@@ -681,6 +681,17 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
   </div><!-- /#appScreen -->
 </div><!-- /#postAuthChrome -->
 
+<div class="modal-bg" id="photoModal">
+  <div class="modal-top">
+    <h4 id="photoModalTitle">Photo</h4>
+    <span class="zoomlbl" id="photoModalHint">tap image for actual size</span>
+    <button class="close-btn" id="photoModalClose">×</button>
+  </div>
+  <div class="modal-scroll" id="photoModalBody">
+    <img id="photoModalImg" alt="" style="max-width:100%;height:auto;cursor:zoom-in;"/>
+  </div>
+</div>
+
 <div class="modal-bg" id="modalBg">
   <div class="modal-top">
     <h4 id="modalTitle">Front</h4>
@@ -1512,7 +1523,7 @@ function renderItems(){
         <label class="field"><span>UNIT PRICE ¥</span><input type="number" min="0" step="0.01" data-f="unit_price_rmb" value="${unit}"/></label>
       </div>
       <div class="upload-slot" style="margin-bottom:7px;">
-        <div class="thumb">${r.photo_path?'<img data-photo alt="Item photo"/>':'<span class="ico">＋</span>'}</div>
+        <div class="thumb"${r.photo_path?' data-photo-view style="cursor:zoom-in;"':''}>${r.photo_path?'<img data-photo alt="Item photo"/>':'<span class="ico">＋</span>'}</div>
         <div class="info">${r.photo_path?'Photo attached':'No photo'}</div>
         <button class="btn-outline btn-sm" data-item-photo>${r.photo_path?'Replace':'📷 Photo'}</button>
         ${r.photo_path?'<button class="del-btn" data-item-photo-del title="Remove photo">×</button>':''}
@@ -1573,6 +1584,40 @@ async function hydratePhotos(){
     if(img&&img.src!==url) img.src=url;
   }
 }
+// Full-size viewer for any attached photo. Signed URLs expire, so a fresh
+// one is minted each time rather than trusting the cached thumbnail URL.
+async function openPhotoModal(path,title){
+  if(!sb||!path) return;
+  const img=document.getElementById('photoModalImg');
+  img.removeAttribute('src');
+  img.style.maxWidth='100%'; img.style.width=''; img.style.cursor='zoom-in';
+  document.getElementById('photoModalTitle').textContent=title||'Photo';
+  document.getElementById('photoModal').classList.add('open');
+  const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(path,3600);
+  if(data&&data.signedUrl){ photoUrlCache[path]=data.signedUrl; img.src=data.signedUrl; }
+}
+function closePhotoModal(){
+  document.getElementById('photoModal').classList.remove('open');
+  document.getElementById('photoModalImg').removeAttribute('src');
+}
+document.getElementById('photoModalClose').addEventListener('click',closePhotoModal);
+document.getElementById('photoModalBody').addEventListener('click',e=>{
+  const img=document.getElementById('photoModalImg');
+  if(e.target!==img){ closePhotoModal(); return; }   // tapping the backdrop closes
+  // toggle between fit-to-width and actual pixels
+  const fitted=img.style.maxWidth!=='none';
+  img.style.maxWidth=fitted?'none':'100%';
+  img.style.width=fitted?'auto':'';
+  img.style.cursor=fitted?'zoom-out':'zoom-in';
+  document.getElementById('photoModalHint').textContent=fitted?'tap image to fit':'tap image for actual size';
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&document.getElementById('photoModal').classList.contains('open')) closePhotoModal();
+});
+document.getElementById('boxPhotoThumb').addEventListener('click',()=>{
+  const b=currentBox();
+  if(b&&b.photo_path) openPhotoModal(b.photo_path,b.label||'Box photo');
+});
 function pickItemPhoto(itemId){
   const inp=document.createElement('input');
   inp.type='file';
@@ -1610,6 +1655,11 @@ function pickItemPhoto(itemId){
 document.getElementById('itemsWrap').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
   const id=card.dataset.itemId;
+  if(e.target.closest('[data-photo-view]')){
+    const row=itemRows.find(r=>r.id===id);
+    if(row&&row.photo_path) openPhotoModal(row.photo_path,row.sku||'Item photo');
+    return;
+  }
   if(e.target.closest('[data-item-photo]')){ pickItemPhoto(id); return; }
   if(e.target.closest('[data-item-photo-del]')){
     if(!sb) return;
@@ -1877,7 +1927,10 @@ function currentBox(){ return boxRows.find(b=>b.id===currentBoxId)||null; }
 function renderBoxPhoto(){
   const b=currentBox();
   const has=!!(b&&b.photo_path);
-  document.getElementById('boxPhotoThumb').innerHTML=has?'<img data-box-photo alt="Box photo"/>':'<span class="ico">＋</span>';
+  const thumb=document.getElementById('boxPhotoThumb');
+  thumb.innerHTML=has?'<img data-box-photo alt="Box photo"/>':'<span class="ico">＋</span>';
+  thumb.style.cursor=has?'zoom-in':'';
+  if(has) thumb.setAttribute('data-photo-view',''); else thumb.removeAttribute('data-photo-view');
   document.getElementById('boxPhotoInfo').textContent=has?'Photo attached':'No photo';
   document.getElementById('boxPhotoBtn').textContent=has?'Replace':'📷 Photo';
   document.getElementById('boxPhotoDelBtn').style.display=has?'':'none';
