@@ -267,6 +267,12 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
       <label class="field"><span>CHINA FEE (¥)</span><input type="number" min="0" step="0.01" id="chinaFee" value="0"/></label>
       <label class="field"><span>RMB RATE (¥ PER S$1)</span><input type="number" step="0.0001" id="chinaRmbRate" value="5.2"/></label>
     </div>
+    <div class="slot-label">Split the fee across</div>
+    <div class="seg" id="chinaBasisSeg" style="margin-bottom:4px;">
+      <button type="button" data-basis="ordered" class="on">All ordered pcs</button>
+      <button type="button" data-basis="arrived">Arrived pcs only</button>
+    </div>
+    <p class="hint">“Arrived pcs only” loads the whole fee onto pieces that are already in a box — pending lines carry no China cost until they arrive.</p>
     <div class="calc" id="chinaCalc"></div>
   </div>
 
@@ -276,7 +282,13 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
     <div class="eyebrow">SHIPMENT</div>
     <h1>Parcel boxes</h1>
     <p class="sub">One shipment can arrive in several boxes. Measure each box, then tick which SKUs were inside it.</p>
-    <button class="btn-primary" id="addBoxBtn" style="width:100%;margin-bottom:16px;">+ Add box</button>
+    <div class="slot-label">Charge freight per</div>
+    <div class="seg" id="freightModeSeg" style="margin-bottom:4px;">
+      <button type="button" data-fmode="box" class="on">Own box</button>
+      <button type="button" data-fmode="shared">Share across all</button>
+    </div>
+    <p class="hint">“Own box” charges each box’s freight only to the pieces inside it. “Share across all” pools every box’s freight and spreads it evenly over all ordered pieces, so each piece carries the same average rate.</p>
+    <button class="btn-primary" id="addBoxBtn" style="width:100%;margin:12px 0 16px;">+ Add box</button>
     <div class="ph-list" id="boxesList"><p class="hint" style="margin:4px 0 0;">— none yet —</p></div>
   </div>
 
@@ -1137,7 +1149,7 @@ let shipmentRows=[];
 async function refreshShipmentList(){
   const el=document.getElementById('shipmentList');
   if(!sb){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable — check your connection.</p>'; return; }
-  const {data,error}=await sb.from('shipments').select('id,order_id,description,rmb_rate,china_fee_rmb').order('created_at',{ascending:false});
+  const {data,error}=await sb.from('shipments').select('id,order_id,description,rmb_rate,china_fee_rmb,china_basis,freight_mode').order('created_at',{ascending:false});
   if(error){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load shipments.</p>'; return; }
   shipmentRows=data||[];
   renderShipmentList();
@@ -1189,11 +1201,28 @@ function cbmOf(b){ return (Number(b.length_cm)*Number(b.breadth_cm)*Number(b.hei
 function volWeightOf(b){ return (Number(b.length_cm)*Number(b.breadth_cm)*Number(b.height_cm))/VOLUMETRIC_DIVISOR; }
 function boxShipRmb(b){ return cbmOf(b)*Number(b.cbm_rate_rmb||0); }
 function boxQty(boxId){ return itemRows.filter(i=>i.box_id===boxId).reduce((s,i)=>s+(Number(i.qty)||0),0); }
-// China-side domestic delivery: one flat fee for the order, spread evenly
-// over every piece on the order (not just the pieces that have arrived)
 function totalQtyAll(){ return itemRows.reduce((s,i)=>s+(Number(i.qty)||0),0); }
+function arrivedQtyAll(){ return itemRows.filter(i=>i.box_id).reduce((s,i)=>s+(Number(i.qty)||0),0); }
+
+// China-side domestic delivery: one flat fee for the order. Basis decides
+// whether it spreads over every ordered piece or only the arrived ones —
+// in 'arrived' mode pending lines carry none of it, so the shares still
+// add back to exactly the fee either way.
 function chinaFeeRmb(){ const s=currentShipment(); return s?(Number(s.china_fee_rmb)||0):0; }
-function chinaPerUnitRmb(){ const q=totalQtyAll(); return q>0?chinaFeeRmb()/q:0; }
+function chinaBasis(){ const s=currentShipment(); return (s&&s.china_basis==='arrived')?'arrived':'ordered'; }
+function chinaBasisQty(){ return chinaBasis()==='arrived'?arrivedQtyAll():totalQtyAll(); }
+function chinaPerUnitRmb(){ const q=chinaBasisQty(); return q>0?chinaFeeRmb()/q:0; }
+function chinaAppliesTo(item){ return chinaBasis()==='ordered' || !!item.box_id; }
+
+// Freight: either each box's cost stays with the pieces inside it, or every
+// box's cost is pooled and averaged over all ordered pieces.
+function freightMode(){ const s=currentShipment(); return (s&&s.freight_mode==='shared')?'shared':'box'; }
+function totalFreightRmb(){ return boxRows.reduce((s,b)=>s+boxShipRmb(b),0); }
+function sharedFreightPerUnitRmb(){ const q=totalQtyAll(); return q>0?totalFreightRmb()/q:0; }
+function freightPerUnitFor(item){
+  if(freightMode()==='shared') return sharedFreightPerUnitRmb();
+  return item.box_id?shipPerUnitRmb(item.box_id):0;
+}
 // the box's whole shipping charge spread evenly over every piece inside it
 function shipPerUnitRmb(boxId){
   const b=boxRows.find(x=>x.id===boxId); if(!b) return 0;
@@ -1217,9 +1246,9 @@ async function refreshOrderDetail(){
 function renderItems(){
   const el=document.getElementById('itemsWrap');
   if(!itemRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">No items yet — tap “Add line”.</p>'; renderTotals(); return; }
-  const chinaPU=chinaPerUnitRmb();
   el.innerHTML=itemRows.map((r,i)=>{
-    const shipPU=r.box_id?shipPerUnitRmb(r.box_id):0;
+    const shipPU=freightPerUnitFor(r);
+    const chinaPU=chinaAppliesTo(r)?chinaPerUnitRmb():0;
     const qty=Number(r.qty)||0, unit=Number(r.unit_price_rmb)||0;
     const goods=unit*qty, ship=shipPU*qty, china=chinaPU*qty;
     const box=boxRows.find(b=>b.id===r.box_id);
@@ -1252,20 +1281,21 @@ function renderItems(){
   hydratePhotos();
 }
 function renderTotals(){
-  let goods=0, ship=0, pieces=0;
+  let goods=0, ship=0, china=0, pieces=0;
   const chinaPU=chinaPerUnitRmb();
   itemRows.forEach(r=>{
     const qty=Number(r.qty)||0;
     goods+=(Number(r.unit_price_rmb)||0)*qty;
-    ship+=(r.box_id?shipPerUnitRmb(r.box_id):0)*qty;
+    ship+=freightPerUnitFor(r)*qty;
+    china+=(chinaAppliesTo(r)?chinaPU:0)*qty;
     pieces+=qty;
   });
-  const china=chinaPU*pieces;
   const arrived=itemRows.filter(r=>r.box_id).length;
   document.getElementById('itemsTotals').innerHTML=
     `${itemRows.length} line(s) · ${pieces} piece(s) · ${arrived}/${itemRows.length} arrived<br/>`+
     `Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China ${fmtFromRmb(china)} &nbsp;·&nbsp; Shipping ${fmtFromRmb(ship)}<br/>`+
-    `<strong>Grand total ${fmtFromRmb(goods+china+ship)}</strong>`;
+    `<strong>Grand total ${fmtFromRmb(goods+china+ship)}</strong><br/>`+
+    `<span style="opacity:.7">China: ${chinaBasis()==='arrived'?'arrived pcs only':'all ordered pcs'} · Freight: ${freightMode()==='shared'?'shared across all':'own box'}</span>`;
 }
 document.getElementById('addItemBtn').addEventListener('click',async()=>{
   const msg=document.getElementById('itemsMsg');
@@ -1385,15 +1415,26 @@ function openChinaFee(){
   const s=currentShipment();
   document.getElementById('chinaFee').value=s?(Number(s.china_fee_rmb)||0):0;
   document.getElementById('chinaRmbRate').value=rmbRate()||5.2;
+  document.querySelectorAll('#chinaBasisSeg button').forEach(b=>b.classList.toggle('on',b.dataset.basis===chinaBasis()));
   renderChinaCalc();
 }
 function renderChinaCalc(){
-  const fee=chinaFeeRmb(), q=totalQtyAll(), per=chinaPerUnitRmb(), r=rmbRate();
+  const fee=chinaFeeRmb(), q=chinaBasisQty(), per=chinaPerUnitRmb(), r=rmbRate();
+  const lbl=chinaBasis()==='arrived'?'arrived piece(s)':'ordered piece(s)';
   document.getElementById('chinaCalc').innerHTML=
     `Fee <strong>¥${fee.toFixed(2)}</strong>${r?` = <strong>S$${(fee/r).toFixed(2)}</strong>`:''}<br/>`+
-    `${q} piece(s) on this order &nbsp;·&nbsp; per piece <strong>¥${per.toFixed(2)}</strong>${r?` = <strong>S$${(per/r).toFixed(2)}</strong>`:''}`+
-    (q?'':'<br/><span style="opacity:.7">Add item lines first — with no pieces there is nothing to divide across.</span>');
+    `${q} ${lbl} &nbsp;·&nbsp; per piece <strong>¥${per.toFixed(2)}</strong>${r?` = <strong>S$${(per/r).toFixed(2)}</strong>`:''}`+
+    (q?'':`<br/><span style="opacity:.7">Nothing to divide across yet — ${chinaBasis()==='arrived'?'no pieces have been ticked into a box.':'add item lines first.'}</span>`);
 }
+document.querySelectorAll('#chinaBasisSeg button').forEach(b=>{
+  b.addEventListener('click',async()=>{
+    const v=b.dataset.basis;
+    const s=currentShipment(); if(s) s.china_basis=v;
+    document.querySelectorAll('#chinaBasisSeg button').forEach(x=>x.classList.toggle('on',x===b));
+    renderChinaCalc();
+    if(sb&&currentShipmentId) await sb.from('shipments').update({china_basis:v}).eq('id',currentShipmentId);
+  });
+});
 document.getElementById('chinaFee').addEventListener('input',async e=>{
   const v=Math.max(0,parseFloat(e.target.value)||0);
   const s=currentShipment(); if(s) s.china_fee_rmb=v;
@@ -1462,6 +1503,7 @@ async function refreshBoxesList(){
     sb.from('shipment_items').select('*').eq('shipment_id',currentShipmentId).order('sort_order')
   ]);
   boxRows=bx.data||[]; itemRows=it.data||[];
+  document.querySelectorAll('#freightModeSeg button').forEach(b=>b.classList.toggle('on',b.dataset.fmode===freightMode()));
   el.innerHTML=boxRows.length?boxRows.map(b=>{
     const q=boxQty(b.id);
     return `<div class="ph-card row-link" data-id="${b.id}" data-box-open>
@@ -1498,6 +1540,15 @@ document.getElementById('addBoxBtn').addEventListener('click',async()=>{
   currentBoxId=data.id;
   openBoxEditor();
 });
+document.querySelectorAll('#freightModeSeg button').forEach(b=>{
+  b.addEventListener('click',async()=>{
+    const v=b.dataset.fmode;
+    const s=currentShipment(); if(s) s.freight_mode=v;
+    document.querySelectorAll('#freightModeSeg button').forEach(x=>x.classList.toggle('on',x===b));
+    await refreshBoxesList();
+    if(sb&&currentShipmentId) await sb.from('shipments').update({freight_mode:v}).eq('id',currentShipmentId);
+  });
+});
 document.getElementById('boxesBackBtn').addEventListener('click',()=>showScreen('shipment-detail'));
 
 function currentBox(){ return boxRows.find(b=>b.id===currentBoxId)||null; }
@@ -1518,10 +1569,15 @@ function renderBoxCalc(){
   const r=rmbRate();
   const q=boxQty(b.id);
   const perUnitRmb=q>0?shipRmb/q:0;
+  const shared=freightMode()==='shared';
+  const sharedPU=sharedFreightPerUnitRmb();
   document.getElementById('boxCalc').innerHTML=
     `CBM <strong>${cbm.toFixed(4)} m³</strong> &nbsp;·&nbsp; volumetric weight ${vw.toFixed(2)} kg <span style="opacity:.7">(÷${VOLUMETRIC_DIVISOR}, reference only)</span><br/>`+
     `Box shipping <strong>¥${shipRmb.toFixed(2)}</strong>${r?` = <strong>S$${(shipRmb/r).toFixed(2)}</strong>`:''}<br/>`+
-    `${q} piece(s) ticked below &nbsp;·&nbsp; per piece <strong>¥${perUnitRmb.toFixed(2)}</strong>${r?` = <strong>S$${(perUnitRmb/r).toFixed(2)}</strong>`:''}`;
+    (shared
+      ? `${q} piece(s) ticked below &nbsp;·&nbsp; <span style="opacity:.7">freight is pooled across all boxes</span><br/>`+
+        `Pooled ¥${totalFreightRmb().toFixed(2)} over ${totalQtyAll()} ordered pc(s) &nbsp;·&nbsp; per piece <strong>¥${sharedPU.toFixed(2)}</strong>${r?` = <strong>S$${(sharedPU/r).toFixed(2)}</strong>`:''}`
+      : `${q} piece(s) ticked below &nbsp;·&nbsp; per piece <strong>¥${perUnitRmb.toFixed(2)}</strong>${r?` = <strong>S$${(perUnitRmb/r).toFixed(2)}</strong>`:''}`);
 }
 function renderBoxItems(){
   const el=document.getElementById('boxItemsList');

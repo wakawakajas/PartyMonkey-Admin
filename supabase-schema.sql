@@ -38,6 +38,8 @@ create table public.shipments (
   description text,
   rmb_rate numeric not null default 5.2,
   china_fee_rmb numeric not null default 0,
+  china_basis text not null default 'ordered' check (china_basis in ('ordered','arrived')),
+  freight_mode text not null default 'box' check (freight_mode in ('box','shared')),
   created_at timestamptz not null default now()
 );
 
