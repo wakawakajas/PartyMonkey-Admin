@@ -36,6 +36,7 @@ create table public.shipments (
   user_id uuid not null references auth.users(id) on delete cascade,
   order_id text not null,
   description text,
+  rmb_rate numeric not null default 5.2,
   created_at timestamptz not null default now()
 );
 
@@ -56,3 +57,56 @@ create policy "Users can update own shipments"
 create policy "Users can delete own shipments"
   on public.shipments for delete
   using (auth.uid() = user_id);
+
+-- order detail: parcel boxes, items bought, tracking numbers
+create table public.shipment_boxes (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  shipment_id uuid not null references public.shipments(id) on delete cascade,
+  label text,
+  length_cm numeric not null default 0,
+  breadth_cm numeric not null default 0,
+  height_cm numeric not null default 0,
+  cbm_rate_rmb numeric not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table public.shipment_items (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  shipment_id uuid not null references public.shipments(id) on delete cascade,
+  box_id uuid references public.shipment_boxes(id) on delete set null,
+  sku text not null default '',
+  qty integer not null default 1,
+  unit_price_rmb numeric not null default 0,
+  sort_order integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table public.shipment_tracking (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  shipment_id uuid not null references public.shipments(id) on delete cascade,
+  tracking_number text not null,
+  eta date,
+  created_at timestamptz not null default now()
+);
+
+alter table public.shipment_boxes    enable row level security;
+alter table public.shipment_items    enable row level security;
+alter table public.shipment_tracking enable row level security;
+
+do $$
+declare t text;
+begin
+  foreach t in array array['shipment_boxes','shipment_items','shipment_tracking'] loop
+    execute format('create policy "own_select" on public.%I for select using (auth.uid() = user_id)', t);
+    execute format('create policy "own_insert" on public.%I for insert with check (auth.uid() = user_id)', t);
+    execute format('create policy "own_update" on public.%I for update using (auth.uid() = user_id)', t);
+    execute format('create policy "own_delete" on public.%I for delete using (auth.uid() = user_id)', t);
+  end loop;
+end $$;
+
+create index shipment_items_shipment_idx    on public.shipment_items(shipment_id);
+create index shipment_boxes_shipment_idx    on public.shipment_boxes(shipment_id);
+create index shipment_tracking_shipment_idx on public.shipment_tracking(shipment_id);
