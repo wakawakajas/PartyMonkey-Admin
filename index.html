@@ -134,6 +134,18 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
 /* shipment lists grow with their content instead of scrolling in a short box */
 .ph-list.list-full{max-height:none;overflow-y:visible;}
 .row-link{cursor:pointer;}
+/* ---- freight arrival calendar ---- */
+.cal-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
+.cal-head h4{flex:1;text-align:center;margin:0;font-family:'Space Grotesk',sans-serif;font-size:15px;}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;}
+.cal-dow{font-size:10px;color:var(--faint);text-align:center;font-family:'IBM Plex Mono',monospace;padding:4px 0;}
+.cal-day{aspect-ratio:1;border:1px solid var(--border);border-radius:3px;background:#fff;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:12px;color:var(--muted);}
+.cal-day.blank{border:none;background:none;}
+.cal-day.has{background:var(--blueprint-soft);border-color:var(--blueprint);color:var(--blueprint);font-weight:700;cursor:pointer;}
+.cal-day.has:hover{background:#E2E9F2;}
+.cal-day.today{outline:2px solid var(--rust);outline-offset:-2px;}
+.cal-day .dot{font-size:8px;line-height:1;margin-top:2px;}
 .row-link:hover{background:var(--paper);}
 </style>
 </head>
@@ -187,10 +199,13 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
     <h1>Shipment</h1>
     <p class="sub">Track order IDs for shipments.</p>
     <button class="btn-primary" id="goToAddOrderBtn" style="width:100%;margin-bottom:8px;">Add new order ID</button>
-    <div class="grid2" style="margin-bottom:16px;">
+    <div class="grid2" style="margin-bottom:10px;">
       <button class="btn-outline btn-sm" id="goToOutstandingBtn">Not arrived</button>
       <button class="btn-outline btn-sm" id="goToConsolBtn">Consolidated shipment</button>
     </div>
+    <label class="field" style="margin-bottom:12px;"><span>SEARCH</span>
+      <input type="text" id="shipmentSearch" placeholder="Order ID, description, item SKU or freight number"/>
+    </label>
     <div class="ph-list list-full" id="shipmentList">
       <p class="hint" style="margin:4px 0 0;">— none yet —</p>
     </div>
@@ -216,10 +231,33 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
         <label class="field"><span>FREIGHT NUMBER</span><input type="text" id="consolNumber" placeholder="e.g. CN-SG-0042" required/></label>
         <label class="field"><span>ESTIMATED ARRIVAL</span><input type="date" id="consolEta"/></label>
       </div>
-      <button class="btn-primary" type="submit" id="consolSaveBtn" style="width:100%;margin-bottom:16px;">Add freight number</button>
+      <button class="btn-primary" type="submit" id="consolSaveBtn" style="width:100%;margin-bottom:10px;">Add freight number</button>
     </form>
+    <button class="btn-outline" id="goToCalendarBtn" style="width:100%;margin-bottom:16px;">📅 Arrival calendar</button>
+    <div class="seg" id="consolTabSeg" style="margin-bottom:12px;">
+      <button type="button" data-ctab="active" class="on">Active</button>
+      <button type="button" data-ctab="history">History</button>
+    </div>
     <div class="ph-list list-full" id="consolList"><p class="hint" style="margin:4px 0 0;">— none yet —</p></div>
     <div id="consolMsg"></div>
+  </div>
+
+  <!-- FREIGHT ARRIVAL CALENDAR -->
+  <div class="home-wrap" id="calendarScreen" style="display:none;">
+    <button class="back-btn" id="calBackBtn"><span class="chev">‹</span> Back</button>
+    <div class="eyebrow">SHIPMENT</div>
+    <h1>Arrival calendar</h1>
+    <p class="sub">Estimated arrival dates for your freight numbers. Tap a highlighted day.</p>
+    <div class="cal-head">
+      <button class="icon-btn" id="calPrev" title="Previous month">‹</button>
+      <h4 id="calMonth">—</h4>
+      <button class="icon-btn" id="calNext" title="Next month">›</button>
+    </div>
+    <div class="cal-grid" id="calGrid"></div>
+    <div id="calDayWrap" style="display:none;margin-top:14px;">
+      <div class="sect-label" id="calDayLbl">Arriving</div>
+      <div class="ph-list list-full" id="calDayList"></div>
+    </div>
   </div>
 
   <!-- CONSOLIDATION DETAIL -->
@@ -1158,7 +1196,7 @@ const SCREEN_EL={home:'homeScreen',tool:'appScreen',shipment:'shipmentScreen','s
   'shipment-detail':'shipmentDetailScreen','shipment-tracking':'shipmentTrackingScreen',
   'shipment-boxes':'shipmentBoxesScreen','shipment-box':'shipmentBoxScreen',
   'shipment-china':'shipmentChinaScreen','shipment-outstanding':'outstandingScreen',
-  'consol':'consolScreen','consol-detail':'consolDetailScreen'};
+  'consol':'consolScreen','consol-detail':'consolDetailScreen','calendar':'calendarScreen'};
 const SCREENS=Object.keys(SCREEN_EL);
 function showScreen(name){
   SCREENS.forEach(s=>{ document.getElementById(SCREEN_EL[s]).style.display=(s===name)?'block':'none'; });
@@ -1172,6 +1210,7 @@ function showScreen(name){
   if(name==='shipment-outstanding') refreshOutstanding();
   if(name==='consol') refreshConsolList();
   if(name==='consol-detail') refreshConsolDetail();
+  if(name==='calendar') openCalendar();
 }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1201,27 +1240,67 @@ let shipmentRows=[];
 async function refreshShipmentList(){
   const el=document.getElementById('shipmentList');
   if(!sb){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable — check your connection.</p>'; return; }
-  const {data,error}=await sb.from('shipments').select('id,order_id,description,rmb_rate,china_fee_rmb,china_basis,freight_mode,sort_order').order('sort_order',{ascending:true});
-  if(error){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load shipments.</p>'; return; }
-  shipmentRows=data||[];
+  const [res,meta]=await Promise.all([
+    sb.from('shipments').select('id,order_id,description,rmb_rate,china_fee_rmb,china_basis,freight_mode,sort_order,consolidation_id').order('sort_order',{ascending:true}),
+    loadShipmentMeta()
+  ]);
+  if(res.error){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load shipments.</p>'; return; }
+  shipmentRows=res.data||[];
+  shipMeta=meta;
   renderShipmentList();
+}
+// everything the order list needs to badge and search rows, in one round trip
+let shipMeta={status:{},skusBySh:{},consolById:{}};
+async function loadShipmentMeta(){
+  const out={status:{},skusBySh:{},consolById:{}};
+  if(!sb) return out;
+  const [it,al,co]=await Promise.all([
+    sb.from('shipment_items').select('id,shipment_id,sku,qty'),
+    sb.from('shipment_box_items').select('item_id,qty'),
+    sb.from('consolidations').select('id,freight_number,eta')
+  ]);
+  const arrivedBy={};
+  (al.data||[]).forEach(a=>{ arrivedBy[a.item_id]=(arrivedBy[a.item_id]||0)+(Number(a.qty)||0); });
+  (it.data||[]).forEach(i=>{
+    const m=out.status[i.shipment_id]||(out.status[i.shipment_id]={ordered:0,arrived:0});
+    const q=Number(i.qty)||0;
+    m.ordered+=q; m.arrived+=Math.min(arrivedBy[i.id]||0,q);
+    (out.skusBySh[i.shipment_id]=out.skusBySh[i.shipment_id]||[]).push(i.sku||'');
+  });
+  Object.values(out.status).forEach(m=>{ m.outstanding=Math.max(0,m.ordered-m.arrived); });
+  (co.data||[]).forEach(c=>{ out.consolById[c.id]=c; });
+  return out;
+}
+function shipmentMatches(r,q){
+  if(!q) return true;
+  const consol=r.consolidation_id?shipMeta.consolById[r.consolidation_id]:null;
+  const hay=[r.order_id,r.description,consol&&consol.freight_number,
+             ...(shipMeta.skusBySh[r.id]||[])].filter(Boolean).join(' ').toLowerCase();
+  return hay.includes(q);
 }
 function renderShipmentList(){
   const el=document.getElementById('shipmentList');
+  const q=(document.getElementById('shipmentSearch').value||'').trim().toLowerCase();
   if(!shipmentRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet —</p>'; return; }
-  el.innerHTML=shipmentRows.map((r,i)=>{
+  const rows=shipmentRows.filter(r=>shipmentMatches(r,q));
+  if(!rows.length){ el.innerHTML=`<p class="hint" style="margin:4px 0 0;">No orders match “${escapeHtml(q)}”.</p>`; return; }
+  el.innerHTML=rows.map(r=>{
+    const i=shipmentRows.indexOf(r);
     const oid=escapeHtml(r.order_id), desc=escapeHtml(r.description||'—');
+    const consol=r.consolidation_id?shipMeta.consolById[r.consolidation_id]:null;
     return `<div class="ph-card row-link" data-id="${r.id}" data-ship-open>
       <div class="ph-card-head">
         <span style="flex:1;">${oid}</span>
+        ${arrivalTag(shipMeta.status[r.id])}
         <button class="icon-btn" data-ship-up ${i===0?'disabled':''} title="Move up">▲</button>
         <button class="icon-btn" data-ship-down ${i===shipmentRows.length-1?'disabled':''} title="Move down">▼</button>
         <button class="del-btn" data-ship-del title="Delete">×</button>
       </div>
-      <p class="hint" style="margin:0;">${desc}</p>
+      <p class="hint" style="margin:0;">${desc}${consol?` · freight ${escapeHtml(consol.freight_number)}`:''}</p>
     </div>`;
   }).join('');
 }
+document.getElementById('shipmentSearch').addEventListener('input',renderShipmentList);
 // swap locally and repaint straight away, then persist every row's position
 async function persistOrder(table,rows){
   if(!sb) return;
@@ -1827,11 +1906,22 @@ async function fetchArrivalStatus(){
 }
 function arrivalTag(st){
   if(!st||!st.ordered) return '<span class="tag no">NO ITEMS</span>';
-  if(st.outstanding===0) return '<span class="tag yes">ARRIVED</span>';
+  if(st.outstanding===0) return '<span class="tag yes">COMPLETED</span>';
   if(st.arrived===0) return '<span class="tag no">PENDING</span>';
-  return `<span class="tag no">${st.arrived}/${st.ordered} PARTIAL</span>`;
+  return `<span class="tag no">${st.arrived}/${st.ordered} PARTIAL ARRIVED</span>`;
 }
 function fullyArrived(st){ return !!st && st.ordered>0 && st.outstanding===0; }
+// a freight number counts as completed once every order in it has fully landed
+function consolProgress(consolId,shipments,status){
+  const orders=shipments.filter(s=>s.consolidation_id===consolId);
+  const done=orders.filter(s=>fullyArrived(status[s.id])).length;
+  return {total:orders.length, done, complete:orders.length>0&&done===orders.length};
+}
+function consolTag(p){
+  if(!p.total) return '<span class="tag no">NO ORDERS</span>';
+  if(p.complete) return '<span class="tag yes">COMPLETED</span>';
+  return `<span class="tag no">${p.done}/${p.total} ARRIVED</span>`;
+}
 
 // ---------- consolidated shipments ----------
 let consolRows=[], currentConsolId=null;
@@ -1839,28 +1929,52 @@ function currentConsol(){ return consolRows.find(c=>c.id===currentConsolId)||nul
 async function refreshConsolList(){
   const el=document.getElementById('consolList');
   if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
-  const [co,sh]=await Promise.all([
+  const [co,sh,status]=await Promise.all([
     sb.from('consolidations').select('*').order('sort_order',{ascending:true}),
-    sb.from('shipments').select('id,order_id,consolidation_id')
+    sb.from('shipments').select('id,order_id,consolidation_id'),
+    fetchArrivalStatus()
   ]);
   if(co.error){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load.</p>'; return; }
   consolRows=co.data||[];
-  const count={}; (sh.data||[]).forEach(s=>{ if(s.consolidation_id) count[s.consolidation_id]=(count[s.consolidation_id]||0)+1; });
-  renderConsolList(count);
+  consolProgressById={};
+  consolRows.forEach(c=>{ consolProgressById[c.id]=consolProgress(c.id,sh.data||[],status); });
+  renderConsolList();
 }
-function renderConsolList(count){
+let consolProgressById={}, consolTab='active';
+function renderConsolList(){
   const el=document.getElementById('consolList');
-  el.innerHTML=consolRows.length?consolRows.map((c,i)=>`<div class="ph-card row-link" data-id="${c.id}">
+  // completed freight moves out of Active into History so the working list
+  // only shows what is still in transit
+  const rows=consolRows.filter(c=>{
+    const done=(consolProgressById[c.id]||{}).complete;
+    return consolTab==='history'?done:!done;
+  });
+  if(!rows.length){
+    el.innerHTML=`<p class="hint" style="margin:4px 0 0;">${consolTab==='history'?'— nothing completed yet —':'— none in transit —'}</p>`;
+    return;
+  }
+  el.innerHTML=rows.map(c=>{
+    const i=consolRows.indexOf(c);
+    const p=consolProgressById[c.id]||{total:0,done:0};
+    return `<div class="ph-card row-link" data-id="${c.id}">
       <div class="ph-card-head">
         <span style="flex:1;">${escapeHtml(c.freight_number)}</span>
+        ${consolTag(p)}
         <button class="icon-btn" data-consol-up ${i===0?'disabled':''} title="Move up">▲</button>
         <button class="icon-btn" data-consol-down ${i===consolRows.length-1?'disabled':''} title="Move down">▼</button>
         <button class="del-btn" data-consol-del title="Delete">×</button>
       </div>
-      <p class="hint" style="margin:0;">ETA ${c.eta?escapeHtml(c.eta):'—'} · ${(count&&count[c.id])||0} order(s)</p>
-    </div>`).join('')
-    :'<p class="hint" style="margin:4px 0 0;">— none yet —</p>';
+      <p class="hint" style="margin:0;">ETA ${c.eta?escapeHtml(c.eta):'—'} · ${p.total} order(s)</p>
+    </div>`;
+  }).join('');
 }
+document.querySelectorAll('#consolTabSeg button').forEach(b=>{
+  b.addEventListener('click',()=>{
+    consolTab=b.dataset.ctab;
+    document.querySelectorAll('#consolTabSeg button').forEach(x=>x.classList.toggle('on',x===b));
+    renderConsolList();
+  });
+});
 document.getElementById('consolList').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
   const id=card.dataset.id;
@@ -1957,6 +2071,71 @@ document.getElementById('consolAvailableList').addEventListener('click',async e=
     if(sb) await sb.from('consolidations').update({[field]:v}).eq('id',c.id);
   });
 });
+// ---------- freight arrival calendar ----------
+let calYear=null, calMonth=null, calConsols=[];
+const pad2=n=>String(n).padStart(2,'0');
+const dateKey=(y,m,d)=>`${y}-${pad2(m+1)}-${pad2(d)}`;
+async function openCalendar(){
+  if(calYear===null){ const n=new Date(); calYear=n.getFullYear(); calMonth=n.getMonth(); }
+  if(sb){
+    const [co,sh,status]=await Promise.all([
+      sb.from('consolidations').select('id,freight_number,eta'),
+      sb.from('shipments').select('id,consolidation_id'),
+      fetchArrivalStatus()
+    ]);
+    calConsols=co.data||[];
+    consolProgressById={};
+    calConsols.forEach(c=>{ consolProgressById[c.id]=consolProgress(c.id,sh.data||[],status); });
+  }
+  hideCalDay();
+  renderCalendar();
+}
+function hideCalDay(){ document.getElementById('calDayWrap').style.display='none'; }
+function renderCalendar(){
+  document.getElementById('calMonth').textContent=
+    new Date(calYear,calMonth,1).toLocaleString(undefined,{month:'long',year:'numeric'});
+  const startDow=new Date(calYear,calMonth,1).getDay();
+  const days=new Date(calYear,calMonth+1,0).getDate();
+  const byDate={};
+  calConsols.forEach(c=>{ if(c.eta) (byDate[c.eta]=byDate[c.eta]||[]).push(c); });
+  const now=new Date(); const todayKey=dateKey(now.getFullYear(),now.getMonth(),now.getDate());
+  let html=['Su','Mo','Tu','We','Th','Fr','Sa'].map(d=>`<div class="cal-dow">${d}</div>`).join('');
+  for(let i=0;i<startDow;i++) html+='<div class="cal-day blank"></div>';
+  for(let d=1;d<=days;d++){
+    const key=dateKey(calYear,calMonth,d);
+    const n=(byDate[key]||[]).length;
+    html+=`<div class="cal-day${n?' has':''}${key===todayKey?' today':''}" data-date="${key}">${d}`+
+          (n?`<span class="dot">${n>1?'●'+n:'●'}</span>`:'')+`</div>`;
+  }
+  document.getElementById('calGrid').innerHTML=html;
+}
+document.getElementById('calPrev').addEventListener('click',()=>{
+  calMonth--; if(calMonth<0){ calMonth=11; calYear--; } hideCalDay(); renderCalendar();
+});
+document.getElementById('calNext').addEventListener('click',()=>{
+  calMonth++; if(calMonth>11){ calMonth=0; calYear++; } hideCalDay(); renderCalendar();
+});
+document.getElementById('calGrid').addEventListener('click',e=>{
+  const cell=e.target.closest('.cal-day.has'); if(!cell) return;
+  const key=cell.dataset.date;
+  const list=calConsols.filter(c=>c.eta===key);
+  if(list.length===1){ currentConsolId=list[0].id; showScreen('consol-detail'); return; }
+  // several freights land that day, so pick one
+  document.getElementById('calDayLbl').textContent='Arriving '+key;
+  document.getElementById('calDayList').innerHTML=list.map(c=>`<div class="ph-card row-link" data-id="${c.id}">
+      <div class="ph-card-head"><span style="flex:1;">${escapeHtml(c.freight_number)}</span>
+      ${consolTag(consolProgressById[c.id]||{total:0,done:0})}</div>
+    </div>`).join('');
+  document.getElementById('calDayWrap').style.display='block';
+});
+document.getElementById('calDayList').addEventListener('click',e=>{
+  const card=e.target.closest('.ph-card'); if(!card) return;
+  currentConsolId=card.dataset.id;
+  showScreen('consol-detail');
+});
+document.getElementById('goToCalendarBtn').addEventListener('click',()=>showScreen('calendar'));
+document.getElementById('calBackBtn').addEventListener('click',()=>showScreen('consol'));
+
 document.getElementById('goToConsolBtn').addEventListener('click',()=>showScreen('consol'));
 document.getElementById('consolBackBtn').addEventListener('click',()=>showScreen('shipment'));
 document.getElementById('consolDetailBackBtn').addEventListener('click',()=>showScreen('consol'));
