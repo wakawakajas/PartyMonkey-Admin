@@ -120,3 +120,18 @@ alter table public.shipments
   add column if not exists consolidation_id uuid references public.consolidations(id) on delete set null;
 
 create index if not exists shipments_consolidation_idx on public.shipments(consolidation_id);
+
+-- ---- manual ordering for order IDs and freight numbers ----------------
+alter table public.shipments     add column if not exists sort_order integer not null default 0;
+alter table public.consolidations add column if not exists sort_order integer not null default 0;
+
+-- backfill newest-first so the existing on-screen order is preserved
+update public.shipments s set sort_order = sub.rn
+from (select id, row_number() over (partition by user_id order by created_at desc) - 1 as rn
+      from public.shipments) sub
+where s.id = sub.id and s.sort_order = 0;
+
+update public.consolidations c set sort_order = sub.rn
+from (select id, row_number() over (partition by user_id order by created_at desc) - 1 as rn
+      from public.consolidations) sub
+where c.id = sub.id and c.sort_order = 0;
