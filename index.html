@@ -1250,6 +1250,7 @@ document.getElementById('shipmentList').addEventListener('click',async e=>{
     return;
   }
   currentShipmentId=id;
+  detailBackTo='shipment';
   showScreen('shipment-detail');
 });
 
@@ -1258,6 +1259,9 @@ document.getElementById('shipmentList').addEventListener('click',async e=>{
 // SGD/RMB toggle never loses precision to repeated round-tripping.
 const VOLUMETRIC_DIVISOR=6000; // L*B*H in cm -> kg, shown for reference only
 let currentShipmentId=null, currentBoxId=null;
+// order detail is reachable from the orders list and from a freight number,
+// so remember which one to go back to
+let detailBackTo='shipment';
 let itemRows=[], boxRows=[], trackingRows=[], allocRows=[];
 let displayCur='SGD';
 const MAX_ITEM_LINES=100;
@@ -1493,7 +1497,7 @@ document.querySelectorAll('#currencySeg button').forEach(b=>{
     renderItems();
   });
 });
-document.getElementById('detailBackBtn').addEventListener('click',()=>showScreen('shipment'));
+document.getElementById('detailBackBtn').addEventListener('click',()=>showScreen(detailBackTo));
 document.getElementById('goToTrackingBtn').addEventListener('click',()=>showScreen('shipment-tracking'));
 document.getElementById('goToBoxesBtn').addEventListener('click',()=>showScreen('shipment-boxes'));
 document.getElementById('goToChinaBtn').addEventListener('click',()=>showScreen('shipment-china'));
@@ -1861,26 +1865,39 @@ async function refreshConsolDetail(){
     document.getElementById('consolEditEta').value=c.eta||'';
   }
   if(!sb) return;
-  const {data}=await sb.from('shipments').select('id,order_id,consolidation_id').order('created_at',{ascending:false});
+  const {data}=await sb.from('shipments').select('id,order_id,description,consolidation_id').order('sort_order',{ascending:true});
   const all=data||[];
   const mine=all.filter(s=>s.consolidation_id===currentConsolId);
   const free=all.filter(s=>!s.consolidation_id);
-  document.getElementById('consolOrdersList').innerHTML=mine.length?mine.map(s=>`<div class="ph-card" data-id="${s.id}">
-      <div class="ph-card-head"><span style="flex:1;">${escapeHtml(s.order_id)}</span>
-      <button class="btn-outline btn-sm" data-consol-remove>Remove</button></div>
-    </div>`).join('')
+  const row=(s,btn)=>`<div class="ph-card" data-id="${s.id}">
+      <div class="ph-card-head">
+        <span style="flex:1;" class="row-link" data-consol-open>${escapeHtml(s.order_id)}</span>
+        ${btn}
+      </div>
+      <p class="hint" style="margin:0;">${escapeHtml(s.description||'—')}</p>
+    </div>`;
+  document.getElementById('consolOrdersList').innerHTML=mine.length
+    ?mine.map(s=>row(s,'<button class="btn-outline btn-sm" data-consol-remove>Remove</button>')).join('')
     :'<p class="hint" style="margin:4px 0 0;">— none yet —</p>';
-  document.getElementById('consolAvailableList').innerHTML=free.length?free.map(s=>`<div class="ph-card" data-id="${s.id}">
-      <div class="ph-card-head"><span style="flex:1;">${escapeHtml(s.order_id)}</span>
-      <button class="btn-outline btn-sm" data-consol-add>Add</button></div>
-    </div>`).join('')
+  document.getElementById('consolAvailableList').innerHTML=free.length
+    ?free.map(s=>row(s,'<button class="btn-outline btn-sm" data-consol-add>Add</button>')).join('')
     :'<p class="hint" style="margin:4px 0 0;">— none available —</p>';
 }
 document.getElementById('consolOrdersList').addEventListener('click',async e=>{
-  if(!e.target.closest('[data-consol-remove]')) return;
-  const id=e.target.closest('.ph-card').dataset.id;
-  if(sb) await sb.from('shipments').update({consolidation_id:null}).eq('id',id);
-  await refreshConsolDetail();
+  const card=e.target.closest('.ph-card'); if(!card) return;
+  const id=card.dataset.id;
+  if(e.target.closest('[data-consol-remove]')){
+    if(sb) await sb.from('shipments').update({consolidation_id:null}).eq('id',id);
+    await refreshConsolDetail();
+    return;
+  }
+  // tapping the order ID drills straight into that order's detail
+  if(e.target.closest('[data-consol-open]')){
+    currentShipmentId=id;
+    await refreshShipmentList(); // pull the full row (rate, fees, modes) the detail screen needs
+    detailBackTo='consol-detail';
+    showScreen('shipment-detail');
+  }
 });
 document.getElementById('consolAvailableList').addEventListener('click',async e=>{
   if(!e.target.closest('[data-consol-add]')) return;
