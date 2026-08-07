@@ -473,11 +473,18 @@ function fitArtToCard(side){
   state.art[side]={wMm:img.naturalWidth*f,hMm:img.naturalHeight*f};
 }
 
-// auto-generated cutting reference marks: a corner bracket at every corner of
-// every placeholder, offset outward — marks that card's own width and height
+// auto-generated cutting reference marks: a corner bracket at every corner
+// that sits on the outer edge of the whole grid, offset outward — marks that
+// card's own width and height. Corners shared between neighboring cards
+// (interior of the grid) are skipped so marks only appear along the sides.
 function drawCutMarks(ctx,sc){
   if(!state.refMark.enabled || state.placeholders.length===0) return;
   const off=state.refMark.offsetMm, len=state.refMark.lenMm;
+  const EPS=0.01;
+  const minX=Math.min(...state.placeholders.map(ph=>ph.xMm));
+  const maxX=Math.max(...state.placeholders.map(ph=>ph.xMm+ph.wMm));
+  const minY=Math.min(...state.placeholders.map(ph=>ph.yMm));
+  const maxY=Math.max(...state.placeholders.map(ph=>ph.yMm+ph.hMm));
   ctx.save();
   ctx.strokeStyle='#E2231A';
   ctx.lineWidth=1;
@@ -486,10 +493,14 @@ function drawCutMarks(ctx,sc){
 
   state.placeholders.forEach(ph=>{
     const x0=ph.xMm, y0=ph.yMm, x1=ph.xMm+ph.wMm, y1=ph.yMm+ph.hMm;
-    [[x0,y0,-1,-1],[x1,y0,1,-1],[x0,y1,-1,1],[x1,y1,1,1]].forEach(([cx,cy,dx,dy])=>{
+    const onLeft=Math.abs(x0-minX)<EPS, onRight=Math.abs(x1-maxX)<EPS;
+    const onTop=Math.abs(y0-minY)<EPS, onBottom=Math.abs(y1-maxY)<EPS;
+    [[x0,y0,-1,-1,onLeft,onTop],[x1,y0,1,-1,onRight,onTop],
+     [x0,y1,-1,1,onLeft,onBottom],[x1,y1,1,1,onRight,onBottom]].forEach(([cx,cy,dx,dy,onH,onV])=>{
+      if(!onH && !onV) return; // fully interior corner, shared with neighbors — omit
       const px=cx+dx*off, py=cy+dy*off;
-      seg(px,py,px+dx*len,py); // marks the card's width
-      seg(px,py,px,py+dy*len); // marks the card's height
+      if(onH) seg(px,py,px+dx*len,py); // marks the card's width, only on the outer left/right edge
+      if(onV) seg(px,py,px,py+dy*len); // marks the card's height, only on the outer top/bottom edge
     });
   });
   ctx.stroke();
@@ -818,27 +829,62 @@ document.getElementById('loadTemplateBtn').addEventListener('click',()=>loadTemp
 document.getElementById('deleteTemplateBtn').addEventListener('click',()=>deleteTemplate(document.getElementById('templateSelect').value));
 
 // ---------- self-contained PDF writer (no external library) ----------
+// Images are embedded fully losslessly: raw RGB pixel rows (no JPEG, no
+// downsampling) run through the browser's built-in deflate — the exact same
+// zlib-compressed-stream format PDF's /FlateDecode expects, with a PNG-style
+// predictor (row filtering) requested via /Predictor 15 so the compressed
+// size stays reasonable without discarding a single pixel.
 function mmToPt(mm){return mm*72/25.4;}
-function buildPdfBytes(jpegDataURL,imgW,imgH,wMm,hMm){
-  const jpeg=atob(jpegDataURL.split(',')[1]);
+function rgbaToRawRgbScanlines(imgData){
+  const w=imgData.width,h=imgData.height,data=imgData.data;
+  const rowBytes=1+w*3; // leading filter-type byte (0 = None) per row, per PNG/FlateDecode predictor convention
+  const out=new Uint8Array(rowBytes*h);
+  let o=0,p=0;
+  for(let y=0;y<h;y++){
+    out[o++]=0;
+    for(let x=0;x<w;x++){ out[o++]=data[p]; out[o++]=data[p+1]; out[o++]=data[p+2]; p+=4; }
+  }
+  return out;
+}
+async function deflateBytes(bytes){
+  const cs=new CompressionStream('deflate'); // zlib-wrapped deflate — same container /FlateDecode requires
+  const writer=cs.writable.getWriter();
+  writer.write(bytes); writer.close();
+  const chunks=[]; let total=0;
+  const reader=cs.readable.getReader();
+  for(;;){ const {done,value}=await reader.read(); if(done)break; chunks.push(value); total+=value.length; }
+  const out=new Uint8Array(total); let o=0;
+  chunks.forEach(c=>{ out.set(c,o); o+=c.length; });
+  return out;
+}
+async function buildPdfBytes(imgData,wMm,hMm){
+  const imgW=imgData.width, imgH=imgData.height;
+  const deflated=await deflateBytes(rgbaToRawRgbScanlines(imgData));
+  const enc=new TextEncoder();
   const W=mmToPt(wMm).toFixed(2),H=mmToPt(hMm).toFixed(2);
   const content=`q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
-  const objs=[null,
-    '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>`,
-    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
-    `<< /Type /XObject /Subtype /Image /Width ${imgW} /Height ${imgH} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n${jpeg}\nendstream`
-  ];
-  let out='%PDF-1.4\n';
-  const off=[];
-  for(let i=1;i<=5;i++){ off[i]=out.length; out+=`${i} 0 obj\n${objs[i]}\nendobj\n`; }
-  const xref=out.length;
-  out+='xref\n0 6\n0000000000 65535 f \n';
-  for(let i=1;i<=5;i++) out+=String(off[i]).padStart(10,'0')+' 00000 n \n';
-  out+=`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-  const bytes=new Uint8Array(out.length);
-  for(let i=0;i<out.length;i++) bytes[i]=out.charCodeAt(i)&0xff;
+  const contentBytes=enc.encode(content);
+  const imgDict=`<< /Type /XObject /Subtype /Image /Width ${imgW} /Height ${imgH} /ColorSpace /DeviceRGB `
+    +`/BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns ${imgW} >> `
+    +`/Length ${deflated.length} >>\nstream\n`;
+
+  const parts=[]; const off=[]; let pos=0;
+  const push=u8=>{ parts.push(u8); pos+=u8.length; };
+  push(enc.encode('%PDF-1.4\n'));
+  off[1]=pos; push(enc.encode('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n'));
+  off[2]=pos; push(enc.encode('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n'));
+  off[3]=pos; push(enc.encode(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n`));
+  off[4]=pos; push(enc.encode(`4 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n`)); push(contentBytes); push(enc.encode('\nendstream\nendobj\n'));
+  off[5]=pos; push(enc.encode(`5 0 obj\n${imgDict}`)); push(deflated); push(enc.encode('\nendstream\nendobj\n'));
+  const xref=pos;
+  let xrefStr='xref\n0 6\n0000000000 65535 f \n';
+  for(let i=1;i<=5;i++) xrefStr+=String(off[i]).padStart(10,'0')+' 00000 n \n';
+  xrefStr+=`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  push(enc.encode(xrefStr));
+
+  const total=parts.reduce((s,p)=>s+p.length,0);
+  const bytes=new Uint8Array(total); let o=0;
+  parts.forEach(p=>{ bytes.set(p,o); o+=p.length; });
   return bytes;
 }
 
@@ -907,25 +953,30 @@ function downloadBlob(blob,filename){
 }
 function safeName(s){return (s||'template').replace(/[^a-z0-9_\-]+/gi,'_');}
 
-document.getElementById('exportBtn').addEventListener('click',()=>{
+document.getElementById('exportBtn').addEventListener('click',async()=>{
   // Both PDFs are bundled into one ZIP so this is a single, reliable download —
   // separate simultaneous file downloads get silently blocked by some browsers.
   const out=document.getElementById('exportMsg');
+  const btn=document.getElementById('exportBtn');
   try{
     const p=paperMm();
     const has={front:!!state.final.front.data,
                back:!!state.final.back.data};
     if(!has.front&&!has.back){showMsg(out,'Upload artwork for at least one side first.',false);return;}
     const oid=safeName(state.orderId);
-    const px=Math.min(3200,Math.max(1800,Math.max(p.w,p.h)*10));
+    // print-quality resolution (300dpi), uncapped except for a safety ceiling
+    // against runaway canvas sizes on very large custom sheets
+    const px=Math.min(6000,Math.round(Math.max(p.w,p.h)/25.4*300));
+    btn.disabled=true; showMsg(out,'Rendering full-resolution, uncompressed PDFs…',true);
     const files=[];
-    ['front','back'].forEach(side=>{
+    for(const side of ['front','back']){
       const c=document.createElement('canvas');
       renderSide(side,c,px,{forExport:true});
-      const jpeg=c.toDataURL('image/jpeg',0.92);
-      const pdfBytes=buildPdfBytes(jpeg,c.width,c.height,p.w,p.h);
+      const ctx=c.getContext('2d');
+      const imgData=ctx.getImageData(0,0,c.width,c.height);
+      const pdfBytes=await buildPdfBytes(imgData,p.w,p.h);
       files.push({name:`${oid}_${side}.pdf`, data:pdfBytes, blank:!has[side]});
-    });
+    }
     const zipBlob=buildZip(files);
     const zipName=`${oid}_pdfs.zip`;
     downloadBlob(zipBlob,zipName);
@@ -933,6 +984,8 @@ document.getElementById('exportBtn').addEventListener('click',()=>{
     showMsg(out,'✓ Downloaded '+zipName+' containing '+label,true);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
+  }finally{
+    btn.disabled=false;
   }
 });
 
