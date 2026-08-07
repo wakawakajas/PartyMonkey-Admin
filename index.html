@@ -1778,9 +1778,9 @@ async function refreshOutstanding(){
     .map(i=>({...i, missing:(Number(i.qty)||0)-(arrivedBy[i.id]||0)}))
     .filter(i=>i.missing>0);
   if(!rows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing outstanding —</p>'; return; }
-  el.innerHTML=rows.map(r=>`<div class="ph-card" data-item-id="${r.id}">
+  el.innerHTML=rows.map(r=>`<div class="ph-card" data-item-id="${r.id}" data-shipment-id="${r.shipment_id}">
       <div class="ph-card-head">
-        <span style="flex:1;">${escapeHtml(orderName[r.shipment_id]||'—')}</span>
+        <span style="flex:1;" class="row-link" data-out-open>${escapeHtml(orderName[r.shipment_id]||'—')}</span>
         <span class="tag no">${r.missing} NOT ARRIVED</span>
       </div>
       <p class="hint" style="margin:0 0 7px;">${escapeHtml(r.sku||'(no SKU)')} · ordered ${r.qty} · arrived ${arrivedBy[r.id]||0}</p>
@@ -1793,8 +1793,45 @@ document.getElementById('outstandingList').addEventListener('change',async e=>{
   const id=e.target.closest('.ph-card').dataset.itemId;
   if(sb) await sb.from('shipment_items').update({remarks:inp.value}).eq('id',id);
 });
+// tapping the order ID drills into that order; the remarks field stays editable
+document.getElementById('outstandingList').addEventListener('click',async e=>{
+  if(!e.target.closest('[data-out-open]')) return;
+  const card=e.target.closest('.ph-card');
+  currentShipmentId=card.dataset.shipmentId;
+  await refreshShipmentList(); // pull the full row the detail screen needs
+  detailBackTo='shipment-outstanding';
+  showScreen('shipment-detail');
+});
 document.getElementById('goToOutstandingBtn').addEventListener('click',()=>showScreen('shipment-outstanding'));
 document.getElementById('outstandingBackBtn').addEventListener('click',()=>showScreen('shipment'));
+
+// ---------- arrival status per order ----------
+// rolls every line's ordered vs measured-in quantity up to the order level
+async function fetchArrivalStatus(){
+  const map={};
+  if(!sb) return map;
+  const [it,al]=await Promise.all([
+    sb.from('shipment_items').select('id,shipment_id,qty'),
+    sb.from('shipment_box_items').select('item_id,qty')
+  ]);
+  const arrivedBy={};
+  (al.data||[]).forEach(a=>{ arrivedBy[a.item_id]=(arrivedBy[a.item_id]||0)+(Number(a.qty)||0); });
+  (it.data||[]).forEach(i=>{
+    const m=map[i.shipment_id]||(map[i.shipment_id]={ordered:0,arrived:0});
+    const q=Number(i.qty)||0;
+    m.ordered+=q;
+    m.arrived+=Math.min(arrivedBy[i.id]||0,q);
+  });
+  Object.values(map).forEach(m=>{ m.outstanding=Math.max(0,m.ordered-m.arrived); });
+  return map;
+}
+function arrivalTag(st){
+  if(!st||!st.ordered) return '<span class="tag no">NO ITEMS</span>';
+  if(st.outstanding===0) return '<span class="tag yes">ARRIVED</span>';
+  if(st.arrived===0) return '<span class="tag no">PENDING</span>';
+  return `<span class="tag no">${st.arrived}/${st.ordered} PARTIAL</span>`;
+}
+function fullyArrived(st){ return !!st && st.ordered>0 && st.outstanding===0; }
 
 // ---------- consolidated shipments ----------
 let consolRows=[], currentConsolId=null;
@@ -1865,13 +1902,18 @@ async function refreshConsolDetail(){
     document.getElementById('consolEditEta').value=c.eta||'';
   }
   if(!sb) return;
-  const {data}=await sb.from('shipments').select('id,order_id,description,consolidation_id').order('sort_order',{ascending:true});
+  const [{data},status]=await Promise.all([
+    sb.from('shipments').select('id,order_id,description,consolidation_id').order('sort_order',{ascending:true}),
+    fetchArrivalStatus()
+  ]);
   const all=data||[];
   const mine=all.filter(s=>s.consolidation_id===currentConsolId);
-  const free=all.filter(s=>!s.consolidation_id);
+  // an order that has fully landed doesn't need shipping, so it isn't offered
+  const free=all.filter(s=>!s.consolidation_id && !fullyArrived(status[s.id]));
   const row=(s,btn)=>`<div class="ph-card" data-id="${s.id}">
       <div class="ph-card-head">
         <span style="flex:1;" class="row-link" data-consol-open>${escapeHtml(s.order_id)}</span>
+        ${arrivalTag(status[s.id])}
         ${btn}
       </div>
       <p class="hint" style="margin:0;">${escapeHtml(s.description||'—')}</p>
@@ -1881,7 +1923,7 @@ async function refreshConsolDetail(){
     :'<p class="hint" style="margin:4px 0 0;">— none yet —</p>';
   document.getElementById('consolAvailableList').innerHTML=free.length
     ?free.map(s=>row(s,'<button class="btn-outline btn-sm" data-consol-add>Add</button>')).join('')
-    :'<p class="hint" style="margin:4px 0 0;">— none available —</p>';
+    :'<p class="hint" style="margin:4px 0 0;">— none available — fully arrived orders are not listed.</p>';
 }
 document.getElementById('consolOrdersList').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
