@@ -121,6 +121,9 @@ alter table public.shipments
 
 create index if not exists shipments_consolidation_idx on public.shipments(consolidation_id);
 
+-- ---- photo of the arrived parcel box ----------------------------------
+alter table public.shipment_boxes add column if not exists photo_path text;
+
 -- ---- soft delete so deletes can be undone for 24 hours ----------------
 -- rows are hidden immediately but kept (with their photos) until they are
 -- purged for good, which the app does lazily once they pass 24 hours old
