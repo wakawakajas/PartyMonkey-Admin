@@ -7,6 +7,7 @@ create table public.templates (
   user_id uuid not null references auth.users(id) on delete cascade,
   name text not null,
   data jsonb not null,
+  sort_order integer not null default 0,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (user_id, name)

@@ -141,13 +141,12 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
     <div class="card-body">
       <p class="hint">Saves sheet size, layout settings, placeholders and the cut-line setting — synced to your account.</p>
       <label class="field" style="margin-bottom:10px;"><span>TEMPLATE NAME</span><input type="text" id="templateName" placeholder="e.g. Name Card 2-up"/></label>
-      <label class="field" style="margin-bottom:10px;"><span>SAVED TEMPLATES</span>
-        <select id="templateSelect"><option value="">— none saved —</option></select>
-      </label>
-      <div class="grid2" style="margin-bottom:16px;">
-        <button class="btn-outline" id="loadTemplateBtn">Load</button>
-        <button class="btn-danger" id="deleteTemplateBtn">Delete</button>
+
+      <label class="field" style="margin-bottom:8px;"><span>SEARCH SAVED TEMPLATES</span><input type="text" id="templateSearch" placeholder="Type to filter…"/></label>
+      <div class="ph-list" id="templateList" style="margin-bottom:16px;">
+        <p class="hint" style="margin:4px 0 0;">— none saved —</p>
       </div>
+
       <button class="btn-primary" id="saveTemplateBtn" style="width:100%;">Save template</button>
       <div id="saveMsg"></div>
     </div>
@@ -905,15 +904,68 @@ function setAuthedUI(signedIn,email){
   document.getElementById('appScreen').style.display=signedIn?'block':'none';
   if(signedIn) document.getElementById('signedInAs').textContent=email;
 }
-async function refreshTemplateDropdown(sel){
-  const el=document.getElementById('templateSelect');
-  if(!sb){ el.innerHTML='<option value="">— sync unavailable —</option>'; return; }
-  const {data,error}=await sb.from('templates').select('name').order('name');
-  if(error){ el.innerHTML='<option value="">— could not load —</option>'; return; }
-  const names=(data||[]).map(r=>r.name);
-  el.innerHTML=names.length?names.map(n=>`<option value="${n}">${n}</option>`).join(''):'<option value="">— none saved —</option>';
-  if(sel&&names.includes(sel))el.value=sel;
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+// local mirror of the synced templates, kept in the user's chosen display
+// order (sort_order) — filtered by the search box and re-rendered as a
+// reorderable list rather than a native <select>
+let templateRows=[];
+async function refreshTemplateList(){
+  const el=document.getElementById('templateList');
+  if(!sb){ templateRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable — check your connection.</p>'; return; }
+  const {data,error}=await sb.from('templates').select('name,sort_order').order('sort_order',{ascending:true});
+  if(error){ templateRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load templates.</p>'; return; }
+  templateRows=data||[];
+  renderTemplateList();
+}
+function renderTemplateList(){
+  const el=document.getElementById('templateList');
+  const q=(document.getElementById('templateSearch').value||'').trim().toLowerCase();
+  if(!templateRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none saved —</p>'; return; }
+  const rows=templateRows.filter(r=>!q||r.name.toLowerCase().includes(q));
+  if(!rows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">No templates match "'+escapeHtml(q)+'".</p>'; return; }
+  el.innerHTML=rows.map(r=>{
+    const idx=templateRows.findIndex(x=>x.name===r.name);
+    const isFirst=idx===0, isLast=idx===templateRows.length-1;
+    const n=escapeHtml(r.name);
+    return `<div class="ph-card" data-name="${n}">
+      <div class="ph-card-head">
+        <span style="flex:1;">${n}</span>
+        <div style="display:flex;gap:4px;">
+          <button class="icon-btn" data-tpl-up ${isFirst?'disabled':''} title="Move up">▲</button>
+          <button class="icon-btn" data-tpl-down ${isLast?'disabled':''} title="Move down">▼</button>
+        </div>
+      </div>
+      <div class="grid2">
+        <button class="btn-outline btn-sm" data-tpl-load>Load</button>
+        <button class="btn-danger btn-sm" data-tpl-del>Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+async function moveTemplate(name,dir){
+  const idx=templateRows.findIndex(r=>r.name===name);
+  const swapIdx=idx+dir;
+  if(idx<0||swapIdx<0||swapIdx>=templateRows.length) return;
+  [templateRows[idx],templateRows[swapIdx]]=[templateRows[swapIdx],templateRows[idx]];
+  renderTemplateList(); // optimistic — reflect the new order immediately
+  if(!sb) return;
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session) return;
+  await Promise.all(templateRows.map((r,i)=>
+    sb.from('templates').update({sort_order:i}).eq('user_id',session.user.id).eq('name',r.name)
+  ));
+}
+document.getElementById('templateSearch').addEventListener('input',renderTemplateList);
+document.getElementById('templateList').addEventListener('click',e=>{
+  const card=e.target.closest('.ph-card'); if(!card) return;
+  const name=card.dataset.name;
+  if(e.target.closest('[data-tpl-load]')) loadTemplate(name);
+  else if(e.target.closest('[data-tpl-del]')) deleteTemplate(name);
+  else if(e.target.closest('[data-tpl-up]')) moveTemplate(name,-1);
+  else if(e.target.closest('[data-tpl-down]')) moveTemplate(name,1);
+});
 async function saveTemplate(){
   if(!sb){showMsg(msgEl,'Template sync unavailable — check your connection.',false);return;}
   const {data:{session}}=await sb.auth.getSession();
@@ -926,12 +978,12 @@ async function saveTemplate(){
     readLayoutInputs();
     const meta={name,paper:state.paper,layout:state.layout,placeholders:state.placeholders,
       showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate};
-    const {error}=await sb.from('templates').upsert(
-      {user_id:session.user.id,name,data:meta,updated_at:new Date().toISOString()},
-      {onConflict:'user_id,name'}
-    );
+    const isNew=!templateRows.some(r=>r.name===name);
+    const payload={user_id:session.user.id,name,data:meta,updated_at:new Date().toISOString()};
+    if(isNew) payload.sort_order=templateRows.length; // append new templates at the end
+    const {error}=await sb.from('templates').upsert(payload,{onConflict:'user_id,name'});
     if(error) throw error;
-    await refreshTemplateDropdown(name);
+    await refreshTemplateList();
     showMsg(msgEl,'✓ Saved "'+name+'" — synced to your account',true);
   }catch(err){
     showMsg(msgEl,'Could not save: '+((err&&err.message)||'unknown error'),false);
@@ -971,12 +1023,10 @@ async function deleteTemplate(name){
   if(!name){showMsg(msgEl,'No template selected.',false);return;}
   const {error}=await sb.from('templates').delete().eq('name',name);
   if(error){showMsg(msgEl,'Could not delete: '+error.message,false);return;}
-  await refreshTemplateDropdown();
+  await refreshTemplateList();
   showMsg(msgEl,'✓ Deleted "'+name+'"',true);
 }
 document.getElementById('saveTemplateBtn').addEventListener('click',saveTemplate);
-document.getElementById('loadTemplateBtn').addEventListener('click',()=>loadTemplate(document.getElementById('templateSelect').value));
-document.getElementById('deleteTemplateBtn').addEventListener('click',()=>deleteTemplate(document.getElementById('templateSelect').value));
 
 // ---------- auth (single form, toggles between sign-in and sign-up mode) ----------
 let authMode='signin';
@@ -1021,8 +1071,8 @@ document.getElementById('signOutBtn').addEventListener('click',async()=>{
 });
 if(sb){
   sb.auth.onAuthStateChange((event,session)=>{
-    if(session){ setAuthedUI(true,session.user.email); refreshTemplateDropdown(); }
-    else{ setAuthedUI(false); document.getElementById('templateSelect').innerHTML='<option value="">— none saved —</option>'; }
+    if(session){ setAuthedUI(true,session.user.email); refreshTemplateList(); }
+    else{ setAuthedUI(false); templateRows=[]; document.getElementById('templateList').innerHTML='<p class="hint" style="margin:4px 0 0;">— none saved —</p>'; }
   });
 }else{
   showMsg(authMsgEl,'Template sync needs a connection to Supabase — unavailable right now.',false);
@@ -1134,7 +1184,7 @@ generateGrid();
 renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();drawAll();
 if(sb){
   sb.auth.getSession().then(({data:{session}})=>{
-    if(session){ setAuthedUI(true,session.user.email); refreshTemplateDropdown(); }
+    if(session){ setAuthedUI(true,session.user.email); refreshTemplateList(); }
     else{ setAuthedUI(false); }
   });
 }
