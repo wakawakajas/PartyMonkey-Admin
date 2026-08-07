@@ -37,6 +37,7 @@ create table public.shipments (
   order_id text not null,
   description text,
   rmb_rate numeric not null default 5.2,
+  china_fee_rmb numeric not null default 0,
   created_at timestamptz not null default now()
 );
 
@@ -79,6 +80,7 @@ create table public.shipment_items (
   sku text not null default '',
   qty integer not null default 1,
   unit_price_rmb numeric not null default 0,
+  photo_path text,
   sort_order integer not null default 0,
   created_at timestamptz not null default now()
 );

@@ -225,9 +225,10 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
       </div>
     </div>
 
-    <div class="grid2" style="margin-bottom:16px;">
-      <button class="btn-outline" id="goToTrackingBtn">Tracking</button>
-      <button class="btn-outline" id="goToBoxesBtn">Parcel boxes</button>
+    <div class="grid3e" style="margin-bottom:16px;">
+      <button class="btn-outline btn-sm" id="goToTrackingBtn">Tracking</button>
+      <button class="btn-outline btn-sm" id="goToBoxesBtn">Parcel boxes</button>
+      <button class="btn-outline btn-sm" id="goToChinaBtn">China fee</button>
     </div>
 
     <div class="sect-label">Items bought</div>
@@ -254,6 +255,19 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
     </form>
     <div class="ph-list" id="trackingList"><p class="hint" style="margin:4px 0 0;">— none yet —</p></div>
     <div id="trackingMsg"></div>
+  </div>
+
+  <!-- CHINA SHIPPING FEE -->
+  <div class="home-wrap" id="shipmentChinaScreen" style="display:none;">
+    <button class="back-btn" id="chinaBackBtn"><span class="chev">‹</span> Back</button>
+    <div class="eyebrow">SHIPMENT</div>
+    <h1>China shipping fee</h1>
+    <p class="sub">Domestic delivery inside China for this order, split evenly across every piece on the order.</p>
+    <div class="grid2" style="margin-bottom:10px;">
+      <label class="field"><span>CHINA FEE (¥)</span><input type="number" min="0" step="0.01" id="chinaFee" value="0"/></label>
+      <label class="field"><span>RMB RATE (¥ PER S$1)</span><input type="number" step="0.0001" id="chinaRmbRate" value="5.2"/></label>
+    </div>
+    <div class="calc" id="chinaCalc"></div>
   </div>
 
   <!-- BOXES LIST -->
@@ -1082,7 +1096,8 @@ function setAuthedUI(signedIn,email){
 // ---------- home / tool / shipment navigation (mobile-app-style side drawer + back buttons) ----------
 const SCREEN_EL={home:'homeScreen',tool:'appScreen',shipment:'shipmentScreen','shipment-add':'shipmentAddScreen',
   'shipment-detail':'shipmentDetailScreen','shipment-tracking':'shipmentTrackingScreen',
-  'shipment-boxes':'shipmentBoxesScreen','shipment-box':'shipmentBoxScreen'};
+  'shipment-boxes':'shipmentBoxesScreen','shipment-box':'shipmentBoxScreen',
+  'shipment-china':'shipmentChinaScreen'};
 const SCREENS=Object.keys(SCREEN_EL);
 function showScreen(name){
   SCREENS.forEach(s=>{ document.getElementById(SCREEN_EL[s]).style.display=(s===name)?'block':'none'; });
@@ -1092,6 +1107,7 @@ function showScreen(name){
   if(name==='shipment-detail') refreshOrderDetail();
   if(name==='shipment-tracking') refreshTrackingList();
   if(name==='shipment-boxes') refreshBoxesList();
+  if(name==='shipment-china') openChinaFee();
 }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1121,7 +1137,7 @@ let shipmentRows=[];
 async function refreshShipmentList(){
   const el=document.getElementById('shipmentList');
   if(!sb){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable — check your connection.</p>'; return; }
-  const {data,error}=await sb.from('shipments').select('id,order_id,description,rmb_rate').order('created_at',{ascending:false});
+  const {data,error}=await sb.from('shipments').select('id,order_id,description,rmb_rate,china_fee_rmb').order('created_at',{ascending:false});
   if(error){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load shipments.</p>'; return; }
   shipmentRows=data||[];
   renderShipmentList();
@@ -1173,6 +1189,11 @@ function cbmOf(b){ return (Number(b.length_cm)*Number(b.breadth_cm)*Number(b.hei
 function volWeightOf(b){ return (Number(b.length_cm)*Number(b.breadth_cm)*Number(b.height_cm))/VOLUMETRIC_DIVISOR; }
 function boxShipRmb(b){ return cbmOf(b)*Number(b.cbm_rate_rmb||0); }
 function boxQty(boxId){ return itemRows.filter(i=>i.box_id===boxId).reduce((s,i)=>s+(Number(i.qty)||0),0); }
+// China-side domestic delivery: one flat fee for the order, spread evenly
+// over every piece on the order (not just the pieces that have arrived)
+function totalQtyAll(){ return itemRows.reduce((s,i)=>s+(Number(i.qty)||0),0); }
+function chinaFeeRmb(){ const s=currentShipment(); return s?(Number(s.china_fee_rmb)||0):0; }
+function chinaPerUnitRmb(){ const q=totalQtyAll(); return q>0?chinaFeeRmb()/q:0; }
 // the box's whole shipping charge spread evenly over every piece inside it
 function shipPerUnitRmb(boxId){
   const b=boxRows.find(x=>x.id===boxId); if(!b) return 0;
@@ -1196,10 +1217,11 @@ async function refreshOrderDetail(){
 function renderItems(){
   const el=document.getElementById('itemsWrap');
   if(!itemRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">No items yet — tap “Add line”.</p>'; renderTotals(); return; }
+  const chinaPU=chinaPerUnitRmb();
   el.innerHTML=itemRows.map((r,i)=>{
     const shipPU=r.box_id?shipPerUnitRmb(r.box_id):0;
     const qty=Number(r.qty)||0, unit=Number(r.unit_price_rmb)||0;
-    const goods=unit*qty, ship=shipPU*qty;
+    const goods=unit*qty, ship=shipPU*qty, china=chinaPU*qty;
     const box=boxRows.find(b=>b.id===r.box_id);
     const arrived=!!r.box_id;
     return `<div class="ph-card" data-item-id="${r.id}">
@@ -1213,27 +1235,37 @@ function renderItems(){
         <label class="field"><span>QTY</span><input type="number" min="0" step="1" data-f="qty" value="${qty}"/></label>
         <label class="field"><span>UNIT PRICE ¥</span><input type="number" min="0" step="0.01" data-f="unit_price_rmb" value="${unit}"/></label>
       </div>
+      <div class="upload-slot" style="margin-bottom:7px;">
+        <div class="thumb">${r.photo_path?'<img data-photo alt="Item photo"/>':'<span class="ico">＋</span>'}</div>
+        <div class="info">${r.photo_path?'Photo attached':'No photo'}</div>
+        <button class="btn-outline btn-sm" data-item-photo>${r.photo_path?'Replace':'📷 Photo'}</button>
+        ${r.photo_path?'<button class="del-btn" data-item-photo-del title="Remove photo">×</button>':''}
+      </div>
       <div class="calc" style="margin-top:0;">
-        Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; Shipping ${fmtFromRmb(ship)} &nbsp;·&nbsp; <strong>Line total ${fmtFromRmb(goods+ship)}</strong><br/>
-        Per piece incl. shipping <strong>${fmtFromRmb(unit+shipPU)}</strong>
-        ${box?` &nbsp;·&nbsp; in ${escapeHtml(box.label||'box')}`:' &nbsp;·&nbsp; not yet in a box'}
+        Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China ${fmtFromRmb(china)} &nbsp;·&nbsp; Shipping ${fmtFromRmb(ship)}<br/>
+        <strong>Line total ${fmtFromRmb(goods+china+ship)}</strong> &nbsp;·&nbsp; per piece all-in <strong>${fmtFromRmb(unit+chinaPU+shipPU)}</strong><br/>
+        ${box?`in ${escapeHtml(box.label||'box')}`:'not yet in a box'}
       </div>
     </div>`;
   }).join('');
   renderTotals();
+  hydratePhotos();
 }
 function renderTotals(){
   let goods=0, ship=0, pieces=0;
+  const chinaPU=chinaPerUnitRmb();
   itemRows.forEach(r=>{
     const qty=Number(r.qty)||0;
     goods+=(Number(r.unit_price_rmb)||0)*qty;
     ship+=(r.box_id?shipPerUnitRmb(r.box_id):0)*qty;
     pieces+=qty;
   });
+  const china=chinaPU*pieces;
   const arrived=itemRows.filter(r=>r.box_id).length;
   document.getElementById('itemsTotals').innerHTML=
     `${itemRows.length} line(s) · ${pieces} piece(s) · ${arrived}/${itemRows.length} arrived<br/>`+
-    `Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; Shipping ${fmtFromRmb(ship)} &nbsp;·&nbsp; <strong>Grand total ${fmtFromRmb(goods+ship)}</strong>`;
+    `Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China ${fmtFromRmb(china)} &nbsp;·&nbsp; Shipping ${fmtFromRmb(ship)}<br/>`+
+    `<strong>Grand total ${fmtFromRmb(goods+china+ship)}</strong>`;
 }
 document.getElementById('addItemBtn').addEventListener('click',async()=>{
   const msg=document.getElementById('itemsMsg');
@@ -1246,12 +1278,77 @@ document.getElementById('addItemBtn').addEventListener('click',async()=>{
   if(error){ showMsg(msg,'Could not add line: '+error.message,false); return; }
   await refreshOrderDetail();
 });
-document.getElementById('itemsWrap').addEventListener('click',async e=>{
-  if(!e.target.closest('[data-item-del]')) return;
-  const id=e.target.closest('.ph-card').dataset.itemId;
+// ---------- item photos (Supabase Storage, private bucket + signed URLs) ----------
+const PHOTO_BUCKET='shipment-photos';
+const photoUrlCache={};
+// innerHTML can't await, so thumbnails are painted first and their signed
+// URLs patched in afterwards; URLs are cached so re-renders don't re-sign.
+async function hydratePhotos(){
   if(!sb) return;
-  await sb.from('shipment_items').delete().eq('id',id);
-  await refreshOrderDetail();
+  for(const r of itemRows){
+    if(!r.photo_path) continue;
+    if(!photoUrlCache[r.photo_path]){
+      const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(r.photo_path,3600);
+      if(data&&data.signedUrl) photoUrlCache[r.photo_path]=data.signedUrl;
+    }
+    const url=photoUrlCache[r.photo_path]; if(!url) continue;
+    const img=document.querySelector(`#itemsWrap [data-item-id="${r.id}"] img[data-photo]`);
+    if(img&&img.src!==url) img.src=url;
+  }
+}
+function pickItemPhoto(itemId){
+  const inp=document.createElement('input');
+  inp.type='file';
+  // plain image/* (no capture attr) so phones offer Camera *and* Photo Library,
+  // while desktop still gets a normal file picker
+  inp.accept='image/*';
+  inp.onchange=async()=>{
+    const file=inp.files[0]; if(!file) return;
+    const msg=document.getElementById('itemsMsg');
+    if(!sb){ showMsg(msg,'Sync unavailable.',false); return; }
+    const {data:{session}}=await sb.auth.getSession();
+    if(!session){ showMsg(msg,'Sign in first.',false); return; }
+    showMsg(msg,'Uploading photo…',true);
+    try{
+      // downscale before upload — phone photos are multi-MB and we only
+      // need a reference shot of the SKU
+      const small=await shrink(await fileToDataURL(file),1280,0.72);
+      const blob=await (await fetch(small)).blob();
+      const row=itemRows.find(r=>r.id===itemId);
+      const oldPath=row&&row.photo_path;
+      const path=`${session.user.id}/${itemId}/${Date.now()}.jpg`;
+      const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:'image/jpeg'});
+      if(up.error) throw up.error;
+      const {error}=await sb.from('shipment_items').update({photo_path:path}).eq('id',itemId);
+      if(error) throw error;
+      if(oldPath) await sb.storage.from(PHOTO_BUCKET).remove([oldPath]); // don't orphan the replaced file
+      msg.innerHTML='';
+      await refreshOrderDetail();
+    }catch(err){
+      showMsg(msg,'Photo upload failed: '+((err&&err.message)||'unknown error'),false);
+    }
+  };
+  inp.click();
+}
+document.getElementById('itemsWrap').addEventListener('click',async e=>{
+  const card=e.target.closest('.ph-card'); if(!card) return;
+  const id=card.dataset.itemId;
+  if(e.target.closest('[data-item-photo]')){ pickItemPhoto(id); return; }
+  if(e.target.closest('[data-item-photo-del]')){
+    if(!sb) return;
+    const row=itemRows.find(r=>r.id===id);
+    if(row&&row.photo_path) await sb.storage.from(PHOTO_BUCKET).remove([row.photo_path]);
+    await sb.from('shipment_items').update({photo_path:null}).eq('id',id);
+    await refreshOrderDetail();
+    return;
+  }
+  if(e.target.closest('[data-item-del]')){
+    if(!sb) return;
+    const row=itemRows.find(r=>r.id===id);
+    if(row&&row.photo_path) await sb.storage.from(PHOTO_BUCKET).remove([row.photo_path]);
+    await sb.from('shipment_items').delete().eq('id',id);
+    await refreshOrderDetail();
+  }
 });
 document.getElementById('itemsWrap').addEventListener('change',async e=>{
   const inp=e.target.closest('[data-f]'); if(!inp) return;
@@ -1281,6 +1378,37 @@ document.querySelectorAll('#currencySeg button').forEach(b=>{
 document.getElementById('detailBackBtn').addEventListener('click',()=>showScreen('shipment'));
 document.getElementById('goToTrackingBtn').addEventListener('click',()=>showScreen('shipment-tracking'));
 document.getElementById('goToBoxesBtn').addEventListener('click',()=>showScreen('shipment-boxes'));
+document.getElementById('goToChinaBtn').addEventListener('click',()=>showScreen('shipment-china'));
+
+// ---------- China domestic shipping fee ----------
+function openChinaFee(){
+  const s=currentShipment();
+  document.getElementById('chinaFee').value=s?(Number(s.china_fee_rmb)||0):0;
+  document.getElementById('chinaRmbRate').value=rmbRate()||5.2;
+  renderChinaCalc();
+}
+function renderChinaCalc(){
+  const fee=chinaFeeRmb(), q=totalQtyAll(), per=chinaPerUnitRmb(), r=rmbRate();
+  document.getElementById('chinaCalc').innerHTML=
+    `Fee <strong>¥${fee.toFixed(2)}</strong>${r?` = <strong>S$${(fee/r).toFixed(2)}</strong>`:''}<br/>`+
+    `${q} piece(s) on this order &nbsp;·&nbsp; per piece <strong>¥${per.toFixed(2)}</strong>${r?` = <strong>S$${(per/r).toFixed(2)}</strong>`:''}`+
+    (q?'':'<br/><span style="opacity:.7">Add item lines first — with no pieces there is nothing to divide across.</span>');
+}
+document.getElementById('chinaFee').addEventListener('input',async e=>{
+  const v=Math.max(0,parseFloat(e.target.value)||0);
+  const s=currentShipment(); if(s) s.china_fee_rmb=v;
+  renderChinaCalc();
+  if(sb&&currentShipmentId) await sb.from('shipments').update({china_fee_rmb:v}).eq('id',currentShipmentId);
+});
+document.getElementById('chinaRmbRate').addEventListener('input',async e=>{
+  const v=parseFloat(e.target.value);
+  if(!(isFinite(v)&&v>0)) return;
+  document.getElementById('detailRmbRate').value=v; // one rate per order, shared across screens
+  const s=currentShipment(); if(s) s.rmb_rate=v;
+  renderChinaCalc();
+  if(sb&&currentShipmentId) await sb.from('shipments').update({rmb_rate:v}).eq('id',currentShipmentId);
+});
+document.getElementById('chinaBackBtn').addEventListener('click',()=>showScreen('shipment-detail'));
 
 // ---------- tracking ----------
 async function refreshTrackingList(){
