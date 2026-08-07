@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Template Builder</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 :root{
@@ -123,17 +124,34 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
   <div class="card" data-card>
     <div class="card-head"><span class="num">1</span><h3>Template library</h3><span class="chev">▾</span></div>
     <div class="card-body">
-      <p class="hint">Saves sheet size, layout settings, placeholders and the cut-line setting.</p>
-      <label class="field" style="margin-bottom:10px;"><span>TEMPLATE NAME</span><input type="text" id="templateName" placeholder="e.g. Name Card 2-up"/></label>
-      <label class="field" style="margin-bottom:10px;"><span>SAVED TEMPLATES</span>
-        <select id="templateSelect"><option value="">— none saved —</option></select>
-      </label>
-      <div class="grid2" style="margin-bottom:16px;">
-        <button class="btn-outline" id="loadTemplateBtn">Load</button>
-        <button class="btn-danger" id="deleteTemplateBtn">Delete</button>
+      <p class="hint">Sign in to save templates and sync them across every device — sheet size, layout, placeholders and cut-line settings.</p>
+
+      <div id="authBox">
+        <label class="field" style="margin-bottom:10px;"><span>EMAIL</span><input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email"/></label>
+        <label class="field" style="margin-bottom:10px;"><span>PASSWORD</span><input type="password" id="authPassword" placeholder="At least 6 characters" autocomplete="current-password"/></label>
+        <div class="grid2" style="margin-bottom:10px;">
+          <button class="btn-outline" id="signUpBtn">Sign up</button>
+          <button class="btn-primary" id="signInBtn">Sign in</button>
+        </div>
+        <div id="authMsg"></div>
       </div>
-      <button class="btn-primary" id="saveTemplateBtn" style="width:100%;">Save template</button>
-      <div id="saveMsg"></div>
+
+      <div id="tplControls" style="display:none;">
+        <div class="toggle-row" style="margin-bottom:12px;">
+          <span class="hint" style="margin:0;" id="signedInAs"></span>
+          <button class="btn-outline btn-sm" id="signOutBtn">Sign out</button>
+        </div>
+        <label class="field" style="margin-bottom:10px;"><span>TEMPLATE NAME</span><input type="text" id="templateName" placeholder="e.g. Name Card 2-up"/></label>
+        <label class="field" style="margin-bottom:10px;"><span>SAVED TEMPLATES</span>
+          <select id="templateSelect"><option value="">— none saved —</option></select>
+        </label>
+        <div class="grid2" style="margin-bottom:16px;">
+          <button class="btn-outline" id="loadTemplateBtn">Load</button>
+          <button class="btn-danger" id="deleteTemplateBtn">Delete</button>
+        </div>
+        <button class="btn-primary" id="saveTemplateBtn" style="width:100%;">Save template</button>
+        <div id="saveMsg"></div>
+      </div>
     </div>
   </div>
 
@@ -305,55 +323,23 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
 </div>
 
 <script>
-// Compatibility shim: window.storage is a Claude.ai-artifact-only API. Outside
-// that environment (e.g. running this file standalone, or via Claude Code's
-// local server) it doesn't exist, so this fills in the same get/set/delete/list
-// shape backed by the browser's own localStorage — templates just become
-// specific to this device/browser instead of this Claude.ai account.
-if(typeof window.storage==='undefined'){
-  window.storage=(function(){
-    const ns=k=>'tplbuilder:'+k;
-    return {
-      async get(key){
-        try{
-          const raw=localStorage.getItem(ns(key));
-          if(raw===null) return null;
-          return {key, value:JSON.parse(raw).value, shared:false};
-        }catch(e){ return null; }
-      },
-      async set(key,value){
-        try{
-          localStorage.setItem(ns(key), JSON.stringify({value}));
-          return {key, value, shared:false};
-        }catch(e){ return null; }
-      },
-      async delete(key){
-        try{ localStorage.removeItem(ns(key)); return {key, deleted:true, shared:false}; }
-        catch(e){ return null; }
-      },
-      async list(prefix){
-        try{
-          const keys=[];
-          for(let i=0;i<localStorage.length;i++){
-            const k=localStorage.key(i);
-            if(k && k.startsWith('tplbuilder:')){
-              const orig=k.slice('tplbuilder:'.length);
-              if(!prefix || orig.startsWith(prefix)) keys.push(orig);
-            }
-          }
-          return {keys, prefix, shared:false};
-        }catch(e){ return null; }
-      }
-    };
-  })();
-}
+// Template sync backend: Supabase (Postgres + auth). Templates are stored
+// server-side, scoped per signed-in user via row-level security, so the
+// same account sees the same templates on every device/browser.
+const SUPABASE_URL='https://kdwggyzyzrhiniasilqs.supabase.co';
+const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtkd2dneXp5enJoaW5pYXNpbHFzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwNTE3ODEsImV4cCI6MjEwMTYyNzc4MX0.WOJjkSZ0yf0zAe_I9jFJbuH2mNPtzZj_kexq0EX_7f8';
+// The anon/public key above is meant to be embedded client-side — Supabase's
+// row-level security (see supabase-schema.sql) is what actually protects data,
+// not secrecy of this key.
+const sb=(window.supabase && window.supabase.createClient)
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
 if(window.pdfjsLib){pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';}
 const toMm=(v,u)=>u==='mm'?v:u==='in'?v*25.4:(v/96)*25.4;
 const fromMm=(mm,u)=>u==='mm'?mm:u==='in'?mm/25.4:(mm/25.4)*96;
 const round=n=>Math.round(n*100)/100;
 const uid=()=>'p'+Math.random().toString(36).slice(2,9);
-const IDX_KEY='tplindex';
-const K=n=>'tpl_'+n.replace(/[^a-z0-9]/gi,'_');
 
 const state={
   paper:{w:210,h:297,unit:'mm'},
@@ -759,45 +745,54 @@ document.getElementById('zoomIn').addEventListener('click',()=>{modalZoom=Math.m
 document.getElementById('zoomOut').addEventListener('click',()=>{modalZoom=Math.max(0.5,modalZoom-0.5);renderModal();});
 document.getElementById('modalClose').addEventListener('click',()=>modalBg.classList.remove('open'));
 
-// ---------- template library ----------
+// ---------- template library (synced via Supabase) ----------
 const msgEl=document.getElementById('saveMsg');
+const authMsgEl=document.getElementById('authMsg');
 function showMsg(el,t,ok){el.innerHTML=`<div class="banner ${ok?'ok':'warn'}">${t}</div>`;}
-async function sGet(k){try{const r=await window.storage.get(k,false);return r?r.value:null;}catch(e){return null;}}
-async function sSet(k,v){return await window.storage.set(k,v,false);}
-async function sDel(k){try{await window.storage.delete(k,false);}catch(e){}}
-async function getIndex(){const r=await sGet(IDX_KEY);if(!r)return[];try{return JSON.parse(r);}catch(e){return[];}}
+
+function setAuthedUI(signedIn,email){
+  document.getElementById('authBox').style.display=signedIn?'none':'block';
+  document.getElementById('tplControls').style.display=signedIn?'block':'none';
+  if(signedIn) document.getElementById('signedInAs').textContent='Signed in as '+email;
+}
 async function refreshTemplateDropdown(sel){
   const el=document.getElementById('templateSelect');
-  const names=await getIndex();
+  if(!sb){ el.innerHTML='<option value="">— sync unavailable —</option>'; return; }
+  const {data,error}=await sb.from('templates').select('name').order('name');
+  if(error){ el.innerHTML='<option value="">— could not load —</option>'; return; }
+  const names=(data||[]).map(r=>r.name);
   el.innerHTML=names.length?names.map(n=>`<option value="${n}">${n}</option>`).join(''):'<option value="">— none saved —</option>';
   if(sel&&names.includes(sel))el.value=sel;
 }
 async function saveTemplate(){
-  if(typeof window.storage==='undefined'){showMsg(msgEl,'Storage unavailable here.',false);return;}
+  if(!sb){showMsg(msgEl,'Template sync unavailable — check your connection.',false);return;}
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session){showMsg(msgEl,'Sign in first.',false);return;}
   const name=document.getElementById('templateName').value.trim();
   if(!name){showMsg(msgEl,'Enter a template name first.',false);return;}
   const btn=document.getElementById('saveTemplateBtn');
   btn.disabled=true;btn.textContent='Saving…';
-  const base=K(name);
   try{
     readLayoutInputs();
     const meta={name,paper:state.paper,layout:state.layout,placeholders:state.placeholders,
       showCut:state.showCut,cutColor:state.cutColor,refMark:state.refMark};
-    await sSet(base+'_meta',JSON.stringify(meta));
-    const names=await getIndex();
-    if(!names.includes(name)){names.push(name);await sSet(IDX_KEY,JSON.stringify(names));}
+    const {error}=await sb.from('templates').upsert(
+      {user_id:session.user.id,name,data:meta,updated_at:new Date().toISOString()},
+      {onConflict:'user_id,name'}
+    );
+    if(error) throw error;
     await refreshTemplateDropdown(name);
-    showMsg(msgEl,'✓ Saved "'+name+'"',true);
+    showMsg(msgEl,'✓ Saved "'+name+'" — synced to your account',true);
   }catch(err){
     showMsg(msgEl,'Could not save: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false;btn.textContent='Save template'; }
 }
 async function loadTemplate(name){
+  if(!sb){showMsg(msgEl,'Template sync unavailable — check your connection.',false);return;}
   if(!name){showMsg(msgEl,'No template selected.',false);return;}
-  const base=K(name);
-  const raw=await sGet(base+'_meta');
-  if(!raw){showMsg(msgEl,'Could not find that template.',false);return;}
-  const meta=JSON.parse(raw);
+  const {data,error}=await sb.from('templates').select('data').eq('name',name).single();
+  if(error||!data){showMsg(msgEl,'Could not find that template.',false);return;}
+  const meta=data.data;
   state.paper=meta.paper||state.paper;
   document.getElementById('paperW').value=state.paper.w;
   document.getElementById('paperH').value=state.paper.h;
@@ -816,17 +811,59 @@ async function loadTemplate(name){
   showMsg(msgEl,'✓ Loaded "'+name+'"',true);
 }
 async function deleteTemplate(name){
+  if(!sb){showMsg(msgEl,'Template sync unavailable — check your connection.',false);return;}
   if(!name){showMsg(msgEl,'No template selected.',false);return;}
-  const base=K(name);
-  await sDel(base+'_meta');
-  const names=(await getIndex()).filter(n=>n!==name);
-  await sSet(IDX_KEY,JSON.stringify(names));
+  const {error}=await sb.from('templates').delete().eq('name',name);
+  if(error){showMsg(msgEl,'Could not delete: '+error.message,false);return;}
   await refreshTemplateDropdown();
   showMsg(msgEl,'✓ Deleted "'+name+'"',true);
 }
 document.getElementById('saveTemplateBtn').addEventListener('click',saveTemplate);
 document.getElementById('loadTemplateBtn').addEventListener('click',()=>loadTemplate(document.getElementById('templateSelect').value));
 document.getElementById('deleteTemplateBtn').addEventListener('click',()=>deleteTemplate(document.getElementById('templateSelect').value));
+
+// ---------- auth ----------
+document.getElementById('signUpBtn').addEventListener('click',async()=>{
+  if(!sb){showMsg(authMsgEl,'Sync unavailable — check your connection.',false);return;}
+  const email=document.getElementById('authEmail').value.trim();
+  const password=document.getElementById('authPassword').value;
+  if(!email||!password){showMsg(authMsgEl,'Enter an email and password.',false);return;}
+  if(password.length<6){showMsg(authMsgEl,'Password needs to be at least 6 characters.',false);return;}
+  const btn=document.getElementById('signUpBtn'); btn.disabled=true;
+  try{
+    const {data,error}=await sb.auth.signUp({email,password});
+    if(error) throw error;
+    showMsg(authMsgEl, data.session
+      ? '✓ Account created and signed in.'
+      : '✓ Account created. Check your email to confirm it, then sign in.', true);
+  }catch(err){
+    showMsg(authMsgEl,'Could not sign up: '+((err&&err.message)||'unknown error'),false);
+  }finally{ btn.disabled=false; }
+});
+document.getElementById('signInBtn').addEventListener('click',async()=>{
+  if(!sb){showMsg(authMsgEl,'Sync unavailable — check your connection.',false);return;}
+  const email=document.getElementById('authEmail').value.trim();
+  const password=document.getElementById('authPassword').value;
+  if(!email||!password){showMsg(authMsgEl,'Enter an email and password.',false);return;}
+  const btn=document.getElementById('signInBtn'); btn.disabled=true;
+  try{
+    const {error}=await sb.auth.signInWithPassword({email,password});
+    if(error) throw error;
+  }catch(err){
+    showMsg(authMsgEl,'Could not sign in: '+((err&&err.message)||'unknown error'),false);
+  }finally{ btn.disabled=false; }
+});
+document.getElementById('signOutBtn').addEventListener('click',async()=>{
+  if(sb) await sb.auth.signOut();
+});
+if(sb){
+  sb.auth.onAuthStateChange((event,session)=>{
+    if(session){ setAuthedUI(true,session.user.email); refreshTemplateDropdown(); }
+    else{ setAuthedUI(false); document.getElementById('templateSelect').innerHTML='<option value="">— none saved —</option>'; }
+  });
+}else{
+  showMsg(authMsgEl,'Template sync needs a connection to Supabase — unavailable right now.',false);
+}
 
 // ---------- self-contained PDF writer (no external library) ----------
 // Images are embedded fully losslessly: raw RGB pixel rows (no JPEG, no
@@ -994,7 +1031,12 @@ window.addEventListener('resize',drawAll);
 writeLayoutInputs();
 generateGrid();
 renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();drawAll();
-if(typeof window.storage!=='undefined')refreshTemplateDropdown();
+if(sb){
+  sb.auth.getSession().then(({data:{session}})=>{
+    if(session){ setAuthedUI(true,session.user.email); refreshTemplateDropdown(); }
+    else{ setAuthedUI(false); }
+  });
+}
 </script>
 </body>
 </html>
