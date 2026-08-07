@@ -294,9 +294,13 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
         <span style="font-size:13px;color:var(--muted);">Show reference line</span>
         <label class="switch"><input type="checkbox" id="refMarkToggle" checked/><span class="slider"></span></label>
       </div>
-      <div class="grid2">
+      <div class="grid2" style="margin-bottom:12px;">
         <label class="field"><span>OFFSET FROM PLACEHOLDER (<span class="unitHint">mm</span>)</span><input type="number" step="0.1" id="refMarkOffset" value="5"/></label>
         <label class="field"><span>MARK LENGTH (<span class="unitHint">mm</span>)</span><input type="number" step="0.1" id="refMarkLen" value="4"/></label>
+      </div>
+      <div class="toggle-row">
+        <span style="font-size:13px;color:var(--muted);">Fold line — dashed mid-edge marks, outer sides only, drawn above the artwork</span>
+        <label class="switch"><input type="checkbox" id="foldLineToggle"/><span class="slider"></span></label>
       </div>
     </div>
   </div>
@@ -391,6 +395,7 @@ const state={
   showCut:true,
   cutColor:'red',
   refMark:{enabled:true,offsetMm:5,lenMm:4},
+  foldLine:{enabled:false},
   final:{front:{data:null,img:null,name:''},back:{data:null,img:null,name:''}},
   art:{front:{wMm:0,hMm:0},back:{wMm:0,hMm:0}},
   bleed:{enabled:true,mm:3},
@@ -539,6 +544,42 @@ function drawCutMarks(ctx,sc){
   ctx.restore();
 }
 
+// fold line: a dashed tick at the midpoint of each placeholder edge, same
+// offset/length as the cutting reference marks and the same outer-edge-only
+// rule (skips edges shared with a neighboring card) — drawn above the
+// artwork, unlike the reference marks which sit underneath it
+function drawFoldLines(ctx,sc){
+  if(!state.foldLine.enabled || state.placeholders.length===0) return;
+  const off=state.refMark.offsetMm, len=state.refMark.lenMm;
+  const EPS=0.01;
+  const minX=Math.min(...state.placeholders.map(ph=>ph.xMm));
+  const maxX=Math.max(...state.placeholders.map(ph=>ph.xMm+ph.wMm));
+  const minY=Math.min(...state.placeholders.map(ph=>ph.yMm));
+  const maxY=Math.max(...state.placeholders.map(ph=>ph.yMm+ph.hMm));
+  ctx.save();
+  ctx.strokeStyle='#E2231A';
+  ctx.lineWidth=1;
+  ctx.setLineDash([1.5*sc,1*sc]);
+  ctx.beginPath();
+  const seg=(x1,y1,x2,y2)=>{ ctx.moveTo(x1*sc,y1*sc); ctx.lineTo(x2*sc,y2*sc); };
+
+  state.placeholders.forEach(ph=>{
+    const x0=ph.xMm, y0=ph.yMm, x1=ph.xMm+ph.wMm, y1=ph.yMm+ph.hMm;
+    const midX=(x0+x1)/2, midY=(y0+y1)/2;
+    const onLeft=Math.abs(x0-minX)<EPS, onRight=Math.abs(x1-maxX)<EPS;
+    const onTop=Math.abs(y0-minY)<EPS, onBottom=Math.abs(y1-maxY)<EPS;
+    // each outer edge gets one tick at its midpoint, pointing further outward —
+    // interior edges shared with a neighboring card are skipped
+    if(onLeft) seg(x0-off,midY,x0-off-len,midY);
+    if(onRight) seg(x1+off,midY,x1+off+len,midY);
+    if(onTop) seg(midX,y0-off,midX,y0-off-len);
+    if(onBottom) seg(midX,y1+off,midX,y1+off+len);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 // ---------- drawing ----------
 function renderSide(side,canvas,maxDim,opts){
   opts=opts||{};
@@ -581,6 +622,9 @@ function renderSide(side,canvas,maxDim,opts){
       ctx.restore();
     });
   }
+
+  // fold line sits above the artwork (unlike the reference marks below it)
+  drawFoldLines(ctx,sc);
 
   if(!opts.forExport && state.showCut){
     ctx.save();
@@ -789,6 +833,9 @@ document.getElementById('bleedAmount').addEventListener('input',e=>{
 document.getElementById('refMarkToggle').addEventListener('change',e=>{
   state.refMark.enabled=e.target.checked;drawAll();
 });
+document.getElementById('foldLineToggle').addEventListener('change',e=>{
+  state.foldLine.enabled=e.target.checked;drawAll();
+});
 document.getElementById('refMarkOffset').addEventListener('input',e=>{
   const v=parseFloat(e.target.value);
   if(!isNaN(v)&&v>=0){ state.refMark.offsetMm=toMm(v,state.paper.unit); drawAll(); }
@@ -847,7 +894,7 @@ async function saveTemplate(){
   try{
     readLayoutInputs();
     const meta={name,paper:state.paper,layout:state.layout,placeholders:state.placeholders,
-      showCut:state.showCut,cutColor:state.cutColor,refMark:state.refMark,shift:state.shift,rotate:state.rotate};
+      showCut:state.showCut,cutColor:state.cutColor,refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate};
     const {error}=await sb.from('templates').upsert(
       {user_id:session.user.id,name,data:meta,updated_at:new Date().toISOString()},
       {onConflict:'user_id,name'}
@@ -878,6 +925,8 @@ async function loadTemplate(name){
   document.querySelectorAll('#cutColorSeg button').forEach(b=>b.classList.toggle('on',b.dataset.cutcolor===state.cutColor));
   if(meta.refMark) state.refMark=Object.assign(state.refMark,meta.refMark);
   document.getElementById('refMarkToggle').checked=state.refMark.enabled;
+  if(meta.foldLine) state.foldLine=Object.assign(state.foldLine,meta.foldLine);
+  document.getElementById('foldLineToggle').checked=state.foldLine.enabled;
   if(meta.shift){ state.shift.front=Object.assign(state.shift.front,meta.shift.front); state.shift.back=Object.assign(state.shift.back,meta.shift.back); }
   if(meta.rotate){ state.rotate.front=meta.rotate.front||0; state.rotate.back=meta.rotate.back||0; }
   document.getElementById('templateName').value=meta.name||name;
