@@ -139,7 +139,8 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
     <div class="preview-card">
       <div class="top-row"><span>FRONT</span>
         <div style="display:flex;gap:4px;">
-          <button class="icon-btn" data-rotate="front">↻</button>
+          <button class="icon-btn" data-rotate-left="front" title="Rotate left">↺</button>
+          <button class="icon-btn" data-rotate-right="front" title="Rotate right">↻</button>
           <button class="icon-btn" data-enlarge="front">⤢</button>
         </div>
       </div>
@@ -148,7 +149,8 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
     <div class="preview-card">
       <div class="top-row"><span>BACK</span>
         <div style="display:flex;gap:4px;">
-          <button class="icon-btn" data-rotate="back">↻</button>
+          <button class="icon-btn" data-rotate-left="back" title="Rotate left">↺</button>
+          <button class="icon-btn" data-rotate-right="back" title="Rotate right">↻</button>
           <button class="icon-btn" data-enlarge="back">⤢</button>
         </div>
       </div>
@@ -559,22 +561,26 @@ function renderSide(side,canvas,maxDim,opts){
   // grid (not rotated) — printed both in preview and in the exported PDF
   drawCutMarks(ctx,sc);
 
-  ctx.save();
-  if(state.rotate[side]===180){
-    ctx.translate(canvas.width/2,canvas.height/2);ctx.rotate(Math.PI);
-    ctx.translate(-canvas.width/2,-canvas.height/2);
-  }
-  // artwork repeated into every placeholder, expanded by bleed on all sides but kept centred
+  // artwork repeated into every placeholder, expanded by bleed on all sides but kept
+  // centred, rotated in 90° steps around each tile's own centre — the footprint
+  // (effW × effH, what the WIDTH/HEIGHT fields show) stays fixed as you rotate;
+  // only the image content spins within it
   const art=state.final[side].img, a=state.art[side];
   if(art&&a.wMm&&a.hMm){
     const bleedMm=state.bleed.enabled?state.bleed.mm:0;
     const effW=a.wMm+bleedMm*2, effH=a.hMm+bleedMm*2;
+    const rotDeg=state.rotate[side]||0;
+    const swapped=(rotDeg%180)!==0; // 90 or 270: image is drawn on its side
+    const srcW=(swapped?effH:effW)*sc, srcH=(swapped?effW:effH)*sc;
     state.placeholders.forEach(ph=>{
-      const x=ph.xMm+(ph.wMm-effW)/2, y=ph.yMm+(ph.hMm-effH)/2;
-      ctx.drawImage(art,x*sc,y*sc,effW*sc,effH*sc);
+      const cx=(ph.xMm+ph.wMm/2)*sc, cy=(ph.yMm+ph.hMm/2)*sc;
+      ctx.save();
+      ctx.translate(cx,cy);
+      ctx.rotate(rotDeg*Math.PI/180);
+      ctx.drawImage(art,-srcW/2,-srcH/2,srcW,srcH);
+      ctx.restore();
     });
   }
-  ctx.restore();
 
   if(!opts.forExport && state.showCut){
     ctx.save();
@@ -723,8 +729,11 @@ document.getElementById('swapOrientBtn').addEventListener('click',()=>{
     if(!isNaN(v)){ state.shift[side][axis]=toMm(v,state.paper.unit); drawAll(); }
   });
 });
-document.querySelectorAll('[data-rotate]').forEach(b=>{
-  b.addEventListener('click',()=>{const s=b.dataset.rotate;state.rotate[s]=state.rotate[s]===180?0:180;drawAll();});
+document.querySelectorAll('[data-rotate-left]').forEach(b=>{
+  b.addEventListener('click',()=>{const s=b.dataset.rotateLeft;state.rotate[s]=((state.rotate[s]||0)-90+360)%360;drawAll();});
+});
+document.querySelectorAll('[data-rotate-right]').forEach(b=>{
+  b.addEventListener('click',()=>{const s=b.dataset.rotateRight;state.rotate[s]=((state.rotate[s]||0)+90)%360;drawAll();});
 });
 document.getElementById('cutToggle').addEventListener('change',e=>{state.showCut=e.target.checked;drawAll();});
 document.querySelectorAll('#cutColorSeg button').forEach(b=>{
@@ -838,7 +847,7 @@ async function saveTemplate(){
   try{
     readLayoutInputs();
     const meta={name,paper:state.paper,layout:state.layout,placeholders:state.placeholders,
-      showCut:state.showCut,cutColor:state.cutColor,refMark:state.refMark,shift:state.shift};
+      showCut:state.showCut,cutColor:state.cutColor,refMark:state.refMark,shift:state.shift,rotate:state.rotate};
     const {error}=await sb.from('templates').upsert(
       {user_id:session.user.id,name,data:meta,updated_at:new Date().toISOString()},
       {onConflict:'user_id,name'}
@@ -870,6 +879,7 @@ async function loadTemplate(name){
   if(meta.refMark) state.refMark=Object.assign(state.refMark,meta.refMark);
   document.getElementById('refMarkToggle').checked=state.refMark.enabled;
   if(meta.shift){ state.shift.front=Object.assign(state.shift.front,meta.shift.front); state.shift.back=Object.assign(state.shift.back,meta.shift.back); }
+  if(meta.rotate){ state.rotate.front=meta.rotate.front||0; state.rotate.back=meta.rotate.back||0; }
   document.getElementById('templateName').value=meta.name||name;
   renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();drawAll();
   showMsg(msgEl,'✓ Loaded "'+name+'"',true);
