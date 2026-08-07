@@ -186,9 +186,28 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
           <select id="paperUnit"><option value="mm">mm</option><option value="in">in</option><option value="px">px</option></select>
         </label>
       </div>
-      <div class="grid2">
+      <div class="grid2" style="margin-bottom:16px;">
         <button class="btn-primary" id="applySizeBtn">Apply size</button>
         <button class="btn-outline" id="swapOrientBtn">↕ Swap orientation</button>
+      </div>
+
+      <div class="sect-label">Margin shift</div>
+      <p class="hint">Nudges the reference marks, placeholders and artwork together as one unit, on top of the sheet — set separately per side to correct printer registration drift. Positive X shifts right, positive Y shifts down.</p>
+      <div class="grid2">
+        <div>
+          <div class="slot-label">Front</div>
+          <div class="grid2">
+            <label class="field"><span>X (<span class="unitHint">mm</span>)</span><input type="number" step="0.1" id="shiftFrontX" value="0"/></label>
+            <label class="field"><span>Y (<span class="unitHint">mm</span>)</span><input type="number" step="0.1" id="shiftFrontY" value="0"/></label>
+          </div>
+        </div>
+        <div>
+          <div class="slot-label">Back</div>
+          <div class="grid2">
+            <label class="field"><span>X (<span class="unitHint">mm</span>)</span><input type="number" step="0.1" id="shiftBackX" value="0"/></label>
+            <label class="field"><span>Y (<span class="unitHint">mm</span>)</span><input type="number" step="0.1" id="shiftBackY" value="0"/></label>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -241,7 +260,10 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
     </div>
   </div>
 
-  <button class="btn-primary" id="exportBtn" style="width:100%;height:54px;font-size:15px;margin-bottom:12px;">Export PDFs (front + back)</button>
+  <div class="grid2" style="margin-bottom:12px;">
+    <button class="btn-primary" id="exportFrontBtn" style="height:54px;font-size:14px;">Download front</button>
+    <button class="btn-primary" id="exportBackBtn" style="height:54px;font-size:14px;">Download back</button>
+  </div>
   <div id="exportMsg"></div>
 
   <!-- 5 CUT -->
@@ -371,7 +393,10 @@ const state={
   art:{front:{wMm:0,hMm:0},back:{wMm:0,hMm:0}},
   bleed:{enabled:true,mm:3},
   rotate:{front:0,back:0},
-  orderId:''
+  orderId:'',
+  // per-side registration offset — nudges reference marks, placeholders and
+  // artwork together as one unit, to correct printer feed drift front vs back
+  shift:{front:{xMm:0,yMm:0},back:{xMm:0,yMm:0}}
 };
 
 document.querySelectorAll('[data-card] .card-head').forEach(h=>{
@@ -523,6 +548,13 @@ function renderSide(side,canvas,maxDim,opts){
   ctx.clearRect(0,0,canvas.width,canvas.height);
   ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
 
+  // registration shift: nudges reference marks, placeholders and artwork
+  // together as one unit, independently per side, to correct printer feed
+  // drift — everything below this point is drawn relative to the shift
+  ctx.save();
+  const shift=state.shift[side]||{xMm:0,yMm:0};
+  ctx.translate(shift.xMm*sc,shift.yMm*sc);
+
   // bottom layer: auto-generated cutting reference marks, fixed to the placeholder
   // grid (not rotated) — printed both in preview and in the exported PDF
   drawCutMarks(ctx,sc);
@@ -551,7 +583,9 @@ function renderSide(side,canvas,maxDim,opts){
     state.placeholders.forEach(ph=>ctx.strokeRect(ph.xMm*sc,ph.yMm*sc,ph.wMm*sc,ph.hMm*sc));
     ctx.restore();
   }
-  // order ID prints onto the artwork too, not just the on-screen preview
+  ctx.restore(); // pairs with the shift save above
+
+  // order ID is anchored to the physical sheet corner, not the shift —
   if(state.orderId){
     ctx.save();
     const fs=Math.max(2,Math.max(p.w,p.h)*0.012*sc);
@@ -683,6 +717,12 @@ document.getElementById('swapOrientBtn').addEventListener('click',()=>{
   document.getElementById('paperH').value=state.paper.h;
   updateCalc();drawAll();
 });
+[['shiftFrontX','front','xMm'],['shiftFrontY','front','yMm'],['shiftBackX','back','xMm'],['shiftBackY','back','yMm']].forEach(([id,side,axis])=>{
+  document.getElementById(id).addEventListener('input',e=>{
+    const v=parseFloat(e.target.value);
+    if(!isNaN(v)){ state.shift[side][axis]=toMm(v,state.paper.unit); drawAll(); }
+  });
+});
 document.querySelectorAll('[data-rotate]').forEach(b=>{
   b.addEventListener('click',()=>{const s=b.dataset.rotate;state.rotate[s]=state.rotate[s]===180?0:180;drawAll();});
 });
@@ -706,6 +746,10 @@ function refreshArtInputs(){
   document.getElementById('bleedAmount').value=round(fromMm(state.bleed.mm,state.paper.unit));
   document.getElementById('refMarkOffset').value=round(fromMm(state.refMark.offsetMm,state.paper.unit));
   document.getElementById('refMarkLen').value=round(fromMm(state.refMark.lenMm,state.paper.unit));
+  document.getElementById('shiftFrontX').value=round(fromMm(state.shift.front.xMm,state.paper.unit));
+  document.getElementById('shiftFrontY').value=round(fromMm(state.shift.front.yMm,state.paper.unit));
+  document.getElementById('shiftBackX').value=round(fromMm(state.shift.back.xMm,state.paper.unit));
+  document.getElementById('shiftBackY').value=round(fromMm(state.shift.back.yMm,state.paper.unit));
 }
 ['front','back'].forEach(side=>{
   const cap=side==='front'?'Front':'Back';
@@ -794,7 +838,7 @@ async function saveTemplate(){
   try{
     readLayoutInputs();
     const meta={name,paper:state.paper,layout:state.layout,placeholders:state.placeholders,
-      showCut:state.showCut,cutColor:state.cutColor,refMark:state.refMark};
+      showCut:state.showCut,cutColor:state.cutColor,refMark:state.refMark,shift:state.shift};
     const {error}=await sb.from('templates').upsert(
       {user_id:session.user.id,name,data:meta,updated_at:new Date().toISOString()},
       {onConflict:'user_id,name'}
@@ -825,6 +869,7 @@ async function loadTemplate(name){
   document.querySelectorAll('#cutColorSeg button').forEach(b=>b.classList.toggle('on',b.dataset.cutcolor===state.cutColor));
   if(meta.refMark) state.refMark=Object.assign(state.refMark,meta.refMark);
   document.getElementById('refMarkToggle').checked=state.refMark.enabled;
+  if(meta.shift){ state.shift.front=Object.assign(state.shift.front,meta.shift.front); state.shift.back=Object.assign(state.shift.back,meta.shift.back); }
   document.getElementById('templateName').value=meta.name||name;
   renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();drawAll();
   showMsg(msgEl,'✓ Loaded "'+name+'"',true);
@@ -951,62 +996,6 @@ async function buildPdfBytes(imgData,wMm,hMm){
   return bytes;
 }
 
-// ---------- self-contained ZIP writer (store, no compression) ----------
-let _crcTable=null;
-function crc32(buf){
-  if(!_crcTable){
-    _crcTable=new Uint32Array(256);
-    for(let n=0;n<256;n++){
-      let c=n;
-      for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);
-      _crcTable[n]=c>>>0;
-    }
-  }
-  let crc=0xFFFFFFFF;
-  for(let i=0;i<buf.length;i++) crc=(crc>>>8)^_crcTable[(crc^buf[i])&0xFF];
-  return (crc^0xFFFFFFFF)>>>0;
-}
-function wU32(a,o,v){a[o]=v&0xFF;a[o+1]=(v>>>8)&0xFF;a[o+2]=(v>>>16)&0xFF;a[o+3]=(v>>>24)&0xFF;}
-function wU16(a,o,v){a[o]=v&0xFF;a[o+1]=(v>>>8)&0xFF;}
-function buildZip(files){
-  const now=new Date();
-  const dosTime=((now.getHours()&0x1F)<<11)|((now.getMinutes()&0x3F)<<5)|((now.getSeconds()>>1)&0x1F);
-  const dosDate=(((now.getFullYear()-1980)&0x7F)<<9)|(((now.getMonth()+1)&0xF)<<5)|(now.getDate()&0x1F);
-  const localParts=[],centralParts=[];
-  let offset=0;
-  files.forEach(f=>{
-    const nameBytes=new TextEncoder().encode(f.name);
-    const crc=crc32(f.data), size=f.data.length;
-    const local=new Uint8Array(30+nameBytes.length);
-    wU32(local,0,0x04034b50); wU16(local,4,20); wU16(local,6,0); wU16(local,8,0);
-    wU16(local,10,dosTime); wU16(local,12,dosDate);
-    wU32(local,14,crc); wU32(local,18,size); wU32(local,22,size);
-    wU16(local,26,nameBytes.length); wU16(local,28,0);
-    local.set(nameBytes,30);
-    localParts.push(local,f.data);
-
-    const central=new Uint8Array(46+nameBytes.length);
-    wU32(central,0,0x02014b50); wU16(central,4,20); wU16(central,6,20);
-    wU16(central,8,0); wU16(central,10,0);
-    wU16(central,12,dosTime); wU16(central,14,dosDate);
-    wU32(central,16,crc); wU32(central,20,size); wU32(central,24,size);
-    wU16(central,28,nameBytes.length); wU16(central,30,0); wU16(central,32,0);
-    wU16(central,34,0); wU16(central,36,0); wU32(central,38,0);
-    wU32(central,42,offset);
-    central.set(nameBytes,46);
-    centralParts.push(central);
-
-    offset+=local.length+f.data.length;
-  });
-  const centralStart=offset;
-  const centralSize=centralParts.reduce((s,c)=>s+c.length,0);
-  const end=new Uint8Array(22);
-  wU32(end,0,0x06054b50); wU16(end,4,0); wU16(end,6,0);
-  wU16(end,8,files.length); wU16(end,10,files.length);
-  wU32(end,12,centralSize); wU32(end,16,centralStart); wU16(end,20,0);
-  return new Blob([...localParts,...centralParts,end],{type:'application/zip'});
-}
-
 function downloadBlob(blob,filename){
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
@@ -1016,41 +1005,35 @@ function downloadBlob(blob,filename){
 }
 function safeName(s){return (s||'template').replace(/[^a-z0-9_\-]+/gi,'_');}
 
-document.getElementById('exportBtn').addEventListener('click',async()=>{
-  // Both PDFs are bundled into one ZIP so this is a single, reliable download —
-  // separate simultaneous file downloads get silently blocked by some browsers.
+async function exportSide(side){
   const out=document.getElementById('exportMsg');
-  const btn=document.getElementById('exportBtn');
+  const btn=document.getElementById(side==='front'?'exportFrontBtn':'exportBackBtn');
+  const other=document.getElementById(side==='front'?'exportBackBtn':'exportFrontBtn');
+  btn.disabled=true; other.disabled=true;
+  showMsg(out,'Rendering full-resolution, uncompressed PDF…',true);
   try{
     const p=paperMm();
-    const has={front:!!state.final.front.data,
-               back:!!state.final.back.data};
-    if(!has.front&&!has.back){showMsg(out,'Upload artwork for at least one side first.',false);return;}
+    const hasArt=!!state.final[side].data;
     const oid=safeName(state.orderId);
     // print-quality resolution (300dpi), uncapped except for a safety ceiling
     // against runaway canvas sizes on very large custom sheets
     const px=Math.min(6000,Math.round(Math.max(p.w,p.h)/25.4*300));
-    btn.disabled=true; showMsg(out,'Rendering full-resolution, uncompressed PDFs…',true);
-    const files=[];
-    for(const side of ['front','back']){
-      const c=document.createElement('canvas');
-      renderSide(side,c,px,{forExport:true});
-      const ctx=c.getContext('2d');
-      const imgData=ctx.getImageData(0,0,c.width,c.height);
-      const pdfBytes=await buildPdfBytes(imgData,p.w,p.h);
-      files.push({name:`${oid}_${side}.pdf`, data:pdfBytes, blank:!has[side]});
-    }
-    const zipBlob=buildZip(files);
-    const zipName=`${oid}_pdfs.zip`;
-    downloadBlob(zipBlob,zipName);
-    const label=files.map(f=>f.name+(f.blank?' (blank)':'')).join(' and ');
-    showMsg(out,'✓ Downloaded '+zipName+' containing '+label,true);
+    const c=document.createElement('canvas');
+    renderSide(side,c,px,{forExport:true});
+    const ctx=c.getContext('2d');
+    const imgData=ctx.getImageData(0,0,c.width,c.height);
+    const pdfBytes=await buildPdfBytes(imgData,p.w,p.h);
+    const filename=`${oid}_${side}.pdf`;
+    downloadBlob(new Blob([pdfBytes],{type:'application/pdf'}),filename);
+    showMsg(out,'✓ Downloaded '+filename+(hasArt?'':' (blank — no artwork uploaded for this side)'),true);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
   }finally{
-    btn.disabled=false;
+    btn.disabled=false; other.disabled=false;
   }
-});
+}
+document.getElementById('exportFrontBtn').addEventListener('click',()=>exportSide('front'));
+document.getElementById('exportBackBtn').addEventListener('click',()=>exportSide('back'));
 
 // ---------- init ----------
 window.addEventListener('resize',drawAll);
