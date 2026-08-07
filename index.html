@@ -282,6 +282,10 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
         <button data-cutcolor="red" class="on">Red</button>
         <button data-cutcolor="white">White</button>
       </div>
+      <div class="toggle-row" style="margin-top:12px;">
+        <span style="font-size:13px;color:var(--muted);">Fold line over artwork — full line through every card, topmost layer. Preview only — never in the exported PDF.</span>
+        <label class="switch"><input type="checkbox" id="foldOverlayToggle"/><span class="slider"></span></label>
+      </div>
     </div>
   </div>
 
@@ -394,6 +398,7 @@ const state={
   placeholders:[],
   showCut:true,
   cutColor:'red',
+  foldOverlay:false,
   refMark:{enabled:true,offsetMm:5,lenMm:4},
   foldLine:{enabled:false},
   final:{front:{data:null,img:null,name:''},back:{data:null,img:null,name:''}},
@@ -580,6 +585,29 @@ function drawFoldLines(ctx,sc){
   ctx.restore();
 }
 
+// fold line overlay: a full dashed line through every card at both its
+// mid-width and mid-height, drawn over the artwork so you can see how a
+// fold would land on the design. Every placeholder gets one, unlike the
+// outer-edge-only fold line ticks — this is a preview aid, not a print
+// mark, so it never appears in the exported PDF.
+function drawFoldOverlay(ctx,sc){
+  if(!state.foldOverlay || state.placeholders.length===0) return;
+  ctx.save();
+  ctx.strokeStyle=state.cutColor==='white'?'#ffffff':'#B24C25';
+  ctx.lineWidth=1;
+  ctx.setLineDash([1.5*sc,1*sc]);
+  ctx.beginPath();
+  state.placeholders.forEach(ph=>{
+    const x0=ph.xMm*sc, y0=ph.yMm*sc, x1=(ph.xMm+ph.wMm)*sc, y1=(ph.yMm+ph.hMm)*sc;
+    const midX=(x0+x1)/2, midY=(y0+y1)/2;
+    ctx.moveTo(x0,midY); ctx.lineTo(x1,midY); // fold line through mid-height
+    ctx.moveTo(midX,y0); ctx.lineTo(midX,y1); // fold line through mid-width
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 // ---------- drawing ----------
 function renderSide(side,canvas,maxDim,opts){
   opts=opts||{};
@@ -633,6 +661,8 @@ function renderSide(side,canvas,maxDim,opts){
     state.placeholders.forEach(ph=>ctx.strokeRect(ph.xMm*sc,ph.yMm*sc,ph.wMm*sc,ph.hMm*sc));
     ctx.restore();
   }
+  // fold line overlay: highest layer, preview only — drawn last so nothing covers it
+  if(!opts.forExport) drawFoldOverlay(ctx,sc);
   ctx.restore(); // pairs with the shift save above
 
   // order ID is anchored to the physical sheet corner, not the shift —
@@ -787,6 +817,7 @@ document.querySelectorAll('#cutColorSeg button').forEach(b=>{
     drawAll();
   });
 });
+document.getElementById('foldOverlayToggle').addEventListener('change',e=>{state.foldOverlay=e.target.checked;drawAll();});
 document.getElementById('orderId').addEventListener('input',e=>{state.orderId=e.target.value.trim();drawAll();});
 
 // ---------- artwork sizing ----------
@@ -894,7 +925,7 @@ async function saveTemplate(){
   try{
     readLayoutInputs();
     const meta={name,paper:state.paper,layout:state.layout,placeholders:state.placeholders,
-      showCut:state.showCut,cutColor:state.cutColor,refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate};
+      showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate};
     const {error}=await sb.from('templates').upsert(
       {user_id:session.user.id,name,data:meta,updated_at:new Date().toISOString()},
       {onConflict:'user_id,name'}
@@ -923,6 +954,8 @@ async function loadTemplate(name){
   document.getElementById('cutToggle').checked=state.showCut;
   state.cutColor=meta.cutColor||'red';
   document.querySelectorAll('#cutColorSeg button').forEach(b=>b.classList.toggle('on',b.dataset.cutcolor===state.cutColor));
+  state.foldOverlay=!!meta.foldOverlay;
+  document.getElementById('foldOverlayToggle').checked=state.foldOverlay;
   if(meta.refMark) state.refMark=Object.assign(state.refMark,meta.refMark);
   document.getElementById('refMarkToggle').checked=state.refMark.enabled;
   if(meta.foldLine) state.foldLine=Object.assign(state.foldLine,meta.foldLine);
