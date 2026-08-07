@@ -1512,7 +1512,8 @@ function renderItems(){
       </div>
       <div class="calc" style="margin-top:0;">
         Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China ${fmtFromRmb(china)} &nbsp;·&nbsp; Shipping ${fmtFromRmb(ship)}<br/>
-        <strong>Line total ${fmtFromRmb(goods+china+ship)}</strong> &nbsp;·&nbsp; per piece all-in <strong>${fmtFromRmb(unit+chinaPU+shipPU)}</strong><br/>
+        Line total ${fmtFromRmb(goods+china+ship)}<br/>
+        <strong style="color:var(--blueprint);">Final price per piece incl. shipping ${fmtFromRmb(unit+chinaPU+shipPU)}</strong><br/>
         ${inBoxes?`in ${inBoxes}`:'not yet in a box'}${out>0?` &nbsp;·&nbsp; <strong>${out} not arrived</strong>`:''}
       </div>
     </div>`;
@@ -1662,23 +1663,40 @@ document.getElementById('goToTrackingBtn').addEventListener('click',()=>showScre
 document.getElementById('goToBoxesBtn').addEventListener('click',()=>showScreen('shipment-boxes'));
 document.getElementById('goToChinaBtn').addEventListener('click',()=>showScreen('shipment-china'));
 
-// Column order and header wording must match the upload template exactly.
-// Only Provisional No. / SKU Name / Purchase Qty / Currency / Exchange Rate /
-// Unit Price are filled; the rest are left blank to be completed downstream.
-const SKU_SHEET_HEADERS=['*Provisional No.(Required)','*SKU Name(Required)','*Purchase Qty(Required)',
-  'Production Date','Expiry Date','Currency(Select from the options)','Exchange Rate','Unit Price',
-  'Supplier','Shipping Method','Tracking No.','Estimated Arrival Date','Note'];
-const SKU_CURRENCY='CNY';
+// Header wording is copied verbatim from import_purchase_orders_en.xlsx,
+// trailing spaces included ("Exchange Rate ", "Tax Fee Allocation Method ... ").
+// Getting a header wrong makes the upload reject the file, so these are exact.
+const SKU_SHEET_HEADERS=(function(){
+  const h=['*Provisional No.(Required)','*SKU Name(Required)','*Purchase Qty(Required)',
+    'Production Date','Expiry Date','Currency(Select from the options)','Exchange Rate ','Unit Price',
+    'Supplier','Shipping Method','Tracking No.','Estimated Arrival Date','Note',
+    'Ship Fee','Ship Fee Allocation Method(Price/Quantity/Volume/Weight)',
+    'Other Fee','Other Fee Allocation Method(Price/Quantity/Volume/Weight)',
+    'Tax Fee','Tax Fee Allocation Method (Price/Quantity/Volume/Weight) ',
+    'First-mile Ship Fee','First-mile Ship Fee Allocation Method(Price/Quantity/Volume/Weight)'];
+  for(let n=1;n<=10;n++)
+    h.push('Custom fee name '+n,'Custom fee amount '+n,
+      'Allocation method for custom fee '+n+' (Price / Quantity / Volume / Weight)');
+  return h;
+})();
+// prices are exported in SGD, which is one of the template's currency options
+const SKU_CURRENCY='SGD';
+const SKU_EXCHANGE_RATE=1;   // already converted, so no further conversion needed
 function buildSkuSheetRows(){
   const sh=currentShipment();
   const provisional=sh?(sh.order_id||''):'';   // Provisional No. is the order ID
-  const rate=sh?(Number(sh.rmb_rate)||''):'';
-  return itemRows.map(i=>[
-    provisional, i.sku||'', Number(i.qty)||0,
-    '', '',                                    // production date, expiry date
-    SKU_CURRENCY, rate, Number(i.unit_price_rmb)||0,
-    '', '', '', '', ''                         // supplier, shipping method, tracking, ETA, note
-  ]);
+  const rate=rmbRate();
+  return itemRows.map(i=>{
+    const row=new Array(SKU_SHEET_HEADERS.length).fill('');
+    const unitSgd=rate?+((Number(i.unit_price_rmb)||0)/rate).toFixed(4):'';
+    row[0]=provisional;                 // A  Provisional No.
+    row[1]=i.sku||'';                   // B  SKU Name
+    row[2]=Number(i.qty)||0;            // C  Purchase Qty
+    row[5]=SKU_CURRENCY;                // F  Currency
+    row[6]=SKU_EXCHANGE_RATE;           // G  Exchange Rate
+    row[7]=unitSgd;                     // H  Unit Price (SGD)
+    return row;                         // every other column intentionally blank
+  });
 }
 document.getElementById('exportSkuBtn').addEventListener('click',()=>{
   const btn=document.getElementById('exportSkuBtn');
@@ -1690,6 +1708,10 @@ document.getElementById('exportSkuBtn').addEventListener('click',()=>{
     const wb=XLSX.utils.book_new();
     const ws=XLSX.utils.aoa_to_sheet([SKU_SHEET_HEADERS,...buildSkuSheetRows()]);
     XLSX.utils.book_append_sheet(wb,ws,'SKU');
+    // the template keeps its dropdown option lists on a second sheet
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([
+      ['USD','Price'],['CNY','Quantity'],['IDR','Volume'],['PHP','Weight'],['THB'],['SGD']
+    ]),'Sheet1');
     XLSX.writeFile(wb,safeName(sh?sh.order_id:'order')+'_SKU.xlsx');
     msg.innerHTML='';
   }catch(err){
