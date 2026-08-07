@@ -121,6 +121,15 @@ alter table public.shipments
 
 create index if not exists shipments_consolidation_idx on public.shipments(consolidation_id);
 
+-- ---- soft delete so deletes can be undone for 24 hours ----------------
+-- rows are hidden immediately but kept (with their photos) until they are
+-- purged for good, which the app does lazily once they pass 24 hours old
+alter table public.shipments      add column if not exists deleted_at timestamptz;
+alter table public.consolidations add column if not exists deleted_at timestamptz;
+
+create index if not exists shipments_deleted_idx      on public.shipments(deleted_at);
+create index if not exists consolidations_deleted_idx on public.consolidations(deleted_at);
+
 -- ---- manual ordering for order IDs and freight numbers ----------------
 alter table public.shipments     add column if not exists sort_order integer not null default 0;
 alter table public.consolidations add column if not exists sort_order integer not null default 0;
