@@ -78,14 +78,38 @@ create table public.shipment_items (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   shipment_id uuid not null references public.shipments(id) on delete cascade,
-  box_id uuid references public.shipment_boxes(id) on delete set null,
   sku text not null default '',
   qty integer not null default 1,
   unit_price_rmb numeric not null default 0,
   photo_path text,
+  remarks text,
   sort_order integer not null default 0,
   created_at timestamptz not null default now()
 );
+
+-- how many pieces of an item landed in which box (an item can split across boxes)
+create table public.shipment_box_items (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  shipment_id uuid not null references public.shipments(id) on delete cascade,
+  box_id uuid not null references public.shipment_boxes(id) on delete cascade,
+  item_id uuid not null references public.shipment_items(id) on delete cascade,
+  qty integer not null default 0,
+  created_at timestamptz not null default now(),
+  unique (box_id, item_id)
+);
+
+create table public.consolidations (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  freight_number text not null,
+  eta date,
+  created_at timestamptz not null default now()
+);
+
+-- single FK = an order can sit in at most one freight number
+alter table public.shipments
+  add column consolidation_id uuid references public.consolidations(id) on delete set null;
 
 create table public.shipment_tracking (
   id uuid primary key default gen_random_uuid(),
@@ -96,14 +120,17 @@ create table public.shipment_tracking (
   created_at timestamptz not null default now()
 );
 
-alter table public.shipment_boxes    enable row level security;
-alter table public.shipment_items    enable row level security;
-alter table public.shipment_tracking enable row level security;
+alter table public.shipment_boxes     enable row level security;
+alter table public.shipment_items     enable row level security;
+alter table public.shipment_tracking  enable row level security;
+alter table public.shipment_box_items enable row level security;
+alter table public.consolidations     enable row level security;
 
 do $$
 declare t text;
 begin
-  foreach t in array array['shipment_boxes','shipment_items','shipment_tracking'] loop
+  foreach t in array array['shipment_boxes','shipment_items','shipment_tracking',
+                           'shipment_box_items','consolidations'] loop
     execute format('create policy "own_select" on public.%I for select using (auth.uid() = user_id)', t);
     execute format('create policy "own_insert" on public.%I for insert with check (auth.uid() = user_id)', t);
     execute format('create policy "own_update" on public.%I for update using (auth.uid() = user_id)', t);

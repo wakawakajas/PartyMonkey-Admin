@@ -184,10 +184,56 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
     <div class="eyebrow">TEMPLATE BUILDER</div>
     <h1>Shipment</h1>
     <p class="sub">Track order IDs for shipments.</p>
-    <button class="btn-primary" id="goToAddOrderBtn" style="width:100%;margin-bottom:16px;">Add new order ID</button>
+    <button class="btn-primary" id="goToAddOrderBtn" style="width:100%;margin-bottom:8px;">Add new order ID</button>
+    <div class="grid2" style="margin-bottom:16px;">
+      <button class="btn-outline btn-sm" id="goToOutstandingBtn">Not arrived</button>
+      <button class="btn-outline btn-sm" id="goToConsolBtn">Consolidated shipment</button>
+    </div>
     <div class="ph-list" id="shipmentList">
       <p class="hint" style="margin:4px 0 0;">— none yet —</p>
     </div>
+  </div>
+
+  <!-- OUTSTANDING / NOT ARRIVED -->
+  <div class="home-wrap" id="outstandingScreen" style="display:none;">
+    <button class="back-btn" id="outstandingBackBtn"><span class="chev">‹</span> Back</button>
+    <div class="eyebrow">SHIPMENT</div>
+    <h1>Not arrived</h1>
+    <p class="sub">Lines where fewer pieces were measured into boxes than were ordered. Add follow-up remarks as you chase them.</p>
+    <div class="ph-list" id="outstandingList"><p class="hint" style="margin:4px 0 0;">— nothing outstanding —</p></div>
+  </div>
+
+  <!-- CONSOLIDATED SHIPMENT LIST -->
+  <div class="home-wrap" id="consolScreen" style="display:none;">
+    <button class="back-btn" id="consolBackBtn"><span class="chev">‹</span> Back</button>
+    <div class="eyebrow">SHIPMENT</div>
+    <h1>Consolidated shipment</h1>
+    <p class="sub">Group orders under one China → Singapore freight number.</p>
+    <form id="consolAddForm">
+      <div class="grid2" style="margin-bottom:10px;">
+        <label class="field"><span>FREIGHT NUMBER</span><input type="text" id="consolNumber" placeholder="e.g. CN-SG-0042" required/></label>
+        <label class="field"><span>ESTIMATED ARRIVAL</span><input type="date" id="consolEta"/></label>
+      </div>
+      <button class="btn-primary" type="submit" id="consolSaveBtn" style="width:100%;margin-bottom:16px;">Add freight number</button>
+    </form>
+    <div class="ph-list" id="consolList"><p class="hint" style="margin:4px 0 0;">— none yet —</p></div>
+    <div id="consolMsg"></div>
+  </div>
+
+  <!-- CONSOLIDATION DETAIL -->
+  <div class="home-wrap" id="consolDetailScreen" style="display:none;">
+    <button class="back-btn" id="consolDetailBackBtn"><span class="chev">‹</span> Back</button>
+    <div class="eyebrow">CONSOLIDATED SHIPMENT</div>
+    <h1 id="consolDetailNumber">—</h1>
+    <div class="grid2" style="margin-bottom:16px;">
+      <label class="field"><span>FREIGHT NUMBER</span><input type="text" id="consolEditNumber"/></label>
+      <label class="field"><span>ESTIMATED ARRIVAL</span><input type="date" id="consolEditEta"/></label>
+    </div>
+    <div class="sect-label">Orders in this freight number</div>
+    <div class="ph-list" id="consolOrdersList" style="margin-bottom:16px;"><p class="hint" style="margin:4px 0 0;">— none yet —</p></div>
+    <div class="sect-label">Add an order</div>
+    <p class="hint">Only orders not already in another freight number are listed.</p>
+    <div class="ph-list" id="consolAvailableList"><p class="hint" style="margin:4px 0 0;">— none available —</p></div>
   </div>
 
   <div class="home-wrap" id="shipmentAddScreen" style="display:none;">
@@ -311,8 +357,8 @@ canvas{border:1px solid var(--ink);background:#fff;max-width:100%;height:auto;}
       <label class="field"><span>RMB RATE (¥ PER S$1)</span><input type="number" step="0.0001" id="boxRmbRate" value="5.2"/></label>
     </div>
     <div class="calc" id="boxCalc"></div>
-    <div class="sect-label">SKUs inside this box</div>
-    <p class="hint">Tick each SKU that arrived in this box. The box's shipping cost is split evenly across every piece ticked here.</p>
+    <div class="sect-label">How many of each SKU arrived in this box</div>
+    <p class="hint">Key the quantity that physically arrived in this box — it defaults to whatever is still outstanding. The box's shipping cost is split evenly across every piece counted here. If a SKU already arrived in an earlier box, the pieces landing in this one are split off into their own line so each arrival keeps its own cost.</p>
     <div class="ph-list" id="boxItemsList"><p class="hint" style="margin:4px 0 0;">— no items on this order yet —</p></div>
   </div>
 
@@ -1109,7 +1155,8 @@ function setAuthedUI(signedIn,email){
 const SCREEN_EL={home:'homeScreen',tool:'appScreen',shipment:'shipmentScreen','shipment-add':'shipmentAddScreen',
   'shipment-detail':'shipmentDetailScreen','shipment-tracking':'shipmentTrackingScreen',
   'shipment-boxes':'shipmentBoxesScreen','shipment-box':'shipmentBoxScreen',
-  'shipment-china':'shipmentChinaScreen'};
+  'shipment-china':'shipmentChinaScreen','shipment-outstanding':'outstandingScreen',
+  'consol':'consolScreen','consol-detail':'consolDetailScreen'};
 const SCREENS=Object.keys(SCREEN_EL);
 function showScreen(name){
   SCREENS.forEach(s=>{ document.getElementById(SCREEN_EL[s]).style.display=(s===name)?'block':'none'; });
@@ -1120,6 +1167,9 @@ function showScreen(name){
   if(name==='shipment-tracking') refreshTrackingList();
   if(name==='shipment-boxes') refreshBoxesList();
   if(name==='shipment-china') openChinaFee();
+  if(name==='shipment-outstanding') refreshOutstanding();
+  if(name==='consol') refreshConsolList();
+  if(name==='consol-detail') refreshConsolDetail();
 }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1186,7 +1236,7 @@ document.getElementById('shipmentList').addEventListener('click',async e=>{
 // SGD/RMB toggle never loses precision to repeated round-tripping.
 const VOLUMETRIC_DIVISOR=6000; // L*B*H in cm -> kg, shown for reference only
 let currentShipmentId=null, currentBoxId=null;
-let itemRows=[], boxRows=[], trackingRows=[];
+let itemRows=[], boxRows=[], trackingRows=[], allocRows=[];
 let displayCur='SGD';
 const MAX_ITEM_LINES=100;
 
@@ -1200,9 +1250,15 @@ function fmtFromRmb(rmb){
 function cbmOf(b){ return (Number(b.length_cm)*Number(b.breadth_cm)*Number(b.height_cm))/1000000; }
 function volWeightOf(b){ return (Number(b.length_cm)*Number(b.breadth_cm)*Number(b.height_cm))/VOLUMETRIC_DIVISOR; }
 function boxShipRmb(b){ return cbmOf(b)*Number(b.cbm_rate_rmb||0); }
-function boxQty(boxId){ return itemRows.filter(i=>i.box_id===boxId).reduce((s,i)=>s+(Number(i.qty)||0),0); }
+// Arrivals are per (box, item) with a quantity, so one ordered line can land
+// across several boxes — allocRows is that join for the current order.
+function allocsForItem(itemId){ return allocRows.filter(a=>a.item_id===itemId); }
+function allocQty(boxId,itemId){ const a=allocRows.find(x=>x.box_id===boxId&&x.item_id===itemId); return a?(Number(a.qty)||0):0; }
+function arrivedQtyOf(item){ return allocsForItem(item.id).reduce((s,a)=>s+(Number(a.qty)||0),0); }
+function outstandingOf(item){ return Math.max(0,(Number(item.qty)||0)-arrivedQtyOf(item)); }
+function boxQty(boxId){ return allocRows.filter(a=>a.box_id===boxId).reduce((s,a)=>s+(Number(a.qty)||0),0); }
 function totalQtyAll(){ return itemRows.reduce((s,i)=>s+(Number(i.qty)||0),0); }
-function arrivedQtyAll(){ return itemRows.filter(i=>i.box_id).reduce((s,i)=>s+(Number(i.qty)||0),0); }
+function arrivedQtyAll(){ return itemRows.reduce((s,i)=>s+arrivedQtyOf(i),0); }
 
 // China-side domestic delivery: one flat fee for the order. Basis decides
 // whether it spreads over every ordered piece or only the arrived ones —
@@ -1212,16 +1268,20 @@ function chinaFeeRmb(){ const s=currentShipment(); return s?(Number(s.china_fee_
 function chinaBasis(){ const s=currentShipment(); return (s&&s.china_basis==='arrived')?'arrived':'ordered'; }
 function chinaBasisQty(){ return chinaBasis()==='arrived'?arrivedQtyAll():totalQtyAll(); }
 function chinaPerUnitRmb(){ const q=chinaBasisQty(); return q>0?chinaFeeRmb()/q:0; }
-function chinaAppliesTo(item){ return chinaBasis()==='ordered' || !!item.box_id; }
+// in 'arrived' mode only the pieces that actually landed carry the fee
+function chinaQtyFor(item){ return chinaBasis()==='arrived'?arrivedQtyOf(item):(Number(item.qty)||0); }
+function itemChinaRmb(item){ return chinaPerUnitRmb()*chinaQtyFor(item); }
 
 // Freight: either each box's cost stays with the pieces inside it, or every
 // box's cost is pooled and averaged over all ordered pieces.
 function freightMode(){ const s=currentShipment(); return (s&&s.freight_mode==='shared')?'shared':'box'; }
 function totalFreightRmb(){ return boxRows.reduce((s,b)=>s+boxShipRmb(b),0); }
 function sharedFreightPerUnitRmb(){ const q=totalQtyAll(); return q>0?totalFreightRmb()/q:0; }
-function freightPerUnitFor(item){
-  if(freightMode()==='shared') return sharedFreightPerUnitRmb();
-  return item.box_id?shipPerUnitRmb(item.box_id):0;
+// in 'box' mode a line's freight is the sum over its arrivals, each priced at
+// its own box's rate — so a split delivery is costed per box, not averaged
+function itemFreightRmb(item){
+  if(freightMode()==='shared') return sharedFreightPerUnitRmb()*(Number(item.qty)||0);
+  return allocsForItem(item.id).reduce((s,a)=>s+shipPerUnitRmb(a.box_id)*(Number(a.qty)||0),0);
 }
 // the box's whole shipping charge spread evenly over every piece inside it
 function shipPerUnitRmb(boxId){
@@ -1235,28 +1295,35 @@ async function refreshOrderDetail(){
   document.getElementById('detailOrderId').textContent=s?s.order_id:'—';
   document.getElementById('detailDesc').textContent=s?(s.description||''):'';
   if(s&&s.rmb_rate) document.getElementById('detailRmbRate').value=s.rmb_rate;
-  if(!sb||!currentShipmentId){ itemRows=[]; boxRows=[]; renderItems(); return; }
-  const [it,bx]=await Promise.all([
-    sb.from('shipment_items').select('*').eq('shipment_id',currentShipmentId).order('sort_order'),
-    sb.from('shipment_boxes').select('*').eq('shipment_id',currentShipmentId).order('created_at')
-  ]);
-  itemRows=it.data||[]; boxRows=bx.data||[];
+  if(!sb||!currentShipmentId){ itemRows=[]; boxRows=[]; allocRows=[]; renderItems(); return; }
+  await loadOrderData();
   renderItems();
+}
+async function loadOrderData(){
+  const [it,bx,al]=await Promise.all([
+    sb.from('shipment_items').select('*').eq('shipment_id',currentShipmentId).order('sort_order'),
+    sb.from('shipment_boxes').select('*').eq('shipment_id',currentShipmentId).order('created_at'),
+    sb.from('shipment_box_items').select('*').eq('shipment_id',currentShipmentId)
+  ]);
+  itemRows=it.data||[]; boxRows=bx.data||[]; allocRows=al.data||[];
 }
 function renderItems(){
   const el=document.getElementById('itemsWrap');
   if(!itemRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">No items yet — tap “Add line”.</p>'; renderTotals(); return; }
   el.innerHTML=itemRows.map((r,i)=>{
-    const shipPU=freightPerUnitFor(r);
-    const chinaPU=chinaAppliesTo(r)?chinaPerUnitRmb():0;
     const qty=Number(r.qty)||0, unit=Number(r.unit_price_rmb)||0;
-    const goods=unit*qty, ship=shipPU*qty, china=chinaPU*qty;
-    const box=boxRows.find(b=>b.id===r.box_id);
-    const arrived=!!r.box_id;
+    const arr=arrivedQtyOf(r), out=outstandingOf(r);
+    const goods=unit*qty, ship=itemFreightRmb(r), china=itemChinaRmb(r);
+    const shipPU=qty>0?ship/qty:0, chinaPU=qty>0?china/qty:0;
+    const inBoxes=allocsForItem(r.id).map(a=>{
+      const b=boxRows.find(x=>x.id===a.box_id);
+      return `${a.qty}× ${escapeHtml(b?(b.label||'box'):'box')}`;
+    }).join(', ');
+    const state=arr===0?['no','PENDING']:(out===0?['yes','ARRIVED']:['no',`${arr}/${qty} ARRIVED`]);
     return `<div class="ph-card" data-item-id="${r.id}">
       <div class="ph-card-head">
         <span style="flex:1;">Line ${i+1}</span>
-        <span class="tag ${arrived?'yes':'no'}">${arrived?'ARRIVED':'PENDING'}</span>
+        <span class="tag ${state[0]}">${state[1]}</span>
         <button class="del-btn" data-item-del title="Delete line">×</button>
       </div>
       <div class="grid3e" style="margin-bottom:7px;">
@@ -1273,7 +1340,7 @@ function renderItems(){
       <div class="calc" style="margin-top:0;">
         Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China ${fmtFromRmb(china)} &nbsp;·&nbsp; Shipping ${fmtFromRmb(ship)}<br/>
         <strong>Line total ${fmtFromRmb(goods+china+ship)}</strong> &nbsp;·&nbsp; per piece all-in <strong>${fmtFromRmb(unit+chinaPU+shipPU)}</strong><br/>
-        ${box?`in ${escapeHtml(box.label||'box')}`:'not yet in a box'}
+        ${inBoxes?`in ${inBoxes}`:'not yet in a box'}${out>0?` &nbsp;·&nbsp; <strong>${out} not arrived</strong>`:''}
       </div>
     </div>`;
   }).join('');
@@ -1282,17 +1349,16 @@ function renderItems(){
 }
 function renderTotals(){
   let goods=0, ship=0, china=0, pieces=0;
-  const chinaPU=chinaPerUnitRmb();
   itemRows.forEach(r=>{
     const qty=Number(r.qty)||0;
     goods+=(Number(r.unit_price_rmb)||0)*qty;
-    ship+=freightPerUnitFor(r)*qty;
-    china+=(chinaAppliesTo(r)?chinaPU:0)*qty;
+    ship+=itemFreightRmb(r);
+    china+=itemChinaRmb(r);
     pieces+=qty;
   });
-  const arrived=itemRows.filter(r=>r.box_id).length;
+  const arrivedPcs=arrivedQtyAll();
   document.getElementById('itemsTotals').innerHTML=
-    `${itemRows.length} line(s) · ${pieces} piece(s) · ${arrived}/${itemRows.length} arrived<br/>`+
+    `${itemRows.length} line(s) · ${pieces} piece(s) · ${arrivedPcs}/${pieces} pcs arrived<br/>`+
     `Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China ${fmtFromRmb(china)} &nbsp;·&nbsp; Shipping ${fmtFromRmb(ship)}<br/>`+
     `<strong>Grand total ${fmtFromRmb(goods+china+ship)}</strong><br/>`+
     `<span style="opacity:.7">China: ${chinaBasis()==='arrived'?'arrived pcs only':'all ordered pcs'} · Freight: ${freightMode()==='shared'?'shared across all':'own box'}</span>`;
@@ -1498,11 +1564,7 @@ document.getElementById('trackingBackBtn').addEventListener('click',()=>showScre
 async function refreshBoxesList(){
   const el=document.getElementById('boxesList');
   if(!sb||!currentShipmentId){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet —</p>'; return; }
-  const [bx,it]=await Promise.all([
-    sb.from('shipment_boxes').select('*').eq('shipment_id',currentShipmentId).order('created_at'),
-    sb.from('shipment_items').select('*').eq('shipment_id',currentShipmentId).order('sort_order')
-  ]);
-  boxRows=bx.data||[]; itemRows=it.data||[];
+  await loadOrderData();
   document.querySelectorAll('#freightModeSeg button').forEach(b=>b.classList.toggle('on',b.dataset.fmode===freightMode()));
   el.innerHTML=boxRows.length?boxRows.map(b=>{
     const q=boxQty(b.id);
@@ -1583,26 +1645,65 @@ function renderBoxItems(){
   const el=document.getElementById('boxItemsList');
   if(!itemRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— no items on this order yet —</p>'; return; }
   el.innerHTML=itemRows.map(r=>{
-    const mine=r.box_id===currentBoxId;
-    const elsewhereBox=(!mine&&r.box_id)?boxRows.find(b=>b.id===r.box_id):null;
+    const ordered=Number(r.qty)||0;
+    const here=allocQty(currentBoxId,r.id);
+    const elsewhere=arrivedQtyOf(r)-here;
+    // most of the time you're recording everything still owed, so that's the
+    // pre-filled value; max stops you booking in more than was ordered
+    const max=ordered-elsewhere;
+    const shown=here>0?here:(document.activeElement&&document.activeElement.dataset&&document.activeElement.dataset.itemId===r.id?here:max);
     return `<div class="ph-card" data-item-id="${r.id}">
-      <div class="toggle-row" style="min-height:auto;">
-        <span style="font-size:13px;flex:1;">
-          ${escapeHtml(r.sku||'(no SKU)')} <span style="color:var(--faint);">× ${Number(r.qty)||0}</span>
-          ${elsewhereBox?`<br/><span class="hint">already in ${escapeHtml(elsewhereBox.label||'another box')}</span>`:''}
-        </span>
-        <label class="switch"><input type="checkbox" data-box-tick ${mine?'checked':''} ${elsewhereBox?'disabled':''}/><span class="slider"></span></label>
+      <div class="grid3e" style="align-items:end;">
+        <div style="grid-column:span 2;font-size:13px;">
+          ${escapeHtml(r.sku||'(no SKU)')}
+          <br/><span class="hint">ordered ${ordered}${elsewhere?` · ${elsewhere} in other box(es)` :''}</span>
+        </div>
+        <label class="field"><span>IN THIS BOX</span>
+          <input type="number" min="0" max="${max}" step="1" data-alloc value="${shown}"/></label>
       </div>
     </div>`;
   }).join('');
 }
-document.getElementById('boxItemsList').addEventListener('change',async e=>{
-  const cb=e.target.closest('[data-box-tick]'); if(!cb) return;
-  const id=e.target.closest('.ph-card').dataset.itemId;
-  const newBox=cb.checked?currentBoxId:null;
-  const row=itemRows.find(r=>r.id===id); if(row) row.box_id=newBox;
+// Recording an arrival for a SKU that already landed in a different box splits
+// the new pieces onto their own line, so each arrival keeps its own freight
+// cost instead of being averaged across the whole original line.
+async function setAllocation(itemId,qty){
+  const item=itemRows.find(i=>i.id===itemId); if(!item) return;
+  const ordered=Number(item.qty)||0;
+  const here=allocQty(currentBoxId,itemId);
+  const elsewhere=arrivedQtyOf(item)-here;
+  qty=Math.max(0,Math.min(parseInt(qty,10)||0,ordered-elsewhere));
+  if(!sb) return;
+  const {data:{session}}=await sb.auth.getSession(); if(!session) return;
+  const existing=allocRows.find(a=>a.box_id===currentBoxId&&a.item_id===itemId);
+
+  if(qty===0){
+    if(existing) await sb.from('shipment_box_items').delete().eq('id',existing.id);
+  }else if(existing){
+    await sb.from('shipment_box_items').update({qty}).eq('id',existing.id);
+  }else if(elsewhere>0){
+    // second (or later) arrival of this SKU -> break it out as its own line
+    const ins=await sb.from('shipment_items').insert({
+      user_id:session.user.id, shipment_id:currentShipmentId,
+      sku:item.sku, qty, unit_price_rmb:item.unit_price_rmb,
+      photo_path:item.photo_path||null, sort_order:(Number(item.sort_order)||0)+1
+    }).select().single();
+    if(ins.error||!ins.data) return;
+    await sb.from('shipment_items').update({qty:ordered-qty}).eq('id',itemId);
+    await sb.from('shipment_box_items').insert({
+      user_id:session.user.id, shipment_id:currentShipmentId,
+      box_id:currentBoxId, item_id:ins.data.id, qty});
+  }else{
+    await sb.from('shipment_box_items').insert({
+      user_id:session.user.id, shipment_id:currentShipmentId,
+      box_id:currentBoxId, item_id:itemId, qty});
+  }
+  await loadOrderData();
   renderBoxCalc(); renderBoxItems();
-  if(sb) await sb.from('shipment_items').update({box_id:newBox}).eq('id',id);
+}
+document.getElementById('boxItemsList').addEventListener('change',async e=>{
+  const inp=e.target.closest('[data-alloc]'); if(!inp) return;
+  await setAllocation(e.target.closest('.ph-card').dataset.itemId, inp.value);
 });
 [['boxLabel','label','text'],['boxL','length_cm','num'],['boxB','breadth_cm','num'],
  ['boxH','height_cm','num'],['boxCbmRate','cbm_rate_rmb','num']].forEach(([id,field,kind])=>{
@@ -1623,6 +1724,138 @@ document.getElementById('boxRmbRate').addEventListener('input',async e=>{
   if(sb&&currentShipmentId) await sb.from('shipments').update({rmb_rate:v}).eq('id',currentShipmentId);
 });
 document.getElementById('boxBackBtn').addEventListener('click',()=>showScreen('shipment-boxes'));
+
+// ---------- outstanding (not arrived) across every order ----------
+async function refreshOutstanding(){
+  const el=document.getElementById('outstandingList');
+  if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
+  const [sh,it,al]=await Promise.all([
+    sb.from('shipments').select('id,order_id'),
+    sb.from('shipment_items').select('id,shipment_id,sku,qty,remarks'),
+    sb.from('shipment_box_items').select('item_id,qty')
+  ]);
+  if(sh.error||it.error||al.error){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load.</p>'; return; }
+  const arrivedBy={};
+  (al.data||[]).forEach(a=>{ arrivedBy[a.item_id]=(arrivedBy[a.item_id]||0)+(Number(a.qty)||0); });
+  const orderName={}; (sh.data||[]).forEach(s=>{ orderName[s.id]=s.order_id; });
+  const rows=(it.data||[])
+    .map(i=>({...i, missing:(Number(i.qty)||0)-(arrivedBy[i.id]||0)}))
+    .filter(i=>i.missing>0);
+  if(!rows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing outstanding —</p>'; return; }
+  el.innerHTML=rows.map(r=>`<div class="ph-card" data-item-id="${r.id}">
+      <div class="ph-card-head">
+        <span style="flex:1;">${escapeHtml(orderName[r.shipment_id]||'—')}</span>
+        <span class="tag no">${r.missing} NOT ARRIVED</span>
+      </div>
+      <p class="hint" style="margin:0 0 7px;">${escapeHtml(r.sku||'(no SKU)')} · ordered ${r.qty} · arrived ${arrivedBy[r.id]||0}</p>
+      <label class="field"><span>FOLLOW-UP REMARKS</span>
+        <input type="text" data-remark placeholder="e.g. supplier resending 20 Mar" value="${escapeHtml(r.remarks||'')}"/></label>
+    </div>`).join('');
+}
+document.getElementById('outstandingList').addEventListener('change',async e=>{
+  const inp=e.target.closest('[data-remark]'); if(!inp) return;
+  const id=e.target.closest('.ph-card').dataset.itemId;
+  if(sb) await sb.from('shipment_items').update({remarks:inp.value}).eq('id',id);
+});
+document.getElementById('goToOutstandingBtn').addEventListener('click',()=>showScreen('shipment-outstanding'));
+document.getElementById('outstandingBackBtn').addEventListener('click',()=>showScreen('shipment'));
+
+// ---------- consolidated shipments ----------
+let consolRows=[], currentConsolId=null;
+function currentConsol(){ return consolRows.find(c=>c.id===currentConsolId)||null; }
+async function refreshConsolList(){
+  const el=document.getElementById('consolList');
+  if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
+  const [co,sh]=await Promise.all([
+    sb.from('consolidations').select('*').order('created_at',{ascending:false}),
+    sb.from('shipments').select('id,order_id,consolidation_id')
+  ]);
+  if(co.error){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load.</p>'; return; }
+  consolRows=co.data||[]; shipmentRows=sh.data||shipmentRows;
+  const count={}; (sh.data||[]).forEach(s=>{ if(s.consolidation_id) count[s.consolidation_id]=(count[s.consolidation_id]||0)+1; });
+  el.innerHTML=consolRows.length?consolRows.map(c=>`<div class="ph-card row-link" data-id="${c.id}">
+      <div class="ph-card-head">
+        <span style="flex:1;">${escapeHtml(c.freight_number)}</span>
+        <button class="del-btn" data-consol-del title="Delete">×</button>
+      </div>
+      <p class="hint" style="margin:0;">ETA ${c.eta?escapeHtml(c.eta):'—'} · ${count[c.id]||0} order(s)</p>
+    </div>`).join('')
+    :'<p class="hint" style="margin:4px 0 0;">— none yet —</p>';
+}
+document.getElementById('consolList').addEventListener('click',async e=>{
+  const card=e.target.closest('.ph-card'); if(!card) return;
+  const id=card.dataset.id;
+  if(e.target.closest('[data-consol-del]')){
+    if(sb) await sb.from('consolidations').delete().eq('id',id);
+    await refreshConsolList();
+    return;
+  }
+  currentConsolId=id;
+  showScreen('consol-detail');
+});
+document.getElementById('consolAddForm').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const msg=document.getElementById('consolMsg');
+  if(!sb){ showMsg(msg,'Sync unavailable.',false); return; }
+  const {data:{session}}=await sb.auth.getSession(); if(!session){ showMsg(msg,'Sign in first.',false); return; }
+  const num=document.getElementById('consolNumber').value.trim();
+  const eta=document.getElementById('consolEta').value||null;
+  if(!num){ showMsg(msg,'Enter a freight number.',false); return; }
+  const btn=document.getElementById('consolSaveBtn'); btn.disabled=true;
+  const {error}=await sb.from('consolidations').insert({user_id:session.user.id,freight_number:num,eta});
+  btn.disabled=false;
+  if(error){ showMsg(msg,'Could not save: '+error.message,false); return; }
+  document.getElementById('consolAddForm').reset(); msg.innerHTML='';
+  await refreshConsolList();
+});
+async function refreshConsolDetail(){
+  const c=currentConsol();
+  document.getElementById('consolDetailNumber').textContent=c?c.freight_number:'—';
+  if(c){
+    document.getElementById('consolEditNumber').value=c.freight_number||'';
+    document.getElementById('consolEditEta').value=c.eta||'';
+  }
+  if(!sb) return;
+  const {data}=await sb.from('shipments').select('id,order_id,consolidation_id').order('created_at',{ascending:false});
+  const all=data||[];
+  const mine=all.filter(s=>s.consolidation_id===currentConsolId);
+  const free=all.filter(s=>!s.consolidation_id);
+  document.getElementById('consolOrdersList').innerHTML=mine.length?mine.map(s=>`<div class="ph-card" data-id="${s.id}">
+      <div class="ph-card-head"><span style="flex:1;">${escapeHtml(s.order_id)}</span>
+      <button class="btn-outline btn-sm" data-consol-remove>Remove</button></div>
+    </div>`).join('')
+    :'<p class="hint" style="margin:4px 0 0;">— none yet —</p>';
+  document.getElementById('consolAvailableList').innerHTML=free.length?free.map(s=>`<div class="ph-card" data-id="${s.id}">
+      <div class="ph-card-head"><span style="flex:1;">${escapeHtml(s.order_id)}</span>
+      <button class="btn-outline btn-sm" data-consol-add>Add</button></div>
+    </div>`).join('')
+    :'<p class="hint" style="margin:4px 0 0;">— none available —</p>';
+}
+document.getElementById('consolOrdersList').addEventListener('click',async e=>{
+  if(!e.target.closest('[data-consol-remove]')) return;
+  const id=e.target.closest('.ph-card').dataset.id;
+  if(sb) await sb.from('shipments').update({consolidation_id:null}).eq('id',id);
+  await refreshConsolDetail();
+});
+document.getElementById('consolAvailableList').addEventListener('click',async e=>{
+  if(!e.target.closest('[data-consol-add]')) return;
+  const id=e.target.closest('.ph-card').dataset.id;
+  // the single FK column is what guarantees an order sits in only one freight number
+  if(sb) await sb.from('shipments').update({consolidation_id:currentConsolId}).eq('id',id);
+  await refreshConsolDetail();
+});
+[['consolEditNumber','freight_number'],['consolEditEta','eta']].forEach(([id,field])=>{
+  document.getElementById(id).addEventListener('change',async e=>{
+    const c=currentConsol(); if(!c) return;
+    const v=e.target.value||(field==='eta'?null:'');
+    c[field]=v;
+    if(field==='freight_number') document.getElementById('consolDetailNumber').textContent=v||'—';
+    if(sb) await sb.from('consolidations').update({[field]:v}).eq('id',c.id);
+  });
+});
+document.getElementById('goToConsolBtn').addEventListener('click',()=>showScreen('consol'));
+document.getElementById('consolBackBtn').addEventListener('click',()=>showScreen('shipment'));
+document.getElementById('consolDetailBackBtn').addEventListener('click',()=>showScreen('consol'));
 document.getElementById('shipmentAddForm').addEventListener('submit',async e=>{
   e.preventDefault();
   const msgEl2=document.getElementById('shipmentMsg');
