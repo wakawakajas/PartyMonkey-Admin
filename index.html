@@ -216,6 +216,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* align-self stops the flex row stretching it back to full chip height */
 .oid-text{color:var(--blueprint);font-weight:700;}
 .chip-xs{margin-left:auto;align-self:center;min-height:26px;height:26px;padding:0 10px;font-size:11px;}
+/* only the first of the pair is pushed to the end — the rest sit next to it */
+.chip-xs+.chip-xs{margin-left:0;}
 /* line item costs: breakdown on the left, the number you act on pinned right */
 .calc-split{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;}
 .calc-left{flex:1;min-width:190px;}
@@ -337,8 +339,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button class="btn-outline btn-sm" id="goToOutstandingBtn">Not arrived</button>
       <button class="btn-outline btn-sm" id="goToConsolBtn">Consolidated shipment</button>
       <button class="btn-outline btn-sm" id="importPoBtn">⬆ Import purchase order</button>
-      <button class="btn-outline btn-sm" id="exportXeroBtn">⬇ Export Xero</button>
-      <button class="btn-outline btn-sm" id="goToTrashBtn" style="grid-column:1/-1;">♻ Recently deleted</button>
+      <button class="btn-outline btn-sm" id="goToTrashBtn">♻ Recently deleted</button>
     </div>
     <div id="importMsg"></div>
     <label class="field" style="margin-bottom:10px;"><span>SEARCH</span>
@@ -352,12 +353,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button type="button" class="chip on" data-st="partial">Partial arrived</button>
       <button type="button" class="chip on" data-st="none">No items</button>
       <button type="button" class="chip" data-st="completed">Completed</button>
+      <button type="button" class="chip chip-xs" id="orderSelectOne">Select</button>
       <button type="button" class="chip chip-xs" id="orderSelectAll">Select all</button>
     </div>
     <!-- sits directly under Select all so the controls stay together -->
     <div class="bulkbar" id="orderBulkBar" style="display:none;">
       <span class="n" id="orderBulkCount"></span>
-      <button class="btn-outline btn-sm" id="orderBulkExport" disabled>Export selected</button>
+      <button class="btn-outline btn-sm" id="orderBulkExport" disabled>Export Details</button>
+      <button class="btn-outline btn-sm" id="exportXeroBtn" disabled>Export for Xero</button>
       <button class="btn-danger btn-sm" id="orderBulkDelete" disabled>Delete selected</button>
     </div>
     <div class="ph-list list-full" id="shipmentList">
@@ -1571,31 +1574,44 @@ function progressBar(st){
 }
 // multi-select delete for orders
 const pickedOrders=new Set();
-// Rows stay clean until you ask to select: "Select all" turns on selection
-// mode and ticks everything on screen, which you can then pare back.
+// Rows stay clean until you ask to select. "Select" turns the tickboxes on
+// with nothing chosen, for picking one order; "Select all" turns them on with
+// everything chosen, which you can then pare back.
 let selectMode=false;
+const allVisiblePicked=v=>v.size>0&&[...v].every(id=>pickedOrders.has(id));
 // The bar keeps its slot and the chip keeps its place whether or not you are
 // selecting — entering select mode must not reflow the page under your finger.
 function syncOrderBulk(){
   const bar=document.getElementById('orderBulkBar');
   const visible=visibleShipmentIds();
   bar.style.display=visible.size?'flex':'none';
+  const one=document.getElementById('orderSelectOne');
   const chip=document.getElementById('orderSelectAll');
-  chip.style.display=visible.size?'':'none';
-  chip.textContent=selectMode?'Cancel':'Select all';
-  chip.classList.toggle('on',selectMode);
+  one.style.display=chip.style.display=visible.size?'':'none';
+  one.textContent=selectMode?'Cancel':'Select';   // the same chip backs out again
+  one.classList.toggle('on',selectMode);
+  chip.classList.toggle('on',selectMode&&allVisiblePicked(visible));
   document.getElementById('orderBulkCount').textContent=
     selectMode?pickedOrders.size+' of '+visible.size+' selected':visible.size+' shown';
-  document.getElementById('orderBulkExport').disabled=!selectMode||!pickedOrders.size;
-  document.getElementById('orderBulkDelete').disabled=!selectMode||!pickedOrders.size;
+  const nothing=!selectMode||!pickedOrders.size;
+  document.getElementById('orderBulkExport').disabled=nothing;
+  document.getElementById('exportXeroBtn').disabled=nothing;
+  document.getElementById('orderBulkDelete').disabled=nothing;
 }
 function exitSelectMode(){
   selectMode=false; pickedOrders.clear(); renderShipmentList();
 }
+document.getElementById('orderSelectOne').addEventListener('click',()=>{
+  if(selectMode){ exitSelectMode(); return; }        // this chip cancels
+  selectMode=true;                                   // boxes on, none ticked
+  renderShipmentList();
+});
 document.getElementById('orderSelectAll').addEventListener('click',()=>{
-  if(selectMode){ exitSelectMode(); return; }        // same chip cancels
+  const visible=visibleShipmentIds();
+  // once selecting, this is a plain all-on / all-off toggle
+  const undo=selectMode&&allVisiblePicked(visible);
   selectMode=true;
-  visibleShipmentIds().forEach(id=>pickedOrders.add(id));
+  if(undo) pickedOrders.clear(); else visible.forEach(id=>pickedOrders.add(id));
   renderShipmentList();
 });
 document.getElementById('orderBulkExport').addEventListener('click',()=>exportShipmentWorkbook());
@@ -3354,9 +3370,11 @@ const XERO_TAX_TYPE='No Tax';
 // the bill is raised in yuan, so the amounts go across unconverted
 const XERO_CURRENCY='CNY';
 const XERO_DUE_DAYS=3;
-const XERO_FEE_DESC='1688 Payment Fee';
-// the 1% payment fee is billed as two separate lines
-const XERO_FEE_SPLIT=[0.002,0.008];
+// the 1% payment fee is billed as two separate lines, one per payment party
+const XERO_FEE_LINES=[
+  {desc:'1688 Payment Fee',      pct:0.002},
+  {desc:'WorldFirst Payment Fee',pct:0.008}
+];
 
 // A minimal store-only zip so several bills can come down in one click.
 // The files are a few hundred bytes each, so there is nothing to gain from
@@ -3430,7 +3448,7 @@ function buildXeroRows(order,baseRmb){
   const due=new Date(bought.getTime()); due.setDate(due.getDate()+XERO_DUE_DAYS);
   const money=v=>(Math.round(v*100)/100).toFixed(2);
   const lines=[{desc:order.description||order.order_id||'',amount:baseRmb}]
-    .concat(XERO_FEE_SPLIT.map(p=>({desc:XERO_FEE_DESC,amount:baseRmb*p})));
+    .concat(XERO_FEE_LINES.map(f=>({desc:f.desc,amount:baseRmb*f.pct})));
   lines.forEach(l=>{ l.amount=Number(money(l.amount)); });
   // Xero checks Total against the lines, so it is the sum of the rounded
   // amounts rather than a separately rounded 101% — the two never disagree
@@ -3438,7 +3456,9 @@ function buildXeroRows(order,baseRmb){
   return lines.map(l=>{
     const row=new Array(XERO_HEADERS.length).fill('');
     row[0]=XERO_CONTACT;              // *ContactName
-    row[10]=order.order_id||'';       // *InvoiceNumber
+    // leading apostrophe so Excel keeps the 19-digit order ID as text instead
+    // of rounding it into scientific notation
+    row[10]=order.order_id?"'"+order.order_id:'';   // *InvoiceNumber
     row[11]=xeroDate(bought);         // *InvoiceDate — date of purchase
     row[12]=xeroDate(due);            // *DueDate
     row[13]=total;                    // Total
