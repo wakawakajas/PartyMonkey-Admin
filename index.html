@@ -287,8 +287,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 <div id="authScreen" class="auth-screen">
   <div class="auth-card">
     <div class="eyebrow">PIGU ASSISTANT V2.0</div>
-    <h1>Print template</h1>
-    <p class="sub">Sign in to build and sync your print templates across every device.</p>
+    <h1>Welcome</h1>
+    <p class="sub">Sign in to reach your print templates and your orders, synced across every device.</p>
     <form id="authForm">
       <label class="field" style="margin-bottom:10px;"><span>EMAIL</span>
         <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email" required/>
@@ -330,18 +330,19 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="home-wrap" id="shipmentScreen" style="display:none;">
     <button class="back-btn" id="shipmentBackBtn"><span class="chev">‹</span> Back</button>
     <div class="eyebrow">PIGU ASSISTANT V2.0</div>
-    <h1>Shipment</h1>
-    <p class="sub">Track order IDs for shipments.</p>
+    <h1>Procurement &amp; Shipping</h1>
+    <p class="sub">Track your orders from purchase through to arrival.</p>
     <button class="btn-primary" id="goToAddOrderBtn" style="width:100%;margin-bottom:8px;">Add new order ID</button>
     <div class="actions4">
       <button class="btn-outline btn-sm" id="goToOutstandingBtn">Not arrived</button>
       <button class="btn-outline btn-sm" id="goToConsolBtn">Consolidated shipment</button>
       <button class="btn-outline btn-sm" id="importPoBtn">⬆ Import purchase order</button>
-      <button class="btn-outline btn-sm" id="goToTrashBtn">♻ Recently deleted</button>
+      <button class="btn-outline btn-sm" id="exportXeroBtn">⬇ Export Xero</button>
+      <button class="btn-outline btn-sm" id="goToTrashBtn" style="grid-column:1/-1;">♻ Recently deleted</button>
     </div>
     <div id="importMsg"></div>
     <label class="field" style="margin-bottom:10px;"><span>SEARCH</span>
-      <input type="text" id="shipmentSearch" placeholder="Order ID, description, item SKU or freight number"/>
+      <input type="text" id="shipmentSearch" placeholder="Order ID, SKU or freight no."/>
     </label>
     <div class="slot-label">Show</div>
     <div class="chips" id="shipFilterChips">
@@ -3338,6 +3339,164 @@ async function exportShipmentWorkbook(){
       'Export failed: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false; btn.textContent=label; syncOrderBulk(); }
 }
+
+// ---------- Xero bill CSV ----------
+// Column order and wording are copied verbatim from Xero's BillTemplate.csv —
+// Xero matches on the header text, so a changed heading rejects the file.
+const XERO_HEADERS=['*ContactName','EmailAddress','POAddressLine1','POAddressLine2',
+  'POAddressLine3','POAddressLine4','POCity','PORegion','POPostalCode','POCountry',
+  '*InvoiceNumber','*InvoiceDate','*DueDate','Total','InventoryItemCode','Description',
+  '*Quantity','*UnitAmount','*AccountCode','*TaxType','TaxAmount',
+  'TrackingName1','TrackingOption1','TrackingName2','TrackingOption2','Currency'];
+const XERO_CONTACT='WorldFirst';
+const XERO_ACCOUNT_CODE='6300';
+const XERO_TAX_TYPE='No Tax';
+// the bill is raised in yuan, so the amounts go across unconverted
+const XERO_CURRENCY='CNY';
+const XERO_DUE_DAYS=3;
+const XERO_FEE_DESC='1688 Payment Fee';
+// the 1% payment fee is billed as two separate lines
+const XERO_FEE_SPLIT=[0.002,0.008];
+
+// A minimal store-only zip so several bills can come down in one click.
+// The files are a few hundred bytes each, so there is nothing to gain from
+// compressing them and plenty to get wrong.
+const CRC_TABLE=(function(){
+  const t=new Uint32Array(256);
+  for(let n=0;n<256;n++){
+    let c=n;
+    for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);
+    t[n]=c>>>0;
+  }
+  return t;
+})();
+function crc32(bytes){
+  let c=0xFFFFFFFF;
+  for(let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&0xFF]^(c>>>8);
+  return (c^0xFFFFFFFF)>>>0;
+}
+function buildZip(files){
+  const enc=new TextEncoder(), parts=[], central=[];
+  const d=new Date();
+  const dosTime=(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1);
+  const dosDate=((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate();
+  let offset=0;
+  const buf=n=>{const b=new Uint8Array(n);return {b,v:new DataView(b.buffer)};};
+  files.forEach(f=>{
+    const name=enc.encode(f.name), data=enc.encode(f.text), crc=crc32(data);
+    const {b:lh,v}=buf(30);
+    v.setUint32(0,0x04034b50,true);
+    v.setUint16(4,20,true);
+    v.setUint16(6,0x0800,true);   // names and contents are UTF-8
+    v.setUint16(8,0,true);        // stored, not deflated
+    v.setUint16(10,dosTime,true); v.setUint16(12,dosDate,true);
+    v.setUint32(14,crc,true);
+    v.setUint32(18,data.length,true); v.setUint32(22,data.length,true);
+    v.setUint16(26,name.length,true); v.setUint16(28,0,true);
+    parts.push(lh,name,data);
+    const {b:cd,v:cv}=buf(46);
+    cv.setUint32(0,0x02014b50,true);
+    cv.setUint16(4,20,true); cv.setUint16(6,20,true);
+    cv.setUint16(8,0x0800,true); cv.setUint16(10,0,true);
+    cv.setUint16(12,dosTime,true); cv.setUint16(14,dosDate,true);
+    cv.setUint32(16,crc,true);
+    cv.setUint32(20,data.length,true); cv.setUint32(24,data.length,true);
+    cv.setUint16(28,name.length,true);
+    cv.setUint32(42,offset,true);
+    central.push(cd,name);
+    offset+=30+name.length+data.length;
+  });
+  const cdSize=central.reduce((t,p)=>t+p.length,0);
+  const {b:eocd,v:ev}=buf(22);
+  ev.setUint32(0,0x06054b50,true);
+  ev.setUint16(8,files.length,true); ev.setUint16(10,files.length,true);
+  ev.setUint32(12,cdSize,true); ev.setUint32(16,offset,true);
+  return new Blob([...parts,...central,eocd],{type:'application/zip'});
+}
+
+function csvCell(v){
+  const s=v==null?'':String(v);
+  return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;
+}
+// Xero reads dates in the organisation's own format; a Singapore org is dd/mm/yyyy
+function xeroDate(d){
+  const p=n=>String(n).padStart(2,'0');
+  return p(d.getDate())+'/'+p(d.getMonth()+1)+'/'+d.getFullYear();
+}
+// One bill per order: the goods-and-China-fee line, then the two fee lines.
+// baseRmb is goods plus the China shipping fee, in yuan — the bill currency.
+function buildXeroRows(order,baseRmb){
+  const bought=order.created_at?new Date(order.created_at):new Date();
+  const due=new Date(bought.getTime()); due.setDate(due.getDate()+XERO_DUE_DAYS);
+  const money=v=>(Math.round(v*100)/100).toFixed(2);
+  const lines=[{desc:order.description||order.order_id||'',amount:baseRmb}]
+    .concat(XERO_FEE_SPLIT.map(p=>({desc:XERO_FEE_DESC,amount:baseRmb*p})));
+  lines.forEach(l=>{ l.amount=Number(money(l.amount)); });
+  // Xero checks Total against the lines, so it is the sum of the rounded
+  // amounts rather than a separately rounded 101% — the two never disagree
+  const total=money(lines.reduce((t,l)=>t+l.amount,0));
+  return lines.map(l=>{
+    const row=new Array(XERO_HEADERS.length).fill('');
+    row[0]=XERO_CONTACT;              // *ContactName
+    row[10]=order.order_id||'';       // *InvoiceNumber
+    row[11]=xeroDate(bought);         // *InvoiceDate — date of purchase
+    row[12]=xeroDate(due);            // *DueDate
+    row[13]=total;                    // Total
+    row[15]=l.desc;                   // Description
+    row[16]=1;                        // *Quantity
+    row[17]=money(l.amount);          // *UnitAmount
+    row[18]=XERO_ACCOUNT_CODE;        // *AccountCode
+    row[19]=XERO_TAX_TYPE;            // *TaxType
+    row[25]=XERO_CURRENCY;            // Currency
+    return row;                       // every other column intentionally blank
+  });
+}
+document.getElementById('exportXeroBtn').addEventListener('click',async()=>{
+  const btn=document.getElementById('exportXeroBtn');
+  const msg=document.getElementById('importMsg');
+  if(!sb){ showMsg(msg,'Sync unavailable — check your connection.',false); return; }
+  if(!pickedOrders.size){
+    showMsg(msg,'Tick the orders to export first — use Select all.',false); return;
+  }
+  btn.disabled=true; const label=btn.textContent; btn.textContent='Exporting…';
+  try{
+    const ids=[...pickedOrders];
+    const [sh,it]=await Promise.all([
+      sb.from('shipments').select('*').in('id',ids).is('deleted_at',null).order('sort_order'),
+      sb.from('shipment_items').select('shipment_id,unit_price_rmb,qty').in('shipment_id',ids)
+    ]);
+    if(sh.error) throw sh.error;
+    if(it.error) throw it.error;
+    const orders=sh.data||[];
+    if(!orders.length) throw new Error('nothing selected to export');
+    const goodsRmb={};
+    (it.data||[]).forEach(i=>{
+      goodsRmb[i.shipment_id]=(goodsRmb[i.shipment_id]||0)
+        +(Number(i.unit_price_rmb)||0)*(Number(i.qty)||0);
+    });
+    // one file per order, so each keeps its own orderid_xero.csv name
+    const files=[], used={};
+    orders.forEach(o=>{
+      const rows=buildXeroRows(o,(goodsRmb[o.id]||0)+(Number(o.china_fee_rmb)||0));
+      let name=safeName(o.order_id)+'_xero.csv';
+      // two order IDs can flatten to the same safe name, and a zip with
+      // duplicate entries loses one of them
+      if(used[name]) name=name.replace(/\.csv$/,'_'+(++used[name])+'.csv'); else used[name]=1;
+      files.push({name,text:[XERO_HEADERS,...rows].map(r=>r.map(csvCell).join(',')).join('\r\n')+'\r\n'});
+    });
+    // a single order downloads as its own csv; several come down zipped so
+    // each one keeps its orderid_xero name
+    if(files.length===1){
+      downloadBlob(new Blob([files[0].text],{type:'text/csv;charset=utf-8;'}),files[0].name);
+    }else{
+      downloadBlob(buildZip(files),'xero_'+new Date().toISOString().slice(0,10)+'.zip');
+    }
+    showMsg(msg,`✓ Exported ${files.length} bill(s) for Xero.`,true);
+  }catch(err){
+    showMsg(msg,'Export failed: '+((err&&err.message)||'unknown error'),false);
+  }finally{ btn.disabled=false; btn.textContent=label; }
+});
+
 document.getElementById('consolBackBtn').addEventListener('click',()=>showScreen('shipment'));
 document.getElementById('consolDetailBackBtn').addEventListener('click',()=>showScreen('consol'));
 document.getElementById('shipmentAddForm').addEventListener('submit',async e=>{
