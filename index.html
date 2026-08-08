@@ -481,10 +481,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 
     <div class="sect-label">Items bought</div>
     <div id="itemsWrap"></div>
-    <div class="bulkbar" id="itemBulkBar" style="display:none;">
+    <div class="bulkbar" id="itemBulkBar">
+      <button class="btn-outline btn-sm" id="itemSelectAll">Select all</button>
       <span class="n" id="itemBulkCount"></span>
-      <button class="btn-outline btn-sm" id="itemBulkClear">Clear</button>
-      <button class="btn-danger btn-sm" id="itemBulkDelete">Delete selected</button>
+      <span id="itemBulkActions" style="display:none;gap:8px;">
+        <button class="btn-outline btn-sm" id="itemBulkCancel">Cancel</button>
+        <button class="btn-outline btn-sm" id="itemBulkExport">Download selected</button>
+        <button class="btn-danger btn-sm" id="itemBulkDelete">Delete selected</button>
+      </span>
     </div>
     <button class="btn-outline" id="addItemBtn" style="width:100%;margin-top:8px;">+ Add line</button>
     <div class="calc" id="itemsTotals"></div>
@@ -548,6 +552,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <p class="hint">“Own box” charges each box’s freight only to the pieces inside it. “Share across all” pools every box’s freight and spreads it evenly over all ordered pieces, so each piece carries the same average rate.</p>
     <button class="btn-primary" id="addBoxBtn" style="width:100%;margin:12px 0 16px;">+ Add box</button>
     <div class="ph-list list-full" id="boxesList"><p class="hint" style="margin:4px 0 0;">— none yet —</p></div>
+    <button class="btn-primary" id="boxesSubmitBtn" style="width:100%;margin-top:14px;">Submit</button>
+    <div id="boxesSubmitMsg"></div>
   </div>
 
   <!-- BOX MEASUREMENT -->
@@ -1434,7 +1440,7 @@ function showScreen(name){
   if(name==='shipment-china') openChinaFee();
   if(name==='shipment-outstanding') refreshOutstanding();
   if(name==='consol') refreshConsolList();
-  if(name==='consol-detail') refreshConsolDetail();
+  if(name==='consol-detail'){ consolPending={}; refreshConsolDetail(); }
   if(name==='calendar') openCalendar();
   if(name==='trash') refreshTrash();
 }
@@ -1740,7 +1746,7 @@ async function refreshOrderDetail(){
   renderItems();
 }
 async function loadOrderData(){
-  pickedItems.clear(); syncItemBulk();
+  pickedItems.clear(); itemSelectMode=false;
   const [it,bx,al]=await Promise.all([
     sb.from('shipment_items').select('*').eq('shipment_id',currentShipmentId).order('sort_order'),
     sb.from('shipment_boxes').select('*').eq('shipment_id',currentShipmentId).order('created_at'),
@@ -1771,7 +1777,7 @@ function renderItems(){
     const hasPhoto=!!(r.photo_path||r.photo_url);
     return `<div class="ph-card" data-item-id="${r.id}">
       <div class="ph-card-head">
-        <input type="checkbox" class="pick" data-item-pick ${pickedItems.has(r.id)?'checked':''} title="Select"/>
+        ${itemSelectMode?`<input type="checkbox" class="pick" data-item-pick ${pickedItems.has(r.id)?'checked':''} title="Select"/>`:''}
         <span style="flex:1;">Line ${i+1}</span>
         <span class="tag ${state[0]}">${state[1]}</span>
         <button class="del-btn" data-item-del title="Delete line">×</button>
@@ -1800,6 +1806,7 @@ function renderItems(){
   }).join('');
   renderTotals();
   hydratePhotos();
+  syncItemBulk();
 }
 function renderTotals(){
   let goods=0, ship=0, china=0, svc=0, gst=0, pieces=0;
@@ -1822,13 +1829,45 @@ function renderTotals(){
 }
 // multi-select delete for SKU lines
 const pickedItems=new Set();
+let itemSelectMode=false;
 function syncItemBulk(){
   const bar=document.getElementById('itemBulkBar');
-  bar.style.display=pickedItems.size?'flex':'none';
-  document.getElementById('itemBulkCount').textContent=pickedItems.size+' line(s) selected';
+  bar.style.display=itemRows.length?'flex':'none';
+  document.getElementById('itemSelectAll').style.display=itemSelectMode?'none':'';
+  document.getElementById('itemBulkActions').style.display=itemSelectMode?'inline-flex':'none';
+  document.getElementById('itemBulkCount').textContent=
+    itemSelectMode?pickedItems.size+' of '+itemRows.length+' selected':itemRows.length+' line(s)';
+  if(itemSelectMode){
+    document.getElementById('itemBulkExport').disabled=!pickedItems.size;
+    document.getElementById('itemBulkDelete').disabled=!pickedItems.size;
+  }
 }
-document.getElementById('itemBulkClear').addEventListener('click',()=>{
-  pickedItems.clear(); syncItemBulk(); renderItems();
+function exitItemSelect(){ itemSelectMode=false; pickedItems.clear(); renderItems(); }
+document.getElementById('itemSelectAll').addEventListener('click',()=>{
+  itemSelectMode=true;
+  itemRows.forEach(r=>pickedItems.add(r.id));
+  renderItems();
+});
+document.getElementById('itemBulkCancel').addEventListener('click',exitItemSelect);
+// download a SKU sheet containing only the ticked lines
+document.getElementById('itemBulkExport').addEventListener('click',()=>{
+  const msg=document.getElementById('itemsMsg');
+  try{
+    if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
+    const chosen=itemRows.filter(r=>pickedItems.has(r.id));
+    if(!chosen.length){ showMsg(msg,'Nothing selected to download.',false); return; }
+    const sh=currentShipment();
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.aoa_to_sheet([SKU_SHEET_HEADERS,...buildSkuSheetRows(chosen)]),'SKU');
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([
+      ['USD','Price'],['CNY','Quantity'],['IDR','Volume'],['PHP','Weight'],['THB'],['SGD']
+    ]),'Sheet1');
+    XLSX.writeFile(wb,safeName(sh?sh.order_id:'order')+'_SKU.xlsx');
+    showMsg(msg,`✓ Downloaded ${chosen.length} line(s).`,true);
+  }catch(err){
+    showMsg(msg,'Download failed: '+((err&&err.message)||'unknown error'),false);
+  }
 });
 document.getElementById('itemBulkDelete').addEventListener('click',async()=>{
   if(!pickedItems.size||!sb) return;
@@ -1838,7 +1877,7 @@ document.getElementById('itemBulkDelete').addEventListener('click',async()=>{
   const paths=itemRows.filter(r=>ids.includes(r.id)&&r.photo_path).map(r=>r.photo_path);
   if(paths.length) await sb.storage.from(PHOTO_BUCKET).remove(paths);
   await Promise.all(ids.map(id=>sb.from('shipment_items').delete().eq('id',id)));
-  pickedItems.clear(); syncItemBulk();
+  pickedItems.clear(); itemSelectMode=false;
   await refreshOrderDetail();
 });
 document.getElementById('addItemBtn').addEventListener('click',async()=>{
@@ -2061,11 +2100,11 @@ function allInPerUnitRmb(i){
   return (Number(i.unit_price_rmb)||0)
     + (itemChinaRmb(i)+itemFreightRmb(i)+itemServiceRmb(i)+itemGstRmb(i))/qty;
 }
-function buildSkuSheetRows(){
+function buildSkuSheetRows(rows){
   const sh=currentShipment();
   const provisional=sh?(sh.order_id||''):'';   // Provisional No. is the order ID
   const rate=rmbRate();
-  return itemRows.map(i=>{
+  return (rows||itemRows).map(i=>{
     const row=new Array(SKU_SHEET_HEADERS.length).fill('');
     row[0]=provisional;                 // A  Provisional No.
     row[1]=i.sku||'';                   // B  SKU Name
@@ -2186,6 +2225,10 @@ async function refreshBoxesList(){
   if(!sb||!currentShipmentId){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet —</p>'; return; }
   await loadOrderData();
   document.querySelectorAll('#freightModeSeg button').forEach(b=>b.classList.toggle('on',b.dataset.fmode===freightMode()));
+  renderBoxesListRows();
+}
+function renderBoxesListRows(){
+  const el=document.getElementById('boxesList');
   el.innerHTML=boxRows.length?boxRows.map(b=>{
     const q=boxQty(b.id);
     return `<div class="ph-card row-link" data-id="${b.id}" data-box-open>
@@ -2224,15 +2267,22 @@ document.getElementById('addBoxBtn').addEventListener('click',async()=>{
   currentBoxId=data.id;
   openBoxEditor();
 });
+// freight mode is a costing setting, so it follows the same rule as the
+// other settings: local until Submit
 document.querySelectorAll('#freightModeSeg button').forEach(b=>{
-  b.addEventListener('click',async()=>{
+  b.addEventListener('click',()=>{
     const v=b.dataset.fmode;
-    const s=currentShipment(); if(s) s.freight_mode=v;
+    const sh=currentShipment(); if(sh) sh.freight_mode=v;
     document.querySelectorAll('#freightModeSeg button').forEach(x=>x.classList.toggle('on',x===b));
-    await refreshBoxesList();
-    if(sb&&currentShipmentId) await sb.from('shipments').update({freight_mode:v}).eq('id',currentShipmentId);
+    markDirty('boxes');
+    renderBoxesListRows();
   });
 });
+document.getElementById('boxesSubmitBtn').addEventListener('click',()=>
+  withSubmit('boxesSubmitBtn',document.getElementById('boxesSubmitMsg'),'shipment-detail',async()=>{
+    const sh=currentShipment(); if(!sh) return;
+    await sb.from('shipments').update({freight_mode:sh.freight_mode}).eq('id',currentShipmentId);
+  }));
 document.getElementById('boxesBackBtn').addEventListener('click',()=>showScreen('shipment-detail'));
 
 function currentBox(){ return boxRows.find(b=>b.id===currentBoxId)||null; }
@@ -2657,10 +2707,20 @@ async function refreshConsolDetail(){
     sb.from('shipments').select('id,order_id,description,consolidation_id').is('deleted_at',null).order('sort_order',{ascending:true}),
     fetchArrivalStatus()
   ]);
-  const all=data||[];
-  const mine=all.filter(s=>s.consolidation_id===currentConsolId);
+  consolAllOrders=data||[];
+  consolStatusCache=status;
+  renderConsolDetailLists();
+}
+// membership changes are held locally so Submit is what actually commits them
+let consolAllOrders=[], consolStatusCache={}, consolPending={};
+function effectiveConsol(o){
+  return Object.prototype.hasOwnProperty.call(consolPending,o.id)?consolPending[o.id]:o.consolidation_id;
+}
+function renderConsolDetailLists(){
+  const all=consolAllOrders, status=consolStatusCache;
+  const mine=all.filter(s=>effectiveConsol(s)===currentConsolId);
   // an order that has fully landed doesn't need shipping, so it isn't offered
-  const free=all.filter(s=>!s.consolidation_id && !fullyArrived(status[s.id]));
+  const free=all.filter(s=>!effectiveConsol(s) && !fullyArrived(status[s.id]));
   const row=(s,btn)=>`<div class="ph-card" data-id="${s.id}">
       <div class="ph-card-head">
         <span style="flex:1;" class="row-link" data-consol-open>${escapeHtml(s.order_id)}</span>
@@ -2680,8 +2740,8 @@ document.getElementById('consolOrdersList').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
   const id=card.dataset.id;
   if(e.target.closest('[data-consol-remove]')){
-    if(sb) await sb.from('shipments').update({consolidation_id:null}).eq('id',id);
-    await refreshConsolDetail();
+    consolPending[id]=null; markDirty('consol');
+    renderConsolDetailLists();
     return;
   }
   // tapping the order ID drills straight into that order's detail
@@ -2692,12 +2752,12 @@ document.getElementById('consolOrdersList').addEventListener('click',async e=>{
     showScreen('shipment-detail');
   }
 });
-document.getElementById('consolAvailableList').addEventListener('click',async e=>{
+document.getElementById('consolAvailableList').addEventListener('click',e=>{
   if(!e.target.closest('[data-consol-add]')) return;
   const id=e.target.closest('.ph-card').dataset.id;
   // the single FK column is what guarantees an order sits in only one freight number
-  if(sb) await sb.from('shipments').update({consolidation_id:currentConsolId}).eq('id',id);
-  await refreshConsolDetail();
+  consolPending[id]=currentConsolId; markDirty('consol');
+  renderConsolDetailLists();
 });
 [['consolEditNumber','freight_number'],['consolEditEta','eta']].forEach(([id,field])=>{
   document.getElementById(id).addEventListener('input',e=>{
@@ -2844,6 +2904,9 @@ document.getElementById('consolDetailSubmitBtn').addEventListener('click',()=>
   withSubmit('consolDetailSubmitBtn',document.getElementById('consolDetailSubmitMsg'),'consol',async()=>{
     const c=currentConsol(); if(!c) return;
     await sb.from('consolidations').update({freight_number:c.freight_number,eta:c.eta||null}).eq('id',c.id);
+    for(const [id,val] of Object.entries(consolPending))
+      await sb.from('shipments').update({consolidation_id:val}).eq('id',id);
+    consolPending={};
   }));
 
 document.getElementById('outstandingSubmitBtn').addEventListener('click',()=>
