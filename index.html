@@ -59,6 +59,19 @@ input:focus,select:focus{outline:2px solid var(--blueprint);outline-offset:1px;b
 .combo-opt .icon-btn{min-height:26px;padding:0 7px;font-size:10px;}
 .combo-empty{padding:10px;color:var(--faint);font-size:12px;}
 button:disabled{opacity:.45;cursor:not-allowed;}
+/* line item: small photo on the left, fields to its right */
+.item-main{display:flex;gap:10px;align-items:flex-start;margin-bottom:8px;}
+.item-photo-wrap{position:relative;flex-shrink:0;}
+.item-photo{width:58px;height:58px;min-height:58px;border-radius:12px;padding:0;overflow:hidden;
+  border:1px dashed var(--border-strong);background:#101113;color:var(--faint);font-size:18px;
+  display:flex;align-items:center;justify-content:center;}
+.item-photo img{width:100%;height:100%;object-fit:cover;display:block;}
+.item-photo.has{border-style:solid;cursor:zoom-in;}
+.item-photo-x{position:absolute;top:-7px;right:-7px;width:21px;height:21px;min-height:21px;padding:0;
+  border-radius:50%;background:var(--card);border:1px solid var(--border-strong);color:var(--faint);
+  font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;}
+.item-photo-x:hover{color:var(--rust);}
+.item-fields{flex:1;min-width:0;}
 input:disabled{background:#202225;color:var(--faint);}
 input::placeholder{color:var(--faint);}
 button{font-family:'IBM Plex Sans',sans-serif;cursor:pointer;border-radius:999px;min-height:var(--tap);}
@@ -298,10 +311,12 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button class="btn-outline btn-sm" id="goToOutstandingBtn">Not arrived</button>
       <button class="btn-outline btn-sm" id="goToConsolBtn">Consolidated shipment</button>
     </div>
-    <div class="grid2" style="margin-bottom:10px;">
+    <div class="grid2" style="margin-bottom:8px;">
       <button class="btn-outline btn-sm" id="exportExcelBtn">⬇ Export Excel</button>
       <button class="btn-outline btn-sm" id="goToTrashBtn">♻ Recently deleted</button>
     </div>
+    <button class="btn-outline" id="importPoBtn" style="width:100%;margin-bottom:10px;">⬆ Import purchase order</button>
+    <div id="importMsg"></div>
     <label class="field" style="margin-bottom:10px;"><span>SEARCH</span>
       <input type="text" id="shipmentSearch" placeholder="Order ID, description, item SKU or freight number"/>
     </label>
@@ -1408,7 +1423,7 @@ async function refreshShipmentList(){
   const el=document.getElementById('shipmentList');
   if(!sb){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable — check your connection.</p>'; return; }
   const [res,meta]=await Promise.all([
-    sb.from('shipments').select('id,order_id,description,rmb_rate,china_fee_rmb,china_basis,freight_mode,sort_order,consolidation_id').is('deleted_at',null).order('sort_order',{ascending:true}),
+    sb.from('shipments').select('id,order_id,description,rmb_rate,china_fee_rmb,china_basis,freight_mode,sort_order,consolidation_id,created_at').is('deleted_at',null).order('sort_order',{ascending:true}),
     loadShipmentMeta()
   ]);
   if(res.error){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load shipments.</p>'; return; }
@@ -1465,7 +1480,7 @@ function renderShipmentList(){
     const consol=r.consolidation_id?shipMeta.consolById[r.consolidation_id]:null;
     return `<div class="ph-card row-link" data-id="${r.id}" data-ship-open>
       <div class="ph-card-head">
-        <span style="flex:1;">${oid}</span>
+        <span style="flex:1;">${oid}${r.created_at?` <span class="hint" style="font-weight:400;">· ${shortDate(r.created_at)}</span>`:''}</span>
         ${arrivalTag(shipMeta.status[r.id])}
         <button class="icon-btn" data-ship-up ${i===0?'disabled':''} title="Move up">▲</button>
         <button class="icon-btn" data-ship-down ${i===shipmentRows.length-1?'disabled':''} title="Move down">▼</button>
@@ -1477,6 +1492,7 @@ function renderShipmentList(){
   }).join('');
 }
 // arrived-vs-ordered as a bar, so how far along an order is reads at a glance
+const shortDate=d=>d?String(d).slice(0,10):'';
 function progressBar(st){
   if(!st||!st.ordered) return '';
   const pct=Math.round((st.arrived/st.ordered)*100);
@@ -1630,22 +1646,24 @@ function renderItems(){
       return `${a.qty}× ${escapeHtml(b?(b.label||'box'):'box')}`;
     }).join(', ');
     const state=arr===0?['no','PENDING']:(out===0?['yes','ARRIVED']:['no',`${arr}/${qty} ARRIVED`]);
+    const hasPhoto=!!(r.photo_path||r.photo_url);
     return `<div class="ph-card" data-item-id="${r.id}">
       <div class="ph-card-head">
         <span style="flex:1;">Line ${i+1}</span>
         <span class="tag ${state[0]}">${state[1]}</span>
         <button class="del-btn" data-item-del title="Delete line">×</button>
       </div>
-      <div class="grid3e" style="margin-bottom:7px;">
-        <label class="field"><span>SKU</span><input type="text" data-f="sku" value="${escapeHtml(r.sku||'')}"/></label>
-        <label class="field"><span>QTY</span><input type="number" min="0" step="1" data-f="qty" value="${qty}"/></label>
-        <label class="field"><span>UNIT PRICE ¥</span><input type="number" min="0" step="0.01" data-f="unit_price_rmb" value="${unit}"/></label>
-      </div>
-      <div class="upload-slot" style="margin-bottom:7px;">
-        <div class="thumb"${r.photo_path?' data-photo-view style="cursor:zoom-in;"':''}>${r.photo_path?'<img data-photo alt="Item photo"/>':'<span class="ico">＋</span>'}</div>
-        <div class="info">${r.photo_path?'Photo attached':'No photo'}</div>
-        <button class="btn-outline btn-sm" data-item-photo>${r.photo_path?'Replace':'📷 Photo'}</button>
-        ${r.photo_path?'<button class="del-btn" data-item-photo-del title="Remove photo">×</button>':''}
+      <div class="item-main">
+        <div class="item-photo-wrap">
+          <button class="item-photo${hasPhoto?' has':''}" data-item-photo-slot
+            title="${hasPhoto?'View photo':'Add photo'}">${hasPhoto?'<img data-photo alt="Item photo"/>':'＋'}</button>
+          ${hasPhoto?'<button class="item-photo-x" data-item-photo-del title="Remove photo">×</button>':''}
+        </div>
+        <div class="grid3e item-fields">
+          <label class="field"><span>SKU</span><input type="text" data-f="sku" value="${escapeHtml(r.sku||'')}"/></label>
+          <label class="field"><span>UNIT PRICE ¥</span><input type="number" min="0" step="0.01" data-f="unit_price_rmb" value="${unit}"/></label>
+          <label class="field"><span>QTY</span><input type="number" min="0" step="1" data-f="qty" value="${qty}"/></label>
+        </div>
       </div>
       <div class="calc" style="margin-top:0;">
         Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China ${fmtFromRmb(china)} &nbsp;·&nbsp; Shipping ${fmtFromRmb(ship)}<br/>
@@ -1693,6 +1711,12 @@ const photoUrlCache={};
 async function hydratePhotos(){
   if(!sb) return;
   for(const r of itemRows){
+    // imported rows may only carry a link to the supplier's image
+    if(!r.photo_path&&r.photo_url){
+      const img=document.querySelector(`#itemsWrap [data-item-id="${r.id}"] img[data-photo]`);
+      if(img&&img.src!==r.photo_url) img.src=r.photo_url;
+      continue;
+    }
     if(!r.photo_path) continue;
     if(!photoUrlCache[r.photo_path]){
       const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(r.photo_path,3600);
@@ -1705,7 +1729,14 @@ async function hydratePhotos(){
 }
 // Full-size viewer for any attached photo. Signed URLs expire, so a fresh
 // one is minted each time rather than trusting the cached thumbnail URL.
-async function openPhotoModal(path,title){
+async function openPhotoModal(path,title,directUrl){
+  if(!path&&directUrl){                       // imported image, shown from source
+    const img=document.getElementById('photoModalImg');
+    img.removeAttribute('src'); img.style.maxWidth='100%'; img.style.width=''; img.style.cursor='zoom-in';
+    document.getElementById('photoModalTitle').textContent=title||'Photo';
+    document.getElementById('photoModal').classList.add('open');
+    img.src=directUrl; return;
+  }
   if(!sb||!path) return;
   const img=document.getElementById('photoModalImg');
   img.removeAttribute('src');
@@ -1774,17 +1805,18 @@ function pickItemPhoto(itemId){
 document.getElementById('itemsWrap').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
   const id=card.dataset.itemId;
-  if(e.target.closest('[data-photo-view]')){
+  // one small square: view it if there is a photo, otherwise start an upload
+  if(e.target.closest('[data-item-photo-slot]')){
     const row=itemRows.find(r=>r.id===id);
-    if(row&&row.photo_path) openPhotoModal(row.photo_path,row.sku||'Item photo');
+    if(row&&(row.photo_path||row.photo_url)) openPhotoModal(row.photo_path,row.sku||'Item photo',row.photo_url);
+    else pickItemPhoto(id);
     return;
   }
-  if(e.target.closest('[data-item-photo]')){ pickItemPhoto(id); return; }
   if(e.target.closest('[data-item-photo-del]')){
     if(!sb) return;
     const row=itemRows.find(r=>r.id===id);
     if(row&&row.photo_path) await sb.storage.from(PHOTO_BUCKET).remove([row.photo_path]);
-    await sb.from('shipment_items').update({photo_path:null}).eq('id',id);
+    await sb.from('shipment_items').update({photo_path:null,photo_url:null}).eq('id',id);
     await refreshOrderDetail();
     return;
   }
@@ -2382,7 +2414,7 @@ function renderConsolList(){
     const p=consolProgressById[c.id]||{total:0,done:0};
     return `<div class="ph-card row-link" data-id="${c.id}">
       <div class="ph-card-head">
-        <span style="flex:1;">${escapeHtml(c.freight_number)}</span>
+        <span style="flex:1;">${escapeHtml(c.freight_number)}${c.created_at?` <span class="hint" style="font-weight:400;">· ${shortDate(c.created_at)}</span>`:''}</span>
         ${consolTag(p)}
         <button class="icon-btn" data-consol-up ${i===0?'disabled':''} title="Move up">▲</button>
         <button class="icon-btn" data-consol-down ${i===consolRows.length-1?'disabled':''} title="Move down">▼</button>
@@ -2722,6 +2754,137 @@ document.getElementById('trashList').addEventListener('click',async e=>{
 });
 document.getElementById('goToTrashBtn').addEventListener('click',()=>showScreen('trash'));
 document.getElementById('trashBackBtn').addEventListener('click',()=>showScreen('shipment'));
+
+// ---------- import a 1688 purchase order ----------
+// Rows sharing a 1688 order number become one order with all their SKUs.
+const PO_COLUMNS={
+  orderNo :['1688orderno','orderno','ordernumber','orderid','1688orderid'],
+  sku     :['skuname','sku','productname','itemname'],
+  price   :['unitprice','price','unitpricermb'],
+  qty     :['purchaseqty','qty','quantity','purchasequantity'],
+  shipFee :['shipfee','shippingfee','freight','freightfee'],
+  image   :['imageurl','image','imagelink','picture','pictureurl']
+};
+const normHeader=v=>String(v==null?'':v).toLowerCase().replace(/[^a-z0-9]/g,'');
+function resolveColumns(headerRow){
+  const map={}, seen=headerRow.map(normHeader);
+  for(const [key,names] of Object.entries(PO_COLUMNS)){
+    let i=seen.findIndex(h=>h&&names.includes(h));
+    if(i<0) i=seen.findIndex(h=>h&&names.some(n=>h.includes(n)));
+    if(i>=0) map[key]=i;
+  }
+  return map;
+}
+const numOf=v=>{const n=parseFloat(String(v==null?'':v).replace(/[^0-9.\-]/g,''));return isFinite(n)?n:0;};
+
+// Suppliers' image hosts usually block cross-origin reads, so copying the file
+// into our bucket often fails. When it does we keep the link rather than lose
+// the picture, and the item still shows it — just served from the origin.
+async function attachImportedImage(itemId,url,userId){
+  try{
+    const res=await fetch(url,{mode:'cors'});
+    if(!res.ok) throw new Error('http '+res.status);
+    const blob=await res.blob();
+    if(!/^image\//.test(blob.type||'')) throw new Error('not an image');
+    const small=await shrink(await fileToDataURL(blob),1280,0.72);
+    const out=await (await fetch(small)).blob();
+    const path=userId+'/'+itemId+'/'+Date.now()+'.jpg';
+    const up=await sb.storage.from(PHOTO_BUCKET).upload(path,out,{contentType:'image/jpeg'});
+    if(up.error) throw up.error;
+    await sb.from('shipment_items').update({photo_path:path,photo_url:url}).eq('id',itemId);
+    return 'copied';
+  }catch(err){
+    await sb.from('shipment_items').update({photo_url:url}).eq('id',itemId);
+    return 'linked';
+  }
+}
+document.getElementById('importPoBtn').addEventListener('click',()=>{
+  const msg=document.getElementById('importMsg');
+  const inp=document.createElement('input');
+  inp.type='file'; inp.accept='.xlsx,.xls,.csv';
+  inp.onchange=async()=>{
+    const file=inp.files[0]; if(!file) return;
+    const btn=document.getElementById('importPoBtn');
+    btn.disabled=true; const label=btn.textContent; btn.textContent='Importing…';
+    try{
+      if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
+      if(!sb) throw new Error('sync unavailable');
+      const {data:{session}}=await sb.auth.getSession();
+      if(!session) throw new Error('sign in first');
+
+      const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
+      const grid=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
+      if(grid.length<2) throw new Error('that sheet has no rows under its header');
+      const col=resolveColumns(grid[0]);
+      const missing=['orderNo','sku','qty'].filter(k=>col[k]===undefined);
+      if(missing.length) throw new Error('could not find column(s): '+
+        missing.map(m=>({orderNo:'1688 Order No.',sku:'SKU Name',qty:'Purchase Qty'})[m]).join(', '));
+
+      // group the rows by order number
+      const groups=new Map();
+      for(const row of grid.slice(1)){
+        const orderNo=String(row[col.orderNo]==null?'':row[col.orderNo]).trim();
+        const sku=String(col.sku!==undefined?(row[col.sku]||''):'').trim();
+        if(!orderNo||(!sku&&!numOf(row[col.qty]))) continue;   // skip blank/filler rows
+        if(!groups.has(orderNo)) groups.set(orderNo,{fees:[],items:[]});
+        const g=groups.get(orderNo);
+        if(col.shipFee!==undefined&&String(row[col.shipFee]).trim()!=='') g.fees.push(numOf(row[col.shipFee]));
+        g.items.push({sku,qty:Math.max(0,Math.round(numOf(row[col.qty]))),
+          unit_price_rmb:col.price!==undefined?numOf(row[col.price]):0,
+          image:col.image!==undefined?String(row[col.image]||'').trim():''});
+      }
+      if(!groups.size) throw new Error('no usable rows found');
+
+      // an order-level fee repeated on every row must not be added up
+      const feeFor=fees=>{
+        if(!fees.length) return 0;
+        const uniq=[...new Set(fees.map(f=>f.toFixed(4)))];
+        return uniq.length===1?fees[0]:fees.reduce((a,b)=>a+b,0);
+      };
+
+      const {data:existing}=await sb.from('shipments').select('order_id').is('deleted_at',null);
+      const taken=new Set((existing||[]).map(r=>r.order_id));
+      let created=0,skipped=0,itemCount=0,copied=0,linked=0;
+      let topSort=shipmentRows.length?Math.min(...shipmentRows.map(r=>Number(r.sort_order)||0))-1:0;
+
+      for(const [orderNo,g] of groups){
+        if(taken.has(orderNo)){ skipped++; continue; }
+        const ins=await sb.from('shipments').insert({
+          user_id:session.user.id, order_id:orderNo,
+          description:'Imported from 1688 · '+new Date().toISOString().slice(0,10),
+          rmb_rate:5.2, china_fee_rmb:feeFor(g.fees), china_basis:'ordered',
+          freight_mode:'box', sort_order:topSort--
+        }).select().single();
+        if(ins.error||!ins.data){ skipped++; continue; }
+        created++;
+        for(let i=0;i<g.items.length;i++){
+          const it=g.items[i];
+          const row=await sb.from('shipment_items').insert({
+            user_id:session.user.id, shipment_id:ins.data.id, sku:it.sku,
+            qty:it.qty||1, unit_price_rmb:it.unit_price_rmb, sort_order:i
+          }).select().single();
+          if(row.error||!row.data) continue;
+          itemCount++;
+          if(it.image&&/^https?:\/\//i.test(it.image)){
+            const how=await attachImportedImage(row.data.id,it.image,session.user.id);
+            if(how==='copied') copied++; else linked++;
+          }
+        }
+      }
+      await refreshShipmentList();
+      const feeNote=[...groups.values()].some(g=>g.fees.length)
+        ? ' Ship fee went to the China fee, split across all ordered pieces.' : '';
+      showMsg(msg,`✓ Imported ${created} order(s), ${itemCount} line(s).`
+        +(skipped?` ${skipped} skipped (order ID already exists).`:'')
+        +(copied?` ${copied} image(s) copied in.`:'')
+        +(linked?` ${linked} image(s) kept as links — that host blocks copying.`:'')
+        +feeNote,true);
+    }catch(err){
+      showMsg(msg,'Import failed: '+((err&&err.message)||'unknown error'),false);
+    }finally{ btn.disabled=false; btn.textContent=label; }
+  };
+  inp.click();
+});
 
 // ---------- Excel export of every shipment tab ----------
 document.getElementById('exportExcelBtn').addEventListener('click',async()=>{

@@ -121,6 +121,12 @@ alter table public.shipments
 
 create index if not exists shipments_consolidation_idx on public.shipments(consolidation_id);
 
+-- ---- imported supplier image ------------------------------------------
+-- 1688 exports carry an image URL. Where the host allows it we copy the
+-- picture into our own bucket (photo_path); where it blocks cross-origin
+-- reads we keep the link and display it from source.
+alter table public.shipment_items add column if not exists photo_url text;
+
 -- ---- photo of the arrived parcel box ----------------------------------
 alter table public.shipment_boxes add column if not exists photo_path text;
 
