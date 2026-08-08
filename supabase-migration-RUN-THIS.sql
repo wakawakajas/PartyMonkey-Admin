@@ -158,3 +158,32 @@ update public.consolidations c set sort_order = sub.rn
 from (select id, row_number() over (partition by user_id order by created_at desc) - 1 as rn
       from public.consolidations) sub
 where c.id = sub.id and c.sort_order = 0;
+
+-- ---- store pick up ----------------------------------------------------
+-- a short queue of orders a customer collects in person: who it is for, any
+-- note, and the two states it moves through
+create table if not exists public.pickups (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  order_id  text not null,
+  name      text not null default '',
+  remarks   text not null default '',
+  prepared  boolean not null default false,
+  collected boolean not null default false,
+  sort_order integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+alter table public.pickups enable row level security;
+
+do $$
+begin
+  execute 'drop policy if exists "own_select" on public.pickups';
+  execute 'drop policy if exists "own_insert" on public.pickups';
+  execute 'drop policy if exists "own_update" on public.pickups';
+  execute 'drop policy if exists "own_delete" on public.pickups';
+  execute 'create policy "own_select" on public.pickups for select using (auth.uid() = user_id)';
+  execute 'create policy "own_insert" on public.pickups for insert with check (auth.uid() = user_id)';
+  execute 'create policy "own_update" on public.pickups for update using (auth.uid() = user_id)';
+  execute 'create policy "own_delete" on public.pickups for delete using (auth.uid() = user_id)';
+end $$;

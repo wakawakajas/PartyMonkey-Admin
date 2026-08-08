@@ -120,17 +120,31 @@ create table public.shipment_tracking (
   created_at timestamptz not null default now()
 );
 
+-- orders a customer collects in person
+create table public.pickups (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  order_id  text not null,
+  name      text not null default '',
+  remarks   text not null default '',
+  prepared  boolean not null default false,
+  collected boolean not null default false,
+  sort_order integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
 alter table public.shipment_boxes     enable row level security;
 alter table public.shipment_items     enable row level security;
 alter table public.shipment_tracking  enable row level security;
 alter table public.shipment_box_items enable row level security;
 alter table public.consolidations     enable row level security;
+alter table public.pickups            enable row level security;
 
 do $$
 declare t text;
 begin
   foreach t in array array['shipment_boxes','shipment_items','shipment_tracking',
-                           'shipment_box_items','consolidations'] loop
+                           'shipment_box_items','consolidations','pickups'] loop
     execute format('create policy "own_select" on public.%I for select using (auth.uid() = user_id)', t);
     execute format('create policy "own_insert" on public.%I for insert with check (auth.uid() = user_id)', t);
     execute format('create policy "own_update" on public.%I for update using (auth.uid() = user_id)', t);
