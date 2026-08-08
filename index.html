@@ -1759,7 +1759,7 @@ async function refreshOrderDetail(){
   renderItems();
 }
 async function loadOrderData(){
-  pickedItems.clear(); itemSelectMode=false; pendingItemDeletes=[]; pendingBoxDeletes=[];
+  pickedItems.clear(); itemSelectMode=false; pendingItemDeletes=[];
   const [it,bx,al]=await Promise.all([
     sb.from('shipment_items').select('*').eq('shipment_id',currentShipmentId).order('sort_order'),
     sb.from('shipment_boxes').select('*').eq('shipment_id',currentShipmentId).order('created_at'),
@@ -2251,7 +2251,6 @@ function renderBoxesListRows(){
         <div style="flex:1;min-width:0;">
           <div class="ph-card-head" style="margin-bottom:4px;">
             <span style="flex:1;">${escapeHtml(b.label||'Untitled box')}</span>
-            ${b._new?'<span class="tag no">UNSAVED</span>':''}
             <button class="del-btn" data-box-del title="Delete">×</button>
           </div>
           <p class="hint" style="margin:0;">${b.length_cm}×${b.breadth_cm}×${b.height_cm} cm · ${cbmOf(b).toFixed(4)} CBM · ${fmtFromRmb(boxShipRmb(b))} · ${q} pc(s)</p>
@@ -2280,34 +2279,34 @@ document.getElementById('boxesList').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
   const id=card.dataset.id;
   if(e.target.closest('[data-box-del]')){
-    const i=boxRows.findIndex(x=>x.id===id); if(i<0) return;
-    if(!boxRows[i]._new) pendingBoxDeletes.push(boxRows[i]);
-    boxRows.splice(i,1);
-    markDirty('boxes'); renderBoxesListRows();
-    return;
-  }
-  const target=boxRows.find(x=>x.id===id);
-  if(target&&target._new){
-    showMsg(document.getElementById('boxesSubmitMsg'),
-      'Submit first — a box has to be saved before you can measure it.',false);
+    if(!sb) return;
+    const b=boxRows.find(x=>x.id===id);
+    if(!confirm('Are you sure?\n\nDelete '+((b&&b.label)||'this box')
+      +'. Its measurements and the quantities recorded inside it go with it.')) return;
+    if(b&&b.photo_path) await sb.storage.from(PHOTO_BUCKET).remove([b.photo_path]);
+    await sb.from('shipment_boxes').delete().eq('id',id);
+    await refreshBoxesList();
     return;
   }
   currentBoxId=id;
   openBoxEditor();
 });
-// A new box is only a row on screen until you Submit. It cannot be measured
-// before then, because the SKU quantities inside it have to point at a saved
-// box, so the list marks it and says so if you tap it.
-let newBoxSeq=0, pendingBoxDeletes=[];
-document.getElementById('addBoxBtn').addEventListener('click',()=>{
-  if(!currentShipmentId) return;
-  boxRows.push({id:'newbox:'+(++newBoxSeq),shipment_id:currentShipmentId,
-    label:'Box '+(boxRows.length+1),length_cm:0,breadth_cm:0,height_cm:0,
-    cbm_rate_rmb:0,photo_path:null,_new:true});
-  markDirty('boxes');
-  renderBoxesListRows();
-  showMsg(document.getElementById('boxesSubmitMsg'),
-    'Box added. Submit to save it, then tap it to measure.',true);
+// Creating and removing a box are list actions and apply straight away —
+// what needs Submit is the detail you then enter on the measurement screen.
+document.getElementById('addBoxBtn').addEventListener('click',async()=>{
+  if(!sb||!currentShipmentId) return;
+  const {data:{session}}=await sb.auth.getSession(); if(!session) return;
+  const {data,error}=await sb.from('shipment_boxes').insert(
+    {user_id:session.user.id,shipment_id:currentShipmentId,label:'Box '+(boxRows.length+1),
+     length_cm:0,breadth_cm:0,height_cm:0,cbm_rate_rmb:0}).select().single();
+  if(error||!data){
+    showMsg(document.getElementById('boxesSubmitMsg'),
+      'Could not add box: '+((error&&error.message)||'unknown error'),false);
+    return;
+  }
+  await refreshBoxesList();
+  currentBoxId=data.id;
+  openBoxEditor();
 });
 // freight mode is a costing setting, so it follows the same rule as the
 // other settings: local until Submit
@@ -2324,16 +2323,6 @@ document.getElementById('boxesSubmitBtn').addEventListener('click',()=>
   withSubmit('boxesSubmitBtn',document.getElementById('boxesSubmitMsg'),'shipment-detail',async(session)=>{
     const sh=currentShipment();
     if(sh) await sb.from('shipments').update({freight_mode:sh.freight_mode}).eq('id',currentShipmentId);
-    for(const gone of pendingBoxDeletes){
-      if(gone.photo_path) await sb.storage.from(PHOTO_BUCKET).remove([gone.photo_path]);
-      await sb.from('shipment_boxes').delete().eq('id',gone.id);   // allocations cascade
-    }
-    pendingBoxDeletes=[];
-    for(const b of boxRows.filter(x=>x._new)){
-      await sb.from('shipment_boxes').insert({user_id:session.user.id,shipment_id:currentShipmentId,
-        label:b.label,length_cm:b.length_cm,breadth_cm:b.breadth_cm,
-        height_cm:b.height_cm,cbm_rate_rmb:b.cbm_rate_rmb});
-    }
   }));
 document.getElementById('boxesBackBtn').addEventListener('click',()=>showScreen('shipment-detail'));
 
