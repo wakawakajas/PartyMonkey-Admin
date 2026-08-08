@@ -1494,15 +1494,24 @@ async function refreshShipmentList(){
   renderShipmentList();
 }
 // everything the order list needs to badge and search rows, in one round trip
-let shipMeta={status:{},skusBySh:{},consolById:{}};
+let shipMeta={status:{},skusBySh:{},consolById:{},cbm:{}};
 async function loadShipmentMeta(){
-  const out={status:{},skusBySh:{},consolById:{}};
+  const out={status:{},skusBySh:{},consolById:{},cbm:{}};
   if(!sb) return out;
-  const [it,al,co]=await Promise.all([
+  const [it,al,co,bx]=await Promise.all([
     sb.from('shipment_items').select('id,shipment_id,sku,qty'),
     sb.from('shipment_box_items').select('item_id,qty'),
-    sb.from('consolidations').select('id,freight_number,eta').is('deleted_at',null)
+    sb.from('consolidations').select('id,freight_number,eta').is('deleted_at',null),
+    sb.from('shipment_boxes').select('shipment_id,length_cm,breadth_cm,height_cm')
   ]);
+  // a box with a dimension still at zero has not been measured yet, so it
+  // adds nothing and does not count towards the box tally either
+  (bx.data||[]).forEach(b=>{
+    const v=(Number(b.length_cm)||0)*(Number(b.breadth_cm)||0)*(Number(b.height_cm)||0)/1e6;
+    if(!v) return;
+    const m=out.cbm[b.shipment_id]||(out.cbm[b.shipment_id]={total:0,boxes:0});
+    m.total+=v; m.boxes++;
+  });
   const arrivedBy={};
   (al.data||[]).forEach(a=>{ arrivedBy[a.item_id]=(arrivedBy[a.item_id]||0)+(Number(a.qty)||0); });
   (it.data||[]).forEach(i=>{
@@ -1559,9 +1568,17 @@ function renderShipmentList(){
         <button class="del-btn" data-ship-del title="Delete">×</button>
       </div>
       <p class="hint" style="margin:0;">${desc}${consol?` · freight ${escapeHtml(consol.freight_number)}`:''}</p>
+      ${cbmLine(shipMeta.cbm[r.id])}
       ${progressBar(shipMeta.status[r.id])}
     </div>`;
   }).join('');
+}
+// once any box on the order has been measured, its volume is worth seeing
+// without opening the order — it is what the freight is charged on
+function cbmLine(m){
+  if(!m||!m.total) return '';
+  return `<p class="hint" style="margin:2px 0 0;"><strong>${m.total.toFixed(4)} m³</strong>`
+    +` · ${m.boxes} box${m.boxes>1?'es':''} measured</p>`;
 }
 // arrived-vs-ordered as a bar, so how far along an order is reads at a glance
 const shortDate=d=>d?String(d).slice(0,10):'';
