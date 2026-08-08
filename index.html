@@ -72,10 +72,10 @@ button:disabled{opacity:.45;cursor:not-allowed;}
   font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;}
 .item-photo-x:hover{color:var(--rust);}
 .item-fields{flex:1;min-width:0;}
-.pick{width:18px;height:18px;flex-shrink:0;accent-color:var(--blueprint);cursor:pointer;margin:0;}
-.bulkbar{display:flex;align-items:center;gap:8px;background:var(--nest);border:1px solid var(--border);
-  border-radius:12px;padding:8px 10px;margin-bottom:10px;font-size:12.5px;}
-.bulkbar .n{flex:1;color:var(--muted);}
+.pick{width:14px;height:14px;flex-shrink:0;accent-color:var(--blueprint);cursor:pointer;margin:0;}
+.bulkbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--nest);
+  border:1px solid var(--border);border-radius:12px;padding:8px 10px;margin-bottom:10px;font-size:12.5px;}
+.bulkbar .n{flex:1;color:var(--muted);min-width:80px;}
 input:disabled{background:#202225;color:var(--faint);}
 input::placeholder{color:var(--faint);}
 button{font-family:'IBM Plex Sans',sans-serif;cursor:pointer;border-radius:999px;min-height:var(--tap);}
@@ -322,9 +322,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <button class="btn-outline" id="importPoBtn" style="width:100%;margin-bottom:10px;">⬆ Import purchase order</button>
     <div id="importMsg"></div>
     <div class="bulkbar" id="orderBulkBar" style="display:none;">
+      <button class="btn-outline btn-sm" id="orderSelectAll">Select all</button>
       <span class="n" id="orderBulkCount"></span>
-      <button class="btn-outline btn-sm" id="orderBulkClear">Clear</button>
-      <button class="btn-danger btn-sm" id="orderBulkDelete">Delete selected</button>
+      <span id="orderBulkActions" style="display:none;gap:8px;">
+        <button class="btn-outline btn-sm" id="orderBulkCancel">Cancel</button>
+        <button class="btn-outline btn-sm" id="orderBulkExport">Export selected</button>
+        <button class="btn-danger btn-sm" id="orderBulkDelete">Delete selected</button>
+      </span>
     </div>
     <label class="field" style="margin-bottom:10px;"><span>SEARCH</span>
       <input type="text" id="shipmentSearch" placeholder="Order ID, description, item SKU or freight number"/>
@@ -379,7 +383,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <button class="btn-outline" id="goToCalendarBtn" style="width:100%;margin-bottom:16px;">📅 Arrival calendar</button>
     <div class="chips" id="consolTabSeg" style="margin-bottom:12px;">
       <button type="button" class="chip on" data-ctab="active">In transit</button>
-      <button type="button" class="chip" data-ctab="completed">Completed</button>
+      <button type="button" class="chip" data-ctab="completed">History</button>
       <button type="button" class="chip" id="consolFilterAll" style="border-style:dashed;">All</button>
       <button type="button" class="chip" id="consolFilterNone" style="border-style:dashed;">None</button>
     </div>
@@ -1407,7 +1411,7 @@ function showScreen(name){
   SCREENS.forEach(s=>{ document.getElementById(SCREEN_EL[s]).style.display=(s===name)?'':'none'; });
   closeDrawer();
   if(name==='tool') drawAll(); // canvases were hidden (0 size) while off-screen; redraw now they're visible
-  if(name==='shipment') refreshShipmentList();
+  if(name==='shipment') refreshShipmentList(); else if(selectMode) exitSelectMode();
   if(name==='shipment-detail') refreshOrderDetail();
   if(name==='shipment-tracking') refreshTrackingList();
   if(name==='shipment-boxes') refreshBoxesList();
@@ -1505,13 +1509,14 @@ function renderShipmentList(){
     el.innerHTML=`<p class="hint" style="margin:4px 0 0;">${raw?`No matching orders for “${escapeHtml(raw)}”`:'No orders'} with the selected status.</p>`;
     return;
   }
+  setTimeout(syncOrderBulk,0);   // reflect the new visible set once painted
   el.innerHTML=rows.map(r=>{
     const i=shipmentRows.indexOf(r);
     const oid=escapeHtml(r.order_id), desc=escapeHtml(r.description||'—');
     const consol=r.consolidation_id?shipMeta.consolById[r.consolidation_id]:null;
     return `<div class="ph-card row-link" data-id="${r.id}" data-ship-open>
       <div class="ph-card-head">
-        <input type="checkbox" class="pick" data-ship-pick ${pickedOrders.has(r.id)?'checked':''} title="Select"/>
+        ${selectMode?`<input type="checkbox" class="pick" data-ship-pick ${pickedOrders.has(r.id)?'checked':''} title="Select"/>`:''}
         <span style="flex:1;">${oid}${r.created_at?` <span class="hint" style="font-weight:400;">· ${shortDate(r.created_at)}</span>`:''}</span>
         ${arrivalTag(shipMeta.status[r.id])}
         <button class="icon-btn" data-ship-up ${i===0?'disabled':''} title="Move up">▲</button>
@@ -1537,21 +1542,39 @@ function progressBar(st){
 }
 // multi-select delete for orders
 const pickedOrders=new Set();
+// Rows stay clean until you ask to select: "Select all" turns on selection
+// mode and ticks everything on screen, which you can then pare back.
+let selectMode=false;
 function syncOrderBulk(){
   const bar=document.getElementById('orderBulkBar');
-  bar.style.display=pickedOrders.size?'flex':'none';
-  document.getElementById('orderBulkCount').textContent=pickedOrders.size+' order(s) selected';
+  const visible=visibleShipmentIds();
+  bar.style.display=visible.size?'flex':'none';
+  document.getElementById('orderSelectAll').style.display=selectMode?'none':'';
+  document.getElementById('orderBulkActions').style.display=selectMode?'inline-flex':'none';
+  document.getElementById('orderBulkCount').textContent=
+    selectMode?pickedOrders.size+' of '+visible.size+' selected':visible.size+' shown';
+  if(selectMode){
+    document.getElementById('orderBulkExport').disabled=!pickedOrders.size;
+    document.getElementById('orderBulkDelete').disabled=!pickedOrders.size;
+  }
 }
-document.getElementById('orderBulkClear').addEventListener('click',()=>{
-  pickedOrders.clear(); syncOrderBulk(); renderShipmentList();
+function exitSelectMode(){
+  selectMode=false; pickedOrders.clear(); renderShipmentList();
+}
+document.getElementById('orderSelectAll').addEventListener('click',()=>{
+  selectMode=true;
+  visibleShipmentIds().forEach(id=>pickedOrders.add(id));
+  renderShipmentList();
 });
+document.getElementById('orderBulkCancel').addEventListener('click',exitSelectMode);
+document.getElementById('orderBulkExport').addEventListener('click',()=>exportShipmentWorkbook(true));
 document.getElementById('orderBulkDelete').addEventListener('click',async()=>{
   if(!pickedOrders.size||!sb) return;
   if(!confirm('Delete '+pickedOrders.size+' order(s)? You can restore them from Recently deleted for 24 hours.')) return;
   const when=new Date().toISOString();
   await Promise.all([...pickedOrders].map(id=>
     sb.from('shipments').update({deleted_at:when}).eq('id',id)));
-  pickedOrders.clear(); syncOrderBulk();
+  pickedOrders.clear(); selectMode=false;
   await refreshShipmentList();
 });
 document.getElementById('shipmentSearch').addEventListener('input',renderShipmentList);
@@ -3030,8 +3053,9 @@ document.getElementById('importPoBtn').addEventListener('click',()=>{
 });
 
 // ---------- Excel export of every shipment tab ----------
-document.getElementById('exportExcelBtn').addEventListener('click',async()=>{
-  const btn=document.getElementById('exportExcelBtn');
+document.getElementById('exportExcelBtn').addEventListener('click',()=>exportShipmentWorkbook(false));
+async function exportShipmentWorkbook(selectedOnly){
+  const btn=document.getElementById(selectedOnly?'orderBulkExport':'exportExcelBtn');
   btn.disabled=true; const label=btn.textContent; btn.textContent='Exporting…';
   try{
     if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
@@ -3043,10 +3067,11 @@ document.getElementById('exportExcelBtn').addEventListener('click',async()=>{
       sb.from('shipment_tracking').select('*'),
       sb.from('consolidations').select('*').is('deleted_at',null).order('sort_order')
     ]);
-    // respect the on-screen filter rather than dumping every order
-    const keep=visibleShipmentIds();
+    // ticked rows win; otherwise fall back to whatever the filter is showing
+    const keep=selectedOnly?new Set(pickedOrders):visibleShipmentIds();
     const orders=(sh.data||[]).filter(o=>keep.has(o.id));
-    if(!orders.length) throw new Error('no orders match the current filter');
+    if(!orders.length) throw new Error(selectedOnly
+      ?'nothing selected to export':'no orders match the current filter');
     const items=it.data||[], allocs=al.data||[], boxes=bx.data||[],
           tracks=tr.data||[], freights=co.data||[];
     const liveOrder=new Set(orders.map(o=>o.id));
@@ -3125,11 +3150,12 @@ document.getElementById('exportExcelBtn').addEventListener('click',async()=>{
 
     XLSX.writeFile(wb,'shipments_'+new Date().toISOString().slice(0,10)+'.xlsx');
     showMsg(document.getElementById('importMsg'),
-      `✓ Exported ${orders.length} order(s) — the ones currently shown.`,true);
+      `✓ Exported ${orders.length} order(s) — ${selectedOnly?'the ones you selected':'the ones currently shown'}.`,true);
   }catch(err){
-    alert('Export failed: '+((err&&err.message)||'unknown error'));
-  }finally{ btn.disabled=false; btn.textContent=label; }
-});
+    showMsg(document.getElementById('importMsg'),
+      'Export failed: '+((err&&err.message)||'unknown error'),false);
+  }finally{ btn.disabled=false; btn.textContent=label; syncOrderBulk(); }
+}
 document.getElementById('consolBackBtn').addEventListener('click',()=>showScreen('shipment'));
 document.getElementById('consolDetailBackBtn').addEventListener('click',()=>showScreen('consol'));
 document.getElementById('shipmentAddForm').addEventListener('submit',async e=>{
