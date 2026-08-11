@@ -326,6 +326,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   background:var(--card);color:var(--muted);font-size:12px;font-weight:600;padding:0 6px;
   font-family:'IBM Plex Sans',sans-serif;}
 .pk-state.on{background:var(--blueprint);border-color:var(--blueprint);color:var(--lime-ink);font-weight:700;}
+/* one toggle per area, wrapping to whatever the width allows */
+.acc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:8px;}
+.acc-grid .pk-state{min-height:44px;}
 /* the photo sits under Collected: a dashed slot when empty, the picture
    itself once there is one, tapped to enlarge */
 .pk-photo{position:relative;width:100%;height:74px;min-height:74px;padding:0;overflow:hidden;
@@ -467,11 +470,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <button class="nav-item" id="navToolBtn">🖨️ Custom Print Template</button>
     <button class="nav-item" id="navShipmentBtn">🚚 Procurement &amp; Shipping</button>
     <button class="nav-item" id="navPickupBtn">🛍️ Store Pick Up</button>
+    <button class="nav-item" id="navUsersBtn" style="display:none;">👤 Users &amp; access</button>
     <button class="nav-item danger" id="navSignOutBtn">↪ Sign out</button>
   </nav>
 
   <div class="home-wrap" id="homeScreen">
     <h1>Hello, <span id="homeWho">—</span></h1>
+    <p class="hint" id="homeNoAccess" style="display:none;margin:6px 0 14px;">
+      Your account has not been given access to anything yet — ask for the parts you need.</p>
     <div class="tile-grid">
       <button class="tile" id="goToToolBtn">
         <span class="tile-top">
@@ -502,6 +508,16 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         <span class="tile-name">Store Pick Up</span>
       </button>
     </div>
+  </div>
+
+  <!-- USERS & ACCESS (admins only) -->
+  <div class="home-wrap" id="usersScreen" style="display:none;">
+    <h1>Users &amp; access</h1>
+    <p class="sub">Choose what each account can open. Accounts are created in Supabase.</p>
+    <div class="ph-list list-full" id="usersList">
+      <p class="hint" style="margin:4px 0 0;">Loading…</p>
+    </div>
+    <div id="usersMsg"></div>
   </div>
 
   <!-- STORE PICK UP -->
@@ -1667,6 +1683,7 @@ function setAuthedUI(signedIn,email){
     document.getElementById('signedInAs').textContent=email;
     // the part before the @ is what people call themselves
     document.getElementById('homeWho').textContent=String(email||'').split('@')[0]||'there';
+    loadAccess();
     if(!hasEverAuthed){
       hasEverAuthed=true;
       showScreen('home'); // land on home only the first time this session becomes authenticated
@@ -1681,13 +1698,54 @@ const SCREEN_EL={home:'homeScreen',tool:'appScreen',shipment:'shipmentScreen','s
   'shipment-boxes':'shipmentBoxesScreen','shipment-box':'shipmentBoxScreen',
   'shipment-china':'shipmentChinaScreen','shipment-outstanding':'outstandingScreen',
   'consol':'consolScreen','consol-detail':'consolDetailScreen','calendar':'calendarScreen',
-  'trash':'trashScreen','pickup':'pickupScreen'};
+  'trash':'trashScreen','pickup':'pickupScreen','users':'usersScreen'};
+// which permission each screen sits behind; anything unlisted is always open
+const SCREEN_SECTION={tool:'print',
+  shipment:'shipping','shipment-add':'shipping','shipment-detail':'shipping',
+  'shipment-tracking':'shipping','shipment-boxes':'shipping','shipment-box':'shipping',
+  'shipment-china':'shipping','shipment-outstanding':'shipping',
+  consol:'shipping','consol-detail':'shipping',calendar:'shipping',trash:'shipping',
+  pickup:'pickup',users:'admin'};
 const SCREENS=Object.keys(SCREEN_EL);
 // With no back button on the screens themselves, Back has to remember the
 // route you actually took rather than a fixed parent per screen.
+// What this account may open. Loaded once at sign-in from its profiles row.
+// This is a gate on the interface, not a lock on the data — row level security
+// is what keeps one account's rows away from another's. If the table is not
+// there yet the app stays fully open rather than locking everyone out.
+let access={admin:false,print:true,shipping:true,pickup:true};
+const may=s=>!s||(s==='admin'?access.admin:!!access[s]);
+async function loadAccess(){
+  access={admin:false,print:true,shipping:true,pickup:true};
+  if(!sb) return;
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session) return;
+  const {data,error}=await sb.from('profiles')
+    .select('is_admin,can_print,can_shipping,can_pickup').eq('user_id',session.user.id).maybeSingle();
+  if(error) return;                       // migration not run — leave it open
+  if(!data){ access={admin:false,print:false,shipping:false,pickup:false}; }
+  else access={admin:!!data.is_admin,print:!!data.can_print,
+               shipping:!!data.can_shipping,pickup:!!data.can_pickup};
+  applyAccess();
+}
+// hide what they cannot open, rather than letting them find a dead end
+function applyAccess(){
+  const pairs=[['goToToolBtn','print'],['navToolBtn','print'],
+               ['goToShipmentBtn','shipping'],['navShipmentBtn','shipping'],
+               ['goToPickupBtn','pickup'],['navPickupBtn','pickup'],
+               ['navUsersBtn','admin']];
+  pairs.forEach(([id,sec])=>{ const el=document.getElementById(id); if(el) el.style.display=may(sec)?'':'none'; });
+  const none=!may('print')&&!may('shipping')&&!may('pickup');
+  const note=document.getElementById('homeNoAccess');
+  if(note) note.style.display=none?'':'none';
+  // if they are sitting on something they may no longer open, send them home
+  if(currentScreen&&!may(SCREEN_SECTION[currentScreen])) showScreen('home',true);
+}
 let currentScreen=null;
 const navStack=[];
 function showScreen(name,viaBack){
+  // the guard, so a stale link or a back step cannot land on a closed screen
+  if(!may(SCREEN_SECTION[name])) name='home';
   if(!viaBack&&currentScreen&&currentScreen!==name){
     navStack.push(currentScreen);
     if(navStack.length>40) navStack.shift();
@@ -1709,6 +1767,7 @@ function showScreen(name,viaBack){
   if(name==='calendar') openCalendar();
   if(name==='trash') refreshTrash();
   if(name==='pickup') refreshPickups();
+  if(name==='users') refreshUsers();
   // nothing to go back to from the first screen of the session
   document.getElementById('navBackBtn').disabled=!navStack.length;
 }
@@ -1725,6 +1784,56 @@ document.getElementById('navShipmentBtn').addEventListener('click',()=>showScree
 document.getElementById('goToToolBtn').addEventListener('click',()=>showScreen('tool'));
 document.getElementById('goToShipmentBtn').addEventListener('click',()=>showScreen('shipment'));
 document.getElementById('navPickupBtn').addEventListener('click',()=>showScreen('pickup'));
+document.getElementById('navUsersBtn').addEventListener('click',()=>showScreen('users'));
+
+// ---------- who may open what ----------
+let userRows=[];
+const ACCESS_COLS=[['can_print','Print template'],['can_shipping','Procurement'],
+                   ['can_pickup','Store Pick Up'],['is_admin','Admin']];
+async function refreshUsers(){
+  const el=document.getElementById('usersList');
+  if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
+  const {data,error}=await sb.from('profiles')
+    .select('user_id,email,is_admin,can_print,can_shipping,can_pickup').order('email');
+  if(error){
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load users. Run supabase-migration-ACCESS.sql first.</p>';
+    return;
+  }
+  userRows=data||[];
+  renderUsers();
+}
+function renderUsers(){
+  const el=document.getElementById('usersList');
+  if(!userRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— no accounts yet —</p>'; return; }
+  el.innerHTML=userRows.map(u=>`<div class="ph-card" data-uid="${u.user_id}">
+      <div class="ph-card-head" style="margin-bottom:9px;">
+        <span style="flex:1;min-width:0;overflow-wrap:anywhere;">${escapeHtml(u.email||u.user_id)}</span>
+      </div>
+      <div class="acc-grid">
+        ${ACCESS_COLS.map(([col,label])=>`
+          <button class="pk-state${u[col]?' on':''}" data-acc="${col}">${label}</button>`).join('')}
+      </div>
+    </div>`).join('');
+}
+document.getElementById('usersList').addEventListener('click',async e=>{
+  const btn=e.target.closest('[data-acc]'); if(!btn) return;
+  const card=e.target.closest('.ph-card');
+  const u=userRows.find(x=>x.user_id===card.dataset.uid); if(!u) return;
+  const col=btn.dataset.acc;
+  const msg=document.getElementById('usersMsg');
+  // locking yourself out of Users would leave nobody able to hand it back
+  const me=(await sb.auth.getSession()).data.session;
+  if(col==='is_admin'&&u[col]&&me&&me.user.id===u.user_id){
+    showMsg(msg,'You cannot remove your own admin access — nobody could grant it back.',false);
+    return;
+  }
+  u[col]=!u[col];
+  renderUsers();
+  const {error}=await sb.from('profiles').update({[col]:u[col]}).eq('user_id',u.user_id);
+  if(error){ u[col]=!u[col]; renderUsers(); showMsg(msg,'Could not save: '+error.message,false); return; }
+  // changing your own access takes effect straight away
+  if(me&&me.user.id===u.user_id) await loadAccess();
+});
 document.getElementById('goToPickupBtn').addEventListener('click',()=>showScreen('pickup'));
 document.getElementById('homeBarBtn').addEventListener('click',()=>showScreen('home'));
 document.getElementById('navBackBtn').addEventListener('click',()=>{
