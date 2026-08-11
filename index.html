@@ -390,6 +390,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button type="button" class="chip on" data-pst="waiting">Waiting</button>
       <button type="button" class="chip on" data-pst="prepared">Prepared</button>
       <button type="button" class="chip" data-pst="collected">Collected</button>
+      <button type="button" class="chip chip-xs" id="pickupPush">🔕 Notify this phone</button>
       <button type="button" class="chip chip-xs" id="pickupTestSound">🔔 Test sound</button>
     </div>
     <div class="ph-list list-full" id="pickupList">
@@ -3773,11 +3774,86 @@ function beep(kind){
   });
 }
 const PICKUP_WORD={added:'added',prepared:'prepared',collected:'collected'};
-function pickupNotify(kind,orderId){
+// `local` means this device caused it, so it is also the one that tells the
+// other phones. A change arriving from elsewhere just chimes.
+function pickupNotify(kind,orderId,local,name){
   chime(kind);
   showMsg(document.getElementById('pickupMsg'),
     `🔔 ${escapeHtml(orderId)} ${PICKUP_WORD[kind]}`,true);
+  if(local) pushOthers(kind,orderId,name);
 }
+
+// ---- notifications while the app is closed ----
+// The chime only exists while the page is on screen. A push goes through the
+// service worker, which the phone keeps alive on its own, so the alert still
+// lands with the app shut.
+const VAPID_PUBLIC='BLwmx7BEF_ksZLvvRxTmwdGU2rucocoESVCzUnbGYoK0x86M_r08cRHw5sncHPuv77XVTcq8FBfEhQB8ROXoWXE';
+let pushEndpoint=null;
+function b64ToBytes(b64){
+  const s=(b64+'='.repeat((4-b64.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/');
+  const raw=atob(s), out=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) out[i]=raw.charCodeAt(i);
+  return out;
+}
+const installedApp=()=>window.matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;
+const pushSupported=()=>'serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;
+if('serviceWorker' in navigator)
+  window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+
+function syncPushChip(state){
+  const b=document.getElementById('pickupPush');
+  if(!b) return;
+  b.textContent=state==='on'?'🔔 Notify: on':'🔕 Notify this phone';
+  b.classList.toggle('on',state==='on');
+}
+// records this device against the account so the function knows where to send
+async function registerPush(interactive){
+  const msg=document.getElementById('pickupMsg');
+  const say=(t,ok)=>{ if(interactive) showMsg(msg,t,ok); };
+  if(!pushSupported()){
+    say(installedApp()?'This phone cannot do background notifications.'
+      :'Add Pigu to your Home Screen first, then open it from there — Safari tabs cannot do background notifications.',false);
+    return false;
+  }
+  try{
+    const perm=await Notification.requestPermission();
+    if(perm!=='granted'){
+      say('Notifications are blocked. Turn them on for Pigu in your phone settings.',false);
+      return false;
+    }
+    const reg=await navigator.serviceWorker.ready;
+    let sub=await reg.pushManager.getSubscription();
+    if(!sub) sub=await reg.pushManager.subscribe(
+      {userVisibleOnly:true,applicationServerKey:b64ToBytes(VAPID_PUBLIC)});
+    const k=sub.toJSON().keys||{};
+    const {data:{session}}=await sb.auth.getSession();
+    if(!session){ say('Sign in first.',false); return false; }
+    const {error}=await sb.from('push_subscriptions').upsert(
+      {user_id:session.user.id,endpoint:sub.endpoint,p256dh:k.p256dh,auth:k.auth,
+       label:(navigator.userAgent||'').slice(0,80)},{onConflict:'endpoint'});
+    if(error){ say('Could not save this phone: '+error.message,false); return false; }
+    pushEndpoint=sub.endpoint;
+    syncPushChip('on');
+    say('✓ This phone will be notified even when the app is closed.',true);
+    return true;
+  }catch(err){
+    say('Could not turn on notifications: '+((err&&err.message)||'unknown error'),false);
+    return false;
+  }
+}
+// already granted on a previous visit — re-attach quietly so the endpoint is known
+async function resumePush(){
+  if(!pushSupported()||Notification.permission!=='granted') { syncPushChip('off'); return; }
+  await registerPush(false);
+}
+async function pushOthers(kind,orderId,name){
+  if(!sb||!sb.functions) return;
+  try{
+    await sb.functions.invoke('notify-pickup',
+      {body:{kind,order_id:orderId,name:name||'',from:pushEndpoint}});
+  }catch(e){ /* the chime already happened; a failed push is not worth a banner */ }
+}
+document.getElementById('pickupPush').addEventListener('click',()=>registerPush(true));
 
 async function refreshPickups(){
   const el=document.getElementById('pickupList');
@@ -3791,6 +3867,7 @@ async function refreshPickups(){
   pickupRows=data||[];
   renderPickups();
   watchPickups();
+  resumePush();
 }
 function pickupMatches(p,q){
   if(!q) return true;
@@ -3873,9 +3950,10 @@ document.getElementById('pickupAddForm').addEventListener('submit',async e=>{
   const {error}=await sb.from('pickups').insert({user_id:session.user.id,order_id:orderId,
     name:nameEl.value.trim(),sort_order:topSort});
   if(error){ showMsg(msg,'Could not add: '+error.message,false); return; }
+  const who=nameEl.value.trim();
   input.value=''; nameEl.value='';
   await refreshPickups();
-  pickupNotify('added',orderId);
+  pickupNotify('added',orderId,true,who);
 });
 document.getElementById('pickupList').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
@@ -3895,7 +3973,7 @@ document.getElementById('pickupList').addEventListener('click',async e=>{
     if(p.prepared){ p.prepared_at=now(); }
     else { p.prepared_at=null; p.collected=false; p.collected_at=null; }
     markDirty('pickup'); renderPickups();
-    if(p.prepared) pickupNotify('prepared',p.order_id);
+    if(p.prepared) pickupNotify('prepared',p.order_id,true,p.name);
   }else if(e.target.closest('[data-pk-collected]')){
     p.collected=!p.collected;
     if(p.collected){
@@ -3903,7 +3981,7 @@ document.getElementById('pickupList').addEventListener('click',async e=>{
       if(!p.prepared){ p.prepared=true; p.prepared_at=p.prepared_at||p.collected_at; }
     }else p.collected_at=null;
     markDirty('pickup'); renderPickups();
-    if(p.collected) pickupNotify('collected',p.order_id);
+    if(p.collected) pickupNotify('collected',p.order_id,true,p.name);
   }
 });
 document.getElementById('pickupList').addEventListener('input',e=>{

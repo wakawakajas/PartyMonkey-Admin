@@ -207,3 +207,30 @@ begin
     execute 'alter publication supabase_realtime add table public.pickups';
   end if;
 end $$;
+
+-- ---- push notification subscriptions -----------------------------------
+-- one row per device that has agreed to be notified. endpoint is the push
+-- service's own URL for that device, so it is what identifies it.
+create table if not exists public.push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  endpoint text not null unique,
+  p256dh   text not null,
+  auth     text not null,
+  label    text not null default '',
+  created_at timestamptz not null default now()
+);
+
+alter table public.push_subscriptions enable row level security;
+
+do $$
+begin
+  execute 'drop policy if exists "own_select" on public.push_subscriptions';
+  execute 'drop policy if exists "own_insert" on public.push_subscriptions';
+  execute 'drop policy if exists "own_update" on public.push_subscriptions';
+  execute 'drop policy if exists "own_delete" on public.push_subscriptions';
+  execute 'create policy "own_select" on public.push_subscriptions for select using (auth.uid() = user_id)';
+  execute 'create policy "own_insert" on public.push_subscriptions for insert with check (auth.uid() = user_id)';
+  execute 'create policy "own_update" on public.push_subscriptions for update using (auth.uid() = user_id)';
+  execute 'create policy "own_delete" on public.push_subscriptions for delete using (auth.uid() = user_id)';
+end $$;
