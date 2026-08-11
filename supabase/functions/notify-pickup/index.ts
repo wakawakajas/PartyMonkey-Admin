@@ -57,7 +57,7 @@ Deno.serve(async (req) => {
     const { data: { user } } = await sb.auth.getUser();
     if (!user) return json({ error: "not signed in" }, 401);
 
-    const { kind, order_id, name, from } = await req.json();
+    const { kind, order_id, name, from, test } = await req.json();
     if (!WORD[kind]) return json({ error: "unknown kind" }, 400);
 
     const { data: subs, error } = await sb
@@ -66,8 +66,9 @@ Deno.serve(async (req) => {
       .eq("user_id", user.id);
     if (error) return json({ error: error.message }, 500);
 
-    // the phone that made the change already chimed; do not buzz it again
-    const targets = (subs ?? []).filter((s) => s.endpoint !== from);
+    // the phone that made the change already chimed; do not buzz it again —
+    // unless this is someone checking their own setup works
+    const targets = test ? (subs ?? []) : (subs ?? []).filter((s) => s.endpoint !== from);
     if (!targets.length) return json({ sent: 0, note: "no other devices registered" });
 
     const payload = JSON.stringify({
