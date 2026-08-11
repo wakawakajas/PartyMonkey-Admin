@@ -24,6 +24,16 @@ const WORD: Record<string, string> = {
   collected: "Collected",
 };
 
+function b64uToBytes(s: string): Uint8Array {
+  const p = s.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(p + "=".repeat((4 - p.length % 4) % 4));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+const bytesToB64u = (b: Uint8Array) =>
+  btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
 // deno-lint-ignore no-explicit-any
 let appServer: any = null;
 async function server() {
@@ -36,10 +46,21 @@ async function server() {
   if (pub.length < 80) throw new Error(`VAPID_PUBLIC_KEY looks wrong (${pub.length} chars, expected ~87)`);
   if (prv.length > 60) throw new Error(`VAPID_PRIVATE_KEY looks like the public key (${prv.length} chars, expected ~43)`);
 
+  // importVapidKeys wants JWKs, not the base64url strings the push spec uses
+  // on the wire, so unpack the point into its x and y halves here
   let keys;
   try {
+    const raw = b64uToBytes(pub);
+    if (raw.length !== 65 || raw[0] !== 4) {
+      throw new Error(`public key is ${raw.length} bytes, expected a 65-byte uncompressed point`);
+    }
+    const x = bytesToB64u(raw.slice(1, 33));
+    const y = bytesToB64u(raw.slice(33, 65));
     keys = await webpush.importVapidKeys(
-      { publicKey: pub, privateKey: prv },
+      {
+        publicKey: { kty: "EC", crv: "P-256", x, y },
+        privateKey: { kty: "EC", crv: "P-256", x, y, d: prv },
+      },
       { extractable: false },
     );
   } catch (e) {
