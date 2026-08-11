@@ -24,20 +24,35 @@ const WORD: Record<string, string> = {
   collected: "Collected",
 };
 
-let appServer: Awaited<ReturnType<typeof webpush.ApplicationServer.new>> | null = null;
+// deno-lint-ignore no-explicit-any
+let appServer: any = null;
 async function server() {
   if (appServer) return appServer;
-  const keys = await webpush.importVapidKeys(
-    {
-      publicKey: Deno.env.get("VAPID_PUBLIC_KEY")!,
-      privateKey: Deno.env.get("VAPID_PRIVATE_KEY")!,
-    },
-    { extractable: false },
-  );
-  appServer = await webpush.ApplicationServer.new({
-    contactInformation: Deno.env.get("VAPID_SUBJECT") ?? "mailto:admin@example.com",
-    vapidKeys: keys,
-  });
+  const pub = Deno.env.get("VAPID_PUBLIC_KEY");
+  const prv = Deno.env.get("VAPID_PRIVATE_KEY");
+  // say which secret is wrong rather than dying inside the library
+  if (!pub) throw new Error("VAPID_PUBLIC_KEY secret is not set");
+  if (!prv) throw new Error("VAPID_PRIVATE_KEY secret is not set");
+  if (pub.length < 80) throw new Error(`VAPID_PUBLIC_KEY looks wrong (${pub.length} chars, expected ~87)`);
+  if (prv.length > 60) throw new Error(`VAPID_PRIVATE_KEY looks like the public key (${prv.length} chars, expected ~43)`);
+
+  let keys;
+  try {
+    keys = await webpush.importVapidKeys(
+      { publicKey: pub, privateKey: prv },
+      { extractable: false },
+    );
+  } catch (e) {
+    throw new Error("could not read the VAPID keys: " + String(e));
+  }
+  try {
+    appServer = await webpush.ApplicationServer.new({
+      contactInformation: Deno.env.get("VAPID_SUBJECT") ?? "mailto:admin@example.com",
+      vapidKeys: keys,
+    });
+  } catch (e) {
+    throw new Error("could not start the push server: " + String(e));
+  }
   return appServer;
 }
 
@@ -78,9 +93,13 @@ Deno.serve(async (req) => {
       url: "./",
     });
 
-    const app = await server();
+    let app;
+    try { app = await server(); }
+    catch (e) { return json({ error: (e as Error).message }, 500); }
+
     let sent = 0;
     const gone: string[] = [];
+    const failures: string[] = [];
 
     await Promise.all(targets.map(async (s) => {
       try {
@@ -94,12 +113,14 @@ Deno.serve(async (req) => {
         // 404/410 means the browser threw the subscription away
         const msg = String(e);
         if (msg.includes("404") || msg.includes("410") || msg.includes("Gone")) gone.push(s.endpoint);
-        else console.error("push failed", s.endpoint.slice(0, 40), msg);
+        else { failures.push(msg.slice(0, 160)); console.error("push failed", s.endpoint.slice(0, 40), msg); }
       }
     }));
 
     if (gone.length) await sb.from("push_subscriptions").delete().in("endpoint", gone);
 
+    // a send that reached nobody is a failure worth reporting, not a quiet 200
+    if (!sent && failures.length) return json({ error: "push rejected: " + failures[0] }, 500);
     return json({ sent, dropped: gone.length });
   } catch (e) {
     console.error(e);
