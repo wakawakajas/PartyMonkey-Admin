@@ -234,3 +234,6 @@ begin
   execute 'create policy "own_update" on public.push_subscriptions for update using (auth.uid() = user_id)';
   execute 'create policy "own_delete" on public.push_subscriptions for delete using (auth.uid() = user_id)';
 end $$;
+
+-- ---- photo against a pick up ------------------------------------------
+alter table public.pickups add column if not exists photo_path text;

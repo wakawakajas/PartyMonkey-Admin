@@ -131,6 +131,7 @@ create table public.pickups (
   collected boolean not null default false,
   prepared_at  timestamptz,
   collected_at timestamptz,
+  photo_path   text,
   sort_order integer not null default 0,
   created_at timestamptz not null default now()
 );
