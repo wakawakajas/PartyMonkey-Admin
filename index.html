@@ -3688,10 +3688,13 @@ function unlockAudio(){
 // tells iOS this is playback rather than ambient sound, so the ring/silent
 // switch does not mute it (Safari 17+; ignored everywhere else)
 try{ if(navigator.audioSession) navigator.audioSession.type='playback'; }catch(e){}
+const hasWebAudio=()=>!!(window.AudioContext||window.webkitAudioContext);
 ['pointerdown','touchend','keydown'].forEach(ev=>
   document.addEventListener(ev,()=>{
     if(!audioCtx||audioCtx.state!=='running') unlockAudio();
-    primeSounds();
+    // only build and prime the fallback where there is no Web Audio at all —
+    // priming plays the clips, which is itself enough to raise the widget
+    if(!hasWebAudio()) primeSounds();
   },{capture:true,passive:true}));
 const CHIME={added:[660,880],prepared:[784],collected:[880,1175]};
 
@@ -3746,18 +3749,31 @@ function primeSounds(){
 let lastSoundPath='';
 function chime(kind){
   unlockAudio();
+  // Web Audio first: it is not media playback, so the phone does not throw up
+  // a Now Playing card for a half-second chime the way an <audio> element does
+  if(audioCtx&&audioCtx.state==='running'){ lastSoundPath='webaudio'; beep(kind); return; }
   const a=SOUND[kind]||SOUND.prepared;
   if(a){
     try{
       a.currentTime=0;
       const p=a.play();
       lastSoundPath='element';
-      if(p&&p.catch) p.catch(()=>{ lastSoundPath='webaudio (element blocked)'; beep(kind); });
+      if(p&&p.catch) p.catch(()=>{});
+      quietMediaSession();
       return;
-    }catch(e){ /* fall through to the oscillator */ }
+    }catch(e){ /* nothing left to try */ }
   }
-  lastSoundPath='webaudio';
-  beep(kind);
+  lastSoundPath='none';
+}
+// the fallback still counts as media on iOS; clearing the session stops the
+// widget lingering after the clip has finished
+function quietMediaSession(){
+  try{
+    if(navigator.mediaSession){
+      navigator.mediaSession.metadata=null;
+      navigator.mediaSession.playbackState='none';
+    }
+  }catch(e){}
 }
 function beep(kind){
   if(!audioCtx) return;
@@ -3947,18 +3963,15 @@ document.getElementById('pickupFilterAll').addEventListener('click',()=>{
 // so you can tell "the app is not making a sound" apart from "the phone is
 // on silent" without adding an order to find out
 document.getElementById('pickupTestSound').addEventListener('click',()=>{
-  unlockAudio(); primeSounds();
+  unlockAudio();
+  if(!hasWebAudio()) primeSounds();
   chime('added');
   const msg=document.getElementById('pickupMsg');
   // report enough to tell where it stopped, rather than just "sent"
   setTimeout(()=>{
-    const a=SOUND.added;
-    const playing=a&&!a.paused&&a.currentTime>0;
-    showMsg(msg,`🔔 via ${lastSoundPath||'nothing'} · ${playing?'playing':'not playing'}`
-      +` · volume ${a?Math.round(a.volume*100):0}%`
-      +` · context ${audioCtx?audioCtx.state:'none'}`
-      +'<br/>Nothing heard? Press the volume-up button while this page is open.',
-      !!playing);
+    const ok=lastSoundPath==='webaudio'||lastSoundPath==='element';
+    showMsg(msg,`🔔 via ${lastSoundPath||'nothing'} · context ${audioCtx?audioCtx.state:'none'}`
+      +'<br/>Nothing heard? Press the volume-up button while this page is open.',ok);
   },250);
 });
 document.getElementById('pickupAddForm').addEventListener('submit',async e=>{
