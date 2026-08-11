@@ -117,11 +117,15 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
+    // can_pickup alone, matching the database rule. Being an admin does not
+    // put you on the list — otherwise switching the section off for someone
+    // would leave their phone still buzzing.
     const { data: team, error: teamErr } = await admin
-      .from("profiles").select("user_id").or("can_pickup.eq.true,is_admin.eq.true");
+      .from("profiles").select("user_id").eq("can_pickup", true);
     // no profiles table yet just means access control has not been set up
     const ids = teamErr ? [user.id] : (team ?? []).map((t) => t.user_id);
-    if (!ids.includes(user.id)) ids.push(user.id);
+    // the self-test has to reach the caller even if they are not on the team
+    if (test && !ids.includes(user.id)) ids.push(user.id);
 
     const { data: subs, error } = await admin
       .from("push_subscriptions")
