@@ -1721,18 +1721,29 @@ const SCREENS=Object.keys(SCREEN_EL);
 let access={admin:false,print:true,shipping:true,pickup:true};
 const may=s=>!s||(s==='admin'?access.admin:!!access[s]);
 async function loadAccess(){
-  access={admin:false,print:true,shipping:true,pickup:true};
   if(!sb) return;
   const {data:{session}}=await sb.auth.getSession();
   if(!session) return;
   const {data,error}=await sb.from('profiles')
     .select('is_admin,can_print,can_shipping,can_pickup').eq('user_id',session.user.id).maybeSingle();
-  if(error) return;                       // migration not run — leave it open
-  if(!data){ access={admin:false,print:false,shipping:false,pickup:false}; }
-  else access={admin:!!data.is_admin,print:!!data.can_print,
-               shipping:!!data.can_shipping,pickup:!!data.can_pickup};
+  // a failed read must leave what we already knew alone — resetting to "open"
+  // here would hand out everything the moment the network hiccuped
+  if(error){
+    if(!accessLoaded) access={admin:false,print:true,shipping:true,pickup:true}; // migration not run
+    return;
+  }
+  access=data
+    ? {admin:!!data.is_admin,print:!!data.can_print,shipping:!!data.can_shipping,pickup:!!data.can_pickup}
+    : {admin:false,print:false,shipping:false,pickup:false};
+  accessLoaded=true;
   applyAccess();
 }
+let accessLoaded=false;
+// Access can be taken away while someone has the app open, so it is re-read
+// when the app comes back to the foreground and every so often while in use.
+// Whatever they lose disappears from the screen without them reloading.
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden) loadAccess(); });
+setInterval(()=>{ if(!document.hidden) loadAccess(); },60000);
 // hide what they cannot open, rather than letting them find a dead end
 function applyAccess(){
   const pairs=[['goToToolBtn','print'],['navToolBtn','print'],
