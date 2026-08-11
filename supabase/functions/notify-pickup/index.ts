@@ -109,10 +109,24 @@ Deno.serve(async (req) => {
     const { kind, order_id, name, from, test } = await req.json();
     if (!WORD[kind]) return json({ error: "unknown kind" }, 400);
 
-    const { data: subs, error } = await sb
+    // Everyone granted Store Pick Up works the same list, so a change has to
+    // reach their devices too, not just the caller's. The caller's own token
+    // cannot see other people's subscription rows, so the fan-out reads them
+    // with the service role.
+    const admin = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    );
+    const { data: team, error: teamErr } = await admin
+      .from("profiles").select("user_id").or("can_pickup.eq.true,is_admin.eq.true");
+    // no profiles table yet just means access control has not been set up
+    const ids = teamErr ? [user.id] : (team ?? []).map((t) => t.user_id);
+    if (!ids.includes(user.id)) ids.push(user.id);
+
+    const { data: subs, error } = await admin
       .from("push_subscriptions")
       .select("endpoint,p256dh,auth")
-      .eq("user_id", user.id);
+      .in("user_id", ids);
     if (error) return json({ error: error.message }, 500);
 
     // the phone that made the change already chimed; do not buzz it again —
@@ -151,7 +165,8 @@ Deno.serve(async (req) => {
       }
     }));
 
-    if (gone.length) await sb.from("push_subscriptions").delete().in("endpoint", gone);
+    // the dead ones may belong to other people, so this needs the service role too
+    if (gone.length) await admin.from("push_subscriptions").delete().in("endpoint", gone);
 
     // a send that reached nobody is a failure worth reporting, not a quiet 200
     if (!sent && failures.length) return json({ error: "push rejected: " + failures[0] }, 500);
