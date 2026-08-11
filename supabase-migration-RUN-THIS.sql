@@ -187,3 +187,23 @@ begin
   execute 'create policy "own_update" on public.pickups for update using (auth.uid() = user_id)';
   execute 'create policy "own_delete" on public.pickups for delete using (auth.uid() = user_id)';
 end $$;
+
+-- ---- pick up timestamps + live updates ---------------------------------
+-- when each state was reached; created_at already stamps when it was added
+alter table public.pickups add column if not exists prepared_at  timestamptz;
+alter table public.pickups add column if not exists collected_at timestamptz;
+
+-- an update event only carries the changed row's key unless the table keeps
+-- its whole previous row, and we need the old flags to tell what just changed
+alter table public.pickups replica identity full;
+
+-- let other devices hear about pick ups as they happen
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'pickups')
+  then
+    execute 'alter publication supabase_realtime add table public.pickups';
+  end if;
+end $$;

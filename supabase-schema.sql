@@ -129,9 +129,15 @@ create table public.pickups (
   remarks   text not null default '',
   prepared  boolean not null default false,
   collected boolean not null default false,
+  prepared_at  timestamptz,
+  collected_at timestamptz,
   sort_order integer not null default 0,
   created_at timestamptz not null default now()
 );
+
+-- keep the whole previous row so a live update can say what changed
+alter table public.pickups replica identity full;
+alter publication supabase_realtime add table public.pickups;
 
 alter table public.shipment_boxes     enable row level security;
 alter table public.shipment_items     enable row level security;
