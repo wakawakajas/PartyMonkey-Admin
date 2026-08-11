@@ -390,6 +390,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button type="button" class="chip on" data-pst="waiting">Waiting</button>
       <button type="button" class="chip on" data-pst="prepared">Prepared</button>
       <button type="button" class="chip" data-pst="collected">Collected</button>
+      <button type="button" class="chip chip-xs" id="pickupTestSound">🔔 Test sound</button>
     </div>
     <div class="ph-list list-full" id="pickupList">
       <p class="hint" style="margin:4px 0 0;">— none yet —</p>
@@ -3668,13 +3669,27 @@ function stamp(iso){
 // there is no asset to lose. Phones will not let a page make a sound until
 // you have touched it once, so the context is opened on the first tap.
 let audioCtx=null;
+// Safari hands back a suspended context and will only resume it inside a real
+// tap, so every touch runs this until the context is actually running — and it
+// pushes a silent buffer through, which is what iOS counts as "started".
 function unlockAudio(){
-  if(audioCtx) return;
   const AC=window.AudioContext||window.webkitAudioContext;
-  if(AC) audioCtx=new AC();
+  if(!AC) return;
+  if(!audioCtx) audioCtx=new AC();
+  if(audioCtx.state==='suspended') audioCtx.resume();
+  if(!audioCtx._primed){
+    audioCtx._primed=true;
+    const b=audioCtx.createBufferSource();
+    b.buffer=audioCtx.createBuffer(1,1,audioCtx.sampleRate);
+    b.connect(audioCtx.destination); b.start(0);
+  }
 }
-document.addEventListener('pointerdown',unlockAudio,{once:true});
-document.addEventListener('keydown',unlockAudio,{once:true});
+// tells iOS this is playback rather than ambient sound, so the ring/silent
+// switch does not mute it (Safari 17+; ignored everywhere else)
+try{ if(navigator.audioSession) navigator.audioSession.type='playback'; }catch(e){}
+['pointerdown','touchend','keydown'].forEach(ev=>
+  document.addEventListener(ev,()=>{ if(!audioCtx||audioCtx.state!=='running') unlockAudio(); },
+    {capture:true,passive:true}));
 const CHIME={added:[660,880],prepared:[784],collected:[880,1175]};
 function chime(kind){
   unlockAudio();
@@ -3761,8 +3776,21 @@ document.getElementById('pickupFilterAll').addEventListener('click',()=>{
   document.querySelectorAll('#pickupFilterChips .chip[data-pst]').forEach(x=>x.classList.add('on'));
   renderPickups();
 });
+// so you can tell "the app is not making a sound" apart from "the phone is
+// on silent" without adding an order to find out
+document.getElementById('pickupTestSound').addEventListener('click',()=>{
+  unlockAudio();
+  chime('added');
+  const msg=document.getElementById('pickupMsg');
+  showMsg(msg, audioCtx
+    ? (audioCtx.state==='running'
+        ? '🔔 Sound sent. Nothing? Check the side switch on your phone and the volume.'
+        : 'Audio is still blocked — tap anywhere on the page, then try again.')
+    : 'This browser has no audio support.', !!audioCtx&&audioCtx.state==='running');
+});
 document.getElementById('pickupAddForm').addEventListener('submit',async e=>{
   e.preventDefault();
+  unlockAudio();   // still inside the tap — after the first await it is too late
   const msg=document.getElementById('pickupMsg');
   const input=document.getElementById('pickupOrderId');
   const nameEl=document.getElementById('pickupNewName');
