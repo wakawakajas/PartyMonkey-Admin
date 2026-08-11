@@ -38,11 +38,24 @@ const bytesToB64u = (b: Uint8Array) =>
 let appServer: any = null;
 async function server() {
   if (appServer) return appServer;
-  const pub = Deno.env.get("VAPID_PUBLIC_KEY");
-  const prv = Deno.env.get("VAPID_PRIVATE_KEY");
-  // say which secret is wrong rather than dying inside the library
-  if (!pub) throw new Error("VAPID_PUBLIC_KEY secret is not set");
-  if (!prv) throw new Error("VAPID_PRIVATE_KEY secret is not set");
+  // trim, because a space or newline pasted along with the value is invisible
+  // in the dashboard but breaks the key
+  const pub = (Deno.env.get("VAPID_PUBLIC_KEY") ?? "").trim();
+  const prv = (Deno.env.get("VAPID_PRIVATE_KEY") ?? "").trim();
+  if (!pub || !prv) {
+    // list the names it can see — never the values — so a misspelled or
+    // unsaved secret is obvious rather than a guessing game
+    let seen = "none";
+    try {
+      const names = Object.keys(Deno.env.toObject()).filter((n) => /vapid/i.test(n)).sort();
+      if (names.length) seen = names.join(", ");
+    } catch { seen = "could not list"; }
+    throw new Error(
+      `${!pub ? "VAPID_PUBLIC_KEY" : "VAPID_PRIVATE_KEY"} is not set. ` +
+      `Secrets containing "vapid" that this function can see: ${seen}. ` +
+      `If the name looks right, redeploy the function so it picks up the value.`,
+    );
+  }
   if (pub.length < 80) throw new Error(`VAPID_PUBLIC_KEY looks wrong (${pub.length} chars, expected ~87)`);
   if (prv.length > 60) throw new Error(`VAPID_PRIVATE_KEY looks like the public key (${prv.length} chars, expected ~43)`);
 
