@@ -1684,6 +1684,11 @@ function setAuthedUI(signedIn,email){
     // the part before the @ is what people call themselves
     document.getElementById('homeWho').textContent=String(email||'').split('@')[0]||'there';
     loadAccess();
+    // Claim this device for whoever just signed in. Without this a phone keeps
+    // whatever account registered it last, so someone with no pick up access
+    // keeps getting the previous user's notifications — and they never open
+    // the pick up screen, which is the only other place this ran.
+    resumePush();
     if(!hasEverAuthed){
       hasEverAuthed=true;
       showScreen('home'); // land on home only the first time this session becomes authenticated
@@ -1847,7 +1852,25 @@ document.getElementById('navRefreshBtn').addEventListener('click',e=>{
   btn.classList.remove('spin'); void btn.offsetWidth; btn.classList.add('spin');
   showScreen(currentScreen||'home',true);
 });
-document.getElementById('navSignOutBtn').addEventListener('click',async()=>{ closeDrawer(); if(sb) await sb.auth.signOut(); });
+// Hand the device back on the way out, so it stops receiving this account's
+// notifications the moment someone else takes the phone.
+async function releaseThisDevice(){
+  try{
+    if(!('serviceWorker' in navigator)) return;
+    const reg=await navigator.serviceWorker.getRegistration();
+    const sub=reg&&await reg.pushManager.getSubscription();
+    if(!sub) return;
+    if(sb) await sb.from('push_subscriptions').delete().eq('endpoint',sub.endpoint);
+    await sub.unsubscribe();
+  }catch(e){ /* signing out matters more than tidying up */ }
+  pushEndpoint=null;
+  syncPushChip('off');
+}
+document.getElementById('navSignOutBtn').addEventListener('click',async()=>{
+  closeDrawer();
+  await releaseThisDevice();
+  if(sb) await sb.auth.signOut();
+});
 // sub-screens drill down from a single parent, so a hardcoded back target
 // is enough — Shipment's parent is Home, Add-order's parent is Shipment
 document.getElementById('goToAddOrderBtn').addEventListener('click',()=>{
