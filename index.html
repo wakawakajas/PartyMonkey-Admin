@@ -3688,19 +3688,85 @@ function unlockAudio(){
 // switch does not mute it (Safari 17+; ignored everywhere else)
 try{ if(navigator.audioSession) navigator.audioSession.type='playback'; }catch(e){}
 ['pointerdown','touchend','keydown'].forEach(ev=>
-  document.addEventListener(ev,()=>{ if(!audioCtx||audioCtx.state!=='running') unlockAudio(); },
-    {capture:true,passive:true}));
+  document.addEventListener(ev,()=>{
+    if(!audioCtx||audioCtx.state!=='running') unlockAudio();
+    primeSounds();
+  },{capture:true,passive:true}));
 const CHIME={added:[660,880],prepared:[784],collected:[880,1175]};
+
+// An <audio> element is the dependable way to make a noise on a phone: it goes
+// out on the media channel at media volume, where Web Audio can come out
+// silent even with a running context. The clip is a WAV built here rather than
+// a file to fetch, so there is still no asset to lose.
+function toneWav(freqs){
+  const sr=44100, tone=0.20, gap=0.05;
+  const n=Math.round(sr*(freqs.length*(tone+gap)));
+  const pcm=new Int16Array(n);
+  freqs.forEach((f,i)=>{
+    const at=Math.round(i*(tone+gap)*sr), len=Math.round(tone*sr);
+    for(let s=0;s<len;s++){
+      const t=s/sr;
+      // fast attack, exponential tail — a chime rather than a flat beep
+      const env=Math.min(1,t/0.006)*Math.exp(-t*7);
+      pcm[at+s]=Math.round(Math.sin(2*Math.PI*f*t)*env*0.7*32767);
+    }
+  });
+  const buf=new ArrayBuffer(44+pcm.length*2), v=new DataView(buf);
+  const tag=(o,s)=>{ for(let i=0;i<s.length;i++) v.setUint8(o+i,s.charCodeAt(i)); };
+  tag(0,'RIFF'); v.setUint32(4,36+pcm.length*2,true); tag(8,'WAVE');
+  tag(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,sr,true); v.setUint32(28,sr*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+  tag(36,'data'); v.setUint32(40,pcm.length*2,true);
+  new Int16Array(buf,44).set(pcm);
+  return URL.createObjectURL(new Blob([buf],{type:'audio/wav'}));
+}
+const SOUND={};
+function buildSounds(){
+  if(SOUND.added) return;
+  Object.keys(CHIME).forEach(k=>{
+    const a=new Audio(toneWav(CHIME[k]));
+    a.preload='auto'; a.volume=1;
+    SOUND[k]=a;
+  });
+}
+// iOS only lets an element play by itself once it has been played inside a
+// tap, so each one is started and stopped straight away on the first touch —
+// the clip opens on silence, so nothing is heard
+function primeSounds(){
+  buildSounds();
+  Object.values(SOUND).forEach(a=>{
+    if(a._primed) return;
+    a._primed=true;
+    const p=a.play();
+    if(p&&p.then) p.then(()=>{a.pause();a.currentTime=0;}).catch(()=>{a._primed=false;});
+    else { a.pause(); a.currentTime=0; }
+  });
+}
+let lastSoundPath='';
 function chime(kind){
   unlockAudio();
+  const a=SOUND[kind]||SOUND.prepared;
+  if(a){
+    try{
+      a.currentTime=0;
+      const p=a.play();
+      lastSoundPath='element';
+      if(p&&p.catch) p.catch(()=>{ lastSoundPath='webaudio (element blocked)'; beep(kind); });
+      return;
+    }catch(e){ /* fall through to the oscillator */ }
+  }
+  lastSoundPath='webaudio';
+  beep(kind);
+}
+function beep(kind){
   if(!audioCtx) return;
   if(audioCtx.state==='suspended') audioCtx.resume();
   (CHIME[kind]||CHIME.prepared).forEach((hz,i)=>{
-    const t=audioCtx.currentTime+i*0.13;
+    const t=audioCtx.currentTime+0.02+i*0.13;
     const osc=audioCtx.createOscillator(), gain=audioCtx.createGain();
     osc.type='sine'; osc.frequency.value=hz;
     gain.gain.setValueAtTime(0.0001,t);
-    gain.gain.exponentialRampToValueAtTime(0.16,t+0.015);
+    gain.gain.exponentialRampToValueAtTime(0.5,t+0.015);
     gain.gain.exponentialRampToValueAtTime(0.0001,t+0.22);
     osc.connect(gain).connect(audioCtx.destination);
     osc.start(t); osc.stop(t+0.24);
@@ -3779,14 +3845,19 @@ document.getElementById('pickupFilterAll').addEventListener('click',()=>{
 // so you can tell "the app is not making a sound" apart from "the phone is
 // on silent" without adding an order to find out
 document.getElementById('pickupTestSound').addEventListener('click',()=>{
-  unlockAudio();
+  unlockAudio(); primeSounds();
   chime('added');
   const msg=document.getElementById('pickupMsg');
-  showMsg(msg, audioCtx
-    ? (audioCtx.state==='running'
-        ? '🔔 Sound sent. Nothing? Check the side switch on your phone and the volume.'
-        : 'Audio is still blocked — tap anywhere on the page, then try again.')
-    : 'This browser has no audio support.', !!audioCtx&&audioCtx.state==='running');
+  // report enough to tell where it stopped, rather than just "sent"
+  setTimeout(()=>{
+    const a=SOUND.added;
+    const playing=a&&!a.paused&&a.currentTime>0;
+    showMsg(msg,`🔔 via ${lastSoundPath||'nothing'} · ${playing?'playing':'not playing'}`
+      +` · volume ${a?Math.round(a.volume*100):0}%`
+      +` · context ${audioCtx?audioCtx.state:'none'}`
+      +'<br/>Nothing heard? Press the volume-up button while this page is open.',
+      !!playing);
+  },250);
 });
 document.getElementById('pickupAddForm').addEventListener('submit',async e=>{
   e.preventDefault();
