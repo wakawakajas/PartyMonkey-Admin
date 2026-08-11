@@ -3,6 +3,11 @@
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 
+// Chrome looks for a fetch handler before it offers "Install app" on Android.
+// This one deliberately does nothing: every request goes to the network as
+// normal, so a deploy is never served from a stale cache.
+self.addEventListener('fetch', () => {});
+
 self.addEventListener('push', event => {
   let d = {};
   try { d = event.data ? event.data.json() : {}; } catch (e) { d = {}; }
