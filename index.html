@@ -1742,8 +1742,26 @@ let accessLoaded=false;
 // Access can be taken away while someone has the app open, so it is re-read
 // when the app comes back to the foreground and every so often while in use.
 // Whatever they lose disappears from the screen without them reloading.
-document.addEventListener('visibilitychange',()=>{ if(!document.hidden) loadAccess(); });
-setInterval(()=>{ if(!document.hidden) loadAccess(); },60000);
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ loadAccess(); checkStillSignedIn(); } });
+setInterval(()=>{ if(!document.hidden){ loadAccess(); checkStillSignedIn(); } },60000);
+
+// Revoking someone's session server-side does not reach a phone that already
+// holds a valid access token — supabase-js keeps using it happily until it
+// expires, up to an hour later. Asking the server who we are is what turns a
+// revoked session into an actual sign out.
+async function checkStillSignedIn(){
+  if(!sb) return;
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session) return;
+  const {data,error}=await sb.auth.getUser();
+  if(!error&&data&&data.user) return;
+  // only an answer from the server counts — a dropped connection must not
+  // throw someone out of the app
+  const status=error&&(error.status||(error.originalError&&error.originalError.status));
+  if(status===401||status===403||/session|jwt|token|not found/i.test((error&&error.message)||'')){
+    await sb.auth.signOut();
+  }
+}
 // hide what they cannot open, rather than letting them find a dead end
 function applyAccess(){
   const pairs=[['goToToolBtn','print'],['navToolBtn','print'],
