@@ -332,6 +332,12 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   background:var(--card);color:var(--muted);font-size:12px;font-weight:600;padding:0 6px;
   font-family:'IBM Plex Sans',sans-serif;}
 .pk-state.on{background:var(--blueprint);border-color:var(--blueprint);color:var(--lime-ink);font-weight:700;}
+/* sits above the home bar, below the modals */
+.update-bar{position:fixed;left:12px;right:12px;bottom:calc(84px + env(safe-area-inset-bottom));
+  z-index:55;display:flex;align-items:center;gap:10px;justify-content:space-between;
+  background:var(--card);border:1px solid var(--blueprint);border-radius:14px;
+  padding:10px 12px;font-size:12.5px;box-shadow:0 8px 22px rgba(0,0,0,.5);}
+
 /* ---- moving between screens ---- */
 /* the incoming screen travels; nothing else does, so there is no second
    element to keep in step and no half-finished state to clean up */
@@ -501,6 +507,7 @@ body{overflow-x:hidden;}
     <button class="nav-item" id="navToolBtn">🖨️ Custom Print Template</button>
     <button class="nav-item" id="navShipmentBtn">🚚 Procurement &amp; Shipping</button>
     <button class="nav-item" id="navPickupBtn">🛍️ Store Pick Up</button>
+    <button class="nav-item" id="navAdhocBtn">✅ Ad-Hoc Picking</button>
     <button class="nav-item" id="navUsersBtn" style="display:none;">👤 Users &amp; access</button>
     <button class="nav-item danger" id="navSignOutBtn">↪ Sign out</button>
   </nav>
@@ -529,7 +536,7 @@ body{overflow-x:hidden;}
         </span>
         <span class="tile-name">Procurement &amp; Shipping</span>
       </button>
-      <button class="tile wide" id="goToPickupBtn">
+      <button class="tile" id="goToPickupBtn">
         <span class="tile-top">
           <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M5 8h14l-1 12H6z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/>
@@ -538,7 +545,28 @@ body{overflow-x:hidden;}
         </span>
         <span class="tile-name">Store Pick Up</span>
       </button>
+      <button class="tile" id="goToAdhocBtn">
+        <span class="tile-top">
+          <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 11l2 2 4-4"/><rect x="3" y="4" width="18" height="17" rx="2"/>
+            <path d="M8 2v4M16 2v4"/>
+          </svg>
+          <span class="tile-go">→</span>
+        </span>
+        <span class="tile-name">Ad-Hoc Picking</span>
+      </button>
     </div>
+  </div>
+
+  <!-- AD-HOC PICKING -->
+  <div class="home-wrap" id="adhocScreen" style="display:none;">
+    <h1>Ad-Hoc Picking</h1>
+    <p class="sub">Not built yet.</p>
+    <div class="card"><div class="card-body" style="padding:16px;">
+      <p class="hint" style="margin:0;">The button is here and wired up, waiting on what it
+      should do. Tell me what picking ad-hoc involves — what you start from, what you record,
+      and what finishing one looks like — and this becomes that screen.</p>
+    </div></div>
   </div>
 
   <!-- USERS & ACCESS (admins only) -->
@@ -1739,13 +1767,52 @@ function setAuthedUI(signedIn,email){
     hasEverAuthed=false; // so a future sign-in also lands on home
   }
 }
+// ---------- picking up a new version without being restarted ----------
+// The installed app can sit open for days. Rather than stamping a version
+// number that has to be remembered on every deploy, this asks the server
+// whether the page itself has changed — the ETag moves whenever the file does.
+let buildTag=null;
+async function fetchBuildTag(){
+  try{
+    const r=await fetch(location.pathname+'?probe='+Date.now(),{method:'HEAD',cache:'no-store'});
+    return r.headers.get('etag')||r.headers.get('last-modified')||null;
+  }catch(e){ return null; }
+}
+function reloadFresh(){
+  // a plain reload can be answered from cache; a new query string cannot be
+  location.replace(location.pathname+'?v='+Date.now());
+}
+function offerUpdate(){
+  if(document.getElementById('updateBar')) return;
+  const bar=document.createElement('div');
+  bar.id='updateBar'; bar.className='update-bar';
+  bar.innerHTML='<span>A new version is ready.</span>'
+    +'<button class="btn-primary btn-sm" id="updateNow">Reload</button>';
+  document.body.appendChild(bar);
+  document.getElementById('updateNow').addEventListener('click',reloadFresh);
+}
+async function checkForUpdate(){
+  if(!buildTag) return;
+  const now=await fetchBuildTag();
+  if(!now||now===buildTag) return;
+  // take it silently when nothing is half-typed; otherwise ask, so an
+  // unsubmitted screen is never thrown away underneath someone
+  if(!dirty.size) reloadFresh(); else offerUpdate();
+}
+(async function watchForUpdates(){
+  buildTag=await fetchBuildTag();
+  if(!buildTag) return;                 // nothing to compare against
+  setInterval(()=>{ if(!document.hidden) checkForUpdate(); },120000);
+  document.addEventListener('visibilitychange',()=>{ if(!document.hidden) checkForUpdate(); });
+})();
+
 // ---------- home / tool / shipment navigation (mobile-app-style side drawer + back buttons) ----------
 const SCREEN_EL={home:'homeScreen',tool:'appScreen',shipment:'shipmentScreen','shipment-add':'shipmentAddScreen',
   'shipment-detail':'shipmentDetailScreen','shipment-tracking':'shipmentTrackingScreen',
   'shipment-boxes':'shipmentBoxesScreen','shipment-box':'shipmentBoxScreen',
   'shipment-china':'shipmentChinaScreen','shipment-outstanding':'outstandingScreen',
   'consol':'consolScreen','consol-detail':'consolDetailScreen','calendar':'calendarScreen',
-  'trash':'trashScreen','pickup':'pickupScreen','users':'usersScreen'};
+  'trash':'trashScreen','pickup':'pickupScreen','users':'usersScreen','adhoc':'adhocScreen'};
 // which permission each screen sits behind; anything unlisted is always open
 const SCREEN_SECTION={tool:'print',
   shipment:'shipping','shipment-add':'shipping','shipment-detail':'shipping',
@@ -1972,6 +2039,8 @@ document.getElementById('usersList').addEventListener('click',async e=>{
   if(me&&me.user.id===u.user_id) await loadAccess();
 });
 document.getElementById('goToPickupBtn').addEventListener('click',()=>showScreen('pickup'));
+document.getElementById('goToAdhocBtn').addEventListener('click',()=>showScreen('adhoc'));
+document.getElementById('navAdhocBtn').addEventListener('click',()=>showScreen('adhoc'));
 document.getElementById('homeBarBtn').addEventListener('click',()=>showScreen('home'));
 document.getElementById('navBackBtn').addEventListener('click',()=>{
   const prev=navStack.pop();
