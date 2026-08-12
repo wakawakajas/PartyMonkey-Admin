@@ -4192,13 +4192,25 @@ async function registerPush(interactive){
     let sub=await reg.pushManager.getSubscription();
     if(!sub) sub=await reg.pushManager.subscribe(
       {userVisibleOnly:true,applicationServerKey:b64ToBytes(VAPID_PUBLIC)});
-    const k=sub.toJSON().keys||{};
     const {data:{session}}=await sb.auth.getSession();
     if(!session){ say('Sign in first.',false); return false; }
-    const {error}=await sb.from('push_subscriptions').upsert(
-      {user_id:session.user.id,endpoint:sub.endpoint,p256dh:k.p256dh,auth:k.auth,
-       label:(navigator.userAgent||'').slice(0,80)},{onConflict:'endpoint'});
-    if(error){ say('Could not save this phone: '+error.message,false); return false; }
+    const row=s=>({user_id:session.user.id,endpoint:s.endpoint,
+      p256dh:(s.toJSON().keys||{}).p256dh,auth:(s.toJSON().keys||{}).auth,
+      label:(navigator.userAgent||'').slice(0,80)});
+    let {error}=await sb.from('push_subscriptions').upsert(row(sub),{onConflict:'endpoint'});
+    if(error){
+      // The row for this browser can belong to whoever signed in here last,
+      // and taking it over needs a permission the project may not have. A
+      // fresh subscription gets a new endpoint, which is nobody else's, so it
+      // inserts cleanly instead of failing quietly and never being notified.
+      try{
+        await sub.unsubscribe();
+        sub=await reg.pushManager.subscribe(
+          {userVisibleOnly:true,applicationServerKey:b64ToBytes(VAPID_PUBLIC)});
+        ({error}=await sb.from('push_subscriptions').insert(row(sub)));
+      }catch(e){ error=error||e; }
+    }
+    if(error){ say('Could not register this device: '+(error.message||error),false); return false; }
     pushEndpoint=sub.endpoint;
     syncPushChip('on');
     say('✓ This phone will be notified even when the app is closed.',true);
@@ -4263,12 +4275,30 @@ document.getElementById('pickupPush').addEventListener('click',async()=>{
   const {data,error}=await callNotify(
     {kind:'added',order_id:'TEST 2 of 2 — sent through the server',name:'Test',test:true});
   const sent=error?('failed: '+await functionError(error)):((data&&data.sent)?data.sent+' device(s)':'nobody');
+
+  // Is THIS device actually on the list? "Sent to 1 device" is no comfort if
+  // that one device is a different phone.
+  let here='unknown';
+  try{
+    const reg=await navigator.serviceWorker.ready;
+    const sub=await reg.pushManager.getSubscription();
+    if(!sub) here='this device is not subscribed at all';
+    else{
+      const {data:rows,error:e2}=await sb.from('push_subscriptions').select('endpoint');
+      if(e2) here='could not check: '+e2.message;
+      else here=(rows||[]).some(r=>r.endpoint===sub.endpoint)
+        ? 'yes — registered'
+        : `NO — this device is missing from the list (${(rows||[]).length} other device(s) there)`;
+    }
+  }catch(err){ here='could not check: '+((err&&err.message)||'unknown'); }
+
   showMsg(msg,
     `<strong>Test 1 (this device):</strong> ${escapeHtml(local)}<br/>`
     +`<strong>Test 2 (through the server):</strong> ${escapeHtml(String(sent))}<br/>`
-    +'Look in your notification shade. Two notifications = all working. '
-    +'Only Test 1 = delivery problem. Neither = the phone is blocking them.',
-    local==='shown');
+    +`<strong>Is this device on the list:</strong> ${escapeHtml(here)}<br/>`
+    +'Two notifications = all working. Only Test 1 = it never reached here. '
+    +'Neither = the phone is blocking them.',
+    local==='shown'&&/^yes/.test(here));
 });
 
 async function refreshPickups(){
