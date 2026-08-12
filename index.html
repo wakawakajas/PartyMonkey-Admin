@@ -2412,7 +2412,7 @@ async function attachSkuPhoto(sku,file){
   const session=await requireSession(msg); if(!session) return;
   showMsg(msg,'Uploading photo…',true);
   try{
-    const small=await shrink(await fileToDataURL(file),SKU_PHOTO_MAX_PX,SKU_PHOTO_QUALITY);
+    const small=await shrinkToBudget(await fileToDataURL(file),SKU_PHOTO_MAX_PX,PHOTO_BUDGET_BYTES);
     const blob=await (await fetch(small)).blob();
     const path=session.user.id+'/sku/'+Date.now()+'.jpg';
     const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:'image/jpeg'});
@@ -2620,7 +2620,7 @@ document.getElementById('adhocImportBtn').addEventListener('click',()=>{
             const res=await fetch(x.url,{mode:'cors'});
             if(!res.ok) throw new Error('http '+res.status);
             const blob=await res.blob();
-            const small=await shrink(await fileToDataURL(blob),SKU_PHOTO_MAX_PX,SKU_PHOTO_QUALITY);
+            const small=await shrinkToBudget(await fileToDataURL(blob),SKU_PHOTO_MAX_PX,PHOTO_BUDGET_BYTES);
             const out=await (await fetch(small)).blob();
             const path=session.user.id+'/sku/'+Date.now()+'-'+i+'.jpg';
             const up=await sb.storage.from(PHOTO_BUCKET).upload(path,out,{contentType:'image/jpeg'});
@@ -3485,9 +3485,27 @@ const PHOTO_BUCKET='shipment-photos';
 // warehouse of thousands of them would otherwise be the bulk of the storage
 const SKU_PHOTO_MAX_PX=320;
 const SKU_PHOTO_QUALITY=0.5;
-// Procurement photos are a record of what turned up, looked at on a phone —
-// 480px still reads a box label when enlarged, and costs a fraction of what
-// 800px did across hundreds of orders.
+// A fixed size and quality cannot promise a file size: a busy photo lands
+// several times larger than a plain one at identical settings. So these are
+// given a byte budget instead, and quality is stepped down — then dimensions,
+// if quality alone will not do it — until the picture fits.
+const PHOTO_BUDGET_BYTES=10*1024;
+const dataUrlBytes=d=>{
+  const b64=String(d).split(',')[1]||'';
+  return Math.round(b64.length*3/4)-(b64.endsWith('==')?2:b64.endsWith('=')?1:0);
+};
+async function shrinkToBudget(dataURL,maxPx,budget){
+  let px=maxPx, best=null;
+  for(let pass=0;pass<4;pass++){
+    for(const q of [0.6,0.45,0.35,0.26,0.2]){
+      const d=await shrink(dataURL,px,q);
+      best=d;
+      if(dataUrlBytes(d)<=budget) return d;
+    }
+    px=Math.round(px*0.75);      // quality is spent; give up pixels next
+  }
+  return best;                   // as close as it can get
+}
 const SHIPMENT_PHOTO_MAX_PX=480;
 const SHIPMENT_PHOTO_QUALITY=0.45;
 // pick up photos keep their own size: they are the only picture of a bag
@@ -3965,7 +3983,7 @@ document.getElementById('boxPhotoBtn').addEventListener('click',async()=>{
     if(!session){ showMsg(msg,'Sign in first.',false); return; }
     showMsg(msg,'Uploading photo…',true);
     try{
-      const small=await shrink(await fileToDataURL(file),SHIPMENT_PHOTO_MAX_PX,SHIPMENT_PHOTO_QUALITY);
+      const small=await shrinkToBudget(await fileToDataURL(file),SHIPMENT_PHOTO_MAX_PX,PHOTO_BUDGET_BYTES);
       const blob=await (await fetch(small)).blob();
       b._pendingPhotoBlob=blob;
       if(b._pendingPreview) URL.revokeObjectURL(b._pendingPreview);
@@ -4556,7 +4574,7 @@ document.getElementById('detailSubmitBtn').addEventListener('click',()=>
         await sb.from('shipment_items').update({photo_path:null,photo_url:null}).eq('id',r.id);
       }
       if(r._pendingPhoto){
-        const small=await shrink(await fileToDataURL(r._pendingPhoto),SHIPMENT_PHOTO_MAX_PX,SHIPMENT_PHOTO_QUALITY);
+        const small=await shrinkToBudget(await fileToDataURL(r._pendingPhoto),SHIPMENT_PHOTO_MAX_PX,PHOTO_BUDGET_BYTES);
         const blob=await (await fetch(small)).blob();
         const old=r.photo_path;
         const path=session.user.id+'/'+r.id+'/'+Date.now()+'.jpg';
@@ -4734,7 +4752,7 @@ async function attachImportedImage(itemId,url,userId){
     if(!res.ok) throw new Error('http '+res.status);
     const blob=await res.blob();
     if(!/^image\//.test(blob.type||'')) throw new Error('not an image');
-    const small=await shrink(await fileToDataURL(blob),SHIPMENT_PHOTO_MAX_PX,SHIPMENT_PHOTO_QUALITY);
+    const small=await shrinkToBudget(await fileToDataURL(blob),SHIPMENT_PHOTO_MAX_PX,PHOTO_BUDGET_BYTES);
     const out=await (await fetch(small)).blob();
     const path=userId+'/'+itemId+'/'+Date.now()+'.jpg';
     const up=await sb.storage.from(PHOTO_BUCKET).upload(path,out,{contentType:'image/jpeg'});
