@@ -213,7 +213,15 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .nav-item{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;border:none;
   padding:0 16px;font-family:'IBM Plex Sans',sans-serif;font-size:14px;color:var(--ink);cursor:pointer;min-height:var(--tap);}
 .nav-item:hover{background:var(--nest);}
-.nav-item.danger{color:var(--rust);margin-top:auto;border-top:1px solid var(--border);padding-top:12px;}
+.nav-item.danger{color:var(--rust);border-top:1px solid var(--border);padding-top:12px;}
+/* the gauge sits at the foot of the drawer, above Sign out */
+.nav-storage{margin-top:auto;padding:12px 16px 4px;}
+.nav-storage-top{display:flex;align-items:baseline;justify-content:space-between;
+  font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.06em;margin-bottom:6px;}
+.nav-storage .prog{margin-top:0;}
+.nav-storage .prog i.warn-fill{background:var(--amber);}
+.nav-storage .prog i.full-fill{background:var(--rust);}
 /* ---- mobile-app-style back button on sub-screens ---- */
 .back-btn{display:flex;align-items:center;gap:2px;background:none;border:none;color:var(--blueprint);
   font-family:'IBM Plex Sans',sans-serif;font-weight:600;font-size:14px;cursor:pointer;padding:0;
@@ -546,6 +554,14 @@ body{overflow-x:hidden;}
     <button class="nav-item" id="navAdhocBtn">✅ Ad-Hoc Picking</button>
     <button class="nav-item" id="navWarehouseBtn">🔎 Search Warehouse</button>
     <button class="nav-item" id="navUsersBtn" style="display:none;">👤 Users &amp; access</button>
+    <div class="nav-storage" id="navStorage" style="display:none;">
+      <div class="nav-storage-top">
+        <span id="navStorageLbl">Photos</span>
+        <span id="navStoragePct" class="hint" style="margin:0;"></span>
+      </div>
+      <div class="prog"><i id="navStorageBar" style="width:0"></i></div>
+      <p class="hint" id="navStorageSub" style="margin:5px 0 0;"></p>
+    </div>
     <button class="nav-item danger" id="navSignOutBtn">↪ Sign out</button>
   </nav>
 
@@ -1900,6 +1916,7 @@ function setAuthedUI(signedIn,email){
     // the part before the @ is what people call themselves
     document.getElementById('homeWho').textContent=String(email||'').split('@')[0]||'there';
     loadAccess();
+    refreshStorage(true);   // the drawer is always open on a wide screen
     checkAnnouncements();
     watchAnnouncements();
     // Claim this device for whoever just signed in. Without this a phone keeps
@@ -2121,7 +2138,36 @@ document.addEventListener('click',async e=>{
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-function openDrawer(){ document.getElementById('navDrawer').classList.add('open'); document.getElementById('navBackdrop').classList.add('open'); }
+// ---------- how much of the photo allowance is gone ----------
+// Supabase gives 1GB free. At the budgets these photos are held to that is
+// tens of thousands of them, but the gauge is there so it is never a surprise.
+const STORAGE_LIMIT_BYTES=1024*1024*1024;
+const humanBytes=b=>b>=1048576?(b/1048576).toFixed(b>=10485760?0:1)+' MB'
+                  :b>=1024?Math.round(b/1024)+' KB':b+' B';
+let storageCheckedAt=0;
+async function refreshStorage(force){
+  const box=document.getElementById('navStorage');
+  if(!sb) return;
+  // it is a scan of every object, so once every few minutes is plenty
+  if(!force&&Date.now()-storageCheckedAt<300000) return;
+  const {data,error}=await sb.rpc('storage_usage');
+  if(error||!data){ box.style.display='none'; return; }   // migration not run
+  storageCheckedAt=Date.now();
+  const row=Array.isArray(data)?data[0]:data;
+  const bytes=Number((row&&row.bytes)||0), files=Number((row&&row.files)||0);
+  const pct=Math.min(100,(bytes/STORAGE_LIMIT_BYTES)*100);
+  box.style.display='';
+  document.getElementById('navStoragePct').textContent=
+    (pct<0.1&&bytes>0?'<0.1':pct.toFixed(pct<10?1:0))+'%';
+  const bar=document.getElementById('navStorageBar');
+  bar.style.width=Math.max(pct,bytes>0?1.5:0)+'%';
+  bar.classList.toggle('warn-fill',pct>=70&&pct<90);
+  bar.classList.toggle('full-fill',pct>=90);
+  document.getElementById('navStorageSub').textContent=
+    `${humanBytes(bytes)} of 1 GB · ${files} photo${files===1?'':'s'}`;
+}
+function openDrawer(){
+  refreshStorage(); document.getElementById('navDrawer').classList.add('open'); document.getElementById('navBackdrop').classList.add('open'); }
 function closeDrawer(){ document.getElementById('navDrawer').classList.remove('open'); document.getElementById('navBackdrop').classList.remove('open'); }
 document.getElementById('menuBtn').addEventListener('click',openDrawer);
 document.getElementById('navBackdrop').addEventListener('click',closeDrawer);
@@ -2840,6 +2886,7 @@ document.getElementById('skuWipeBtn').addEventListener('click',async()=>{
       +(paths.length?` and ${paths.length} photo(s)`:'')+' deleted.',true);
     pickedSkus.clear(); skuSelectMode=false;
     await refreshSkus();
+    refreshStorage(true);   // a wipe is exactly when the gauge should move
   }catch(err){
     showMsg(msg,'Could not empty it: '+((err&&err.message)||'unknown error'),false);
     await refreshSkus();
