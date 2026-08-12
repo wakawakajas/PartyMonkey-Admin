@@ -5075,16 +5075,16 @@ document.getElementById('goToTrashBtn').addEventListener('click',()=>showScreen(
 // Read-only by design: this is where you look something up, not where you edit
 // it. The photo is the one exception, because spotting a line with the wrong
 // picture is exactly the moment you want to put a right one on it.
-let warehouseRows=[], warehouseOrders={}, warehouseTimer=null;
-const WAREHOUSE_LIMIT=60;
-// commas and brackets are how PostgREST separates the arms of an `or` filter,
-// so a search containing them would be read as syntax rather than as text
-const safeLike=s=>String(s||'').replace(/[,()*]/g,' ').trim();
+// The asking is done in the database, by a function that answers this one
+// question with the owner's rights. That is what lets somebody who cannot open
+// Procurement & Shipping still look something up here: orders stay private, and
+// only the fields on these cards ever come back.
+let warehouseRows=[], warehouseTimer=null;
 document.getElementById('warehouseSearch').addEventListener('input',e=>{
   clearTimeout(warehouseTimer);
-  const q=safeLike(e.target.value);
+  const q=String(e.target.value||'').trim();
   if(q.length<2){
-    warehouseRows=[]; warehouseOrders={};
+    warehouseRows=[];
     document.getElementById('warehouseCount').textContent='';
     document.getElementById('warehouseResults').innerHTML=
       '<p class="hint" style="margin:4px 0 0;">— type at least two letters —</p>';
@@ -5097,51 +5097,23 @@ async function runWarehouseSearch(q){
   const count=document.getElementById('warehouseCount');
   if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
   count.textContent='Searching…';
-  const like='%'+q+'%';
-  const cols='id,shipment_id,sku,qty,remarks,photo_path,photo_url';
   // Only what is inside Procurement & Shipping. The Ad-Hoc catalogue is a list
   // of names a shop could stock, not a record of anything bought, so it has no
   // business here — it is searchable from Ad-Hoc Picking, where it belongs.
-  const [byItem,byOrder]=await Promise.all([
-    sb.from('shipment_items').select(cols)
-      .or(`sku.ilike.${like},remarks.ilike.${like}`).limit(WAREHOUSE_LIMIT),
-    sb.from('shipments').select('id').is('deleted_at',null)
-      .or(`order_id.ilike.${like},description.ilike.${like}`).limit(WAREHOUSE_LIMIT)
-  ]);
-  if(byItem.error){
+  // The matching, the join to the order and the arrival tally all happen in the
+  // one function, which is also what keeps the orders themselves out of reach.
+  const {data,error}=await sb.rpc('search_procurement',{q});
+  if(error){
     count.textContent='';
-    el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not search: '+escapeHtml(byItem.error.message)+'</p>';
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not search: '
+      +escapeHtml(error.message)+'. Run supabase-migration-WAREHOUSE-SEARCH.sql first.</p>';
     return;
   }
-  const rows=byItem.data||[];
-  const seen=new Set(rows.map(r=>r.id));
-  const hitOrders=(byOrder.data||[]).map(r=>r.id);
-  if(hitOrders.length){
-    const {data:more}=await sb.from('shipment_items').select(cols)
-      .in('shipment_id',hitOrders).limit(WAREHOUSE_LIMIT);
-    (more||[]).forEach(r=>{ if(!seen.has(r.id)){ seen.add(r.id); rows.push(r); } });
-  }
-  // A line carries no deletion stamp of its own, only its order does, so the
-  // orders are fetched both to show and to weed out anything sitting in the bin.
-  const shipIds=[...new Set(rows.map(r=>r.shipment_id))];
-  warehouseOrders={};
-  if(shipIds.length){
-    const {data:sh}=await sb.from('shipments').select('id,order_id,description,created_at')
-      .is('deleted_at',null).in('id',shipIds);
-    (sh||[]).forEach(s=>{ warehouseOrders[s.id]=s; });
-  }
-  // What was ordered is not what turned up. Pieces are booked in against a line
-  // as they arrive in boxes, so the arrivals are totalled here and a short
-  // delivery can read as what is actually on the shelf.
-  warehouseRows=rows.filter(r=>warehouseOrders[r.shipment_id]);
-  if(warehouseRows.length){
-    const {data:al}=await sb.from('shipment_box_items').select('item_id,qty')
-      .in('item_id',warehouseRows.map(r=>r.id));
-    const by={};
-    (al||[]).forEach(a=>{ by[a.item_id]=(by[a.item_id]||0)+(Number(a.qty)||0); });
-    // never more than was ordered, the same ceiling the order list applies
-    warehouseRows.forEach(r=>{ r._arrived=Math.min(by[r.id]||0,Number(r.qty)||0); });
-  }
+  warehouseRows=(data||[]).map(r=>({
+    id:r.item_id, sku:r.sku, qty:r.qty, remarks:r.remarks,
+    photo_path:r.photo_path, photo_url:r.photo_url,
+    _arrived:r.arrived, order_id:r.order_id, description:r.description
+  }));
   renderWarehouseResults();
 }
 // What is on the shelf, said plainly: a full delivery needs no arithmetic done
@@ -5163,7 +5135,6 @@ function renderWarehouseResults(){
   }
   el.innerHTML=warehouseRows.map(r=>{
     const has=!!(r.photo_path||r.photo_url);
-    const o=warehouseOrders[r.shipment_id]||{};
     // a short delivery gets the amber edge it gets everywhere else
     const arr=Number(r._arrived)||0, ord=Number(r.qty)||0;
     const part=arr>0&&arr<ord;
@@ -5176,7 +5147,7 @@ function renderWarehouseResults(){
         <div style="flex:1;min-width:0;">
           <div class="sku-name">${escapeHtml(r.sku||'—')}</div>
           <p class="hint" style="margin:2px 0 0;">${qtyLine(r)}${r.remarks?' · '+escapeHtml(r.remarks):''}</p>
-          <p class="hint" style="margin:2px 0 0;">${oidCopy(o.order_id)}${o.description?' · '+escapeHtml(o.description):''}</p>
+          <p class="hint" style="margin:2px 0 0;">${oidCopy(r.order_id)}${r.description?' · '+escapeHtml(r.description):''}</p>
         </div>
       </div>
       <button class="btn-outline btn-sm" data-wh-change>${has?'Change photo':'Add photo'}</button>
@@ -5226,10 +5197,13 @@ async function replaceWarehousePhoto(row,file){
     const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:'image/jpeg'});
     if(up.error) throw up.error;
     const old=row.photo_path;
-    // the imported link goes too, or it would keep being shown in preference
-    const {error}=await sb.from('shipment_items')
-      .update({photo_path:path,photo_url:null}).eq('id',row.id);
+    // Through the same function as the search, so this works for somebody who
+    // cannot open Procurement. It clears the imported link as well, or that
+    // would keep being shown in preference to the picture just chosen.
+    const {error}=await sb.rpc('set_item_photo',{item:row.id,path});
     if(error) throw error;
+    // The old file sits in the uploader's own folder, which may not be this
+    // person's, so tidying it away can fail. That is housekeeping, not the job.
     if(old) await sb.storage.from(PHOTO_BUCKET).remove([old]);
     row.photo_path=path; row.photo_url=null;
     showMsg(msg,'✓ Photo updated.',true);
