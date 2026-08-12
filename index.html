@@ -326,6 +326,17 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   background:var(--card);color:var(--muted);font-size:12px;font-weight:600;padding:0 6px;
   font-family:'IBM Plex Sans',sans-serif;}
 .pk-state.on{background:var(--blueprint);border-color:var(--blueprint);color:var(--lime-ink);font-weight:700;}
+/* ---- pick a photo source ---- */
+.sheet-bg{display:none;position:fixed;inset:0;z-index:64;background:rgba(0,0,0,.55);
+  align-items:flex-end;justify-content:center;padding:0 12px calc(12px + env(safe-area-inset-bottom));}
+.sheet-bg.open{display:flex;}
+.sheet{width:100%;max-width:420px;background:var(--card);border:1px solid var(--border);
+  border-radius:20px;padding:16px;display:flex;flex-direction:column;gap:9px;
+  box-shadow:0 -8px 30px rgba(0,0,0,.5);}
+.sheet-title{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px;margin-bottom:2px;}
+.sheet button{width:100%;height:50px;font-size:14px;}
+@media (min-width:560px){ .sheet-bg{align-items:center;} }
+
 /* one toggle per area, wrapping to whatever the width allows */
 .acc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:8px;}
 .acc-grid .pk-state{min-height:44px;}
@@ -1071,6 +1082,17 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   </div>
   </div><!-- /#appScreen -->
 </div><!-- /#postAuthChrome -->
+
+<!-- Samsung's picker opens straight into the gallery with no way to reach the
+     camera, so the choice is made here rather than hoping the phone offers it -->
+<div class="sheet-bg" id="photoSheet">
+  <div class="sheet">
+    <div class="sheet-title">Add a photo</div>
+    <button class="btn-primary" id="photoFromCam">📷 Take a photo</button>
+    <button class="btn-outline" id="photoFromLib">🖼️ Choose from library</button>
+    <button class="btn-outline" id="photoSheetCancel">Cancel</button>
+  </div>
+</div>
 
 <div class="modal-bg" id="photoModal">
   <div class="modal-top">
@@ -2487,22 +2509,51 @@ document.getElementById('boxPhotoThumb').addEventListener('click',()=>{
   if(b&&b.photo_path) openPhotoModal(b.photo_path,b.label||'Box photo');
 });
 // the picked file is held and previewed locally; it only reaches storage on Submit
-function pickItemPhoto(itemId){
-  const inp=document.createElement('input');
-  inp.type='file';
-  // plain image/* (no capture attr) so phones offer Camera *and* Photo Library,
-  // while desktop still gets a normal file picker
-  inp.accept='image/*';
-  inp.onchange=async()=>{
-    const file=inp.files[0]; if(!file) return;
-    const row=itemRows.find(r=>r.id===itemId); if(!row) return;
-    if(row._pendingPreview) URL.revokeObjectURL(row._pendingPreview);
-    row._pendingPhoto=file;
-    row._pendingPreview=URL.createObjectURL(file);
-    row._removePhoto=false;
-    markDirty('detail'); renderItems();
-  };
-  inp.click();
+// Asks where the picture should come from, then opens the right picker.
+// "capture" is what actually reaches the camera — without it Samsung drops
+// you into the gallery with no way back out to take a photo. Desktop has no
+// camera to speak of, so it skips the question.
+function askPhotoSource(){
+  const sheet=document.getElementById('photoSheet');
+  const touch=matchMedia('(pointer:coarse)').matches;
+  if(!touch) return Promise.resolve('library');
+  sheet.classList.add('open');
+  return new Promise(res=>{
+    const done=v=>{
+      sheet.classList.remove('open');
+      ['photoFromCam','photoFromLib','photoSheetCancel'].forEach(id=>
+        document.getElementById(id).onclick=null);
+      sheet.onclick=null;
+      res(v);
+    };
+    document.getElementById('photoFromCam').onclick=()=>done('camera');
+    document.getElementById('photoFromLib').onclick=()=>done('library');
+    document.getElementById('photoSheetCancel').onclick=()=>done(null);
+    sheet.onclick=e=>{ if(e.target===sheet) done(null); };   // tapping outside closes
+  });
+}
+async function pickImageFile(){
+  const src=await askPhotoSource();
+  if(!src) return null;
+  return new Promise(res=>{
+    const inp=document.createElement('input');
+    inp.type='file'; inp.accept='image/*';
+    if(src==='camera') inp.capture='environment';
+    inp.onchange=()=>res(inp.files[0]||null);
+    // a cancelled picker fires nothing on most phones, so nothing is left waiting
+    inp.oncancel=()=>res(null);
+    inp.click();
+  });
+}
+async function pickItemPhoto(itemId){
+  const file=await pickImageFile();
+  if(!file) return;
+  const row=itemRows.find(r=>r.id===itemId); if(!row) return;
+  if(row._pendingPreview) URL.revokeObjectURL(row._pendingPreview);
+  row._pendingPhoto=file;
+  row._pendingPreview=URL.createObjectURL(file);
+  row._removePhoto=false;
+  markDirty('detail'); renderItems();
 }
 document.getElementById('itemsWrap').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
@@ -2849,12 +2900,11 @@ async function hydrateBoxPhoto(path){
   const img=document.querySelector('#boxPhotoThumb img[data-box-photo]');
   if(img&&photoUrlCache[path]) img.src=photoUrlCache[path];
 }
-document.getElementById('boxPhotoBtn').addEventListener('click',()=>{
+document.getElementById('boxPhotoBtn').addEventListener('click',async()=>{
   const b=currentBox(); if(!b) return;
-  const inp=document.createElement('input');
-  inp.type='file'; inp.accept='image/*';   // phones offer Camera or Photo Library
-  inp.onchange=async()=>{
-    const file=inp.files[0]; if(!file) return;
+  {
+    const file=await pickImageFile();
+    if(!file) return;
     const msg=document.getElementById('boxSubmitMsg');
     if(!sb){ showMsg(msg,'Sync unavailable.',false); return; }
     const {data:{session}}=await sb.auth.getSession();
@@ -2873,8 +2923,7 @@ document.getElementById('boxPhotoBtn').addEventListener('click',()=>{
     }catch(err){
       showMsg(msg,'Photo upload failed: '+((err&&err.message)||'unknown error'),false);
     }
-  };
-  inp.click();
+  }
 });
 document.getElementById('boxPhotoDelBtn').addEventListener('click',()=>{
   const b=currentBox(); if(!b) return;
@@ -4397,11 +4446,9 @@ async function attachPickupPhoto(p,file){
     showMsg(msg,'Photo upload failed: '+((err&&err.message)||'unknown error'),false);
   }
 }
-function pickPickupPhoto(p){
-  const inp=document.createElement('input');
-  inp.type='file'; inp.accept='image/*';   // phones offer Camera or Photo Library
-  inp.onchange=()=>{ const f=inp.files[0]; if(f) attachPickupPhoto(p,f); };
-  inp.click();
+async function pickPickupPhoto(p){
+  const f=await pickImageFile();
+  if(f) attachPickupPhoto(p,f);
 }
 // a note box is only as tall as the note, so nothing is hidden past the edge
 function growNote(t){
