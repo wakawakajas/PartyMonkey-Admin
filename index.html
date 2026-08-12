@@ -2594,33 +2594,47 @@ document.getElementById('adhocImportBtn').addEventListener('click',()=>{
       // upsert on the name, so importing a longer list again just tops it up
       let added=0;
       for(let i=0;i<list.length;i+=500){
-        const chunk=list.slice(i,i+500).map(x=>({user_id:session.user.id,sku:x.sku}));
-        const {error}=await sb.from('warehouse_skus').upsert(chunk,{onConflict:'sku',ignoreDuplicates:true});
+        const chunk=list.slice(i,i+500).map(x=>{
+          const row={user_id:session.user.id,sku:x.sku};
+          if(x.url) row.photo_url=x.url;     // keep the address even if the copy fails
+          return row;
+        });
+        const {error}=await sb.from('warehouse_skus').upsert(chunk,{onConflict:'sku'});
         if(error) throw error;
         added+=chunk.length;
+        btn.textContent=`Importing… ${Math.min(i+500,list.length)}/${list.length}`;
       }
       // Photos are fetched one at a time and shrunk on the way in. Suppliers'
       // image hosts often refuse cross-origin reads, so any that will not come
       // are skipped rather than failing the import.
       const withUrls=list.filter(x=>x.url);
-      let photos=0, refused=0;
-      for(const x of withUrls){
-        try{
-          const res=await fetch(x.url,{mode:'cors'});
-          if(!res.ok) throw new Error('http '+res.status);
-          const blob=await res.blob();
-          const small=await shrink(await fileToDataURL(blob),SKU_PHOTO_MAX_PX,SKU_PHOTO_QUALITY);
-          const out=await (await fetch(small)).blob();
-          const path=session.user.id+'/sku/'+Date.now()+'-'+(photos+1)+'.jpg';
-          const up=await sb.storage.from(PHOTO_BUCKET).upload(path,out,{contentType:'image/jpeg'});
-          if(up.error) throw up.error;
-          await sb.from('warehouse_skus').update({photo_path:path}).eq('sku',x.sku);
-          photos++;
-        }catch(e){ refused++; }
-      }
-      showMsg(msg,`✓ Imported ${added} SKU name(s) from ${escapeHtml(file.name)}.`
-        +(photos?` ${photos} photo(s) saved.`:'')
-        +(refused?` ${refused} photo(s) could not be fetched — that host blocks other sites from reading its images. Add those by tapping the square.`:''),true);
+      let photos=0, refused=0, done=0;
+      // a few at a time: one after another would take all afternoon over ten
+      // thousand rows, all at once would be throttled by the host
+      const LANES=6;
+      await Promise.all(Array.from({length:LANES},async(_,lane)=>{
+        for(let i=lane;i<withUrls.length;i+=LANES){
+          const x=withUrls[i];
+          try{
+            const res=await fetch(x.url,{mode:'cors'});
+            if(!res.ok) throw new Error('http '+res.status);
+            const blob=await res.blob();
+            const small=await shrink(await fileToDataURL(blob),SKU_PHOTO_MAX_PX,SKU_PHOTO_QUALITY);
+            const out=await (await fetch(small)).blob();
+            const path=session.user.id+'/sku/'+Date.now()+'-'+i+'.jpg';
+            const up=await sb.storage.from(PHOTO_BUCKET).upload(path,out,{contentType:'image/jpeg'});
+            if(up.error) throw up.error;
+            await sb.from('warehouse_skus').update({photo_path:path}).eq('sku',x.sku);
+            photos++;
+          }catch(e){ refused++; }
+          if(++done%25===0) btn.textContent=`Photos… ${done}/${withUrls.length}`;
+        }
+      }));
+      showMsg(msg,`✓ ${added} SKU name(s) from ${escapeHtml(file.name)}.`
+        +(photos?` ${photos} photo(s) copied.`:'')
+        +(refused?` ${refused} could not be copied — that host blocks other sites from reading its
+           images. Those still show from the supplier's own address, and can be replaced by tapping
+           the square.`:''),true);
       refreshSkus();
     }catch(err){
       showMsg(msg,'Import failed: '+((err&&err.message)||'unknown error'),false);
@@ -2644,22 +2658,31 @@ let skuRows=[];
 const pickedSkus=new Set();
 let skuSelectMode=false;
 document.getElementById('goToSkusBtn').addEventListener('click',()=>showScreen('skus'));
+// A warehouse of ten thousand names cannot be read in one go — the server
+// stops at a thousand rows — and drawing ten thousand cards would lock up the
+// phone anyway. So the count comes from the server, the list shows a page of
+// it, and searching is done server side rather than filtering what happened
+// to be loaded.
+const SKU_PAGE=300;
+let skuTotal=0;
 async function refreshSkus(){
   const el=document.getElementById('skuList');
   if(!sb){ skuRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
-  const {data,error}=await sb.from('warehouse_skus').select('*').order('sku');
+  const q=(document.getElementById('skuSearch').value||'').trim();
+  let sel=sb.from('warehouse_skus').select('*',{count:'exact'}).order('sku').limit(SKU_PAGE);
+  if(q) sel=sel.ilike('sku','%'+q+'%');
+  const {data,count,error}=await sel;
   if(error){
-    skuRows=[];
+    skuRows=[]; skuTotal=0;
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load. Run supabase-migration-ADHOC.sql first.</p>';
     return;
   }
   skuRows=data||[];
+  skuTotal=count==null?skuRows.length:count;
   renderSkus();
 }
-function visibleSkuIds(){
-  const q=(document.getElementById('skuSearch').value||'').trim().toLowerCase();
-  return new Set(skuRows.filter(r=>!q||String(r.sku).toLowerCase().includes(q)).map(r=>r.id));
-}
+// the server has already filtered, so everything loaded is on screen
+function visibleSkuIds(){ return new Set(skuRows.map(r=>r.id)); }
 const allSkusPicked=v=>v.size>0&&[...v].every(id=>pickedSkus.has(id));
 function syncSkuBulk(){
   const visible=visibleSkuIds();
@@ -2675,31 +2698,44 @@ function syncSkuBulk(){
 }
 function renderSkus(){
   const el=document.getElementById('skuList');
-  const q=(document.getElementById('skuSearch').value||'').trim().toLowerCase();
+  const q=(document.getElementById('skuSearch').value||'').trim();
   setTimeout(()=>{ syncSkuBulk(); hydrateSkuListThumbs(); },0);
-  document.getElementById('skusCount').textContent=`${skuRows.length} SKU name(s) in the warehouse.`;
-  if(!skuRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet — import a list or add one.</p>'; return; }
-  const rows=skuRows.filter(r=>!q||String(r.sku).toLowerCase().includes(q));
-  if(!rows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Nothing matches.</p>'; return; }
-  el.innerHTML=rows.map(r=>`<div class="ph-card" data-sku-id="${r.id}">
+  const capped=skuTotal>skuRows.length;
+  // while searching the figure is how many matched, not how many exist
+  document.getElementById('skusCount').textContent=q
+    ? `${skuTotal} match${skuTotal===1?'':'es'} for “${q}”.`
+      +(capped?` Showing the first ${skuRows.length}.`:'')
+    : `${skuTotal} SKU name(s) in the warehouse.`
+      +(capped?` Showing the first ${skuRows.length} — search to narrow it down.`:'');
+  if(!skuTotal&&!q){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet — import a list or add one.</p>'; return; }
+  if(!skuRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Nothing matches.</p>'; return; }
+  el.innerHTML=skuRows.map(r=>`<div class="ph-card" data-sku-id="${r.id}">
       <div class="adhoc-row">
         <input type="checkbox" class="pick" data-sku-pick ${pickedSkus.has(r.id)?'checked':''}
           title="Select" style="${skuSelectMode?'align-self:center;':'visibility:hidden;width:0;margin:0;'}"/>
-        <button class="sku-thumb${r.photo_path?' has':''}" data-sku-shot
-                title="${r.photo_path?'Tap to enlarge':'Add a photo'}">
-          ${r.photo_path?`<img alt="" data-sku-thumb="${escapeHtml(r.photo_path)}"/>`:'<span>＋</span>'}
-        </button>
+        ${skuThumbHtml(r)}
         <div class="adhoc-line">
           <div class="sku-head">
             <span class="sku-name">${escapeHtml(r.sku)}</span>
             <button class="copy-btn" data-copy="${escapeHtml(r.sku)}"
                     title="Copy SKU name" aria-label="Copy SKU name">⧉</button>
+            <button class="copy-btn" data-sku-edit title="Rename" aria-label="Rename">✎</button>
           </div>
-          <input type="text" class="sku-edit" data-sku-name value="${escapeHtml(r.sku)}"/>
+          <input type="text" class="sku-edit" data-sku-name value="${escapeHtml(r.sku)}" hidden/>
         </div>
         <button class="del-btn" data-sku-del title="Delete">×</button>
       </div>
     </div>`).join('');
+}
+// a copied photo where we have one, the supplier's own image where the copy
+// was refused, and an empty square where there is neither
+function skuThumbHtml(r){
+  const has=!!(r.photo_path||r.photo_url);
+  const img=r.photo_path
+    ? `<img alt="" data-sku-thumb="${escapeHtml(r.photo_path)}"/>`
+    : (r.photo_url?`<img alt="" src="${escapeHtml(r.photo_url)}" referrerpolicy="no-referrer"/>`:'<span>＋</span>');
+  return `<button class="sku-thumb${has?' has':''}" data-sku-shot
+            title="${has?'Tap to enlarge':'Add a photo'}">${img}</button>`;
 }
 async function hydrateSkuListThumbs(){
   if(!sb) return;
@@ -2712,7 +2748,12 @@ async function hydrateSkuListThumbs(){
     if(photoUrlCache[path]) img.src=photoUrlCache[path];
   }
 }
-document.getElementById('skuSearch').addEventListener('input',renderSkus);
+// searching asks the server, since the whole catalogue is not loaded
+let skuSearchTimer=null;
+document.getElementById('skuSearch').addEventListener('input',()=>{
+  clearTimeout(skuSearchTimer);
+  skuSearchTimer=setTimeout(refreshSkus,250);
+});
 function toggleSkuAdd(open){
   const form=document.getElementById('skuAddForm');
   const btn=document.getElementById('skuAddOpen');
@@ -2770,8 +2811,18 @@ document.getElementById('skuList').addEventListener('click',async e=>{
     syncSkuBulk();
     return;
   }
+  // the name only becomes editable when you ask for it
+  if(e.target.closest('[data-sku-edit]')){
+    const box=card.querySelector('[data-sku-name]');
+    const head=card.querySelector('.sku-head');
+    box.hidden=!box.hidden;
+    head.style.display=box.hidden?'':'none';
+    if(!box.hidden){ box.focus(); box.select(); }
+    return;
+  }
   if(e.target.closest('[data-sku-shot]')){
     if(r.photo_path) openPhotoModal(r.photo_path,r.sku);
+    else if(r.photo_url) openPhotoModal(null,r.sku,r.photo_url);
     else{ const f=await pickImageFile(); if(f){ await attachSkuPhoto(r.sku,f); await refreshSkus(); } }
     return;
   }
@@ -2788,11 +2839,13 @@ document.getElementById('skuList').addEventListener('focusout',async e=>{
   const card=e.target.closest('.ph-card');
   const r=skuRows.find(x=>x.id===card.dataset.skuId); if(!r) return;
   const name=e.target.value.trim();
-  if(!name||name===r.sku){ e.target.value=r.sku; return; }
+  const shut=()=>{ e.target.hidden=true;
+    const head=card.querySelector('.sku-head'); if(head) head.style.display=''; };
+  if(!name||name===r.sku){ e.target.value=r.sku; shut(); return; }
   const msg=document.getElementById('skuMsg');
   const {error}=await sb.from('warehouse_skus').update({sku:name}).eq('id',r.id);
   if(error){
-    e.target.value=r.sku;
+    e.target.value=r.sku; shut();
     showMsg(msg,/duplicate|unique/i.test(error.message)
       ? 'There is already a SKU with that name.' : 'Could not rename: '+error.message,false);
     return;

@@ -29,3 +29,9 @@ create policy "sku_photos_team_delete" on storage.objects
     and (storage.foldername(name))[2] = 'sku'
     and public.on_team(auth.uid())
   );
+
+-- ---- keep the source image address ----------------------------------
+-- Suppliers' hosts often refuse cross-origin reads, so the copy into our own
+-- bucket fails. Keeping the address means the picture can still be shown from
+-- source, and the copy retried later, instead of the photo being lost.
+alter table public.warehouse_skus add column if not exists photo_url text;
