@@ -658,6 +658,7 @@ body{overflow-x:hidden;}
               aria-expanded="false">+</button>
       <span class="add-lbl" id="skuAddLbl">Add new SKU</span>
       <button class="btn-outline btn-sm" id="adhocImportBtn" style="margin-left:auto;">⬆ Import SKU</button>
+      <button class="btn-danger btn-sm" id="skuWipeBtn">Delete everything</button>
     </div>
     <div id="adhocImportMsg"></div>
     <form id="skuAddForm" class="pk-add" autocomplete="off" style="display:none;">
@@ -2801,6 +2802,48 @@ document.getElementById('skuBulkDelete').addEventListener('click',async()=>{
   if(gone.length) await sb.storage.from(PHOTO_BUCKET).remove(gone);
   pickedSkus.clear(); skuSelectMode=false;
   await refreshSkus();
+});
+// Emptying the catalogue is the largest thing anyone can do here and it takes
+// the whole team's warehouse with it, so it says how many, asks for the code,
+// and clears the photos before the rows — if it is interrupted, what is left
+// is still a real catalogue rather than names with dead pictures.
+document.getElementById('skuWipeBtn').addEventListener('click',async()=>{
+  if(!sb) return;
+  const btn=document.getElementById('skuWipeBtn');
+  const msg=document.getElementById('adhocImportMsg');
+  const {count}=await sb.from('warehouse_skus').select('*',{count:'exact',head:true});
+  const total=count||0;
+  if(!total){ showMsg(msg,'The warehouse is already empty.',false); return; }
+  if(!challenge(`Delete all ${total} SKU name(s) and their photos, for everyone.`)) return;
+  btn.disabled=true; const label=btn.textContent;
+  try{
+    // collect the stored photos a page at a time, since there may be thousands
+    btn.textContent='Finding photos…';
+    const paths=[];
+    for(let from=0;;from+=1000){
+      const {data,error}=await sb.from('warehouse_skus')
+        .select('photo_path').not('photo_path','is',null).range(from,from+999);
+      if(error) throw error;
+      if(!data||!data.length) break;
+      data.forEach(r=>paths.push(r.photo_path));
+      if(data.length<1000) break;
+    }
+    for(let i=0;i<paths.length;i+=100){
+      await sb.storage.from(PHOTO_BUCKET).remove(paths.slice(i,i+100));
+      btn.textContent=`Photos… ${Math.min(i+100,paths.length)}/${paths.length}`;
+    }
+    btn.textContent='Deleting…';
+    // a delete needs a filter; every row has a name, so this matches them all
+    const {error}=await sb.from('warehouse_skus').delete().neq('sku','');
+    if(error) throw error;
+    showMsg(msg,`✓ Warehouse emptied — ${total} SKU name(s)`
+      +(paths.length?` and ${paths.length} photo(s)`:'')+' deleted.',true);
+    pickedSkus.clear(); skuSelectMode=false;
+    await refreshSkus();
+  }catch(err){
+    showMsg(msg,'Could not empty it: '+((err&&err.message)||'unknown error'),false);
+    await refreshSkus();
+  }finally{ btn.disabled=false; btn.textContent=label; }
 });
 document.getElementById('skuList').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
