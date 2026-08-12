@@ -342,6 +342,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .adhoc-line .copy-btn{align-self:center;margin-left:0;}
 .adhoc-qty{flex:0 0 78px;margin-bottom:0;}
 .adhoc-qty input{height:40px;font-size:15px;padding:0 8px;text-align:center;}
+.adhoc-loc{flex:1 1 100%;margin-bottom:0;}
+.adhoc-loc input{height:40px;font-size:14px;}
+/* the picture identifies the item at a glance, so it leads the row */
+.sku-thumb{width:56px;height:56px;min-height:56px;flex-shrink:0;padding:0;overflow:hidden;
+  border:1px dashed var(--border-strong);border-radius:12px;background:#101113;
+  color:var(--faint);font-size:17px;display:flex;align-items:center;justify-content:center;}
+.sku-thumb.has{border-style:solid;cursor:zoom-in;}
+.sku-thumb img{width:100%;height:100%;object-fit:cover;display:block;}
 .adhoc-picked{width:88px;flex-shrink:0;min-height:52px;}
 .adhoc-row .del-btn{align-self:center;flex-shrink:0;}
 .sku-results{display:flex;flex-direction:column;gap:5px;margin-bottom:12px;}
@@ -2323,6 +2331,8 @@ document.getElementById('adhocList').addEventListener('click',async e=>{
 
 // ---- one order: search the catalogue, add lines, tick them off ----
 const adhocOrder=()=>adhocOrders.find(o=>o.id===adhocCurrentId)||null;
+// SKU name -> storage path, so a line knows whether it has a picture
+let skuPhotos={};
 async function refreshAdhocDetail(){
   const o=adhocOrder();
   document.getElementById('adhocDetailId').innerHTML=o?oidCopy(o.order_id):'—';
@@ -2332,7 +2342,49 @@ async function refreshAdhocDetail(){
   const {data,error}=await sb.from('adhoc_items').select('*')
     .eq('order_ref',adhocCurrentId).order('sort_order',{ascending:true});
   adhocLines=error?[]:(data||[]);
+  // one lookup for the whole list rather than one per line
+  const names=[...new Set(adhocLines.map(l=>l.sku))];
+  if(names.length){
+    const {data:sk}=await sb.from('warehouse_skus').select('sku,photo_path').in('sku',names);
+    skuPhotos={};
+    (sk||[]).forEach(r=>{ if(r.photo_path) skuPhotos[r.sku]=r.photo_path; });
+  }else skuPhotos={};
   renderAdhocLines();
+}
+async function hydrateSkuThumbs(){
+  if(!sb) return;
+  for(const img of document.querySelectorAll('#adhocLines img[data-sku-thumb]')){
+    const path=img.getAttribute('data-sku-thumb');
+    if(!photoUrlCache[path]){
+      const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(path,3600);
+      if(data&&data.signedUrl) photoUrlCache[path]=data.signedUrl;
+    }
+    if(photoUrlCache[path]) img.src=photoUrlCache[path];
+  }
+}
+// A SKU photo belongs to the SKU, not to one picking line, so it is stored
+// against the catalogue entry and shows up wherever that SKU appears.
+async function attachSkuPhoto(sku,file){
+  const msg=document.getElementById('adhocDetailMsg');
+  const session=await requireSession(msg); if(!session) return;
+  showMsg(msg,'Uploading photo…',true);
+  try{
+    const small=await shrink(await fileToDataURL(file),SKU_PHOTO_MAX_PX,SKU_PHOTO_QUALITY);
+    const blob=await (await fetch(small)).blob();
+    const path=session.user.id+'/sku/'+Date.now()+'.jpg';
+    const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:'image/jpeg'});
+    if(up.error) throw up.error;
+    const old=skuPhotos[sku];
+    const {error}=await sb.from('warehouse_skus')
+      .upsert({user_id:session.user.id,sku,photo_path:path},{onConflict:'sku'});
+    if(error) throw error;
+    if(old) await sb.storage.from(PHOTO_BUCKET).remove([old]);
+    skuPhotos[sku]=path;
+    msg.innerHTML='';
+    renderAdhocLines();
+  }catch(err){
+    showMsg(msg,'Photo upload failed: '+((err&&err.message)||'unknown error'),false);
+  }
 }
 function renderAdhocLines(){
   const el=document.getElementById('adhocLines');
@@ -2340,19 +2392,35 @@ function renderAdhocLines(){
   document.getElementById('adhocDetailProgress').textContent=
     total?`${picked} of ${total} picked${picked>=total?' — done':''}`:'Nothing added yet.';
   if(!total){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing added yet —</p>'; return; }
-  el.innerHTML=adhocLines.map(l=>`<div class="ph-card" data-line="${l.id}">
+  el.innerHTML=adhocLines.map(l=>{
+    const want=Number(l.qty)||1;
+    // how many were actually found, defaulting to however many were asked for
+    const got=l.qty_picked==null?want:Number(l.qty_picked);
+    const photo=skuPhotos[l.sku];
+    return `<div class="ph-card" data-line="${l.id}">
       <div class="adhoc-row">
+        <button class="sku-thumb${photo?' has':''}" data-sku-photo="${escapeHtml(l.sku)}"
+                title="${photo?'Tap to enlarge':'Add a photo of this SKU'}">
+          ${photo?`<img alt="" data-sku-thumb="${escapeHtml(photo)}"/>`:'<span>＋</span>'}
+        </button>
         <div class="adhoc-line">
           <span class="sku-name">${escapeHtml(l.sku)}</span>
           <button class="copy-btn" data-copy="${escapeHtml(l.sku)}"
                   title="Copy SKU name" aria-label="Copy SKU name">⧉</button>
           <label class="field adhoc-qty"><span>QTY</span>
-            <input type="number" min="1" step="1" data-line-qty value="${Number(l.qty)||1}"/></label>
+            <input type="number" min="1" step="1" data-line-qty value="${want}"/></label>
+          <label class="field adhoc-qty"><span>PICKED</span>
+            <input type="number" min="0" step="1" data-line-got value="${got}"/></label>
+          <label class="field adhoc-loc"><span>LOCATION REMARKS</span>
+            <input type="text" data-line-loc value="${escapeHtml(l.location_remarks||'')}"
+                   placeholder="Where it was found"/></label>
         </div>
         <button class="pk-state adhoc-picked${l.picked?' on':''}" data-line-picked>Picked</button>
         <button class="del-btn" data-line-del title="Remove">×</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+  hydrateSkuThumbs();
 }
 // searching the catalogue as you type, capped so a huge list stays usable
 let adhocSearchTimer=null;
@@ -2394,6 +2462,13 @@ document.getElementById('adhocSkuResults').addEventListener('click',async e=>{
 document.getElementById('adhocLines').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
   const l=adhocLines.find(x=>x.id===card.dataset.line); if(!l) return;
+  const shot=e.target.closest('[data-sku-photo]');
+  if(shot){
+    const sku=shot.getAttribute('data-sku-photo');
+    if(skuPhotos[sku]) openPhotoModal(skuPhotos[sku],sku);
+    else{ const f=await pickImageFile(); if(f) attachSkuPhoto(sku,f); }
+    return;
+  }
   if(e.target.closest('[data-line-del]')){
     await sb.from('adhoc_items').delete().eq('id',l.id);
     await refreshAdhocDetail();
@@ -2402,19 +2477,40 @@ document.getElementById('adhocLines').addEventListener('click',async e=>{
   if(e.target.closest('[data-line-picked]')){
     l.picked=!l.picked;
     l.picked_at=l.picked?new Date().toISOString():null;
+    // ticking it means you found what was asked for, unless you say otherwise
+    if(l.picked&&l.qty_picked==null) l.qty_picked=Number(l.qty)||1;
     renderAdhocLines();
-    await sb.from('adhoc_items').update({picked:l.picked,picked_at:l.picked_at}).eq('id',l.id);
+    await sb.from('adhoc_items').update({picked:l.picked,picked_at:l.picked_at,
+      qty_picked:l.qty_picked}).eq('id',l.id);
     // the order's own state follows its lines, so the list behind is stale now
     await refreshAdhoc();
   }
 });
 document.getElementById('adhocLines').addEventListener('change',async e=>{
-  if(!e.target.matches('[data-line-qty]')) return;
+  const card=e.target.closest('.ph-card'); if(!card) return;
+  const l=adhocLines.find(x=>x.id===card.dataset.line); if(!l) return;
+  if(e.target.matches('[data-line-qty]')){
+    const v=Math.max(1,parseInt(e.target.value,10)||1);
+    e.target.value=v; l.qty=v;
+    await sb.from('adhoc_items').update({qty:v}).eq('id',l.id);
+  }else if(e.target.matches('[data-line-got]')){
+    const v=Math.max(0,parseInt(e.target.value,10)||0);
+    e.target.value=v; l.qty_picked=v;
+    await sb.from('adhoc_items').update({qty_picked:v}).eq('id',l.id);
+  }
+});
+// location is prose, so it saves a moment after typing stops rather than
+// writing on every keystroke
+const adhocLocTimers=new Map();
+document.getElementById('adhocLines').addEventListener('input',e=>{
+  if(!e.target.matches('[data-line-loc]')) return;
   const card=e.target.closest('.ph-card');
   const l=adhocLines.find(x=>x.id===card.dataset.line); if(!l) return;
-  const v=Math.max(1,parseInt(e.target.value,10)||1);
-  e.target.value=v; l.qty=v;
-  await sb.from('adhoc_items').update({qty:v}).eq('id',l.id);
+  l.location_remarks=e.target.value;
+  clearTimeout(adhocLocTimers.get(l.id));
+  adhocLocTimers.set(l.id,setTimeout(async()=>{
+    await sb.from('adhoc_items').update({location_remarks:l.location_remarks||''}).eq('id',l.id);
+  },700));
 });
 
 // ---- import the warehouse SKU list ----
@@ -2431,27 +2527,54 @@ document.getElementById('adhocImportBtn').addEventListener('click',()=>{
       const session=await requireSession(msg); if(!session) return;
       const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
       const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
-      // take a column called SKU if there is one, otherwise the first column
-      let col=0, start=0;
+      // take a column called SKU if there is one, otherwise the first column,
+      // and a photo column beside it if the sheet has one
+      let col=0, photoCol=-1, start=0;
       const head=(rows[0]||[]).map(v=>String(v).trim().toLowerCase());
       const found=head.findIndex(h=>/^(sku|sku name|item|product)/.test(h));
-      if(found>=0){ col=found; start=1; }
+      if(found>=0){
+        col=found; start=1;
+        photoCol=head.findIndex(h=>/(photo|image|picture|img)/.test(h));
+      }
       const seen=new Set(), list=[];
       for(let r=start;r<rows.length;r++){
         const v=String((rows[r]||[])[col]??'').trim();
         if(!v||seen.has(v.toLowerCase())) continue;
-        seen.add(v.toLowerCase()); list.push(v);
+        seen.add(v.toLowerCase());
+        const url=photoCol>=0?String((rows[r]||[])[photoCol]??'').trim():'';
+        list.push({sku:v,url:/^https?:\/\//i.test(url)?url:''});
       }
       if(!list.length) throw new Error('no SKU names found in the first sheet');
       // upsert on the name, so importing a longer list again just tops it up
       let added=0;
       for(let i=0;i<list.length;i+=500){
-        const chunk=list.slice(i,i+500).map(sku=>({user_id:session.user.id,sku}));
+        const chunk=list.slice(i,i+500).map(x=>({user_id:session.user.id,sku:x.sku}));
         const {error}=await sb.from('warehouse_skus').upsert(chunk,{onConflict:'sku',ignoreDuplicates:true});
         if(error) throw error;
         added+=chunk.length;
       }
-      showMsg(msg,`✓ Imported ${added} SKU name(s) from ${escapeHtml(file.name)}.`,true);
+      // Photos are fetched one at a time and shrunk on the way in. Suppliers'
+      // image hosts often refuse cross-origin reads, so any that will not come
+      // are skipped rather than failing the import.
+      const withUrls=list.filter(x=>x.url);
+      let photos=0, refused=0;
+      for(const x of withUrls){
+        try{
+          const res=await fetch(x.url,{mode:'cors'});
+          if(!res.ok) throw new Error('http '+res.status);
+          const blob=await res.blob();
+          const small=await shrink(await fileToDataURL(blob),SKU_PHOTO_MAX_PX,SKU_PHOTO_QUALITY);
+          const out=await (await fetch(small)).blob();
+          const path=session.user.id+'/sku/'+Date.now()+'-'+(photos+1)+'.jpg';
+          const up=await sb.storage.from(PHOTO_BUCKET).upload(path,out,{contentType:'image/jpeg'});
+          if(up.error) throw up.error;
+          await sb.from('warehouse_skus').update({photo_path:path}).eq('sku',x.sku);
+          photos++;
+        }catch(e){ refused++; }
+      }
+      showMsg(msg,`✓ Imported ${added} SKU name(s) from ${escapeHtml(file.name)}.`
+        +(photos?` ${photos} photo(s) saved.`:'')
+        +(refused?` ${refused} photo(s) could not be fetched — that host blocks other sites from reading its images. Add those by tapping the square.`:''),true);
     }catch(err){
       showMsg(msg,'Import failed: '+((err&&err.message)||'unknown error'),false);
     }finally{ btn.disabled=false; btn.textContent=label; }
@@ -3044,6 +3167,10 @@ const PHOTO_BUCKET='shipment-photos';
 // Shipment photos are reference shots — enough to recognise a SKU or read a
 // box label, not archival. 800px at q0.6 is roughly a quarter the bytes of
 // the old 1280/0.72 setting, so the free storage tier goes about 4x further.
+// a SKU thumbnail is looked at in a 56px square, so it is stored small — a
+// warehouse of thousands of them would otherwise be the bulk of the storage
+const SKU_PHOTO_MAX_PX=320;
+const SKU_PHOTO_QUALITY=0.5;
 const SHIPMENT_PHOTO_MAX_PX=800;
 const SHIPMENT_PHOTO_QUALITY=0.6;
 const photoUrlCache={};
