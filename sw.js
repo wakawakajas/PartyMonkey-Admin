@@ -20,6 +20,13 @@ self.addEventListener('push', event => {
     // each other rather than stacking up
     tag: d.tag || 'pickup',
     renotify: true,
+    // Android decides whether to show a banner or just drop it in the shade.
+    // A vibration pattern and staying put until it is dealt with are what push
+    // it towards a banner; without them Samsung tends to file it silently.
+    vibrate: [80, 40, 80],
+    requireInteraction: true,
+    silent: false,
+    timestamp: Date.now(),
     data: { url: d.url || './' }
   }));
 });
