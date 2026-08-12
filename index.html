@@ -334,6 +334,16 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .pk-state.on{background:var(--blueprint);border-color:var(--blueprint);color:var(--lime-ink);font-weight:700;}
 /* SKU names are long and unpunctuated, so they wrap rather than truncate */
 .sku-name{font-weight:600;font-size:13.5px;overflow-wrap:anywhere;min-width:0;}
+/* a picking line: name and quantity together on the left, Picked on the right
+   where the thumb already is from the row above */
+.adhoc-row{display:flex;align-items:flex-start;gap:9px;}
+.adhoc-line{flex:1;min-width:0;display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;}
+.adhoc-line .sku-name{color:var(--blueprint);flex:1 1 130px;align-self:center;}
+.adhoc-line .copy-btn{align-self:center;margin-left:0;}
+.adhoc-qty{flex:0 0 78px;margin-bottom:0;}
+.adhoc-qty input{height:40px;font-size:15px;padding:0 8px;text-align:center;}
+.adhoc-picked{width:88px;flex-shrink:0;min-height:52px;}
+.adhoc-row .del-btn{align-self:center;flex-shrink:0;}
 .sku-results{display:flex;flex-direction:column;gap:5px;margin-bottom:12px;}
 .sku-results:empty{margin-bottom:0;}
 .sku-hit{text-align:left;background:var(--nest);border:1px solid var(--border);color:var(--ink);
@@ -626,13 +636,12 @@ body{overflow-x:hidden;}
   <!-- SEARCH WAREHOUSE -->
   <div class="home-wrap" id="warehouseScreen" style="display:none;">
     <h1>Search Warehouse</h1>
-    <p class="sub" id="warehouseCount">—</p>
-    <label class="field" style="margin-bottom:10px;"><span>SEARCH</span>
-      <input type="text" id="warehouseSearch" placeholder="Type part of the SKU name" autocomplete="off"/>
-    </label>
-    <div class="ph-list list-full" id="warehouseList">
-      <p class="hint" style="margin:4px 0 0;">Start typing to search.</p>
-    </div>
+    <p class="sub">Not built yet.</p>
+    <div class="card"><div class="card-body" style="padding:16px;">
+      <p class="hint" style="margin:0;">I had this searching the imported SKU names, but that
+      list belongs to Ad-Hoc Picking. Tell me what you want to look up here — where something is
+      stored, how much is left, which order it came in on — and this becomes that.</p>
+    </div></div>
     <div id="warehouseMsg"></div>
   </div>
 
@@ -644,6 +653,18 @@ body{overflow-x:hidden;}
       <p class="hint" style="margin:4px 0 0;">Loading…</p>
     </div>
     <div id="usersMsg"></div>
+
+    <div class="sect-label">Send a pop-up</div>
+    <div class="card"><div class="card-body" style="padding:14px;">
+      <p class="hint">Appears on everyone's screen. Anyone with the app shut gets a
+      notification instead, if they have turned those on.</p>
+      <label class="field" style="margin-bottom:8px;"><span>TITLE</span>
+        <input type="text" id="announceTitle" placeholder="e.g. Stock take at 4pm"/></label>
+      <label class="field" style="margin-bottom:10px;"><span>MESSAGE</span>
+        <input type="text" id="announceBody" placeholder="Anything they need to know"/></label>
+      <button class="btn-primary" id="announceSend" style="width:100%;">Send to everyone</button>
+      <div id="announceMsg"></div>
+    </div></div>
   </div>
 
   <!-- STORE PICK UP -->
@@ -1200,6 +1221,14 @@ body{overflow-x:hidden;}
 
 <!-- Samsung's picker opens straight into the gallery with no way to reach the
      camera, so the choice is made here rather than hoping the phone offers it -->
+<div class="sheet-bg" id="announceSheet">
+  <div class="sheet">
+    <div class="sheet-title" id="announceShownTitle">Message</div>
+    <p class="hint" id="announceShownBody" style="margin:0 0 4px;"></p>
+    <button class="btn-primary" id="announceDismiss">OK</button>
+  </div>
+</div>
+
 <div class="sheet-bg" id="photoSheet">
   <div class="sheet">
     <div class="sheet-title">Add a photo</div>
@@ -1821,6 +1850,8 @@ function setAuthedUI(signedIn,email){
     // the part before the @ is what people call themselves
     document.getElementById('homeWho').textContent=String(email||'').split('@')[0]||'there';
     loadAccess();
+    checkAnnouncements();
+    watchAnnouncements();
     // Claim this device for whoever just signed in. Without this a phone keeps
     // whatever account registered it last, so someone with no pick up access
     // keeps getting the previous user's notifications — and they never open
@@ -1887,7 +1918,8 @@ const SCREEN_SECTION={tool:'print',
   'shipment-tracking':'shipping','shipment-boxes':'shipping','shipment-box':'shipping',
   'shipment-china':'shipping','shipment-outstanding':'shipping',
   consol:'shipping','consol-detail':'shipping',calendar:'shipping',trash:'shipping',
-  pickup:'pickup',users:'admin'};
+  pickup:'pickup',users:'admin',
+  adhoc:'adhoc','adhoc-detail':'adhoc',warehouse:'warehouse'};
 const SCREENS=Object.keys(SCREEN_EL);
 // With no back button on the screens themselves, Back has to remember the
 // route you actually took rather than a fixed parent per screen.
@@ -1895,23 +1927,30 @@ const SCREENS=Object.keys(SCREEN_EL);
 // This is a gate on the interface, not a lock on the data — row level security
 // is what keeps one account's rows away from another's. If the table is not
 // there yet the app stays fully open rather than locking everyone out.
-let access={admin:false,print:true,shipping:true,pickup:true};
+let access={admin:false,print:true,shipping:true,pickup:true,adhoc:true,warehouse:true};
 const may=s=>!s||(s==='admin'?access.admin:!!access[s]);
 async function loadAccess(){
   if(!sb) return;
   const {data:{session}}=await sb.auth.getSession();
   if(!session) return;
+  // select * rather than naming columns, so a section added before its
+  // migration has been run does not fail the whole read
   const {data,error}=await sb.from('profiles')
-    .select('is_admin,can_print,can_shipping,can_pickup').eq('user_id',session.user.id).maybeSingle();
+    .select('*').eq('user_id',session.user.id).maybeSingle();
   // a failed read must leave what we already knew alone — resetting to "open"
   // here would hand out everything the moment the network hiccuped
   if(error){
-    if(!accessLoaded) access={admin:false,print:true,shipping:true,pickup:true}; // migration not run
+    if(!accessLoaded) access={admin:false,print:true,shipping:true,pickup:true,adhoc:true,warehouse:true};
     return;
   }
+  // a column that is not there yet means that section was never gated, so it
+  // stays open rather than vanishing for everyone
+  const flag=(v,dflt)=>v===undefined?dflt:!!v;
   access=data
-    ? {admin:!!data.is_admin,print:!!data.can_print,shipping:!!data.can_shipping,pickup:!!data.can_pickup}
-    : {admin:false,print:false,shipping:false,pickup:false};
+    ? {admin:flag(data.is_admin,false),print:flag(data.can_print,false),
+       shipping:flag(data.can_shipping,false),pickup:flag(data.can_pickup,false),
+       adhoc:flag(data.can_adhoc,true),warehouse:flag(data.can_warehouse,true)}
+    : {admin:false,print:false,shipping:false,pickup:false,adhoc:false,warehouse:false};
   accessLoaded=true;
   applyAccess();
 }
@@ -1944,6 +1983,8 @@ function applyAccess(){
   const pairs=[['goToToolBtn','print'],['navToolBtn','print'],
                ['goToShipmentBtn','shipping'],['navShipmentBtn','shipping'],
                ['goToPickupBtn','pickup'],['navPickupBtn','pickup'],
+               ['goToAdhocBtn','adhoc'],['navAdhocBtn','adhoc'],
+               ['goToWarehouseBtn','warehouse'],['navWarehouseBtn','warehouse'],
                ['navUsersBtn','admin']];
   pairs.forEach(([id,sec])=>{ const el=document.getElementById(id); if(el) el.style.display=may(sec)?'':'none'; });
   const none=!may('print')&&!may('shipping')&&!may('pickup');
@@ -1990,7 +2031,6 @@ function showScreen(name,viaBack){
   if(name==='users') refreshUsers();
   if(name==='adhoc') refreshAdhoc();
   if(name==='adhoc-detail') refreshAdhocDetail();
-  if(name==='warehouse') refreshWarehouseCount();
   // nothing to go back to from the first screen of the session
   document.getElementById('navBackBtn').disabled=!navStack.length;
 }
@@ -2045,12 +2085,14 @@ document.getElementById('navUsersBtn').addEventListener('click',()=>showScreen('
 // ---------- who may open what ----------
 let userRows=[];
 const ACCESS_COLS=[['can_print','Print template'],['can_shipping','Procurement'],
-                   ['can_pickup','Store Pick Up'],['is_admin','Admin']];
+                   ['can_pickup','Store Pick Up'],['can_adhoc','Ad-Hoc Picking'],
+                   ['can_warehouse','Search Warehouse'],['is_admin','Admin']];
+// admin is not a section, so "everything" means every section, not the keys
+const SECTION_COLS=ACCESS_COLS.filter(([c])=>c!=='is_admin').map(([c])=>c);
 async function refreshUsers(){
   const el=document.getElementById('usersList');
   if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
-  const {data,error}=await sb.from('profiles')
-    .select('user_id,email,is_admin,can_print,can_shipping,can_pickup').order('email');
+  const {data,error}=await sb.from('profiles').select('*').order('email');
   if(error){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load users. Run supabase-migration-ACCESS.sql first.</p>';
     return;
@@ -2069,7 +2111,10 @@ function renderUsers(){
         ${ACCESS_COLS.map(([col,label])=>`
           <button class="pk-state${u[col]?' on':''}" data-acc="${col}">${label}</button>`).join('')}
       </div>
-      <button class="btn-danger btn-sm" data-signout style="margin-top:9px;">Force sign out</button>
+      <div class="row" style="margin:9px 0 0;">
+        <button class="btn-outline btn-sm" data-acc-all>${SECTION_COLS.every(c=>u[c])?'Remove all access':'Give all access'}</button>
+        <button class="btn-danger btn-sm" data-signout>Force sign out</button>
+      </div>
     </div>`).join('');
 }
 document.getElementById('usersList').addEventListener('click',async e=>{
@@ -2090,6 +2135,20 @@ document.getElementById('usersList').addEventListener('click',async e=>{
     if(error){ showMsg(msg,'Could not sign them out: '+(error.message||error),false); return; }
     showMsg(msg,`✓ ${escapeHtml(who)} signed out`
       +(data?` · ${data} device(s) unregistered`:''),true);
+    return;
+  }
+
+  // one tap for every section, rather than working down the row
+  const all=e.target.closest('[data-acc-all]');
+  if(all){
+    const msg=document.getElementById('usersMsg');
+    const turnOn=!SECTION_COLS.every(c=>u[c]);
+    const patch={}; SECTION_COLS.forEach(c=>{ patch[c]=turnOn; u[c]=turnOn; });
+    renderUsers();
+    const {error}=await sb.from('profiles').update(patch).eq('user_id',u.user_id);
+    if(error){ await refreshUsers(); showMsg(msg,'Could not save: '+error.message,false); return; }
+    const me=(await sb.auth.getSession()).data.session;
+    if(me&&me.user.id===u.user_id) await loadAccess();
     return;
   }
 
@@ -2282,20 +2341,16 @@ function renderAdhocLines(){
     total?`${picked} of ${total} picked${picked>=total?' — done':''}`:'Nothing added yet.';
   if(!total){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing added yet —</p>'; return; }
   el.innerHTML=adhocLines.map(l=>`<div class="ph-card" data-line="${l.id}">
-      <div class="pk-row">
-        <div class="pk-main">
-          <div class="pk-idline">
-            <span class="sku-name">${escapeHtml(l.sku)}</span>
-            <button class="copy-btn" data-copy="${escapeHtml(l.sku)}"
-                    title="Copy SKU name" aria-label="Copy SKU name">⧉</button>
-          </div>
-          <label class="field" style="max-width:130px;"><span>QTY</span>
+      <div class="adhoc-row">
+        <div class="adhoc-line">
+          <span class="sku-name">${escapeHtml(l.sku)}</span>
+          <button class="copy-btn" data-copy="${escapeHtml(l.sku)}"
+                  title="Copy SKU name" aria-label="Copy SKU name">⧉</button>
+          <label class="field adhoc-qty"><span>QTY</span>
             <input type="number" min="1" step="1" data-line-qty value="${Number(l.qty)||1}"/></label>
         </div>
-        <div class="pk-states">
-          <button class="pk-state${l.picked?' on':''}" data-line-picked>${l.picked?'Picked':'Pick'}</button>
-          <button class="del-btn" data-line-del title="Remove">×</button>
-        </div>
+        <button class="pk-state adhoc-picked${l.picked?' on':''}" data-line-picked>Picked</button>
+        <button class="del-btn" data-line-del title="Remove">×</button>
       </div>
     </div>`).join('');
 }
@@ -2397,7 +2452,6 @@ document.getElementById('adhocImportBtn').addEventListener('click',()=>{
         added+=chunk.length;
       }
       showMsg(msg,`✓ Imported ${added} SKU name(s) from ${escapeHtml(file.name)}.`,true);
-      refreshWarehouseCount();
     }catch(err){
       showMsg(msg,'Import failed: '+((err&&err.message)||'unknown error'),false);
     }finally{ btn.disabled=false; btn.textContent=label; }
@@ -2405,36 +2459,65 @@ document.getElementById('adhocImportBtn').addEventListener('click',()=>{
   inp.click();
 });
 
-// ---------- search warehouse ----------
-async function refreshWarehouseCount(){
-  const el=document.getElementById('warehouseCount');
-  if(!sb){ el.textContent='Sync unavailable.'; return; }
-  const {count,error}=await sb.from('warehouse_skus').select('*',{count:'exact',head:true});
-  el.textContent=error
-    ? 'Could not read the catalogue. Run supabase-migration-ADHOC.sql first.'
-    : `${count||0} SKU name(s) in the warehouse.`;
+// ---------- pop-up messages from an admin ----------
+// Shown once each. The last one seen is remembered on the device, so a
+// message does not reappear every time the app is opened.
+const SEEN_KEY='pigu.seenAnnouncement';
+function showAnnouncement(a){
+  if(!a) return;
+  if(localStorage.getItem(SEEN_KEY)===a.id) return;
+  document.getElementById('announceShownTitle').textContent=a.title||'Message';
+  document.getElementById('announceShownBody').textContent=a.body||'';
+  document.getElementById('announceSheet').classList.add('open');
+  localStorage.setItem(SEEN_KEY,a.id);
 }
-let warehouseTimer=null;
-document.getElementById('warehouseSearch').addEventListener('input',e=>{
-  clearTimeout(warehouseTimer);
-  const q=e.target.value.trim();
-  const box=document.getElementById('warehouseList');
-  if(q.length<2){ box.innerHTML='<p class="hint" style="margin:4px 0 0;">Start typing to search.</p>'; return; }
-  warehouseTimer=setTimeout(async()=>{
-    const {data,error}=await sb.from('warehouse_skus').select('sku')
-      .ilike('sku','%'+q+'%').order('sku').limit(100);
-    if(error){ box.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not search: '+escapeHtml(error.message)+'</p>'; return; }
-    const rows=data||[];
-    box.innerHTML=rows.length?rows.map(r=>`<div class="ph-card">
-        <div class="ph-card-head" style="margin:0;">
-          <span class="sku-name" style="flex:1;min-width:0;">${escapeHtml(r.sku)}</span>
-          <button class="copy-btn" data-copy="${escapeHtml(r.sku)}"
-                  title="Copy SKU name" aria-label="Copy SKU name">⧉</button>
-        </div>
-      </div>`).join('')
-      :`<p class="hint" style="margin:4px 0 0;">Nothing matches “${escapeHtml(q)}”.</p>`;
-  },220);
+document.getElementById('announceDismiss').addEventListener('click',()=>
+  document.getElementById('announceSheet').classList.remove('open'));
+
+async function checkAnnouncements(){
+  if(!sb) return;
+  const {data,error}=await sb.from('announcements')
+    .select('id,title,body,created_at').order('created_at',{ascending:false}).limit(1);
+  if(error||!data||!data.length) return;
+  // anything older than a day is stale news to someone opening the app now
+  const a=data[0];
+  if(Date.now()-Date.parse(a.created_at)>864e5) { localStorage.setItem(SEEN_KEY,a.id); return; }
+  showAnnouncement(a);
+}
+let announceChannel=null;
+function watchAnnouncements(){
+  if(!sb||announceChannel||!sb.channel) return;
+  announceChannel=sb.channel('announcements-feed')
+    .on('postgres_changes',{event:'INSERT',schema:'public',table:'announcements'},
+      ({new:row})=>showAnnouncement(row))
+    .subscribe();
+}
+document.getElementById('announceSend').addEventListener('click',async()=>{
+  const btn=document.getElementById('announceSend');
+  const msg=document.getElementById('announceMsg');
+  const title=document.getElementById('announceTitle').value.trim();
+  const body=document.getElementById('announceBody').value.trim();
+  if(!title&&!body){ showMsg(msg,'Type something to send.',false); return; }
+  btn.disabled=true; const label=btn.textContent; btn.textContent='Sending…';
+  try{
+    const session=await requireSession(msg); if(!session) return;
+    const {error}=await sb.from('announcements')
+      .insert({user_id:session.user.id,title,body});
+    if(error) throw error;
+    // reaches anyone with the app shut, using the same push as pick ups
+    const r=await invokeFn('notify-pickup',
+      {kind:'added',order_id:title||body,name:'',test:true});
+    document.getElementById('announceTitle').value='';
+    document.getElementById('announceBody').value='';
+    showMsg(msg,'✓ Sent'+((r&&r.data&&r.data.sent)?` · ${r.data.sent} device(s) also notified`:''),true);
+  }catch(err){
+    showMsg(msg,'Could not send: '+((err&&err.message)||'unknown error'),false);
+  }finally{ btn.disabled=false; btn.textContent=label; }
 });
+
+// Search Warehouse deliberately has nothing here yet — the SKU catalogue it
+// used to list belongs to Ad-Hoc Picking, and what this screen should look up
+// instead is still an open question.
 document.getElementById('homeBarBtn').addEventListener('click',()=>showScreen('home'));
 document.getElementById('navBackBtn').addEventListener('click',()=>{
   const prev=navStack.pop();
