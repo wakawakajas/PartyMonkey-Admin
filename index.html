@@ -662,9 +662,36 @@ body{overflow-x:hidden;}
     </div>
   </div>
 
-  <!-- AD-HOC PICKING -->
-  <div class="home-wrap" id="adhocScreen" style="display:none;">
+  <!-- AD-HOC PICKING — which shop -->
+  <div class="home-wrap" id="adhocStoreScreen" style="display:none;">
     <h1>Ad-Hoc Picking</h1>
+    <p class="sub">Two shops, each with its own SKUs and pick lists.</p>
+    <div class="tile-grid">
+      <button class="tile" data-store="partymonkey">
+        <span class="tile-top">
+          <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 9h16l-1.5 11h-13z"/><path d="M8 9V6a4 4 0 0 1 8 0v3"/>
+          </svg>
+          <span class="tile-go">→</span>
+        </span>
+        <span class="tile-name">PartyMonkey</span>
+      </button>
+      <button class="tile" data-store="planttalks">
+        <span class="tile-top">
+          <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 21V11"/><path d="M12 13c-4 0-6-2-6-6 4 0 6 2 6 6z"/>
+            <path d="M12 11c0-3.5 2-5 5-5 0 3.5-2 5-5 5z"/>
+          </svg>
+          <span class="tile-go">→</span>
+        </span>
+        <span class="tile-name">Plant Talks</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- AD-HOC PICKING — one shop's pick lists -->
+  <div class="home-wrap" id="adhocScreen" style="display:none;">
+    <h1 id="adhocStoreTitle">Ad-Hoc Picking</h1>
     <p class="sub">Pick lists put together on the spot.</p>
     <div class="add-row">
       <button class="fab-add" id="adhocAddBtn" title="Add a pick list" aria-label="Add a pick list">+</button>
@@ -709,7 +736,7 @@ body{overflow-x:hidden;}
 
   <!-- ALL SKUs -->
   <div class="home-wrap" id="skusScreen" style="display:none;">
-    <h1>All SKUs</h1>
+    <h1 id="skusTitle">All SKUs</h1>
     <p class="sub" id="skusCount">—</p>
     <div class="add-row">
       <button class="fab-add" id="skuAddOpen" title="Add a SKU" aria-label="Add a SKU"
@@ -2020,7 +2047,8 @@ const SCREEN_EL={home:'homeScreen',tool:'appScreen',shipment:'shipmentScreen','s
   'shipment-china':'shipmentChinaScreen','shipment-outstanding':'outstandingScreen',
   'consol':'consolScreen','consol-detail':'consolDetailScreen','calendar':'calendarScreen',
   'trash':'trashScreen','pickup':'pickupScreen','users':'usersScreen','adhoc':'adhocScreen',
-  'adhoc-detail':'adhocDetailScreen','warehouse':'warehouseScreen','skus':'skusScreen'};
+  'adhoc-detail':'adhocDetailScreen','warehouse':'warehouseScreen','skus':'skusScreen',
+  'adhoc-list':'adhocScreen'};
 // which permission each screen sits behind; anything unlisted is always open
 const SCREEN_SECTION={tool:'print',
   shipment:'shipping','shipment-add':'shipping','shipment-detail':'shipping',
@@ -2028,7 +2056,7 @@ const SCREEN_SECTION={tool:'print',
   'shipment-china':'shipping','shipment-outstanding':'shipping',
   consol:'shipping','consol-detail':'shipping',calendar:'shipping',trash:'shipping',
   pickup:'pickup',users:'admin',
-  adhoc:'adhoc','adhoc-detail':'adhoc',skus:'adhoc',warehouse:'warehouse'};
+  adhoc:'adhoc','adhoc-list':'adhoc','adhoc-detail':'adhoc',skus:'adhoc',warehouse:'warehouse'};
 const SCREENS=Object.keys(SCREEN_EL);
 // With no back button on the screens themselves, Back has to remember the
 // route you actually took rather than a fixed parent per screen.
@@ -2107,6 +2135,8 @@ const navStack=[];
 function showScreen(name,viaBack){
   // the guard, so a stale link or a back step cannot land on a closed screen
   if(!may(SCREEN_SECTION[name])) name='home';
+  // and a shop has to be chosen before any of its screens mean anything
+  if(!currentStore&&['adhoc-list','adhoc-detail','skus'].includes(name)) name='adhoc';
   const moving=currentScreen!==name;   // a refresh is not a journey
   if(!viaBack&&currentScreen&&moving){
     navStack.push(currentScreen);
@@ -2138,7 +2168,7 @@ function showScreen(name,viaBack){
   if(name==='trash') refreshTrash();
   if(name==='pickup') refreshPickups();
   if(name==='users') refreshUsers();
-  if(name==='adhoc') refreshAdhoc();
+  if(name==='adhoc-list') refreshAdhoc();
   if(name==='adhoc-detail') refreshAdhocDetail();
   if(name==='skus') refreshSkus();
   // nothing to go back to from the first screen of the session
@@ -2348,6 +2378,25 @@ document.getElementById('navWarehouseBtn').addEventListener('click',()=>showScre
 // A pick list made up on the spot: add an order, search the warehouse
 // catalogue for SKUs, tick them off as they are picked. An order finishes
 // itself once every line is ticked, so nothing has to be marked done.
+// Two shops share the screens but nothing else: every read and every write
+// carries the store, so one shop's SKUs and pick lists are invisible to the
+// other. Everything that existed before this became PartyMonkey's.
+const STORES={partymonkey:'PartyMonkey',planttalks:'Plant Talks'};
+let currentStore=localStorage.getItem('pigu.store')||null;
+function setStore(k){
+  if(!STORES[k]) return;
+  currentStore=k;
+  localStorage.setItem('pigu.store',k);
+  document.getElementById('adhocStoreTitle').textContent=STORES[k];
+  document.getElementById('skusTitle').textContent=STORES[k]+' · All SKUs';
+  // nothing from the other shop should linger on screen
+  adhocOrders=[]; adhocLines=[]; skuRows=[]; skuPhotos={};
+  pickedAdhoc.clear(); adhocSelectMode=false;
+  pickedSkus.clear(); skuSelectMode=false;
+}
+document.querySelectorAll('#adhocStoreScreen [data-store]').forEach(b=>{
+  b.addEventListener('click',()=>{ setStore(b.dataset.store); showScreen('adhoc-list'); });
+});
 let adhocOrders=[], adhocLineCounts={}, adhocCurrentId=null, adhocLines=[];
 let adhocFilter=new Set(['pending']);
 const adhocState=o=>{
@@ -2362,8 +2411,8 @@ async function refreshAdhoc(){
   const el=document.getElementById('adhocList');
   if(!sb){ adhocOrders=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
   const [o,i]=await Promise.all([
-    sb.from('adhoc_orders').select('*').order('sort_order',{ascending:true}),
-    sb.from('adhoc_items').select('order_ref,picked')
+    sb.from('adhoc_orders').select('*').eq('store',currentStore).order('sort_order',{ascending:true}),
+    sb.from('adhoc_items').select('order_ref,picked').eq('store',currentStore)
   ]);
   if(o.error){
     adhocOrders=[];
@@ -2465,7 +2514,8 @@ async function addAdhocOrder(){
   const orderId=sameDay?`${base} (${sameDay+1})`:base;
   const topSort=adhocOrders.length?Math.min(...adhocOrders.map(o=>Number(o.sort_order)||0))-1:0;
   const {data,error}=await sb.from('adhoc_orders')
-    .insert({user_id:session.user.id,order_id:orderId,sort_order:topSort}).select().single();
+    .insert({user_id:session.user.id,order_id:orderId,sort_order:topSort,store:currentStore})
+    .select().single();
   if(error){ showMsg(msg,'Could not add: '+error.message,false); return; }
   await refreshAdhoc();
   adhocCurrentId=data.id;
@@ -2517,7 +2567,8 @@ async function refreshAdhocDetail(){
   // one lookup for the whole list rather than one per line
   const names=[...new Set(adhocLines.map(l=>l.sku))];
   if(names.length){
-    const {data:sk}=await sb.from('warehouse_skus').select('sku,photo_path').in('sku',names);
+    const {data:sk}=await sb.from('warehouse_skus').select('sku,photo_path')
+      .eq('store',currentStore).in('sku',names);
     skuPhotos={};
     (sk||[]).forEach(r=>{ if(r.photo_path) skuPhotos[r.sku]=r.photo_path; });
   }else skuPhotos={};
@@ -2548,7 +2599,7 @@ async function attachSkuPhoto(sku,file){
     if(up.error) throw up.error;
     const old=skuPhotos[sku];
     const {error}=await sb.from('warehouse_skus')
-      .upsert({user_id:session.user.id,sku,photo_path:path},{onConflict:'sku'});
+      .upsert({user_id:session.user.id,sku,photo_path:path,store:currentStore},{onConflict:'store,sku'});
     if(error) throw error;
     if(old) await sb.storage.from(PHOTO_BUCKET).remove([old]);
     skuPhotos[sku]=path;
@@ -2633,7 +2684,7 @@ document.getElementById('adhocSkuSearch').addEventListener('input',e=>{
   if(q.length<2){ box.innerHTML=''; return; }
   adhocSearchTimer=setTimeout(async()=>{
     const {data,error}=await sb.from('warehouse_skus').select('sku')
-      .ilike('sku','%'+q+'%').order('sku').limit(25);
+      .eq('store',currentStore).ilike('sku','%'+q+'%').order('sku').limit(25);
     if(error){ box.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not search: '+escapeHtml(error.message)+'</p>'; return; }
     const rows=data||[];
     box.innerHTML=rows.length
@@ -2654,7 +2705,7 @@ document.getElementById('adhocSkuResults').addEventListener('click',async e=>{
     await sb.from('adhoc_items').update({qty:existing.qty}).eq('id',existing.id);
   }else{
     const {error}=await sb.from('adhoc_items').insert({user_id:session.user.id,
-      order_ref:adhocCurrentId,sku,qty:1,sort_order:adhocLines.length});
+      order_ref:adhocCurrentId,sku,qty:1,sort_order:adhocLines.length,store:currentStore});
     if(error){ showMsg(msg,'Could not add: '+error.message,false); return; }
   }
   document.getElementById('adhocSkuResults').innerHTML='';
@@ -2779,11 +2830,11 @@ document.getElementById('adhocImportBtn').addEventListener('click',()=>{
       let added=0;
       for(let i=0;i<list.length;i+=500){
         const chunk=list.slice(i,i+500).map(x=>{
-          const row={user_id:session.user.id,sku:x.sku};
+          const row={user_id:session.user.id,sku:x.sku,store:currentStore};
           if(x.url) row.photo_url=x.url;     // keep the address even if the copy fails
           return row;
         });
-        const {error}=await sb.from('warehouse_skus').upsert(chunk,{onConflict:'sku'});
+        const {error}=await sb.from('warehouse_skus').upsert(chunk,{onConflict:'store,sku'});
         if(error) throw error;
         added+=chunk.length;
         btn.textContent=`Importing… ${Math.min(i+500,list.length)}/${list.length}`;
@@ -2808,7 +2859,8 @@ document.getElementById('adhocImportBtn').addEventListener('click',()=>{
             const path=session.user.id+'/sku/'+Date.now()+'-'+i+'.jpg';
             const up=await sb.storage.from(PHOTO_BUCKET).upload(path,out,{contentType:'image/jpeg'});
             if(up.error) throw up.error;
-            await sb.from('warehouse_skus').update({photo_path:path}).eq('sku',x.sku);
+            await sb.from('warehouse_skus').update({photo_path:path})
+            .eq('store',currentStore).eq('sku',x.sku);
             photos++;
           }catch(e){ refused++; }
           if(++done%25===0) btn.textContent=`Photos… ${done}/${withUrls.length}`;
@@ -2853,7 +2905,8 @@ async function refreshSkus(){
   const el=document.getElementById('skuList');
   if(!sb){ skuRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
   const q=(document.getElementById('skuSearch').value||'').trim();
-  let sel=sb.from('warehouse_skus').select('*',{count:'exact'}).order('sku').limit(SKU_PAGE);
+  let sel=sb.from('warehouse_skus').select('*',{count:'exact'})
+    .eq('store',currentStore).order('sku').limit(SKU_PAGE);
   if(q) sel=sel.ilike('sku','%'+q+'%');
   const {data,count,error}=await sel;
   if(error){
@@ -2957,7 +3010,7 @@ document.getElementById('skuAddForm').addEventListener('submit',async e=>{
   const sku=input.value.trim();
   if(!sku){ showMsg(msg,'Type a SKU name.',false); return; }
   const session=await requireSession(msg); if(!session) return;
-  const {error}=await sb.from('warehouse_skus').insert({user_id:session.user.id,sku});
+  const {error}=await sb.from('warehouse_skus').insert({user_id:session.user.id,sku,store:currentStore});
   if(error){
     showMsg(msg,/duplicate|unique/i.test(error.message)
       ? 'That SKU is already in the warehouse.' : 'Could not add: '+error.message,false);
@@ -2994,7 +3047,8 @@ document.getElementById('skuWipeBtn').addEventListener('click',async()=>{
   if(!sb) return;
   const btn=document.getElementById('skuWipeBtn');
   const msg=document.getElementById('adhocImportMsg');
-  const {count}=await sb.from('warehouse_skus').select('*',{count:'exact',head:true});
+  const {count}=await sb.from('warehouse_skus')
+    .select('*',{count:'exact',head:true}).eq('store',currentStore);
   const total=count||0;
   if(!total){ showMsg(msg,'The warehouse is already empty.',false); return; }
   if(!challenge(`Delete all ${total} SKU name(s) and their photos, for everyone.`)) return;
@@ -3005,7 +3059,8 @@ document.getElementById('skuWipeBtn').addEventListener('click',async()=>{
     const paths=[];
     for(let from=0;;from+=1000){
       const {data,error}=await sb.from('warehouse_skus')
-        .select('photo_path').not('photo_path','is',null).range(from,from+999);
+        .select('photo_path').eq('store',currentStore)
+        .not('photo_path','is',null).range(from,from+999);
       if(error) throw error;
       if(!data||!data.length) break;
       data.forEach(r=>paths.push(r.photo_path));
@@ -3017,7 +3072,7 @@ document.getElementById('skuWipeBtn').addEventListener('click',async()=>{
     }
     btn.textContent='Deleting…';
     // a delete needs a filter; every row has a name, so this matches them all
-    const {error}=await sb.from('warehouse_skus').delete().neq('sku','');
+    const {error}=await sb.from('warehouse_skus').delete().eq('store',currentStore).neq('sku','');
     if(error) throw error;
     showMsg(msg,`✓ Warehouse emptied — ${total} SKU name(s)`
       +(paths.length?` and ${paths.length} photo(s)`:'')+' deleted.',true);
