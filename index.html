@@ -5098,11 +5098,10 @@ async function runWarehouseSearch(q){
   count.textContent='Searching…';
   const like='%'+q+'%';
   const cols='id,shipment_id,sku,qty,remarks,photo_path,photo_url';
-  const [bySku,byItem,byOrder]=await Promise.all([
-    // the Ad-Hoc catalogue, both shops at once, since this screen sits outside
-    // the shop picker. select * rather than naming the store column, so a
-    // catalogue whose STORES migration has not been run still searches.
-    sb.from('warehouse_skus').select('*').ilike('sku',like).order('sku').limit(WAREHOUSE_LIMIT),
+  // Only what is inside Procurement & Shipping. The Ad-Hoc catalogue is a list
+  // of names a shop could stock, not a record of anything bought, so it has no
+  // business here — it is searchable from Ad-Hoc Picking, where it belongs.
+  const [byItem,byOrder]=await Promise.all([
     sb.from('shipment_items').select(cols)
       .or(`sku.ilike.${like},remarks.ilike.${like}`).limit(WAREHOUSE_LIMIT),
     sb.from('shipments').select('id').is('deleted_at',null)
@@ -5113,13 +5112,13 @@ async function runWarehouseSearch(q){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not search: '+escapeHtml(byItem.error.message)+'</p>';
     return;
   }
-  const rows=(byItem.data||[]).map(r=>({...r,_kind:'item'}));
+  const rows=byItem.data||[];
   const seen=new Set(rows.map(r=>r.id));
   const hitOrders=(byOrder.data||[]).map(r=>r.id);
   if(hitOrders.length){
     const {data:more}=await sb.from('shipment_items').select(cols)
       .in('shipment_id',hitOrders).limit(WAREHOUSE_LIMIT);
-    (more||[]).forEach(r=>{ if(!seen.has(r.id)){ seen.add(r.id); rows.push({...r,_kind:'item'}); } });
+    (more||[]).forEach(r=>{ if(!seen.has(r.id)){ seen.add(r.id); rows.push(r); } });
   }
   // A line carries no deletion stamp of its own, only its order does, so the
   // orders are fetched both to show and to weed out anything sitting in the bin.
@@ -5133,21 +5132,15 @@ async function runWarehouseSearch(q){
   // What was ordered is not what turned up. Pieces are booked in against a line
   // as they arrive in boxes, so the arrivals are totalled here and a short
   // delivery can read as what is actually on the shelf.
-  const keep=rows.filter(r=>warehouseOrders[r.shipment_id]);
-  if(keep.length){
+  warehouseRows=rows.filter(r=>warehouseOrders[r.shipment_id]);
+  if(warehouseRows.length){
     const {data:al}=await sb.from('shipment_box_items').select('item_id,qty')
-      .in('item_id',keep.map(r=>r.id));
+      .in('item_id',warehouseRows.map(r=>r.id));
     const by={};
     (al||[]).forEach(a=>{ by[a.item_id]=(by[a.item_id]||0)+(Number(a.qty)||0); });
     // never more than was ordered, the same ceiling the order list applies
-    keep.forEach(r=>{ r._arrived=Math.min(by[r.id]||0,Number(r.qty)||0); });
+    warehouseRows.forEach(r=>{ r._arrived=Math.min(by[r.id]||0,Number(r.qty)||0); });
   }
-  // a catalogue name is the thing itself, so it leads; the lines that bought it
-  // follow. A failed catalogue read costs its half of the results, not the search.
-  warehouseRows=[
-    ...(bySku.error?[]:(bySku.data||[]).map(r=>({...r,_kind:'sku'}))),
-    ...keep
-  ];
   renderWarehouseResults();
 }
 // What is on the shelf, said plainly: a full delivery needs no arithmetic done
@@ -5169,29 +5162,20 @@ function renderWarehouseResults(){
   }
   el.innerHTML=warehouseRows.map(r=>{
     const has=!!(r.photo_path||r.photo_url);
-    // a catalogue entry says which shop stocks it; a bought line says which
-    // order brought it in. Everything else about the two is the same.
-    const where=r._kind==='sku'
-      ? `<span class="tag no">${escapeHtml(STORES[r.store]||'Catalogue')}</span>`
-      : `<span class="tag no">ORDER</span>`;
-    const under=r._kind==='sku'
-      ? `<p class="hint" style="margin:2px 0 0;">Ad-Hoc catalogue</p>`
-      : (()=>{ const o=warehouseOrders[r.shipment_id]||{};
-          return `<p class="hint" style="margin:2px 0 0;">${qtyLine(r)}${r.remarks?' · '+escapeHtml(r.remarks):''}</p>`
-            +`<p class="hint" style="margin:2px 0 0;">${oidCopy(o.order_id)}${o.description?' · '+escapeHtml(o.description):''}</p>`; })();
+    const o=warehouseOrders[r.shipment_id]||{};
     // a short delivery gets the amber edge it gets everywhere else
-    const part=r._kind==='item'&&(Number(r._arrived)||0)>0&&(Number(r._arrived)||0)<(Number(r.qty)||0);
-    return `<div class="ph-card${part?' line-part':''}" data-wh-id="${r._kind}:${r.id}">
+    const arr=Number(r._arrived)||0, ord=Number(r.qty)||0;
+    const part=arr>0&&arr<ord;
+    return `<div class="ph-card${part?' line-part':''}" data-wh-id="${r.id}">
       <div class="item-main">
         <div class="item-photo-wrap">
           <button class="item-photo${has?' has':''}" data-wh-photo
             title="${has?'View photo':'Add photo'}">${has?'<img data-wh-thumb alt="Item photo"/>':'＋'}</button>
         </div>
         <div style="flex:1;min-width:0;">
-          <div class="adhoc-head" style="margin-bottom:2px;">
-            <span class="sku-name">${escapeHtml(r.sku||'—')}</span>${where}
-          </div>
-          ${under}
+          <div class="sku-name">${escapeHtml(r.sku||'—')}</div>
+          <p class="hint" style="margin:2px 0 0;">${qtyLine(r)}${r.remarks?' · '+escapeHtml(r.remarks):''}</p>
+          <p class="hint" style="margin:2px 0 0;">${oidCopy(o.order_id)}${o.description?' · '+escapeHtml(o.description):''}</p>
         </div>
       </div>
       <button class="btn-outline btn-sm" data-wh-change>${has?'Change photo':'Add photo'}</button>
@@ -5202,7 +5186,7 @@ function renderWarehouseResults(){
 async function hydrateWarehouseThumbs(){
   if(!sb) return;
   for(const r of warehouseRows){
-    const img=document.querySelector(`[data-wh-id="${r._kind}:${r.id}"] img[data-wh-thumb]`);
+    const img=document.querySelector(`[data-wh-id="${r.id}"] img[data-wh-thumb]`);
     if(!img) continue;
     if(!r.photo_path&&r.photo_url){ if(img.src!==r.photo_url) img.src=r.photo_url; continue; }
     if(!r.photo_path) continue;
@@ -5215,7 +5199,7 @@ async function hydrateWarehouseThumbs(){
 }
 document.getElementById('warehouseResults').addEventListener('click',e=>{
   const card=e.target.closest('[data-wh-id]'); if(!card) return;
-  const row=warehouseRows.find(r=>r._kind+':'+r.id===card.dataset.whId); if(!row) return;
+  const row=warehouseRows.find(r=>r.id===card.dataset.whId); if(!row) return;
   if(e.target.closest('[data-wh-change]')){ pickWarehousePhoto(row); return; }
   if(e.target.closest('[data-wh-photo]')){
     if(row.photo_path||row.photo_url) openPhotoModal(row.photo_path,row.sku||'Item photo',row.photo_url);
@@ -5234,19 +5218,15 @@ async function replaceWarehousePhoto(row,file){
   const msg=document.getElementById('warehouseMsg');
   const session=await requireSession(msg); if(!session) return;
   showMsg(msg,'Uploading photo…',true);
-  const isSku=row._kind==='sku';
   try{
-    const small=await shrinkToBudget(await fileToDataURL(file),
-      isSku?SKU_PHOTO_MAX_PX:SHIPMENT_PHOTO_MAX_PX,PHOTO_BUDGET_BYTES);
+    const small=await shrinkToBudget(await fileToDataURL(file),SHIPMENT_PHOTO_MAX_PX,PHOTO_BUDGET_BYTES);
     const blob=await (await fetch(small)).blob();
-    const path=session.user.id+'/'+(isSku?'sku':row.id)+'/'+Date.now()+'.jpg';
+    const path=session.user.id+'/'+row.id+'/'+Date.now()+'.jpg';
     const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:'image/jpeg'});
     if(up.error) throw up.error;
     const old=row.photo_path;
-    // A catalogue photo belongs to the SKU and a line's photo to that line, so
-    // each goes back to its own table. The imported link goes too, or it would
-    // keep being shown in preference to the picture just chosen.
-    const {error}=await sb.from(isSku?'warehouse_skus':'shipment_items')
+    // the imported link goes too, or it would keep being shown in preference
+    const {error}=await sb.from('shipment_items')
       .update({photo_path:path,photo_url:null}).eq('id',row.id);
     if(error) throw error;
     if(old) await sb.storage.from(PHOTO_BUCKET).remove([old]);
