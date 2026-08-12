@@ -5130,13 +5130,35 @@ async function runWarehouseSearch(q){
       .is('deleted_at',null).in('id',shipIds);
     (sh||[]).forEach(s=>{ warehouseOrders[s.id]=s; });
   }
+  // What was ordered is not what turned up. Pieces are booked in against a line
+  // as they arrive in boxes, so the arrivals are totalled here and a short
+  // delivery can read as what is actually on the shelf.
+  const keep=rows.filter(r=>warehouseOrders[r.shipment_id]);
+  if(keep.length){
+    const {data:al}=await sb.from('shipment_box_items').select('item_id,qty')
+      .in('item_id',keep.map(r=>r.id));
+    const by={};
+    (al||[]).forEach(a=>{ by[a.item_id]=(by[a.item_id]||0)+(Number(a.qty)||0); });
+    // never more than was ordered, the same ceiling the order list applies
+    keep.forEach(r=>{ r._arrived=Math.min(by[r.id]||0,Number(r.qty)||0); });
+  }
   // a catalogue name is the thing itself, so it leads; the lines that bought it
   // follow. A failed catalogue read costs its half of the results, not the search.
   warehouseRows=[
     ...(bySku.error?[]:(bySku.data||[]).map(r=>({...r,_kind:'sku'}))),
-    ...rows.filter(r=>warehouseOrders[r.shipment_id])
+    ...keep
   ];
   renderWarehouseResults();
+}
+// What is on the shelf, said plainly: a full delivery needs no arithmetic done
+// to it, a short one is worth spelling out both halves of, and a line nobody
+// has booked in yet should not be mistaken for one that arrived.
+function qtyLine(r){
+  const ord=Number(r.qty)||0, arr=Math.max(0,Number(r._arrived)||0);
+  if(!ord) return '0 pcs';
+  if(arr>=ord) return `${ord} pcs · all arrived`;
+  if(arr>0)    return `${arr} of ${ord} pcs arrived`;
+  return `${ord} pcs ordered · none arrived`;
 }
 function renderWarehouseResults(){
   const el=document.getElementById('warehouseResults');
@@ -5155,9 +5177,11 @@ function renderWarehouseResults(){
     const under=r._kind==='sku'
       ? `<p class="hint" style="margin:2px 0 0;">Ad-Hoc catalogue</p>`
       : (()=>{ const o=warehouseOrders[r.shipment_id]||{};
-          return `<p class="hint" style="margin:2px 0 0;">${Number(r.qty)||0} pcs${r.remarks?' · '+escapeHtml(r.remarks):''}</p>`
+          return `<p class="hint" style="margin:2px 0 0;">${qtyLine(r)}${r.remarks?' · '+escapeHtml(r.remarks):''}</p>`
             +`<p class="hint" style="margin:2px 0 0;">${oidCopy(o.order_id)}${o.description?' · '+escapeHtml(o.description):''}</p>`; })();
-    return `<div class="ph-card" data-wh-id="${r._kind}:${r.id}">
+    // a short delivery gets the amber edge it gets everywhere else
+    const part=r._kind==='item'&&(Number(r._arrived)||0)>0&&(Number(r._arrived)||0)<(Number(r.qty)||0);
+    return `<div class="ph-card${part?' line-part':''}" data-wh-id="${r._kind}:${r.id}">
       <div class="item-main">
         <div class="item-photo-wrap">
           <button class="item-photo${has?' has':''}" data-wh-photo
