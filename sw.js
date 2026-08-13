@@ -29,19 +29,26 @@ self.addEventListener('push', event => {
     requireInteraction: true,
     silent: false,
     timestamp: Date.now(),
-    data: { url: d.url || './' }
+    data: { url: d.url || './', requestId: d.request_id || null }
   }));
 });
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-  const target = new URL((event.notification.data && event.notification.data.url) || './',
-                         self.location.href).href;
+  const data = event.notification.data || {};
+  const target = new URL(data.url || './', self.location.href).href;
   event.waitUntil((async () => {
     const open = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const c of open) {
-      if (c.url.startsWith(self.registration.scope) && 'focus' in c) return c.focus();
+      if (!c.url.startsWith(self.registration.scope) || !('focus' in c)) continue;
+      // An app already running will not re-read the address, so the id is
+      // handed to it directly. Focus first: on Android the message can be
+      // dropped if the page is still in the background when it arrives.
+      await c.focus();
+      if (data.requestId) c.postMessage({ type: 'open-request', requestId: data.requestId });
+      return;
     }
+    // nothing running, so the id travels in the address instead
     if (self.clients.openWindow) return self.clients.openWindow(target);
   })());
 });

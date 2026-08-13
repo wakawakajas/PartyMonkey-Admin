@@ -182,7 +182,9 @@ const payloadFor = (kind: Kind, r: any) => ({
   // one notification per request, so a reminder replaces the ring before it
   // rather than stacking up a column of the same thing
   tag: `request-${r.id}`,
-  url: "./",
+  // the request this is about, so tapping the notification lands on it rather
+  // than on whatever screen the app happened to be left on
+  url: `./#request-${r.id}`,
   request_id: r.id,
   kind,
 });
