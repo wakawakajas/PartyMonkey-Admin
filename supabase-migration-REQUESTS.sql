@@ -143,18 +143,47 @@ create trigger requests_clear_remind_trg
 --
 -- Skip it if you do not need that. Nothing else depends on it.
 --
--- To switch it on:
---   1. Deploy the notify-request function first.
---   2. Dashboard -> Database -> Extensions: enable pg_cron and pg_net.
---   3. Replace the two placeholders below with your own values:
---        <PROJECT-REF>        Settings -> General -> Reference ID
---        <SERVICE-ROLE-KEY>   Settings -> API -> service_role  (secret!)
---      This key can read and write everything, so keep this SQL to yourself.
---   4. Run this part on its own.
+-- ---- WHAT TO DO ------------------------------------------------------
+--
+-- STEP 1. Deploy the notify-request function, if you have not already.
+--
+-- STEP 2. Turn on two database add-ons:
+--         Dashboard -> Database -> Extensions -> search "pg_cron"  -> enable
+--                                             -> search "pg_net"   -> enable
+--
+-- STEP 3. Make up a password and tell the function about it:
+--         Dashboard -> Edge Functions -> notify-request -> Secrets -> Add
+--           Name:  CRON_SECRET
+--           Value: any long random string you like
+--
+--         A password of your own rather than the project's service_role key.
+--         The scheduled job below is stored in the database in plain sight,
+--         so whatever goes in it should be worth as little as possible: this
+--         one can only ask the function to send reminders that were already
+--         due. The service_role key sitting in the same place could read and
+--         rewrite everything you have.
+--
+--         (The function still accepts the service_role key, if you would
+--         rather use that. It is under Project Settings -> API Keys ->
+--         "Legacy API keys". CRON_SECRET is the better answer.)
+--
+-- STEP 4. Copy the block below into the SQL Editor — everything between the
+--         two ==== lines, with the leading "--" removed from each line.
+--         Replace PASTE_YOUR_CRON_SECRET_HERE with what you chose in STEP 3,
+--         keeping the single quotes around it. Then Run.
+--
+--         The project address is already filled in; it is not secret and is
+--         the same one the app itself uses.
+--
+-- STEP 5. Check it is running:
+--         select * from cron.job_run_details order by start_time desc limit 5;
+--         A row a minute, with status "succeeded". Nothing appears until the
+--         next whole minute ticks over.
 --
 -- To switch it off again:
---   select cron.unschedule('pigu-request-reminders');
--- ------------------------------------------------------------
+--         select cron.unschedule('pigu-request-reminders');
+--
+-- ==== copy from here ==================================================
 --
 -- create extension if not exists pg_cron;
 -- create extension if not exists pg_net;
@@ -164,14 +193,13 @@ create trigger requests_clear_remind_trg
 --   '* * * * *',
 --   $cron$
 --   select net.http_post(
---     url     := 'https://<PROJECT-REF>.supabase.co/functions/v1/notify-request',
+--     url     := 'https://kdwggyzyzrhiniasilqs.supabase.co/functions/v1/notify-request',
 --     headers := jsonb_build_object(
 --                  'Content-Type',  'application/json',
---                  'Authorization', 'Bearer <SERVICE-ROLE-KEY>'),
+--                  'Authorization', 'Bearer PASTE_YOUR_CRON_SECRET_HERE'),
 --     body    := jsonb_build_object('due', true)
 --   );
 --   $cron$
 -- );
 --
--- -- what it has been doing:
--- --   select * from cron.job_run_details order by start_time desc limit 20;
+-- ==== to here =========================================================

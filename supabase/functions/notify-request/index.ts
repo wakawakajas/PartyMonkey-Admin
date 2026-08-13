@@ -11,7 +11,7 @@
 //      whether they are party to it — the function never takes their word for
 //      who they are.
 //
-//   2. From pg_cron, with the service role key:
+//   2. From pg_cron, with CRON_SECRET:
 //        { due: true }
 //      Sweeps every request whose snooze has run out and pushes the reminder,
 //      which is what makes a snooze survive the app being closed. See PART 5
@@ -19,6 +19,8 @@
 //
 // Secrets it needs (Edge Functions -> Secrets):
 //   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT
+//   CRON_SECRET   — only for the scheduled sweep above. Make one up; it is a
+//                   password shared between the cron job and this function.
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import * as webpush from "jsr:@negrel/webpush@0.3";
 
@@ -192,9 +194,21 @@ Deno.serve(async (req) => {
     // Only the service role may ask for this: it reads and writes rows on
     // everybody's behalf, which no signed-in user should be able to trigger.
     if (body.due) {
+      const presented = authHeader.replace(/^Bearer\s+/i, "").trim();
+      // CRON_SECRET is a password you make up and set once in the function's
+      // secrets. Prefer it: the scheduled job lives in a SQL statement that
+      // sits in the database for anyone with access to read, and this is a
+      // password that only triggers reminder pushes. The service role key
+      // pasted in the same place would read and rewrite the whole project.
+      const cronSecret = (Deno.env.get("CRON_SECRET") ?? "").trim();
       const serviceKey = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim();
-      if (!serviceKey || authHeader.replace(/^Bearer\s+/i, "").trim() !== serviceKey) {
-        return json({ error: "the due sweep needs the service role key" }, 403);
+      const ok = (cronSecret && presented === cronSecret) ||
+                 (serviceKey && presented === serviceKey);
+      if (!ok) {
+        return json({
+          error: "the due sweep needs CRON_SECRET (or the service role key)" +
+                 (cronSecret ? "" : " — CRON_SECRET is not set on this function"),
+        }, 403);
       }
       const admin = adminClient();
       const { data: due, error } = await admin
