@@ -620,6 +620,24 @@ body{overflow-x:hidden;}
   align-items:center;justify-content:center;border-bottom-left-radius:10px;
   background:rgba(0,0,0,.62);color:#fff;font-size:14px;line-height:1;}
 .req-shots:empty{display:none;}
+/* ---- Search Warehouse: the box a line is actually in ---- */
+.wh-boxes{display:flex;flex-direction:column;gap:8px;margin-top:9px;
+  padding-top:9px;border-top:1px solid var(--border);}
+.wh-box{display:flex;align-items:flex-start;gap:9px;}
+/* bigger than the SKU thumbnail beside it, because this is the thing being
+   looked for — the SKU photo is only there to confirm you have the right line */
+.wh-box-photo{width:78px;height:78px;flex-shrink:0;padding:0;overflow:hidden;
+  border:1px dashed var(--border-strong);border-radius:14px;background:var(--nest);
+  color:var(--faint);font-size:24px;line-height:1;display:flex;
+  align-items:center;justify-content:center;cursor:pointer;}
+.wh-box-photo.has{border-style:solid;cursor:zoom-in;background:#101113;}
+.wh-box-photo img{width:100%;height:100%;object-fit:cover;display:block;}
+.wh-box-main{flex:1;min-width:0;}
+.wh-box-name{font-family:'IBM Plex Sans',sans-serif;font-size:13px;font-weight:600;
+  overflow-wrap:anywhere;}
+/* the SKU photo no longer opens a picker, so a line without one should not
+   look like a button waiting to be pressed */
+.item-photo[disabled]{opacity:.45;cursor:default;}
 /* ---- the alert itself ---- */
 /* A way out that is not an answer. The sheet used to be inescapable, which is
    right for the first read and wrong the moment you have seen it and want your
@@ -5877,7 +5895,10 @@ async function runWarehouseSearch(q){
   warehouseRows=(data||[]).map(r=>({
     id:r.item_id, sku:r.sku, qty:r.qty, remarks:r.remarks,
     photo_path:r.photo_path, photo_url:r.photo_url,
-    _arrived:r.arrived, order_id:r.order_id, description:r.description
+    _arrived:r.arrived, order_id:r.order_id, description:r.description,
+    // absent until the box photo migration has been run, so an older database
+    // simply shows no boxes rather than failing
+    boxes:Array.isArray(r.boxes)?r.boxes:[]
   }));
   renderWarehouseResults();
 }
@@ -5907,7 +5928,8 @@ function renderWarehouseResults(){
       <div class="item-main">
         <div class="item-photo-wrap">
           <button class="item-photo${has?' has':''}" data-wh-photo
-            title="${has?'View photo':'Add photo'}">${has?'<img data-wh-thumb alt="Item photo"/>':'＋'}</button>
+            title="${has?'What it looks like — tap to enlarge':'No SKU photo'}"
+            ${has?'':'disabled'}>${has?'<img data-wh-thumb alt="SKU photo"/>':'—'}</button>
         </div>
         <div style="flex:1;min-width:0;">
           <div class="sku-name">${escapeHtml(r.sku||'—')}</div>
@@ -5915,10 +5937,35 @@ function renderWarehouseResults(){
           <p class="hint" style="margin:2px 0 0;">${oidCopy(r.order_id)}${r.description?' · '+escapeHtml(r.description):''}</p>
         </div>
       </div>
-      <button class="btn-outline btn-sm" data-wh-change>${has?'Change photo':'Add photo'}</button>
+      ${boxStrip(r)}
     </div>`;
   }).join('');
   hydrateWarehouseThumbs();
+}
+// The boxes a line actually landed in. This is what somebody standing in the
+// warehouse is looking for — not what the goods look like, but which box they
+// are in and what that box looks like. A line can be split across several, so
+// each gets its own entry with its own picture.
+function boxStrip(r){
+  if(!r.boxes.length){
+    return `<p class="hint" style="margin:8px 0 0;">Not booked into a box yet.</p>`;
+  }
+  return `<div class="wh-boxes">`+r.boxes.map((b,i)=>{
+    const has=!!b.photo_path;
+    const name=b.label?escapeHtml(b.label):'Box '+(i+1);
+    return `<div class="wh-box">
+      <button class="wh-box-photo${has?' has':''}" data-wh-box-view="${escapeHtml(b.id)}"
+        title="${has?'Tap to enlarge':'No photo of this box yet'}">
+        ${has?`<img data-wh-box-thumb="${escapeHtml(b.photo_path)}" alt="Box photo"/>`
+             :'<span>📦</span>'}</button>
+      <div class="wh-box-main">
+        <div class="wh-box-name">${name}</div>
+        <p class="hint" style="margin:1px 0 0;">${Number(b.qty)||0} pcs in here</p>
+        <button class="btn-outline btn-sm" data-wh-box-shoot="${escapeHtml(b.id)}"
+          style="margin-top:5px;">${has?'📷 Replace photo':'📷 Take photo'}</button>
+      </div>
+    </div>`;
+  }).join('')+`</div>`;
 }
 async function hydrateWarehouseThumbs(){
   if(!sb) return;
@@ -5933,45 +5980,69 @@ async function hydrateWarehouseThumbs(){
     }
     if(photoUrlCache[r.photo_path]) img.src=photoUrlCache[r.photo_path];
   }
+  for(const img of document.querySelectorAll('#warehouseResults img[data-wh-box-thumb]')){
+    const path=img.getAttribute('data-wh-box-thumb');
+    if(!path) continue;
+    if(!photoUrlCache[path]){
+      const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(path,3600);
+      if(data&&data.signedUrl) photoUrlCache[path]=data.signedUrl;
+    }
+    if(photoUrlCache[path]) img.src=photoUrlCache[path];
+  }
 }
+const whBox=(row,id)=>row.boxes.find(b=>String(b.id)===String(id))||null;
 document.getElementById('warehouseResults').addEventListener('click',e=>{
   const card=e.target.closest('[data-wh-id]'); if(!card) return;
   const row=warehouseRows.find(r=>r.id===card.dataset.whId); if(!row) return;
-  if(e.target.closest('[data-wh-change]')){ pickWarehousePhoto(row); return; }
-  if(e.target.closest('[data-wh-photo]')){
-    if(row.photo_path||row.photo_url) openPhotoModal(row.photo_path,row.sku||'Item photo',row.photo_url);
-    else pickWarehousePhoto(row);
+  const shoot=e.target.closest('[data-wh-box-shoot]');
+  if(shoot){ pickBoxPhoto(row,whBox(row,shoot.dataset.whBoxShoot)); return; }
+  const view=e.target.closest('[data-wh-box-view]');
+  if(view){
+    const b=whBox(row,view.dataset.whBoxView);
+    if(b&&b.photo_path) openPhotoModal(b.photo_path,b.label||'Box photo');
+    else if(b) pickBoxPhoto(row,b);          // an empty slot is an invitation
+    return;
   }
+  // The SKU photo is read-only here. It says what the goods are, which belongs
+  // to the order that bought them — this screen is about where they are now.
+  if(e.target.closest('[data-wh-photo]')&&(row.photo_path||row.photo_url))
+    openPhotoModal(row.photo_path,row.sku||'SKU photo',row.photo_url);
 });
-function pickWarehousePhoto(row){
+function pickBoxPhoto(row,box){
+  if(!box) return;
   const inp=document.createElement('input');
   inp.type='file'; inp.accept='image/*';
-  inp.addEventListener('change',()=>{ const f=inp.files&&inp.files[0]; if(f) replaceWarehousePhoto(row,f); });
+  // straight to the camera where there is one, because this is used standing
+  // in front of the box rather than at a desk
+  inp.capture='environment';
+  inp.addEventListener('change',()=>{ const f=inp.files&&inp.files[0]; if(f) replaceBoxPhoto(row,box,f); });
   inp.click();
 }
 // Straight to the database, unlike the order screen where photos wait for
 // Submit — there is nothing else on this screen to submit alongside them.
-async function replaceWarehousePhoto(row,file){
+async function replaceBoxPhoto(row,box,file){
   const msg=document.getElementById('warehouseMsg');
   const session=await requireSession(msg); if(!session) return;
   showMsg(msg,'Uploading photo…',true);
   try{
     const small=await shrinkToBudget(await fileToDataURL(file),SHIPMENT_PHOTO_MAX_PX,PHOTO_BUDGET_BYTES);
     const blob=await (await fetch(small)).blob();
-    const path=session.user.id+'/'+row.id+'/'+Date.now()+'.jpg';
+    const path=session.user.id+'/box-'+box.id+'/'+Date.now()+'.jpg';
     const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:'image/jpeg'});
     if(up.error) throw up.error;
-    const old=row.photo_path;
-    // Through the same function as the search, so this works for somebody who
-    // cannot open Procurement. It clears the imported link as well, or that
-    // would keep being shown in preference to the picture just chosen.
-    const {error}=await sb.rpc('set_item_photo',{item:row.id,path});
+    const old=box.photo_path;
+    // Through a function rather than the table, so this works for somebody who
+    // cannot open Procurement at all — which is who this screen is for.
+    const {error}=await sb.rpc('set_box_photo',{box:box.id,path});
     if(error) throw error;
-    // The old file sits in the uploader's own folder, which may not be this
-    // person's, so tidying it away can fail. That is housekeeping, not the job.
+    // The old file sits in the folder of whoever packed the box, which is
+    // rarely this person. Tidying it away is housekeeping, not the job.
     if(old) await sb.storage.from(PHOTO_BUCKET).remove([old]);
-    row.photo_path=path; row.photo_url=null;
-    showMsg(msg,'✓ Photo updated.',true);
+    // the same box can appear under several lines in these results
+    warehouseRows.forEach(r=>r.boxes.forEach(b=>{
+      if(String(b.id)===String(box.id)) b.photo_path=path;
+    }));
+    showMsg(msg,'✓ Box photo updated.',true);
     renderWarehouseResults();
   }catch(err){
     showMsg(msg,'Could not upload: '+((err&&err.message)||'unknown error'),false);
