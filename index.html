@@ -589,6 +589,29 @@ body{overflow-x:hidden;}
 .req-when{white-space:nowrap;}
 .req-actions{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:9px;}
 .req-actions .btn-sm{min-height:42px;}
+/* Urgent has to be legible before the words are read, so it is carried by the
+   edge of the card and a tag rather than by wording alone. Rust is already the
+   app's "this one is short" colour, so it needs no learning. */
+.ph-card.req-urgent{border-color:var(--rust);}
+.tag.urgent{background:rgba(255,138,107,.16);color:var(--rust);border:1px solid var(--rust);}
+.req-eyebrow.urgent{color:var(--rust);}
+/* thumbnails, in the compose box and on a card. The + slot is the last one and
+   disappears once three have been added. */
+.req-shots{display:flex;flex-wrap:wrap;gap:7px;}
+.req-shot{position:relative;width:62px;height:62px;padding:0;overflow:hidden;flex-shrink:0;
+  border:1px solid var(--border-strong);border-radius:12px;background:var(--nest);
+  color:var(--faint);font-size:19px;line-height:1;display:flex;align-items:center;
+  justify-content:center;cursor:pointer;}
+.req-shot.add{border-style:dashed;}
+/* the sheet stretches every button in it to a full-width 50px row, which is
+   right for the answers and wrong for a thumbnail */
+.sheet .req-shot{width:62px;height:62px;}
+.req-shot img{width:100%;height:100%;object-fit:cover;display:block;}
+/* the × sits on the picture itself, so removing one is not a separate journey */
+.req-shot-x{position:absolute;top:0;right:0;width:22px;height:22px;display:flex;
+  align-items:center;justify-content:center;border-bottom-left-radius:10px;
+  background:rgba(0,0,0,.62);color:#fff;font-size:14px;line-height:1;}
+.req-shots:empty{display:none;}
 
 /* one toggle per area, wrapping to whatever the width allows */
 .acc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:8px;}
@@ -979,13 +1002,25 @@ body{overflow-x:hidden;}
     <div class="card"><div class="card-body" style="padding:14px;">
       <label class="field" style="margin-bottom:8px;"><span>WHO</span>
         <select id="requestAssignee"><option value="">Loading the team…</option></select></label>
+      <div class="field" style="margin-bottom:8px;"><span>HOW URGENT</span>
+        <div class="seg" id="requestUrgency">
+          <button type="button" class="on" data-urgent="0">Request</button>
+          <button type="button" data-urgent="1">Urgent</button>
+        </div></div>
       <label class="field" style="margin-bottom:8px;"><span>WHAT YOU NEED</span>
         <input type="text" id="requestTitle" placeholder="e.g. Count the red bags in aisle 3" maxlength="120"/></label>
-      <label class="field" style="margin-bottom:10px;"><span>DETAIL (OPTIONAL)</span>
+      <label class="field" style="margin-bottom:8px;"><span>DETAIL (OPTIONAL)</span>
         <textarea id="requestBody" rows="2" placeholder="Anything that helps them do it"></textarea></label>
+      <div class="field" style="margin-bottom:10px;"><span>PHOTOS (UP TO 3)</span>
+        <div class="req-shots" id="requestNewShots"></div></div>
       <button class="btn-primary" id="requestSend" style="width:100%;">Send Request</button>
       <div id="requestMsg"></div>
     </div></div>
+
+    <div class="chips" id="requestFilterChips">
+      <button class="chip on" data-rfilter="open">Open</button>
+      <button class="chip" data-rfilter="completed">Completed</button>
+    </div>
 
     <div class="sect-label">Waiting on you <span class="hint" id="requestInboxCount"></span></div>
     <div class="ph-list list-full" id="requestInbox">
@@ -996,6 +1031,8 @@ body{overflow-x:hidden;}
     <div class="ph-list list-full" id="requestOutbox">
       <p class="hint" style="margin:4px 0 0;">— nothing yet —</p>
     </div>
+    <p class="hint" id="requestPurgeNote" style="margin:10px 0 0;">
+      Completed requests are cleared out three days after they are finished.</p>
   </div>
 
   <!-- USERS & ACCESS (admins only) -->
@@ -1610,6 +1647,7 @@ body{overflow-x:hidden;}
       <span id="requestSheetMore" class="req-more" hidden></span></div>
     <div class="sheet-title" id="requestSheetTitle">Request</div>
     <p class="hint" id="requestSheetBody" style="margin:0 0 2px;"></p>
+    <div class="req-shots" id="requestSheetShots" hidden></div>
     <p class="hint" id="requestSheetFrom" style="margin:0 0 6px;"></p>
     <button class="btn-primary" id="requestAck">OK — got it</button>
     <!-- Nothing else is offered until it has been acknowledged: the person who
@@ -6855,6 +6893,17 @@ document.getElementById('requestSnooze').innerHTML=SNOOZE_MINS
 let requestInbox=[], requestOutbox=[], teamMembers=[];
 let requestsReady=false;                 // false until the migration has been run
 let myUserId=null;
+// Three each, not three between them: the person who asked shows what they
+// mean, and the person doing it shows what they found. One party filling the
+// only three slots would make the other half of that impossible.
+const REQUEST_PHOTO_MAX=3;
+// 30KB is a small picture. It is enough to tell a shelf or a box apart, and
+// not enough to read a label — the pick up screen is where that lives.
+const REQUEST_PHOTO_BUDGET=30*1024;
+const REQUEST_PHOTO_MAX_PX=900;
+let requestPhotos={};                    // request id -> rows, both people's
+let newRequestShots=[];                  // files picked before the request exists
+let requestFilter='open';
 
 async function loadTeamMembers(){
   if(!sb) return;
@@ -6903,8 +6952,33 @@ async function refreshRequests(){
   const rows=data||[];
   requestInbox=rows.filter(r=>r.assignee_id===myUserId);
   requestOutbox=rows.filter(r=>r.requester_id===myUserId);
+  await loadRequestPhotos(rows.map(r=>r.id));
   renderRequests();
   ringDueRequests();
+  purgeOldRequests();
+}
+// one read for every request on screen, rather than one per card
+async function loadRequestPhotos(ids){
+  requestPhotos={};
+  if(!sb||!ids.length) return;
+  const {data,error}=await sb.from('request_photos')
+    .select('*').in('request_id',ids).order('created_at');
+  if(error) return;                      // migration two has not been run yet
+  (data||[]).forEach(p=>(requestPhotos[p.request_id]=requestPhotos[p.request_id]||[]).push(p));
+}
+// Three days after it was finished a request is of no further use, and its
+// photos are taking up a paid bucket. The database picks the rows — either
+// person may be the one who opens the app — and hands back the paths, because
+// deleting the row does not remove the file.
+let purgedThisSession=false;
+async function purgeOldRequests(){
+  if(!sb||purgedThisSession) return;
+  purgedThisSession=true;                // once a session is enough for a 3 day rule
+  const {data,error}=await sb.rpc('purge_old_requests');
+  if(error||!data||!data.length) return;
+  const paths=data.map(r=>r.path).filter(Boolean);
+  if(paths.length) await sb.storage.from(PHOTO_BUCKET).remove(paths);
+  await refreshRequests();
 }
 const openInbox=()=>requestInbox.filter(r=>r.status!=='completed');
 // the count on the home tile, so an unopened app still says there is something
@@ -6921,18 +6995,34 @@ function renderRequests(){
   syncRequestBadge();
   const inbox=document.getElementById('requestInbox');
   const outbox=document.getElementById('requestOutbox');
+  // Completed work moves out of the way rather than piling up under the thing
+  // still waiting to be done, which is the whole reason for the two chips.
+  const done=r=>r.status==='completed';
+  const keep=r=>requestFilter==='completed'?done(r):!done(r);
+  const inRows=requestInbox.filter(keep), outRows=requestOutbox.filter(keep);
   const open=openInbox();
-  document.getElementById('requestInboxCount').textContent=open.length?`· ${open.length}`:'';
+  document.getElementById('requestInboxCount').textContent=open.length?`· ${open.length} open`:'';
   document.getElementById('requestOutboxCount').textContent=
-    requestOutbox.length?`· ${requestOutbox.filter(r=>r.status!=='completed').length} open`:'';
+    requestOutbox.length?`· ${requestOutbox.filter(r=>!done(r)).length} open`:'';
+  document.getElementById('requestPurgeNote').hidden=requestFilter!=='completed';
 
-  inbox.innerHTML=open.length
-    ? open.map(r=>requestCard(r,true)).join('')
-    : '<p class="hint" style="margin:4px 0 0;">— nothing right now —</p>';
-  outbox.innerHTML=requestOutbox.length
-    ? requestOutbox.map(r=>requestCard(r,false)).join('')
-    : '<p class="hint" style="margin:4px 0 0;">— nothing yet —</p>';
+  const empty=requestFilter==='completed'?'— nothing finished yet —':'— nothing right now —';
+  inbox.innerHTML=inRows.length
+    ? inRows.map(r=>requestCard(r,true)).join('')
+    : `<p class="hint" style="margin:4px 0 0;">${empty}</p>`;
+  outbox.innerHTML=outRows.length
+    ? outRows.map(r=>requestCard(r,false)).join('')
+    : `<p class="hint" style="margin:4px 0 0;">${requestFilter==='completed'?'— nothing finished yet —':'— nothing yet —'}</p>`;
+  hydrateRequestPhotos();
 }
+document.querySelectorAll('#requestFilterChips .chip[data-rfilter]').forEach(b=>{
+  b.addEventListener('click',()=>{
+    requestFilter=b.dataset.rfilter;
+    document.querySelectorAll('#requestFilterChips .chip[data-rfilter]')
+      .forEach(x=>x.classList.toggle('on',x.dataset.rfilter===requestFilter));
+    renderRequests();
+  });
+});
 function requestCard(r,mine){
   const [cls,word]=REQ_TAG[r.status]||REQ_TAG.pending;
   const other=mine?nameOf(r.requester_id):nameOf(r.assignee_id);
@@ -6941,25 +7031,114 @@ function requestCard(r,mine){
   const due=r.status!=='completed'&&r.remind_at&&new Date(r.remind_at)>new Date()
     ? ` · back at ${clock(r.remind_at)}` : '';
   const snoozed=r.snoozes?` · snoozed ${r.snoozes}×`:'';
-  return `<div class="ph-card${r.status==='completed'?' line-done':r.status==='acknowledged'?' line-part':''}"
+  const edge=r.status==='completed'?' line-done':r.status==='acknowledged'?' line-part':'';
+  // urgency outranks the part-done amber: it is the thing to notice first
+  return `<div class="ph-card${edge}${r.urgent&&r.status!=='completed'?' req-urgent':''}"
        data-req-id="${escapeHtml(r.id)}">
     <div class="ph-card-head">
       <span style="flex:1;min-width:0;overflow-wrap:anywhere;">${escapeHtml(r.title)}</span>
+      ${r.urgent?'<span class="tag urgent">URGENT</span>':''}
       <span class="tag ${cls}">${word}</span>
       ${mine?'':`<button class="del-btn" data-req-del title="Withdraw">×</button>`}
     </div>
     ${r.body?`<p class="hint" style="margin:0 0 4px;">${escapeHtml(r.body)}</p>`:''}
-    <p class="hint" style="margin:0;">${line} · ${stamp(r.created_at)}${snoozed}${due}</p>
-    ${mine?`<div class="req-actions">
+    ${shotStrip(r)}
+    <p class="hint" style="margin:6px 0 0;">${line} · ${stamp(r.created_at)}${snoozed}${due}</p>
+    ${mine&&r.status!=='completed'?`<div class="req-actions">
       <button class="btn-outline btn-sm" data-req-open>Open</button>
       <button class="btn-primary btn-sm" data-req-done>✓ Completed</button>
     </div>`:''}
   </div>`;
 }
+// Everybody's photos on the request, whoever added them, then a slot to add
+// one — but only your own three, and only while there is still something to
+// say about it.
+function shotStrip(r){
+  const shots=requestPhotos[r.id]||[];
+  const mineCount=shots.filter(p=>p.user_id===myUserId).length;
+  const canAdd=r.status!=='completed'&&mineCount<REQUEST_PHOTO_MAX;
+  const thumbs=shots.map(p=>`<button class="req-shot" data-req-shot="${escapeHtml(p.path)}">
+      <img alt="" data-req-thumb="${escapeHtml(p.path)}"/>
+      ${p.user_id===myUserId?`<span class="req-shot-x" data-req-shot-del="${escapeHtml(p.id)}" title="Remove">×</span>`:''}
+    </button>`).join('');
+  const add=canAdd?`<button class="req-shot add" data-req-add-shot title="Add a photo">＋</button>`:'';
+  if(!thumbs&&!add) return '';
+  return `<div class="req-shots">${thumbs}${add}</div>`;
+}
+// storage paths are private, so each thumbnail needs a signed URL; the cache is
+// shared with the rest of the app so a photo is only signed once an hour
+async function hydrateRequestPhotos(){
+  if(!sb) return;
+  for(const img of document.querySelectorAll('img[data-req-thumb]')){
+    const path=img.getAttribute('data-req-thumb');
+    if(!path) continue;
+    if(!photoUrlCache[path]){
+      const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(path,3600);
+      if(data&&data.signedUrl) photoUrlCache[path]=data.signedUrl;
+    }
+    if(photoUrlCache[path]) img.src=photoUrlCache[path];
+  }
+}
 const clock=t=>{const d=new Date(t);const p=n=>String(n).padStart(2,'0');
   return p(d.getHours())+':'+p(d.getMinutes());};
 
 // ---- sending one ----
+// Urgency is a two-way switch rather than a checkbox, so the ordinary case is
+// visibly chosen rather than merely left alone.
+let requestUrgent=false;
+document.getElementById('requestUrgency').addEventListener('click',e=>{
+  const b=e.target.closest('[data-urgent]'); if(!b) return;
+  requestUrgent=b.dataset.urgent==='1';
+  document.querySelectorAll('#requestUrgency [data-urgent]')
+    .forEach(x=>x.classList.toggle('on',(x.dataset.urgent==='1')===requestUrgent));
+});
+// Photos picked before the request exists have nowhere to be stored yet, so
+// they are held as squeezed blobs and uploaded once there is an id to file
+// them under.
+function renderNewShots(){
+  const el=document.getElementById('requestNewShots');
+  el.innerHTML=newRequestShots.map((s,i)=>`<button class="req-shot" data-new-shot="${i}">
+      <img alt="" src="${s.url}"/>
+      <span class="req-shot-x" data-new-shot-del="${i}" title="Remove">×</span>
+    </button>`).join('')
+    +(newRequestShots.length<REQUEST_PHOTO_MAX
+      ? '<button class="req-shot add" data-new-shot-add title="Add a photo">＋</button>' : '');
+}
+renderNewShots();
+document.getElementById('requestNewShots').addEventListener('click',async e=>{
+  const del=e.target.closest('[data-new-shot-del]');
+  if(del){
+    e.stopPropagation();
+    const i=Number(del.dataset.newShotDel);
+    URL.revokeObjectURL(newRequestShots[i].url);
+    newRequestShots.splice(i,1); renderNewShots();
+    return;
+  }
+  const shot=e.target.closest('[data-new-shot]');
+  if(shot){ openPhotoModal(null,'Photo',newRequestShots[Number(shot.dataset.newShot)].url); return; }
+  if(!e.target.closest('[data-new-shot-add]')) return;
+  if(newRequestShots.length>=REQUEST_PHOTO_MAX) return;
+  const f=await pickImageFile(); if(!f) return;
+  const blob=await squeezeRequestPhoto(f);
+  newRequestShots.push({blob,url:URL.createObjectURL(blob)});
+  renderNewShots();
+});
+async function squeezeRequestPhoto(file){
+  const small=await shrinkToBudget(await fileToDataURL(file),
+    REQUEST_PHOTO_MAX_PX,REQUEST_PHOTO_BUDGET);
+  return (await fetch(small)).blob();
+}
+async function uploadRequestPhoto(requestId,blob){
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session) return null;
+  const path=session.user.id+'/request-'+requestId+'/'+Date.now()+'-'+Math.random().toString(36).slice(2,7)+'.jpg';
+  const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:'image/jpeg'});
+  if(up.error) return null;
+  const {error}=await sb.from('request_photos')
+    .insert({request_id:requestId,user_id:session.user.id,path});
+  if(error){ await sb.storage.from(PHOTO_BUCKET).remove([path]); return null; }
+  return path;
+}
 document.getElementById('requestSend').addEventListener('click',async()=>{
   const msg=document.getElementById('requestMsg');
   const btn=document.getElementById('requestSend');
@@ -6974,12 +7153,20 @@ document.getElementById('requestSend').addEventListener('click',async()=>{
   btn.disabled=true; btn.textContent='Sending…';
   try{
     const {data,error}=await sb.from('requests')
-      .insert({requester_id:session.user.id,assignee_id:assignee,title,body})
+      .insert({requester_id:session.user.id,assignee_id:assignee,title,body,
+               urgent:requestUrgent})
       .select().single();
     if(error) throw error;
+    // Photos go up before the push, so the notification never arrives ahead of
+    // the pictures that explain it.
+    let failed=0;
+    for(const s of newRequestShots){ if(!await uploadRequestPhoto(data.id,s.blob)) failed++; }
+    newRequestShots.forEach(s=>URL.revokeObjectURL(s.url));
+    newRequestShots=[]; renderNewShots();
     document.getElementById('requestTitle').value='';
     document.getElementById('requestBody').value='';
-    showMsg(msg,`✓ Sent to ${escapeHtml(nameOf(assignee))}.`,true);
+    showMsg(msg,`✓ Sent to ${escapeHtml(nameOf(assignee))}.`
+      +(failed?` ${failed} photo(s) could not be attached.`:''),!failed);
     // the realtime insert reaches an app they already have open; this reaches
     // the phone in their pocket
     pushRequest(data.id,'new');
@@ -7019,11 +7206,20 @@ function nextRequestAlert(){
   const sheet=document.getElementById('requestSheet');
   if(!requestShowing){ sheet.classList.remove('open'); return; }
   const r=requestShowing;
-  document.getElementById('requestSheetKind').textContent=
-    r.snoozes?`Reminder · snoozed ${r.snoozes}×`:'New request';
+  const eyebrow=document.getElementById('requestSheetKind');
+  eyebrow.textContent=(r.urgent?'URGENT · ':'')
+    +(r.snoozes?`Reminder · snoozed ${r.snoozes}×`:'New request');
+  eyebrow.parentElement.classList.toggle('urgent',!!r.urgent);
   document.getElementById('requestSheetTitle').textContent=r.title||'Request';
   const b=document.getElementById('requestSheetBody');
   b.textContent=r.body||''; b.hidden=!r.body;
+  // whatever was attached, shown where the decision is being made
+  const shots=document.getElementById('requestSheetShots');
+  const list=requestPhotos[r.id]||[];
+  shots.innerHTML=list.map(p=>`<button class="req-shot" data-req-shot="${escapeHtml(p.path)}">
+      <img alt="" data-req-thumb="${escapeHtml(p.path)}"/></button>`).join('');
+  shots.hidden=!list.length;
+  if(list.length) hydrateRequestPhotos();
   document.getElementById('requestSheetFrom').textContent=
     `from ${nameOf(r.requester_id)} · ${stamp(r.created_at)}`;
   syncRequestMore();
@@ -7084,6 +7280,13 @@ document.getElementById('requestDone').addEventListener('click',()=>{
                   remind_at:null},'completed');
 });
 document.getElementById('requestSheet').addEventListener('click',e=>{
+  // a photo on the sheet enlarges; there is nothing to add or remove here,
+  // because this is the moment for deciding rather than for filing
+  const shot=e.target.closest('[data-req-shot]');
+  if(shot&&requestShowing){
+    openPhotoModal(shot.dataset.reqShot,requestShowing.title||'Photo');
+    return;
+  }
   const b=e.target.closest('[data-snooze]');
   if(!b){
     // Tapping outside gets you out, but only once it has been acknowledged —
@@ -7101,10 +7304,39 @@ document.getElementById('requestSheet').addEventListener('click',e=>{
   showMsg(document.getElementById('requestMsg'),
     `⏰ Back in ${snoozeWord(mins)}.`,true);
 });
+// Photos behave the same wherever a request is shown, so both lists and the
+// sheet hand their taps to this one place.
+async function handleShotClick(e,r){
+  const del=e.target.closest('[data-req-shot-del]');
+  if(del){
+    e.stopPropagation();
+    const row=(requestPhotos[r.id]||[]).find(p=>p.id===del.dataset.reqShotDel);
+    if(!row||!confirm('Remove this photo?')) return true;
+    await sb.from('request_photos').delete().eq('id',row.id);
+    await sb.storage.from(PHOTO_BUCKET).remove([row.path]);
+    await refreshRequests();
+    return true;
+  }
+  const shot=e.target.closest('[data-req-shot]');
+  if(shot){ openPhotoModal(shot.dataset.reqShot,r.title||'Photo'); return true; }
+  if(e.target.closest('[data-req-add-shot]')){
+    const mine=(requestPhotos[r.id]||[]).filter(p=>p.user_id===myUserId).length;
+    if(mine>=REQUEST_PHOTO_MAX) return true;
+    const f=await pickImageFile(); if(!f) return true;
+    showMsg(document.getElementById('requestMsg'),'Adding the photo…',true);
+    const ok=await uploadRequestPhoto(r.id,await squeezeRequestPhoto(f));
+    if(!ok) showMsg(document.getElementById('requestMsg'),'Could not add the photo.',false);
+    else document.getElementById('requestMsg').innerHTML='';
+    await refreshRequests();
+    return true;
+  }
+  return false;
+}
 // the same three choices from the list, without opening the sheet first
-document.getElementById('requestInbox').addEventListener('click',e=>{
+document.getElementById('requestInbox').addEventListener('click',async e=>{
   const card=e.target.closest('[data-req-id]'); if(!card) return;
   const r=requestInbox.find(x=>x.id===card.dataset.reqId); if(!r) return;
+  if(await handleShotClick(e,r)) return;
   if(e.target.closest('[data-req-done]')){
     actOnRequest(r,{status:'completed',completed_at:new Date().toISOString(),
                     remind_at:null},'completed');
@@ -7115,9 +7347,17 @@ document.getElementById('requestInbox').addEventListener('click',e=>{
 document.getElementById('requestOutbox').addEventListener('click',async e=>{
   const card=e.target.closest('[data-req-id]'); if(!card) return;
   const r=requestOutbox.find(x=>x.id===card.dataset.reqId); if(!r) return;
+  if(await handleShotClick(e,r)) return;
   if(!e.target.closest('[data-req-del]')) return;
-  if(!confirm('Withdraw “'+r.title+'”?\n\nIt stops reminding them.')) return;
+  if(!confirm('Withdraw “'+r.title+'”?\n\nThey are told it is cancelled and the reminders stop.')) return;
+  // Told first, deleted second. The function reads the request with the
+  // caller's own token to decide who to tell, and a deleted row reads as
+  // nothing at all — so the order here is the difference between the person
+  // who was asked finding out and simply never hearing again.
+  await pushRequest(r.id,'cancelled');
+  const paths=(requestPhotos[r.id]||[]).map(p=>p.path);
   await sb.from('requests').delete().eq('id',r.id);
+  if(paths.length) await sb.storage.from(PHOTO_BUCKET).remove(paths);
   await refreshRequests();
 });
 
@@ -7178,10 +7418,29 @@ let requestChannel=null;
 function watchRequests(){
   if(!sb||requestChannel||!sb.channel) return;
   requestChannel=sb.channel('requests-feed')
-    .on('postgres_changes',{event:'*',schema:'public',table:'requests'},({new:row,eventType})=>{
-      // a delete carries the old row, not a new one, and a withdrawn request
-      // only needs the list to catch up
-      if(!row||!row.id||eventType==='DELETE'){ refreshRequests(); return; }
+    .on('postgres_changes',{event:'*',schema:'public',table:'requests'},({new:row,old:gone,eventType})=>{
+      // A delete carries the old row rather than a new one. If it is the very
+      // request on screen, the sheet has to go: leaving it up means answering
+      // something that no longer exists, and "OK — got it" would write to a
+      // row that is gone.
+      if(eventType==='DELETE'){
+        const old=gone||{};
+        if(requestShowing&&old.id===requestShowing.id){
+          requestQueue=requestQueue.filter(q=>q.id!==old.id);
+          requestShowing=null;
+          nextRequestAlert();
+          // if another request took the sheet it has already chimed for itself;
+          // this is only for the case where the sheet simply goes away
+          if(!requestShowing) chime('request');
+          showMsg(document.getElementById('requestMsg'),
+            `✋ ${escapeHtml(old.title||'That request')} was cancelled.`,true);
+        }else if(old.id){
+          requestQueue=requestQueue.filter(q=>q.id!==old.id);
+        }
+        refreshRequests();
+        return;
+      }
+      if(!row||!row.id){ refreshRequests(); return; }
       // the channel can outrun the first read of the session; without an id to
       // compare against, re-read and let that decide what to ring
       if(!myUserId){ refreshRequests(); return; }

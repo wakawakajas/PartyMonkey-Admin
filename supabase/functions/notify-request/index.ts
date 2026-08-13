@@ -33,13 +33,20 @@ const json = (body: unknown, status = 200) =>
     headers: { ...CORS, "Content-Type": "application/json" },
   });
 
-type Kind = "new" | "reminder" | "acknowledged" | "completed";
-// who each kind is addressed to, and what it says
-const KIND: Record<Kind, { to: "assignee" | "requester"; word: string }> = {
-  new:          { to: "assignee",  word: "New request" },
-  reminder:     { to: "assignee",  word: "Reminder" },
+type Kind = "new" | "reminder" | "acknowledged" | "completed" | "cancelled";
+// who each kind is addressed to, and what it says. The two aimed at the
+// assignee say so louder when the request is marked urgent — that word is the
+// whole reason for the setting, and the notification is the only place most
+// people will ever read it.
+const KIND: Record<Kind, { to: "assignee" | "requester"; word: string; urgent?: string }> = {
+  new:          { to: "assignee",  word: "New request", urgent: "URGENT request" },
+  reminder:     { to: "assignee",  word: "Reminder",    urgent: "URGENT reminder" },
   acknowledged: { to: "requester", word: "Acknowledged" },
   completed:    { to: "requester", word: "Completed" },
+  // Sent while the request still exists — once the row is gone there is
+  // nothing left to read, and the person who was asked deserves to be told
+  // they can stop.
+  cancelled:    { to: "assignee",  word: "Request cancelled" },
 };
 
 function b64uToBytes(s: string): Uint8Array {
@@ -162,8 +169,9 @@ async function deliver(msgs: Msg[]) {
 
 // deno-lint-ignore no-explicit-any
 const payloadFor = (kind: Kind, r: any) => ({
-  title: KIND[kind].word,
+  title: (r.urgent && KIND[kind].urgent) || KIND[kind].word,
   body: String(r.title ?? "").slice(0, 120),
+  urgent: !!r.urgent,
   // one notification per request, so a reminder replaces the ring before it
   // rather than stacking up a column of the same thing
   tag: `request-${r.id}`,
@@ -191,7 +199,7 @@ Deno.serve(async (req) => {
       const admin = adminClient();
       const { data: due, error } = await admin
         .from("requests")
-        .select("id,title,assignee_id")
+        .select("id,title,assignee_id,urgent")
         .neq("status", "completed")
         .not("remind_at", "is", null)
         .lte("remind_at", new Date().toISOString())
@@ -231,7 +239,7 @@ Deno.serve(async (req) => {
     // is the whole authorisation check — no id can be guessed into a push.
     const { data: r, error } = await sb
       .from("requests")
-      .select("id,title,requester_id,assignee_id")
+      .select("id,title,requester_id,assignee_id,urgent")
       .eq("id", body.request_id)
       .maybeSingle();
     if (error) return json({ error: error.message }, 500);

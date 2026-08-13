@@ -23,7 +23,9 @@ self.addEventListener('push', event => {
     // Android decides whether to show a banner or just drop it in the shade.
     // A vibration pattern and staying put until it is dealt with are what push
     // it towards a banner; without them Samsung tends to file it silently.
-    vibrate: [80, 40, 80],
+    // An urgent request buzzes longer and harder, so it is tellable apart from
+    // an ordinary one through a pocket, before the phone is even looked at.
+    vibrate: d.urgent ? [200, 90, 200, 90, 200] : [80, 40, 80],
     requireInteraction: true,
     silent: false,
     timestamp: Date.now(),
