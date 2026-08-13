@@ -8,17 +8,6 @@ self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 // normal, so a deploy is never served from a stale cache.
 self.addEventListener('fetch', () => {});
 
-// n buzzes of the given length, with a gap between them. The pattern alternates
-// buzz/pause and must not end on a pause, or some phones sit through it.
-function buzz(n, ms) {
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    if (i) out.push(90);
-    out.push(ms);
-  }
-  return out;
-}
-
 self.addEventListener('push', event => {
   let d = {};
   try { d = event.data ? event.data.json() : {}; } catch (e) { d = {}; }
@@ -31,17 +20,16 @@ self.addEventListener('push', event => {
     // each other rather than stacking up
     tag: d.tag || 'pickup',
     renotify: true,
-    // Android decides whether to show a banner or just drop it in the shade.
-    // A vibration pattern and staying put until it is dealt with are what push
-    // it towards a banner; without them Samsung tends to file it silently.
+    // No vibration at all: an empty pattern rather than the field left out,
+    // because leaving it out lets Android fall back to the channel's own
+    // buzzing. The sound stays with the phone's settings for this app, which
+    // is the only place a push has ever been able to leave it.
     //
-    // The pattern counts, the way the beeps do inside the app: two buzzes for
-    // something arriving, eight for a reminder you already put off. A push
-    // cannot carry a sound — that belongs to the phone's own settings for this
-    // app — but it can carry this, and counting works through a pocket without
-    // having to recognise anything. Urgent buzzes longer without changing the
-    // count, so the two readings do not fight each other.
-    vibrate: buzz(d.kind === 'reminder' ? 8 : 2, d.urgent ? 200 : 110),
+    // The cost is worth knowing: a vibration pattern is one of the things that
+    // pushes Android towards showing a banner rather than filing the
+    // notification silently in the shade. requireInteraction below is now
+    // carrying that on its own, and Samsung in particular may be quieter.
+    vibrate: [],
     requireInteraction: true,
     silent: false,
     timestamp: Date.now(),
