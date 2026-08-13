@@ -2,7 +2,9 @@
 -- REQUEST & REMINDER
 -- Run in the Supabase SQL Editor, AFTER supabase-migration-ACCESS.sql
 -- and supabase-migration-ADHOC.sql (which is where public.on_team comes
--- from). Safe to run more than once. Plain statements, no DO blocks.
+-- from). Safe to run more than once, and safe to run as one batch — the
+-- Editor wraps the file in a transaction, so nothing here may raise on a
+-- second run or it would undo everything above it.
 --
 -- One person asks another for something. It keeps asking — on a snooze the
 -- reminder comes back, and comes back again, until the assignee says it is
@@ -93,8 +95,22 @@ create policy "requests_delete" on public.requests
 -- so a request lands on a screen that is already open, without a refresh
 alter table public.requests replica identity full;
 
--- ignore an error here; it only means realtime is already carrying the table
-alter publication supabase_realtime add table public.requests;
+-- Asked first rather than attempted and forgiven. Adding a table that is
+-- already published raises 42710, and the SQL Editor runs this file as one
+-- transaction — so that error would roll back everything above it, not just
+-- this line. Some projects publish every table automatically, which makes it
+-- the normal case rather than the odd one.
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+     where pubname = 'supabase_realtime'
+       and schemaname = 'public'
+       and tablename = 'requests')
+  then
+    alter publication supabase_realtime add table public.requests;
+  end if;
+end $$;
 
 
 -- ---------- PART 4 of 5 : housekeeping ----------

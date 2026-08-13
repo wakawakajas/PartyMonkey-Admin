@@ -1,7 +1,9 @@
 -- ============================================================
 -- NEW SECTIONS IN USERS & ACCESS + ADMIN POP-UP MESSAGES
 -- Run in the Supabase SQL Editor, AFTER supabase-migration-ACCESS.sql.
--- Safe to run more than once. Plain statements, no DO blocks.
+-- Safe to run more than once, and safe to run as one batch — the Editor wraps
+-- a pasted file in a transaction, so nothing here may raise on a second run
+-- or it would undo everything above it.
 -- ============================================================
 
 -- ---------- PART 1 of 3 : the two new sections ----------
@@ -38,5 +40,17 @@ alter table public.announcements replica identity full;
 
 
 -- ---------- PART 3 of 3 : deliver them live ----------
--- ignore an error here; it only means realtime is already carrying the table
-alter publication supabase_realtime add table public.announcements;
+-- Asked first rather than attempted and forgiven. Adding a table that is
+-- already published raises 42710, and the SQL Editor runs a pasted file as one
+-- transaction — so that error would roll back every part above it, not just
+-- this line. Some projects publish every table automatically, which makes it
+-- the normal case rather than the odd one.
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'announcements')
+  then
+    execute 'alter publication supabase_realtime add table public.announcements';
+  end if;
+end $$;
