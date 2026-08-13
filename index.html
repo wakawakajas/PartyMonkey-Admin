@@ -299,6 +299,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .tile-name{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:16px;line-height:1.2;
   color:var(--lime-ink);}
 .tile-ico{color:var(--lime-ink);}
+/* the standing offer to register this phone, on the screen everybody lands on */
+.push-nag{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:14px;
+  padding:12px 14px;border:1px solid var(--rust);border-radius:16px;
+  background:rgba(255,138,107,.10);}
+.push-nag[hidden]{display:none;}
+.push-nag > div:first-child{flex:1 1 190px;min-width:0;font-size:12.5px;line-height:1.45;}
+.push-nag b{display:block;color:var(--rust);font-size:13px;}
+.push-nag span{color:var(--muted);}
 /* how many requests are waiting on you, on the tile itself — the point of
    this one is that you should not have to open it to find out */
 .tile-badge{display:flex;align-items:center;justify-content:center;flex-shrink:0;
@@ -855,6 +863,18 @@ body{overflow-x:hidden;}
       <div id="energyMsg"></div>
     </div>
 
+    <!-- A phone that has not been registered hears nothing, whoever sends it
+         what. This is the one screen everybody lands on, so the offer lives
+         here and goes away the moment it is accepted. -->
+    <div class="push-nag" id="pushNag" hidden>
+      <div>
+        <b>This phone will not ring.</b>
+        <span>Turn on notifications and you will hear requests even with the app closed.</span>
+      </div>
+      <button type="button" class="btn-primary btn-sm" data-push-chip>🔕 Notify this phone</button>
+      <div id="pushNagMsg"></div>
+    </div>
+
     <div class="tile-grid">
       <button class="tile" id="goToToolBtn">
         <span class="tile-top">
@@ -1072,6 +1092,7 @@ body{overflow-x:hidden;}
     <div class="chips" id="requestFilterChips">
       <button class="chip on" data-rfilter="open">Open</button>
       <button class="chip" data-rfilter="completed">Completed</button>
+      <button type="button" class="chip chip-xs" data-push-chip>🔕 Notify this phone</button>
     </div>
 
     <div class="sect-label">Waiting on you <span class="hint" id="requestInboxCount"></span></div>
@@ -1169,7 +1190,7 @@ body{overflow-x:hidden;}
       <p class="hint" style="margin:4px 0 0;">— none yet —</p>
     </div>
     <div class="chips chips-left" style="margin-top:12px;">
-      <button type="button" class="chip chip-xs" id="pickupPush">🔕 Notify this phone</button>
+      <button type="button" class="chip chip-xs" id="pickupPush" data-push-chip>🔕 Notify this phone</button>
       <button type="button" class="chip chip-xs" id="pickupTestSound">🔔 Test sound</button>
     </div>
     <div id="pickupMsg"></div>
@@ -6501,15 +6522,23 @@ const pushSupported=()=>'serviceWorker' in navigator&&'PushManager' in window&&'
 if('serviceWorker' in navigator)
   window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 
+// Every chip that offers to register this phone, wherever it lives. There used
+// to be one, on Store Pick Up — so anyone without access to that section, or
+// who simply never opened it, was never asked and never heard a thing.
 function syncPushChip(state){
-  const b=document.getElementById('pickupPush');
-  if(!b) return;
-  b.textContent=state==='on'?'🔔 Notify: on':'🔕 Notify this phone';
-  b.classList.toggle('on',state==='on');
+  const on=state==='on';
+  document.querySelectorAll('[data-push-chip]').forEach(b=>{
+    b.textContent=on?'🔔 Notify: on':'🔕 Notify this phone';
+    b.classList.toggle('on',on);
+  });
+  // and the standing offer on the home screen, which is only worth showing
+  // while there is something to accept
+  const nag=document.getElementById('pushNag');
+  if(nag) nag.hidden=on;
 }
 // records this device against the account so the function knows where to send
-async function registerPush(interactive){
-  const msg=document.getElementById('pickupMsg');
+async function registerPush(interactive,msgEl){
+  const msg=msgEl||document.getElementById('pickupMsg');
   const say=(t,ok)=>{ if(interactive) showMsg(msg,t,ok); };
   if(!pushSupported()){
     say(installedApp()?'This phone cannot do background notifications.'
@@ -6559,6 +6588,17 @@ async function resumePush(){
   if(!pushSupported()||Notification.permission!=='granted') { syncPushChip('off'); return; }
   await registerPush(false);
 }
+// Any of the chips, wherever it sits. The pick up one keeps its extra job as a
+// self-test once registered; the rest simply register, because on the screens
+// they live on there is nothing to test against.
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('[data-push-chip]');
+  if(!b||b.id==='pickupPush') return;              // that one has its own handler
+  const msg=b.closest('.push-nag')?document.getElementById('pushNagMsg')
+                                  :document.getElementById('requestMsg');
+  b.disabled=true;
+  try{ await registerPush(true,msg); }finally{ b.disabled=false; }
+});
 // supabase-js reports any non-2xx as "Edge Function returned a non-2xx status
 // code" and keeps the body on the attached Response, which is where the
 // function actually says what went wrong
