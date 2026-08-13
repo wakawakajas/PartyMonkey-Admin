@@ -1294,6 +1294,13 @@ body{overflow-x:hidden;}
       <button type="button" class="chip on" data-ctab="active">In transit</button>
       <button type="button" class="chip" data-ctab="completed"
               title="Freight numbers where every order has fully arrived">History</button>
+      <button type="button" class="chip chip-xs" id="consolSelectOne">Select</button>
+      <button type="button" class="chip chip-xs" id="consolSelectAll">Select all</button>
+    </div>
+    <!-- sits directly under Select all so the controls stay together -->
+    <div class="bulkbar" id="consolBulkBar" style="display:none;">
+      <span class="n" id="consolBulkCount"></span>
+      <button class="btn-outline btn-sm" id="consolBulkPo" disabled>Export PO</button>
     </div>
     <div class="ph-list list-full" id="consolList"><p class="hint" style="margin:4px 0 0;">— none yet —</p></div>
     <div id="consolMsg"></div>
@@ -3952,6 +3959,28 @@ async function poRowsForOrder(id){
     rateEl.value=keepRate;
   }
 }
+// Several orders in one go. The costing reads the shipment row for its fees,
+// mode and rate, and the consolidation page has never loaded those — it only
+// knows freight numbers. So anything missing is fetched first and taken back
+// out afterwards, leaving shipmentRows exactly as the screen had it.
+async function poRowsForOrders(ids){
+  const keep=shipmentRows.slice();
+  try{
+    const missing=ids.filter(id=>!shipmentRows.some(r=>r.id===id));
+    if(missing.length){
+      const {data,error}=await sb.from('shipments')
+        .select('id,order_id,rmb_rate,china_fee_rmb,china_basis,freight_mode,service_fee_pct,gst_pct')
+        .in('id',missing);
+      if(error) throw error;
+      (data||[]).forEach(r=>shipmentRows.push(r));
+    }
+    const rows=[];
+    for(const id of ids) rows.push(...await poRowsForOrder(id));
+    return rows;
+  }finally{
+    shipmentRows.length=0; keep.forEach(r=>shipmentRows.push(r));
+  }
+}
 document.getElementById('orderBulkPo').addEventListener('click',async()=>{
   const btn=document.getElementById('orderBulkPo');
   const msg=document.getElementById('shipmentMsg');
@@ -3962,8 +3991,7 @@ document.getElementById('orderBulkPo').addEventListener('click',async()=>{
     if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
     // list order rather than tick order, so the sheet reads down the screen
     const ids=shipmentRows.filter(r=>pickedOrders.has(r.id)).map(r=>r.id);
-    const rows=[];
-    for(const id of ids) rows.push(...await poRowsForOrder(id));
+    const rows=await poRowsForOrders(ids);
     if(!rows.length){ showMsg(msg,'Those orders have no item lines to export.',false); return; }
     const wb=XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb,
@@ -5130,15 +5158,92 @@ async function refreshConsolList(){
   if(co.error){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load.</p>'; return; }
   consolRows=co.data||[];
   consolProgressById={};
+  consolOrdersById={};
+  (sh.data||[]).forEach(s=>{
+    if(!s.consolidation_id) return;
+    (consolOrdersById[s.consolidation_id]=consolOrdersById[s.consolidation_id]||[]).push(s.id);
+  });
   consolRows.forEach(c=>{ consolProgressById[c.id]=consolProgress(c.id,sh.data||[],status); });
   renderConsolList();
 }
 let consolProgressById={}, consolTab=new Set(['active']);
+// which orders ride under each freight number, kept from the read above so
+// Export PO does not have to go and ask again
+let consolOrdersById={};
+
+// ---- picking freight numbers, to export the PO for everything under them ----
+const pickedConsols=new Set();
+let consolSelectMode=false;
+const visibleConsolIds=()=>new Set(consolRows
+  .filter(c=>consolTab.has((consolProgressById[c.id]||{}).complete?'completed':'active'))
+  .map(c=>c.id));
+const allConsolsPicked=v=>v.size>0&&[...v].every(id=>pickedConsols.has(id));
+function syncConsolBulk(){
+  const visible=visibleConsolIds();
+  document.getElementById('consolBulkBar').style.display=visible.size?'flex':'none';
+  const one=document.getElementById('consolSelectOne'), all=document.getElementById('consolSelectAll');
+  one.style.display=all.style.display=visible.size?'':'none';
+  one.textContent=consolSelectMode?'Cancel':'Select';   // the same chip backs out again
+  one.classList.toggle('on',consolSelectMode);
+  all.classList.toggle('on',consolSelectMode&&allConsolsPicked(visible));
+  document.getElementById('consolBulkCount').textContent=
+    consolSelectMode?pickedConsols.size+' of '+visible.size+' selected':visible.size+' shown';
+  // how many orders that actually amounts to, since a freight number with no
+  // orders under it would otherwise look ready to export
+  const orders=[...pickedConsols].reduce((n,id)=>n+((consolOrdersById[id]||[]).length),0);
+  document.getElementById('consolBulkPo').disabled=!orders;
+}
+document.getElementById('consolSelectOne').addEventListener('click',()=>{
+  if(consolSelectMode){ consolSelectMode=false; pickedConsols.clear(); renderConsolList(); return; }
+  consolSelectMode=true; renderConsolList();
+});
+document.getElementById('consolSelectAll').addEventListener('click',()=>{
+  const visible=visibleConsolIds();
+  const undo=consolSelectMode&&allConsolsPicked(visible);
+  consolSelectMode=true;
+  if(undo) pickedConsols.clear(); else visible.forEach(id=>pickedConsols.add(id));
+  renderConsolList();
+});
+document.getElementById('consolBulkPo').addEventListener('click',async()=>{
+  const btn=document.getElementById('consolBulkPo');
+  const msg=document.getElementById('consolMsg');
+  if(!pickedConsols.size||!sb) return;
+  const label=btn.textContent;
+  btn.disabled=true; btn.textContent='Building…';
+  try{
+    if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
+    // list order, and an order only once even if two freight numbers somehow
+    // both claim it
+    const seen=new Set(), ids=[];
+    consolRows.filter(c=>pickedConsols.has(c.id)).forEach(c=>
+      (consolOrdersById[c.id]||[]).forEach(o=>{ if(!seen.has(o)){ seen.add(o); ids.push(o); } }));
+    if(!ids.length){ showMsg(msg,'No orders under the freight numbers selected.',false); return; }
+    const rows=await poRowsForOrders(ids);
+    if(!rows.length){ showMsg(msg,'Those orders have no item lines to export.',false); return; }
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.aoa_to_sheet([SKU_SHEET_HEADERS,...rows]),'SKU');
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([
+      ['USD','Price'],['CNY','Quantity'],['IDR','Volume'],['PHP','Weight'],['THB'],['SGD']
+    ]),'Sheet1');
+    // one freight number names the file after itself; several cannot, so the
+    // day does. Column A still says which order every line belongs to.
+    const one=pickedConsols.size===1&&consolRows.find(c=>pickedConsols.has(c.id));
+    const d=new Date(), p=n=>String(n).padStart(2,'0');
+    XLSX.writeFile(wb,one
+      ? safeName(one.freight_number||'freight')+'_PO.xlsx'
+      : `PO_${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}.xlsx`);
+    showMsg(msg,`✓ ${rows.length} line(s) from ${ids.length} order(s).`,true);
+  }catch(err){
+    showMsg(msg,'Export failed: '+((err&&err.message)||'unknown error'),false);
+  }finally{ btn.disabled=false; btn.textContent=label; }
+});
 function renderConsolList(){
   const el=document.getElementById('consolList');
   if(!consolTab.size){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">No status selected — tap a chip above.</p>'; return;
   }
+  setTimeout(syncConsolBulk,0);
   const rows=consolRows.filter(c=>
     consolTab.has((consolProgressById[c.id]||{}).complete?'completed':'active'));
   if(!rows.length){
@@ -5148,8 +5253,10 @@ function renderConsolList(){
   el.innerHTML=rows.map(c=>{
     const i=consolRows.indexOf(c);
     const p=consolProgressById[c.id]||{total:0,done:0};
-    return `<div class="ph-card row-link" data-id="${c.id}">
+    return `<div class="ph-card row-link${pickClasses(consolSelectMode,pickedConsols.has(c.id))}" data-id="${c.id}">
       <div class="ph-card-head">
+        <input type="checkbox" class="pick" data-consol-pick ${pickedConsols.has(c.id)?'checked':''}
+          title="Select" style="${consolSelectMode?'':'visibility:hidden;width:0;margin:0;'}"/>
         <span style="flex:1;">${escapeHtml(c.freight_number)}${c.created_at?` <span class="hint" style="font-weight:400;">· ${shortDate(c.created_at)}</span>`:''}</span>
         ${consolTag(p)}
         <button class="icon-btn" data-consol-up ${i===0?'disabled':''} title="Move up">▲</button>
@@ -5181,6 +5288,16 @@ document.getElementById('consolFilterNone').addEventListener('click',()=>{
 document.getElementById('consolList').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
   const id=card.dataset.id;
+  if(e.target.closest('[data-consol-pick]')){
+    syncCardPick(card,pickedConsols,id,e.target.closest('[data-consol-pick]').checked,syncConsolBulk);
+    return;
+  }
+  // in select mode the card picks rather than opens, and the reorder arrows
+  // wait until you are done — the same rule the orders list follows
+  if(consolSelectMode&&!inSelectField(e.target)){
+    toggleCardPick(card,pickedConsols,id,syncConsolBulk);
+    return;
+  }
   const idx=consolRows.findIndex(c=>c.id===id);
   if(e.target.closest('[data-consol-up]')||e.target.closest('[data-consol-down]')){
     const dir=e.target.closest('[data-consol-up]')?-1:1;
