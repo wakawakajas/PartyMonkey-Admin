@@ -172,8 +172,13 @@ create trigger requests_clear_remind_trg
 --         Replace PASTE_YOUR_CRON_SECRET_HERE with what you chose in STEP 3,
 --         keeping the single quotes around it. Then Run.
 --
---         The project address is already filled in; it is not secret and is
---         the same one the app itself uses.
+--         The project address and the long "eyJ..." key are already filled in.
+--         Neither is secret: that is the same public anon key the app ships
+--         with. It is there only because the platform gateway rejects a call
+--         whose Authorization header is not a real token — it does that
+--         before the function runs, so a password in that header never
+--         arrives. The password goes in x-cron-secret instead, and that is
+--         the thing that actually grants access.
 --
 -- STEP 5. Check it is running:
 --         select * from cron.job_run_details order by start_time desc limit 5;
@@ -195,8 +200,9 @@ create trigger requests_clear_remind_trg
 --   select net.http_post(
 --     url     := 'https://kdwggyzyzrhiniasilqs.supabase.co/functions/v1/notify-request',
 --     headers := jsonb_build_object(
---                  'Content-Type',  'application/json',
---                  'Authorization', 'Bearer PASTE_YOUR_CRON_SECRET_HERE'),
+--                  'Content-Type',   'application/json',
+--                  'Authorization',  'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtkd2dneXp5enJoaW5pYXNpbHFzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwNTE3ODEsImV4cCI6MjEwMTYyNzc4MX0.WOJjkSZ0yf0zAe_I9jFJbuH2mNPtzZj_kexq0EX_7f8',
+--                  'x-cron-secret',  'PASTE_YOUR_CRON_SECRET_HERE'),
 --     body    := jsonb_build_object('due', true)
 --   );
 --   $cron$
