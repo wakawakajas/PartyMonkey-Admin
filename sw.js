@@ -20,16 +20,13 @@ self.addEventListener('push', event => {
     // each other rather than stacking up
     tag: d.tag || 'pickup',
     renotify: true,
-    // No vibration at all: an empty pattern rather than the field left out,
-    // because leaving it out lets Android fall back to the channel's own
-    // buzzing. The sound stays with the phone's settings for this app, which
-    // is the only place a push has ever been able to leave it.
-    //
-    // The cost is worth knowing: a vibration pattern is one of the things that
-    // pushes Android towards showing a banner rather than filing the
-    // notification silently in the shade. requireInteraction below is now
-    // carrying that on its own, and Samsung in particular may be quieter.
-    vibrate: [],
+    // One short buzz, not a pattern that counts anything. It is here for
+    // Samsung rather than for the reader: One UI leans on a vibration pattern
+    // when deciding whether to raise a banner or file the notification
+    // silently in the shade, and with no pattern at all it tends to file it.
+    // Kept to a single 120ms pulse so it registers without being the buzzing
+    // that was asked to go away.
+    vibrate: [120],
     requireInteraction: true,
     silent: false,
     timestamp: Date.now(),
