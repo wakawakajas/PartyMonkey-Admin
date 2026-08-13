@@ -577,8 +577,13 @@ body{overflow-x:hidden;}
 .req-more[hidden]{display:none;}
 .req-snooze-label{margin-top:4px;font-size:11px;color:var(--faint);
   font-family:'IBM Plex Sans',sans-serif;}
-/* 2x2 rather than four in a row: these are pressed half-awake with one hand */
+/* two per row rather than all in a line: these are pressed half-awake with one
+   hand. An odd one left over at the end takes the full width instead of
+   sitting alone in the left column. */
 .req-snooze{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.req-snooze button:last-child:nth-child(odd){grid-column:1/-1;}
+#requestAfterAck{display:flex;flex-direction:column;gap:9px;}
+#requestAfterAck[hidden]{display:none;}
 /* the row of state on a request card, and the same three-state colouring the
    rest of the app uses — no news, seen, done */
 .req-when{white-space:nowrap;}
@@ -1607,13 +1612,13 @@ body{overflow-x:hidden;}
     <p class="hint" id="requestSheetBody" style="margin:0 0 2px;"></p>
     <p class="hint" id="requestSheetFrom" style="margin:0 0 6px;"></p>
     <button class="btn-primary" id="requestAck">OK — got it</button>
-    <button class="btn-outline" id="requestDone">✓ Completed</button>
-    <div class="req-snooze-label">Not now — remind me in</div>
-    <div class="req-snooze">
-      <button class="btn-outline" data-snooze="5">5 min</button>
-      <button class="btn-outline" data-snooze="10">10 min</button>
-      <button class="btn-outline" data-snooze="30">30 min</button>
-      <button class="btn-outline" data-snooze="60">1 hour</button>
+    <!-- Nothing else is offered until it has been acknowledged: the person who
+         asked finds out it was seen before any decision about when, and the
+         choice narrows to two — do it now, or say when to be asked again. -->
+    <div id="requestAfterAck" hidden>
+      <button class="btn-outline" id="requestDone">✓ Completed</button>
+      <div class="req-snooze-label">Or remind me again in</div>
+      <div class="req-snooze" id="requestSnooze"></div>
     </div>
   </div>
 </div>
@@ -6839,8 +6844,14 @@ function watchPickups(){
 // record — it survives a reload, a different phone, and the app being shut, and
 // it is what the cron sweep reads to push while nobody is looking. The timer
 // below is just the copy that rings promptly when the app happens to be open.
-const SNOOZE_MINS=[5,10,30,60];
+// A minute is here for the "I am walking there now" case — long enough to put
+// the phone down, short enough that nothing is really being deferred.
+const SNOOZE_MINS=[1,5,10,30,60];
 const snoozeWord=m=>m===60?'1 hour':m+' min';
+// built from the list above rather than written out in the markup, so the
+// choices on offer and the wording on the banner can never drift apart
+document.getElementById('requestSnooze').innerHTML=SNOOZE_MINS
+  .map(m=>`<button class="btn-outline" data-snooze="${m}">${snoozeWord(m)}</button>`).join('');
 let requestInbox=[], requestOutbox=[], teamMembers=[];
 let requestsReady=false;                 // false until the migration has been run
 let myUserId=null;
@@ -7016,23 +7027,29 @@ function nextRequestAlert(){
   document.getElementById('requestSheetFrom').textContent=
     `from ${nameOf(r.requester_id)} · ${stamp(r.created_at)}`;
   syncRequestMore();
-  // acknowledging twice is not a thing; the button goes once it has been
-  document.getElementById('requestAck').hidden=r.status==='acknowledged';
+  // Two faces to this sheet. Unanswered, the only way through it is Got it.
+  // Once that is done — now, or on an earlier ring — it shows the two things
+  // left to decide instead, and never asks to be acknowledged twice.
+  showAckStage(r.status==='acknowledged');
   sheet.classList.add('open');
   chime('request');
+}
+function showAckStage(acked){
+  document.getElementById('requestAck').hidden=acked;
+  document.getElementById('requestAfterAck').hidden=!acked;
 }
 // Writes the change, tells the other side, and moves the sheet on. Every button
 // on the sheet ends up here, so there is one place where a request can change
 // hands and one place that can fail.
-async function actOnRequest(r,patch,kind){
+// Writes the change and tells the other side. Leaves the sheet alone, because
+// not every answer is the last word on a request — Got it is the middle of a
+// conversation, not the end of one.
+async function saveRequest(r,patch,kind){
   Object.assign(r,patch);
   // the sheet can be holding a copy from before the last refresh, so the row
   // the list will redraw from is patched by id rather than by reference
   const live=requestInbox.find(x=>x.id===r.id);
   if(live&&live!==r) Object.assign(live,patch);
-  // the sheet closes on the tap, not on the round trip — a slow connection
-  // should not leave somebody holding a phone waiting for a dialog to go away
-  nextRequestAlert();
   renderRequests();
   if(!sb) return;
   const {error}=await sb.from('requests').update(patch).eq('id',r.id);
@@ -7044,12 +7061,22 @@ async function actOnRequest(r,patch,kind){
   if(kind) pushRequest(r.id,kind);
   armSnoozeTimers();
 }
-document.getElementById('requestAck').addEventListener('click',()=>{
+// and the answers that do finish with this request: move the sheet on first,
+// so it closes on the tap rather than on the round trip — a slow connection
+// should not leave somebody holding a phone waiting for a dialog to go away
+async function actOnRequest(r,patch,kind){
+  nextRequestAlert();
+  await saveRequest(r,patch,kind);
+}
+document.getElementById('requestAck').addEventListener('click',async()=>{
   const r=requestShowing; if(!r) return;
   // Acknowledged is "I have seen it", not "it is done" — the request stays
-  // open and keeps its reminders. Only Completed ends it.
-  actOnRequest(r,{status:'acknowledged',acknowledged_at:new Date().toISOString(),
-                  remind_at:null},'acknowledged');
+  // open and keeps its reminders. Only Completed ends it. The sheet stays on
+  // this request and turns over to ask what happens next.
+  showAckStage(true);
+  document.getElementById('requestSheetKind').textContent='Acknowledged — what next?';
+  await saveRequest(r,{status:'acknowledged',acknowledged_at:new Date().toISOString(),
+                       remind_at:null},'acknowledged');
 });
 document.getElementById('requestDone').addEventListener('click',()=>{
   const r=requestShowing; if(!r) return;
@@ -7057,7 +7084,16 @@ document.getElementById('requestDone').addEventListener('click',()=>{
                   remind_at:null},'completed');
 });
 document.getElementById('requestSheet').addEventListener('click',e=>{
-  const b=e.target.closest('[data-snooze]'); if(!b) return;
+  const b=e.target.closest('[data-snooze]');
+  if(!b){
+    // Tapping outside gets you out, but only once it has been acknowledged —
+    // by then the person who asked knows it was seen, and the request is still
+    // sitting on the list waiting to be completed. Before that there is
+    // nothing to do but answer it.
+    if(e.target===e.currentTarget&&requestShowing&&requestShowing.status==='acknowledged')
+      nextRequestAlert();
+    return;
+  }
   const r=requestShowing; if(!r) return;
   const mins=Number(b.dataset.snooze);
   actOnRequest(r,{remind_at:new Date(Date.now()+mins*60000).toISOString(),
