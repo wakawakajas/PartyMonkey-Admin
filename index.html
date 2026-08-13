@@ -6444,61 +6444,6 @@ const XERO_FEE_LINES=[
   {desc:'WorldFirst Payment Fee',pct:0.008}
 ];
 
-// A minimal store-only zip so several bills can come down in one click.
-// The files are a few hundred bytes each, so there is nothing to gain from
-// compressing them and plenty to get wrong.
-const CRC_TABLE=(function(){
-  const t=new Uint32Array(256);
-  for(let n=0;n<256;n++){
-    let c=n;
-    for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);
-    t[n]=c>>>0;
-  }
-  return t;
-})();
-function crc32(bytes){
-  let c=0xFFFFFFFF;
-  for(let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&0xFF]^(c>>>8);
-  return (c^0xFFFFFFFF)>>>0;
-}
-function buildZip(files){
-  const enc=new TextEncoder(), parts=[], central=[];
-  const d=new Date();
-  const dosTime=(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1);
-  const dosDate=((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate();
-  let offset=0;
-  const buf=n=>{const b=new Uint8Array(n);return {b,v:new DataView(b.buffer)};};
-  files.forEach(f=>{
-    const name=enc.encode(f.name), data=enc.encode(f.text), crc=crc32(data);
-    const {b:lh,v}=buf(30);
-    v.setUint32(0,0x04034b50,true);
-    v.setUint16(4,20,true);
-    v.setUint16(6,0x0800,true);   // names and contents are UTF-8
-    v.setUint16(8,0,true);        // stored, not deflated
-    v.setUint16(10,dosTime,true); v.setUint16(12,dosDate,true);
-    v.setUint32(14,crc,true);
-    v.setUint32(18,data.length,true); v.setUint32(22,data.length,true);
-    v.setUint16(26,name.length,true); v.setUint16(28,0,true);
-    parts.push(lh,name,data);
-    const {b:cd,v:cv}=buf(46);
-    cv.setUint32(0,0x02014b50,true);
-    cv.setUint16(4,20,true); cv.setUint16(6,20,true);
-    cv.setUint16(8,0x0800,true); cv.setUint16(10,0,true);
-    cv.setUint16(12,dosTime,true); cv.setUint16(14,dosDate,true);
-    cv.setUint32(16,crc,true);
-    cv.setUint32(20,data.length,true); cv.setUint32(24,data.length,true);
-    cv.setUint16(28,name.length,true);
-    cv.setUint32(42,offset,true);
-    central.push(cd,name);
-    offset+=30+name.length+data.length;
-  });
-  const cdSize=central.reduce((t,p)=>t+p.length,0);
-  const {b:eocd,v:ev}=buf(22);
-  ev.setUint32(0,0x06054b50,true);
-  ev.setUint16(8,files.length,true); ev.setUint16(10,files.length,true);
-  ev.setUint32(12,cdSize,true); ev.setUint32(16,offset,true);
-  return new Blob([...parts,...central,eocd],{type:'application/zip'});
-}
 
 function csvCell(v){
   const s=v==null?'':String(v);
@@ -6562,24 +6507,21 @@ document.getElementById('exportXeroBtn').addEventListener('click',async()=>{
       goodsRmb[i.shipment_id]=(goodsRmb[i.shipment_id]||0)
         +(Number(i.unit_price_rmb)||0)*(Number(i.qty)||0);
     });
-    // one file per order, so each keeps its own orderid_xero.csv name
-    const files=[], used={};
-    orders.forEach(o=>{
-      const rows=buildXeroRows(o,(goodsRmb[o.id]||0)+(Number(o.china_fee_rmb)||0));
-      let name=safeName(o.order_id)+'_xero.csv';
-      // two order IDs can flatten to the same safe name, and a zip with
-      // duplicate entries loses one of them
-      if(used[name]) name=name.replace(/\.csv$/,'_'+(++used[name])+'.csv'); else used[name]=1;
-      files.push({name,text:[XERO_HEADERS,...rows].map(r=>r.map(csvCell).join(',')).join('\r\n')+'\r\n'});
-    });
-    // a single order downloads as its own csv; several come down zipped so
-    // each one keeps its orderid_xero name
-    if(files.length===1){
-      downloadBlob(new Blob([files[0].text],{type:'text/csv;charset=utf-8;'}),files[0].name);
-    }else{
-      downloadBlob(buildZip(files),'xero_'+new Date().toISOString().slice(0,10)+'.zip');
-    }
-    showMsg(msg,`✓ Exported ${files.length} bill(s) for Xero.`,true);
+    // One file, every selected order in it. Xero groups rows into separate
+    // bills by *InvoiceNumber, which each row already carries, so a combined
+    // csv imports as the same set of bills a folder of separate ones did —
+    // and is one import to run rather than one per order.
+    const rows=[];
+    orders.forEach(o=>rows.push(
+      ...buildXeroRows(o,(goodsRmb[o.id]||0)+(Number(o.china_fee_rmb)||0))));
+    const text=[XERO_HEADERS,...rows].map(r=>r.map(csvCell).join(',')).join('\r\n')+'\r\n';
+    // a single order still names the file after itself; several cannot, so
+    // they are named for the day
+    const name=orders.length===1
+      ? safeName(orders[0].order_id)+'_xero.csv'
+      : 'xero_'+new Date().toISOString().slice(0,10)+'.csv';
+    downloadBlob(new Blob([text],{type:'text/csv;charset=utf-8;'}),name);
+    showMsg(msg,`✓ ${orders.length} bill(s), ${rows.length} line(s), in one file for Xero.`,true);
   }catch(err){
     showMsg(msg,'Export failed: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false; btn.textContent=label; }
