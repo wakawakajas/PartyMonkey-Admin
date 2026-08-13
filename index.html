@@ -1226,6 +1226,7 @@ body{overflow-x:hidden;}
     <div class="bulkbar" id="orderBulkBar" style="display:none;">
       <span class="n" id="orderBulkCount"></span>
       <button class="btn-outline btn-sm" id="orderBulkExport" disabled>Export Details</button>
+      <button class="btn-outline btn-sm" id="orderBulkPo" disabled>Export PO</button>
       <button class="btn-outline btn-sm" id="exportXeroBtn" disabled>Export for Xero</button>
       <button class="btn-danger btn-sm" id="orderBulkDelete" disabled>Delete selected</button>
     </div>
@@ -3877,6 +3878,7 @@ function syncOrderBulk(){
     selectMode?pickedOrders.size+' of '+visible.size+' selected':visible.size+' shown';
   const nothing=!selectMode||!pickedOrders.size;
   document.getElementById('orderBulkExport').disabled=nothing;
+  document.getElementById('orderBulkPo').disabled=nothing;
   document.getElementById('exportXeroBtn').disabled=nothing;
   // delete stays out of sight until there is something to delete
   showDelete('orderBulkDelete',!nothing);
@@ -3898,6 +3900,67 @@ document.getElementById('orderSelectAll').addEventListener('click',()=>{
   renderShipmentList();
 });
 document.getElementById('orderBulkExport').addEventListener('click',()=>exportShipmentWorkbook());
+
+// ---------- Export PO across several orders ----------
+// The PO rows are built by the same code the order detail screen uses, and
+// that code reads whichever order is open: the shipment row for its fees and
+// mode, the loaded item/box/allocation arrays for the lines, and the rate
+// straight off the input on screen. So each order is made current in turn,
+// its rows built, and everything put back — rather than a second costing
+// implementation that would drift from the first.
+async function poRowsForOrder(id){
+  const keep={id:currentShipmentId,items:itemRows,boxes:boxRows,allocs:allocRows};
+  const rateEl=document.getElementById('detailRmbRate');
+  const keepRate=rateEl.value;
+  try{
+    currentShipmentId=id;
+    const s=shipmentRows.find(r=>r.id===id);
+    rateEl.value=s?(Number(s.rmb_rate)||0):0;
+    // the raw reads rather than loadOrderData, which also resets the detail
+    // screen's dirty tracking and would throw away unsaved edits
+    const [it,bx,al]=await Promise.all([
+      sb.from('shipment_items').select('*').eq('shipment_id',id).order('sort_order'),
+      sb.from('shipment_boxes').select('*').eq('shipment_id',id).order('created_at'),
+      sb.from('shipment_box_items').select('*').eq('shipment_id',id)
+    ]);
+    itemRows=it.data||[]; boxRows=bx.data||[]; allocRows=al.data||[];
+    return buildSkuSheetRows();
+  }finally{
+    currentShipmentId=keep.id; itemRows=keep.items; boxRows=keep.boxes; allocRows=keep.allocs;
+    rateEl.value=keepRate;
+  }
+}
+document.getElementById('orderBulkPo').addEventListener('click',async()=>{
+  const btn=document.getElementById('orderBulkPo');
+  const msg=document.getElementById('shipmentMsg');
+  if(!pickedOrders.size||!sb) return;
+  const label=btn.textContent;
+  btn.disabled=true; btn.textContent='Building…';
+  try{
+    if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
+    // list order rather than tick order, so the sheet reads down the screen
+    const ids=shipmentRows.filter(r=>pickedOrders.has(r.id)).map(r=>r.id);
+    const rows=[];
+    for(const id of ids) rows.push(...await poRowsForOrder(id));
+    if(!rows.length){ showMsg(msg,'Those orders have no item lines to export.',false); return; }
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.aoa_to_sheet([SKU_SHEET_HEADERS,...rows]),'SKU');
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([
+      ['USD','Price'],['CNY','Quantity'],['IDR','Volume'],['PHP','Weight'],['THB'],['SGD']
+    ]),'Sheet1');
+    // one order keeps the <order-id>_PO name; several cannot, so they are
+    // named for the day instead. Column A still says which order each line is.
+    const one=ids.length===1&&shipmentRows.find(r=>r.id===ids[0]);
+    const d=new Date(), p=n=>String(n).padStart(2,'0');
+    XLSX.writeFile(wb,one
+      ? safeName(one.order_id||'order')+'_PO.xlsx'
+      : `PO_${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}.xlsx`);
+    showMsg(msg,`✓ ${rows.length} line(s) from ${ids.length} order(s).`,true);
+  }catch(err){
+    showMsg(msg,'Export failed: '+((err&&err.message)||'unknown error'),false);
+  }finally{ btn.disabled=false; btn.textContent=label; }
+});
 document.getElementById('orderBulkDelete').addEventListener('click',async()=>{
   if(!pickedOrders.size||!sb) return;
   if(!confirm('Are you sure?\n\nDelete '+pickedOrders.size+' order(s)? You can restore them from Recently deleted for 24 hours.')) return;
