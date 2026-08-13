@@ -175,8 +175,12 @@ create trigger requests_clear_remind_trg
 --         token, before your function is reached. pg_net could not be made to
 --         send one the platform would accept — every scheduled run came back
 --         401 "Invalid JWT" without the function ever running. So the job
---         sends no Authorization at all, and x-cron-secret is the whole of
---         the check.
+--         sends no Authorization at all, and the password in the body below
+--         is the whole of the check.
+--
+--         The password travels in the body rather than a header for the same
+--         reason: pg_net delivers the body reliably and, in this project at
+--         least, would not deliver a custom header at all.
 --
 --         This is not a hole. The sweep still needs x-cron-secret to match
 --         CRON_SECRET, and every other call still has its user token
@@ -212,10 +216,9 @@ create trigger requests_clear_remind_trg
 --   $cron$
 --   select net.http_post(
 --     url     := 'https://kdwggyzyzrhiniasilqs.supabase.co/functions/v1/notify-request',
---     headers := jsonb_build_object(
---                  'Content-Type',   'application/json',
---                  'x-cron-secret',  'PASTE_YOUR_CRON_SECRET_HERE'),
---     body    := jsonb_build_object('due', true)
+--     headers := jsonb_build_object('Content-Type', 'application/json'),
+--     body    := jsonb_build_object('due', true,
+--                                   'secret', 'PASTE_YOUR_CRON_SECRET_HERE')
 --   );
 --   $cron$
 -- );

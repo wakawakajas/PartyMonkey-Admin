@@ -202,13 +202,14 @@ Deno.serve(async (req) => {
     // Only the service role may ask for this: it reads and writes rows on
     // everybody's behalf, which no signed-in user should be able to trigger.
     if (body.due) {
-      // The password arrives in its own header, never in Authorization.
-      // With "Verify JWT" on, the platform rejects anything in Authorization
-      // that is not a real token before this code runs — and pg_net could not
-      // be made to deliver one it would accept, whatever was put there. So
-      // the function is deployed with that check off and the scheduled job
-      // sends no Authorization at all; this header is the whole of it.
-      const presented = (req.headers.get("x-cron-secret") ?? "").trim() ||
+      // The password rides in the BODY, because that is the one part pg_net
+      // has been reliably delivering — reaching this branch at all proves
+      // {"due":true} arrived intact, while two separate attempts to send a
+      // header through pg_net never showed up. A header is still accepted for
+      // anyone calling this by hand, and so is Authorization for a setup
+      // predating all this.
+      const presented = String(body.secret ?? "").trim() ||
+                        (req.headers.get("x-cron-secret") ?? "").trim() ||
                         authHeader.replace(/^Bearer\s+/i, "").trim();
       // CRON_SECRET is a password you make up and set once in the function's
       // secrets. Prefer it: the scheduled job lives in a SQL statement that
@@ -220,9 +221,16 @@ Deno.serve(async (req) => {
       const ok = (cronSecret && presented === cronSecret) ||
                  (serviceKey && presented === serviceKey);
       if (!ok) {
+        // Says enough to tell "nothing arrived" from "arrived but different",
+        // which are opposite problems, without printing either secret. Lengths
+        // only: a mismatched pair usually differs in length, and when it does
+        // not you at least know the value is getting through.
         return json({
-          error: "the due sweep needs the x-cron-secret header" +
-                 (cronSecret ? " to match CRON_SECRET" : " — but CRON_SECRET is not set on this function"),
+          error: "the due sweep password did not match",
+          sent_secret_in_body: body.secret ? `yes, ${String(body.secret).trim().length} chars` : "no",
+          sent_secret_in_header: req.headers.get("x-cron-secret") ? "yes" : "no",
+          expected: cronSecret ? `CRON_SECRET is set, ${cronSecret.length} chars`
+                               : "CRON_SECRET is NOT set on this function",
         }, 403);
       }
       const admin = adminClient();
