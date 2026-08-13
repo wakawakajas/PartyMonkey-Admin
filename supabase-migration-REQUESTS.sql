@@ -167,23 +167,36 @@ create trigger requests_clear_remind_trg
 --         rather use that. It is under Project Settings -> API Keys ->
 --         "Legacy API keys". CRON_SECRET is the better answer.)
 --
--- STEP 4. Copy the block below into the SQL Editor — everything between the
+-- STEP 4. Turn OFF "Verify JWT" on the function:
+--         Dashboard -> Edge Functions -> notify-request -> Settings
+--         (CLI: supabase functions deploy notify-request --no-verify-jwt)
+--
+--         That check only asks whether the Authorization header holds a real
+--         token, before your function is reached. pg_net could not be made to
+--         send one the platform would accept — every scheduled run came back
+--         401 "Invalid JWT" without the function ever running. So the job
+--         sends no Authorization at all, and x-cron-secret is the whole of
+--         the check.
+--
+--         This is not a hole. The sweep still needs x-cron-secret to match
+--         CRON_SECRET, and every other call still has its user token
+--         validated inside the function before anything happens.
+--
+-- STEP 5. Copy the block below into the SQL Editor — everything between the
 --         two ==== lines, with the leading "--" removed from each line.
 --         Replace PASTE_YOUR_CRON_SECRET_HERE with what you chose in STEP 3,
 --         keeping the single quotes around it. Then Run.
 --
---         The project address and the long "eyJ..." key are already filled in.
---         Neither is secret: that is the same public anon key the app ships
---         with. It is there only because the platform gateway rejects a call
---         whose Authorization header is not a real token — it does that
---         before the function runs, so a password in that header never
---         arrives. The password goes in x-cron-secret instead, and that is
---         the thing that actually grants access.
+-- STEP 6. Check it is running. Note that cron.job_run_details only says the
+--         request was handed off — pg_net is asynchronous, and "succeeded"
+--         there is true even when the call itself came back 401. The reply is
+--         in a different table, and this is the one that tells you anything:
 --
--- STEP 5. Check it is running:
---         select * from cron.job_run_details order by start_time desc limit 5;
---         A row a minute, with status "succeeded". Nothing appears until the
---         next whole minute ticks over.
+--           select status_code, content, created
+--             from net._http_response order by created desc limit 5;
+--
+--         200 with {"due":0} means it ran and nothing was owed. 200 with
+--         {"due":1,"sent":1} is a reminder actually delivered.
 --
 -- To switch it off again:
 --         select cron.unschedule('pigu-request-reminders');
@@ -201,7 +214,6 @@ create trigger requests_clear_remind_trg
 --     url     := 'https://kdwggyzyzrhiniasilqs.supabase.co/functions/v1/notify-request',
 --     headers := jsonb_build_object(
 --                  'Content-Type',   'application/json',
---                  'Authorization',  'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtkd2dneXp5enJoaW5pYXNpbHFzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwNTE3ODEsImV4cCI6MjEwMTYyNzc4MX0.WOJjkSZ0yf0zAe_I9jFJbuH2mNPtzZj_kexq0EX_7f8',
 --                  'x-cron-secret',  'PASTE_YOUR_CRON_SECRET_HERE'),
 --     body    := jsonb_build_object('due', true)
 --   );

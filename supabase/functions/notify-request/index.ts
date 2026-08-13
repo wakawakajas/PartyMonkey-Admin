@@ -192,19 +192,22 @@ Deno.serve(async (req) => {
 
   try {
     const authHeader = req.headers.get("Authorization") ?? "";
-    if (!authHeader) return json({ error: "not signed in" }, 401);
     const body = await req.json().catch(() => ({}));
 
+    // The sweep is checked before the signed-in requirement further down,
+    // because it has no user and carries no Authorization header at all — its
+    // password travels in x-cron-secret. Demanding one here turned every
+    // scheduled run into a 401 that never reached the check that mattered.
     // ---- the cron sweep ----------------------------------------------
     // Only the service role may ask for this: it reads and writes rows on
     // everybody's behalf, which no signed-in user should be able to trigger.
     if (body.due) {
-      // The password arrives in its own header, not in Authorization. The
-      // platform gateway checks Authorization is a real JWT before this code
-      // ever runs, so a made-up password there is rejected upstream with
-      // "Invalid JWT" and never reaches us. Authorization therefore carries
-      // the public anon key purely to get through the door, and this header
-      // is what actually decides.
+      // The password arrives in its own header, never in Authorization.
+      // With "Verify JWT" on, the platform rejects anything in Authorization
+      // that is not a real token before this code runs — and pg_net could not
+      // be made to deliver one it would accept, whatever was put there. So
+      // the function is deployed with that check off and the scheduled job
+      // sends no Authorization at all; this header is the whole of it.
       const presented = (req.headers.get("x-cron-secret") ?? "").trim() ||
                         authHeader.replace(/^Bearer\s+/i, "").trim();
       // CRON_SECRET is a password you make up and set once in the function's
@@ -248,6 +251,9 @@ Deno.serve(async (req) => {
     }
 
     // ---- a push the app asked for ------------------------------------
+    // everything past here is on behalf of a signed-in person, so from here on
+    // a token is required
+    if (!authHeader) return json({ error: "not signed in" }, 401);
     const kind = body.kind as Kind;
     if (!KIND[kind]) return json({ error: "unknown kind" }, 400);
     if (!body.request_id) return json({ error: "no request_id" }, 400);
