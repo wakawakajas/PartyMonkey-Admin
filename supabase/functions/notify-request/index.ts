@@ -27,7 +27,11 @@ import * as webpush from "jsr:@negrel/webpush@0.3";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  // x-cron-secret is listed so the sweep can be tried by hand from a browser.
+  // pg_net never preflights, so the schedule itself does not depend on this —
+  // but without it a browser refuses the call before it is sent, which is a
+  // confusing way to lose an afternoon.
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 const json = (body: unknown, status = 200) =>
