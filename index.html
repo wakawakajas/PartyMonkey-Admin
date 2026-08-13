@@ -6364,30 +6364,33 @@ const hasWebAudio=()=>!!(window.AudioContext||window.webkitAudioContext);
     if(audioCtx&&audioCtx.state==='running') chime(kind);
     else if(audioCtx&&audioCtx.resume) audioCtx.resume().then(()=>chime(kind)).catch(()=>{});
   },{capture:true,passive:true}));
-// A request is somebody asking you for something, so it gets a rising phrase
-// of its own — not one of the pick up tones, which mean a list has moved.
-const CHIME={added:[660,880],prepared:[784],collected:[880,1175],
-  request:[880,660,1047]};
+// One tone, everywhere. Four different phrases meant four things to learn, and
+// nobody learned them — so the pitch is now the same wherever a sound comes
+// from, and the only thing that varies is how many times it goes. Counting is
+// something you can do through a pocket without having to recognise anything.
+const TONE=880;                            // A5
+const BEEPS={one:1,added:2,prepared:2,collected:2,request:2};
 // ---- the reminder alarm ----
-// A single chime is a notification. A reminder you have already put off twice
-// has to survive a phone face-down on a shelf, so it repeats for ten seconds
-// like an alarm clock — and stops the instant anything is touched, because by
-// then it has done its job and carrying on would only be punishment.
-const ALARM_MS=10000, ALARM_GAP=1150;
-let alarmTimer=null, alarmUntil=0;
+// Two beeps is an announcement. A reminder you have already put off has to
+// survive a phone face-down on a shelf, so it beeps eight times, spread across
+// about ten seconds rather than fired off in a burst — and stops the instant
+// anything is touched, because by then it has done its job and carrying on
+// would only be punishment.
+const ALARM_BEEPS=8, ALARM_GAP=1300;
+let alarmTimer=null, alarmLeft=0;
 function startAlarm(){
   stopAlarm();
-  alarmUntil=Date.now()+ALARM_MS;
+  alarmLeft=ALARM_BEEPS;
   const ring=()=>{
-    if(Date.now()>=alarmUntil){ stopAlarm(); return; }
-    chime('request');
+    if(alarmLeft--<=0){ stopAlarm(); return; }
+    chime('one');                          // one beep per turn, eight turns
     alarmTimer=setTimeout(ring,ALARM_GAP);
   };
   ring();
 }
 function stopAlarm(){
   if(alarmTimer) clearTimeout(alarmTimer);
-  alarmTimer=null; alarmUntil=0;
+  alarmTimer=null; alarmLeft=0;
 }
 // any touch anywhere silences it — answering the sheet, or just picking the
 // phone up and looking at it
@@ -6421,10 +6424,11 @@ function toneWav(freqs){
   return URL.createObjectURL(new Blob([buf],{type:'audio/wav'}));
 }
 const SOUND={};
+// one clip per beep count, all on the same pitch
 function buildSounds(){
-  if(SOUND.added) return;
-  Object.keys(CHIME).forEach(k=>{
-    const a=new Audio(toneWav(CHIME[k]));
+  if(SOUND.one) return;
+  Object.keys(BEEPS).forEach(k=>{
+    const a=new Audio(toneWav(new Array(BEEPS[k]).fill(TONE)));
     a.preload='auto'; a.volume=1;
     SOUND[k]=a;
   });
@@ -6448,7 +6452,7 @@ function chime(kind){
   // Web Audio first: it is not media playback, so the phone does not throw up
   // a Now Playing card for a half-second chime the way an <audio> element does
   if(audioCtx&&audioCtx.state==='running'){ lastSoundPath='webaudio'; beep(kind); return; }
-  const a=SOUND[kind]||SOUND.prepared;
+  const a=SOUND[kind]||SOUND.one;
   if(a){
     try{
       a.currentTime=0;
@@ -6480,16 +6484,17 @@ function quietMediaSession(){
 function beep(kind){
   if(!audioCtx) return;
   if(audioCtx.state==='suspended') audioCtx.resume();
-  (CHIME[kind]||CHIME.prepared).forEach((hz,i)=>{
-    const t=audioCtx.currentTime+0.02+i*0.13;
+  const n=BEEPS[kind]||1;
+  for(let i=0;i<n;i++){
+    const t=audioCtx.currentTime+0.02+i*0.3;   // far enough apart to be counted
     const osc=audioCtx.createOscillator(), gain=audioCtx.createGain();
-    osc.type='sine'; osc.frequency.value=hz;
+    osc.type='sine'; osc.frequency.value=TONE;
     gain.gain.setValueAtTime(0.0001,t);
     gain.gain.exponentialRampToValueAtTime(0.5,t+0.015);
     gain.gain.exponentialRampToValueAtTime(0.0001,t+0.22);
     osc.connect(gain).connect(audioCtx.destination);
     osc.start(t); osc.stop(t+0.24);
-  });
+  }
 }
 const PICKUP_WORD={added:'added',prepared:'prepared',collected:'collected'};
 // `local` means this device caused it, so it is also the one that tells the
@@ -7352,8 +7357,10 @@ function nextRequestAlert(){
   // left to decide instead, and never asks to be acknowledged twice.
   showAckStage(r.status==='acknowledged');
   sheet.classList.add('open');
-  // a first sight chimes once; a reminder you have already deferred rings
-  startAlarm();
+  // Two beeps for something you are seeing for the first time, eight for a
+  // reminder you already asked to be left alone about — having been snoozed is
+  // exactly what makes it the second kind.
+  if(r.snoozes) startAlarm(); else chime('request');
 }
 // A handshake for a deal struck. Purely a reward — nothing waits on it, so the
 // write underneath has already happened by the time it plays.
