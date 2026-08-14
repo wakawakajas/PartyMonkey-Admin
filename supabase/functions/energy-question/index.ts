@@ -19,7 +19,7 @@
 //
 // Secrets it needs (Edge Functions -> Secrets):
 //   GEMINI_API_KEY   required
-//   GEMINI_MODEL     optional, defaults to gemini-2.5-flash
+//   GEMINI_MODEL     optional, defaults to gemini-3.6-flash
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const CORS = {
@@ -33,7 +33,12 @@ const json = (body: unknown, status = 200) =>
     headers: { ...CORS, "Content-Type": "application/json" },
   });
 
-const MODEL = Deno.env.get("GEMINI_MODEL") || "gemini-2.5-flash";
+// Read per call, not once at boot: changing the GEMINI_MODEL secret should
+// take effect on the next question rather than whenever a worker happens to be
+// recycled. Models are retired on a schedule — 2.5 Flash closed to new keys
+// well before its shutdown — so this will need changing again, and changing it
+// should not mean a redeploy.
+const model = () => Deno.env.get("GEMINI_MODEL") || "gemini-3.6-flash";
 
 // The four slots always run most capacity first, least last. That ordering is
 // load-bearing — it is what lets a Monday and a Friday be compared when the
@@ -111,11 +116,34 @@ function clean(raw: unknown): { question: string; modes: Mode[] } | null {
   return { question, modes };
 }
 
+// Names only, never values. "Not set" on its own cannot tell a missing secret
+// from a misspelled one, and those want opposite fixes — so say what the
+// function can actually see. Anything Supabase injects itself is filtered out;
+// what is left is what somebody typed, which is where the mistake will be.
+function secretNames() {
+  try {
+    return Object.keys(Deno.env.toObject())
+      .filter((k) => !/^(SUPABASE_|SB_|DENO_|_)/.test(k))
+      .sort();
+  } catch { return []; }
+}
+
 async function writeQuestion(theme: string, day: string) {
   const key = Deno.env.get("GEMINI_API_KEY");
-  if (!key) throw new Error("GEMINI_API_KEY is not set on this function");
+  if (!key) {
+    const seen = secretNames();
+    throw new Error(
+      "GEMINI_API_KEY is not set on this function. " +
+        (seen.length
+          ? `Secrets it can see: ${seen.join(", ")}. ` +
+            "If yours is in that list, the name differs — check for a stray space or lowercase."
+          : "It can see no secrets at all, so either none were saved on this project " +
+            "or the function is running an older deploy — deploy it again."),
+    );
+  }
+  const name = model();
   const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+    `https://generativelanguage.googleapis.com/v1beta/models/${name}:generateContent`;
   // The day goes in the prompt purely so two consecutive days do not come back
   // identical when the theme has not changed.
   const asked = theme.trim()
@@ -136,7 +164,14 @@ async function writeQuestion(theme: string, day: string) {
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
-    throw new Error(`Gemini said ${res.status}: ${detail.slice(0, 300)}`);
+    // A retired or misspelled model is the one failure worth naming outright,
+    // because the fix is a secret rather than a code change and the reply does
+    // not say which models this key may actually use.
+    const hint = res.status === 404
+      ? ` — "${name}" is not available to this key. Set the GEMINI_MODEL secret to one that is;` +
+        ` the list is at https://generativelanguage.googleapis.com/v1beta/models`
+      : "";
+    throw new Error(`Gemini said ${res.status}${hint}: ${detail.slice(0, 240)}`);
   }
   const body = await res.json();
   const text = body?.candidates?.[0]?.content?.parts?.[0]?.text;

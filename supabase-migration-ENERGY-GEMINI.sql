@@ -82,7 +82,7 @@ create policy "energy_generated_read" on public.energy_generated
 --   supabase functions deploy energy-question
 --   supabase secrets set GEMINI_API_KEY=...
 --
--- Optionally also GEMINI_MODEL, which defaults to gemini-2.5-flash. It is a
+-- Optionally also GEMINI_MODEL, which defaults to gemini-3.6-flash. It is a
 -- secret rather than a constant so the model can be changed without a redeploy
 -- when a better or cheaper one turns up.
 
