@@ -4165,16 +4165,35 @@ function boxQty(boxId){ return allocRows.filter(a=>a.box_id===boxId).reduce((s,a
 function totalQtyAll(){ return itemRows.reduce((s,i)=>s+(Number(i.qty)||0),0); }
 function arrivedQtyAll(){ return itemRows.reduce((s,i)=>s+arrivedQtyOf(i),0); }
 
+// ---- what the fees are actually shared out over ----
+// Freight and the China fee are shared by PURCHASED UNIT, not by piece.
+// Breaking a line down does not make it take up more of the lorry, so it must
+// not take a larger share of the bill — yet counted in pieces it would: one
+// carton broken into 24 outvotes an unbroken carton beside it 24 to 1, and
+// quietly moves money off every other line in the box.
+//
+// A line's share therefore stays exactly what it was, and the per-piece
+// figure falls out of dividing that unchanged share by the new piece count.
+// The counts above are left alone — they are what the screens display.
+const perOfItemId=id=>{ const i=itemRows.find(x=>x.id===id); return i?perUnitOf(i):1; };
+const itemUnits=i=>(Number(i.qty)||0)/perUnitOf(i);
+const allocUnits=a=>(Number(a.qty)||0)/perOfItemId(a.item_id);
+const arrivedUnitsOf=i=>allocsForItem(i.id).reduce((s,a)=>s+allocUnits(a),0);
+function boxUnits(boxId){ return allocRows.filter(a=>a.box_id===boxId).reduce((s,a)=>s+allocUnits(a),0); }
+function totalUnitsAll(){ return itemRows.reduce((s,i)=>s+itemUnits(i),0); }
+function arrivedUnitsAll(){ return itemRows.reduce((s,i)=>s+arrivedUnitsOf(i),0); }
+
 // China-side domestic delivery: one flat fee for the order. Basis decides
 // whether it spreads over every ordered piece or only the arrived ones —
 // in 'arrived' mode pending lines carry none of it, so the shares still
 // add back to exactly the fee either way.
 function chinaFeeRmb(){ const s=currentShipment(); return s?(Number(s.china_fee_rmb)||0):0; }
 function chinaBasis(){ const s=currentShipment(); return (s&&s.china_basis==='arrived')?'arrived':'ordered'; }
-function chinaBasisQty(){ return chinaBasis()==='arrived'?arrivedQtyAll():totalQtyAll(); }
+// in purchased units, for the same reason freight is — see the note above
+function chinaBasisQty(){ return chinaBasis()==='arrived'?arrivedUnitsAll():totalUnitsAll(); }
 function chinaPerUnitRmb(){ const q=chinaBasisQty(); return q>0?chinaFeeRmb()/q:0; }
 // in 'arrived' mode only the pieces that actually landed carry the fee
-function chinaQtyFor(item){ return chinaBasis()==='arrived'?arrivedQtyOf(item):(Number(item.qty)||0); }
+function chinaQtyFor(item){ return chinaBasis()==='arrived'?arrivedUnitsOf(item):itemUnits(item); }
 function itemChinaRmb(item){ return chinaPerUnitRmb()*chinaQtyFor(item); }
 
 // World First service fee and GST are both charged on goods + China fee,
@@ -4185,21 +4204,24 @@ function itemTaxableRmb(i){ return (Number(i.unit_price_rmb)||0)*(Number(i.qty)|
 function itemServiceRmb(i){ return itemTaxableRmb(i)*servicePct()/100; }
 function itemGstRmb(i){ return itemTaxableRmb(i)*gstPct()/100; }
 
-// Freight: either each box's cost stays with the pieces inside it, or every
-// box's cost is pooled and averaged over all ordered pieces.
+// Freight: either each box's cost stays with what is inside it, or every
+// box's cost is pooled and averaged over the whole order. Either way the
+// sharing is by purchased unit, so breaking a line down leaves its share
+// alone and only changes what that share works out to per piece.
 function freightMode(){ const s=currentShipment(); return (s&&s.freight_mode==='shared')?'shared':'box'; }
 function totalFreightRmb(){ return boxRows.reduce((s,b)=>s+boxShipRmb(b),0); }
-function sharedFreightPerUnitRmb(){ const q=totalQtyAll(); return q>0?totalFreightRmb()/q:0; }
+function sharedFreightPerUnitRmb(){ const q=totalUnitsAll(); return q>0?totalFreightRmb()/q:0; }
 // in 'box' mode a line's freight is the sum over its arrivals, each priced at
 // its own box's rate — so a split delivery is costed per box, not averaged
 function itemFreightRmb(item){
-  if(freightMode()==='shared') return sharedFreightPerUnitRmb()*(Number(item.qty)||0);
-  return allocsForItem(item.id).reduce((s,a)=>s+shipPerUnitRmb(a.box_id)*(Number(a.qty)||0),0);
+  if(freightMode()==='shared') return sharedFreightPerUnitRmb()*itemUnits(item);
+  return allocsForItem(item.id).reduce((s,a)=>s+shipPerUnitRmb(a.box_id)*allocUnits(a),0);
 }
 // the box's whole shipping charge spread evenly over every piece inside it
+// per purchased unit in that box, not per piece — see the note above
 function shipPerUnitRmb(boxId){
   const b=boxRows.find(x=>x.id===boxId); if(!b) return 0;
-  const q=boxQty(boxId);
+  const q=boxUnits(boxId);
   return q>0 ? boxShipRmb(b)/q : 0;
 }
 
@@ -5058,16 +5080,21 @@ function renderBoxCalc(){
   const cbm=cbmOf(b), vw=volWeightOf(b), shipRmb=boxShipRmb(b);
   const r=rmbRate();
   const q=boxQty(b.id);
-  const perUnitRmb=q>0?shipRmb/q:0;
+  // per purchased unit, which is per piece until something is broken down —
+  // the word only changes when the two stop meaning the same thing
+  const perUnitRmb=shipPerUnitRmb(b.id);
   const shared=freightMode()==='shared';
   const sharedPU=sharedFreightPerUnitRmb();
+  const split=itemRows.some(i=>perUnitOf(i)>1);
+  const word=split?'unit':'piece';
+  const pooledOver=split?totalUnitsAll():totalQtyAll();
   document.getElementById('boxCalc').innerHTML=
     `CBM <strong>${cbm.toFixed(4)} m³</strong> &nbsp;·&nbsp; volumetric weight ${vw.toFixed(2)} kg <span style="opacity:.7">(÷${VOLUMETRIC_DIVISOR}, reference only)</span><br/>`+
     `Box shipping <strong>¥${shipRmb.toFixed(2)}</strong>${r?` = <strong>S$${(shipRmb/r).toFixed(2)}</strong>`:''}<br/>`+
     (shared
       ? `${q} piece(s) ticked below &nbsp;·&nbsp; <span style="opacity:.7">freight is pooled across all boxes</span><br/>`+
-        `Pooled ¥${totalFreightRmb().toFixed(2)} over ${totalQtyAll()} ordered pc(s) &nbsp;·&nbsp; per piece <strong>¥${sharedPU.toFixed(2)}</strong>${r?` = <strong>S$${(sharedPU/r).toFixed(2)}</strong>`:''}`
-      : `${q} piece(s) ticked below &nbsp;·&nbsp; per piece <strong>¥${perUnitRmb.toFixed(2)}</strong>${r?` = <strong>S$${(perUnitRmb/r).toFixed(2)}</strong>`:''}`);
+        `Pooled ¥${totalFreightRmb().toFixed(2)} over ${(+pooledOver.toFixed(2))} ordered ${word}(s) &nbsp;·&nbsp; per ${word} <strong>¥${sharedPU.toFixed(2)}</strong>${r?` = <strong>S$${(sharedPU/r).toFixed(2)}</strong>`:''}`
+      : `${q} piece(s) ticked below &nbsp;·&nbsp; per ${word} <strong>¥${perUnitRmb.toFixed(2)}</strong>${r?` = <strong>S$${(perUnitRmb/r).toFixed(2)}</strong>`:''}`);
 }
 function renderBoxItems(){
   const el=document.getElementById('boxItemsList');
