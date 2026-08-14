@@ -668,6 +668,13 @@ body{overflow-x:hidden;}
 .ord-shot img{width:100%;height:100%;object-fit:cover;display:block;}
 .ord-desc{margin:0;font-size:14px;line-height:1.35;color:var(--blueprint);
   overflow-wrap:anywhere;}
+/* the freight number is about where the goods are, not what they are, so it
+   sits under the name rather than trailing off the end of it */
+.ord-freight{margin:2px 0 0;}
+/* the status sits under the × rather than in the row with it, where it was
+   squeezing the order ID on a narrow phone */
+.ord-status{display:flex;justify-content:flex-end;margin:-4px 0 4px;}
+.ord-date{margin:4px 0 0;text-align:right;}
 /* ---- multiple qty, sitting under the line it belongs to ---- */
 .mq{margin-top:9px;padding-left:11px;border-left:2px solid var(--blueprint);border-radius:0;}
 .mq-top{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;}
@@ -3875,10 +3882,36 @@ toTop.addEventListener('click',()=>{
   window.scrollTo({top:0,behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?'auto':'smooth'});
 });
 document.getElementById('homeBarBtn').addEventListener('click',()=>showScreen('home'));
-document.getElementById('navBackBtn').addEventListener('click',()=>{
+function goBack(){
   const prev=navStack.pop();
   showScreen(prev||'home',true);
-});
+}
+document.getElementById('navBackBtn').addEventListener('click',goBack);
+// ---- swipe in from the left edge to go back ----
+// Bound to the document rather than to any screen, so every screen has it and
+// so does every screen added later. It starts within a thumb's width of the
+// edge, which is the one place a horizontal drag cannot be anything else —
+// no list, slider or photo strip begins there.
+(function swipeBack(){
+  const EDGE=28, TRAVEL=64, SLOPE=1.4;
+  let x0=null,y0=null,live=false;
+  document.addEventListener('touchstart',e=>{
+    if(e.touches.length!==1){ x0=null; return; }
+    const t=e.touches[0];
+    x0=t.clientX<=EDGE?t.clientX:null; y0=t.clientY; live=false;
+  },{passive:true});
+  document.addEventListener('touchmove',e=>{
+    if(x0==null||live) return;
+    const t=e.touches[0], dx=t.clientX-x0, dy=Math.abs(t.clientY-y0);
+    // must be going sideways rather than down, or scrolling a page that
+    // happens to start near the edge would count as going back
+    if(dx>TRAVEL&&dx>dy*SLOPE){
+      live=true; x0=null;
+      if(navStack.length) goBack();
+    }
+  },{passive:true});
+  document.addEventListener('touchend',()=>{ x0=null; },{passive:true});
+})();
 // re-runs whatever the current screen loads, so it pulls fresh rows without
 // a full reload — which on the installed app means losing your place
 document.getElementById('navRefreshBtn').addEventListener('click',e=>{
@@ -4008,21 +4041,21 @@ function renderShipmentList(){
       <div class="ph-card-head">
         <input type="checkbox" class="pick" data-ship-pick ${pickedOrders.has(r.id)?'checked':''}
           title="Select" style="${selectMode?'':'visibility:hidden;width:0;margin:0;'}"/>
-        <span style="flex:1;" class="ord-id">${oidCopy(r.order_id)}${r.created_at?` <span class="hint" style="font-weight:400;">· ${shortDate(r.created_at)}</span>`:''}</span>
-        ${arrivalTag(shipMeta.status[r.id])}
-        ${selectMode?`<button class="icon-btn" data-ship-up ${i===0?'disabled':''} title="Move up">▲</button>
-        <button class="icon-btn" data-ship-down ${i===shipmentRows.length-1?'disabled':''} title="Move down">▼</button>`:''}
+        <span style="flex:1;" class="ord-id">${oidCopy(r.order_id)}</span>
         <button class="del-btn" data-ship-del title="Delete">×</button>
       </div>
+      <div class="ord-status">${arrivalTag(shipMeta.status[r.id])}</div>
       <div class="ord-main">
         ${ph?`<span class="ord-shot"><img alt="" data-ord-thumb="${escapeHtml(ph.path||'')}"
               ${!ph.path&&ph.url?`src="${escapeHtml(ph.url)}" referrerpolicy="no-referrer"`:''}/></span>`:''}
         <div style="flex:1;min-width:0;">
-          <p class="ord-desc">${desc}${consol?` <span class="hint" style="margin:0;">· freight ${escapeHtml(consol.freight_number)}</span>`:''}</p>
+          <p class="ord-desc">${desc}</p>
+          ${consol?`<p class="hint ord-freight">freight ${escapeHtml(consol.freight_number)}</p>`:''}
           ${cbmLine(shipMeta.cbm[r.id],r)}
         </div>
       </div>
       ${progressBar(shipMeta.status[r.id])}
+      ${r.created_at?`<p class="hint ord-date">${shortDate(r.created_at)}</p>`:''}
     </div>`;
   }).join('');
   hydrateOrderThumbs();
@@ -4233,49 +4266,65 @@ async function persistOrder(table,rows){
   const {data:{session}}=await sb.auth.getSession(); if(!session) return;
   await Promise.all(rows.map((r,i)=>sb.from(table).update({sort_order:i}).eq('id',r.id)));
 }
-function moveInArray(arr,idx,dir){
-  const j=idx+dir;
-  if(idx<0||j<0||j>=arr.length) return false;
-  [arr[idx],arr[j]]=[arr[j],arr[idx]];
-  return true;
-}
 // ---------- dragging an order up or down, while selecting ----------
 // Only in select mode: the rest of the time a card is a link into the order,
 // and a list you can accidentally reorder by brushing it is worse than one
 // with arrows. On touch it takes a short hold to engage, so an ordinary swipe
 // still scrolls the list; a mouse starts on the first movement, having no
 // such conflict.
-(function dragToReorder(){
-  const list=document.getElementById('shipmentList');
+// ---------- dragging a row into place, while selecting ----------
+// Only in select mode: the rest of the time a card is the way into the thing
+// it names, and a list that reorders itself when brushed is worse than one
+// with arrows. On touch it takes a short hold to engage, so an ordinary swipe
+// still scrolls a long list; a mouse starts on the first movement, having no
+// such conflict.
+function makeReorderable(listId,opts){
+  const list=document.getElementById(listId);
+  if(!list) return;
   const HOLD_MS=220, SLOP=8;
-  let card=null, startY=0, armed=false, moved=false, holdTimer=null, autoTimer=null, didDrag=false;
-
+  let card=null,startY=0,armed=false,moved=false,holdTimer=null,autoTimer=null,didDrag=false,lastY=null;
   const cards=()=>[...list.querySelectorAll('.ph-card')];
   function cleanup(){
     clearTimeout(holdTimer); clearInterval(autoTimer); autoTimer=null;
     if(card){ card.classList.remove('dragging'); card.style.transform=''; }
     list.classList.remove('dragging-list');
-    card=null; armed=false; moved=false;
+    card=null; armed=false; moved=false; lastY=null;
   }
   function engage(){
     armed=true; didDrag=true;
     card.classList.add('dragging');
     list.classList.add('dragging-list');
-    // the page must stop scrolling under the finger once the drag is real
     autoTimer=setInterval(()=>{
       if(!armed||lastY==null) return;
       if(lastY<90) window.scrollBy(0,-14);
       else if(lastY>window.innerHeight-120) window.scrollBy(0,14);
     },16);
   }
-  let lastY=null;
+  // The rows the dragged card displaces slide to their new places rather than
+  // jumping: their positions are measured before the move and again after,
+  // and each is put back where it was and released.
+  function slideOthers(move){
+    const others=cards().filter(c=>c!==card);
+    const was=new Map(others.map(c=>[c,c.getBoundingClientRect().top]));
+    move();
+    others.forEach(c=>{
+      const dy=was.get(c)-c.getBoundingClientRect().top;
+      if(!dy) return;
+      c.style.transition='none';
+      c.style.transform='translateY('+dy+'px)';
+      // eslint-disable-next-line no-unused-expressions
+      c.offsetHeight;                     // let that position take effect first
+      c.style.transition='transform .18s ease';
+      c.style.transform='';
+      setTimeout(()=>{ c.style.transition=''; },200);
+    });
+  }
   list.addEventListener('pointerdown',e=>{
-    if(!selectMode) return;
+    if(!opts.selecting()) return;
     if(e.target.closest('button,input,a,[data-copy]')) return;
     const c=e.target.closest('.ph-card'); if(!c) return;
     card=c; startY=e.clientY; lastY=e.clientY; moved=false; armed=false; didDrag=false;
-    if(e.pointerType==='mouse'){ /* engages on the first real movement */ }
-    else holdTimer=setTimeout(()=>{ if(card&&!moved) engage(); },HOLD_MS);
+    if(e.pointerType!=='mouse') holdTimer=setTimeout(()=>{ if(card&&!moved) engage(); },HOLD_MS);
   });
   list.addEventListener('pointermove',e=>{
     if(!card) return;
@@ -4283,24 +4332,24 @@ function moveInArray(arr,idx,dir){
     const dy=e.clientY-startY;
     if(!armed){
       if(Math.abs(dy)>SLOP){
-        // a mouse drag is unambiguous; a finger that moved this soon was scrolling
         if(e.pointerType==='mouse') engage(); else { moved=true; cleanup(); }
       }
       return;
     }
     e.preventDefault();
     card.style.transform='translateY('+dy+'px)';
-    // swap with whichever neighbour's midpoint the card has passed
     const mid=card.getBoundingClientRect().top+card.offsetHeight/2;
     for(const other of cards()){
       if(other===card) continue;
       const r=other.getBoundingClientRect();
       const om=r.top+r.height/2;
-      if(mid<om&&other.compareDocumentPosition(card)&Node.DOCUMENT_POSITION_FOLLOWING){
-        list.insertBefore(card,other); startY=e.clientY; card.style.transform=''; break;
+      if(mid<om&&(other.compareDocumentPosition(card)&Node.DOCUMENT_POSITION_FOLLOWING)){
+        slideOthers(()=>list.insertBefore(card,other));
+        startY=e.clientY; card.style.transform=''; break;
       }
-      if(mid>om&&other.compareDocumentPosition(card)&Node.DOCUMENT_POSITION_PRECEDING){
-        list.insertBefore(card,other.nextSibling); startY=e.clientY; card.style.transform=''; break;
+      if(mid>om&&(other.compareDocumentPosition(card)&Node.DOCUMENT_POSITION_PRECEDING)){
+        slideOthers(()=>list.insertBefore(card,other.nextSibling));
+        startY=e.clientY; card.style.transform=''; break;
       }
     }
   },{passive:false});
@@ -4308,18 +4357,17 @@ function moveInArray(arr,idx,dir){
     if(!armed){ cleanup(); return; }
     const order=cards().map(c=>c.dataset.id);
     cleanup();
-    // The list only shows what the chips and the search leave visible, so the
-    // new sequence is threaded back through the full list: hidden rows keep
-    // their places and the visible ones land in the order just dragged.
-    const byId={};
-    shipmentRows.forEach(r=>{ byId[r.id]=r; });
+    const rows=opts.rows();
+    const byId={}; rows.forEach(r=>{ byId[r.id]=r; });
     const queue=order.filter(id=>byId[id]);
     const visible=new Set(queue);
-    // rebuilt from a snapshot rather than from the array being replaced, and
-    // any id that does not resolve is dropped rather than leaving a hole
-    shipmentRows=shipmentRows.map(r=>visible.has(r.id)?byId[queue.shift()]:r);
-    renderShipmentList();
-    await persistOrder('shipments',shipmentRows);
+    // The list only shows what the chips and the search have left, so the new
+    // sequence is threaded back through the whole list: hidden rows keep their
+    // places and the visible ones land in the order just dragged. Rebuilt from
+    // a snapshot rather than in place, which left holes where an id had moved.
+    opts.setRows(rows.map(r=>visible.has(r.id)?byId[queue.shift()]:r));
+    opts.render();
+    await persistOrder(opts.table,opts.rows());
   }
   list.addEventListener('pointerup',drop);
   list.addEventListener('pointercancel',cleanup);
@@ -4327,7 +4375,11 @@ function moveInArray(arr,idx,dir){
   list.addEventListener('click',e=>{
     if(didDrag){ didDrag=false; e.stopPropagation(); e.preventDefault(); }
   },true);
-})();
+}
+makeReorderable('shipmentList',{selecting:()=>selectMode,table:'shipments',
+  rows:()=>shipmentRows,setRows:v=>{shipmentRows=v;},render:()=>renderShipmentList()});
+makeReorderable('consolList',{selecting:()=>consolSelectMode,table:'consolidations',
+  rows:()=>consolRows,setRows:v=>{consolRows=v;},render:()=>renderConsolList()});
 document.getElementById('shipmentList').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
   const id=card.dataset.id;
@@ -4342,11 +4394,6 @@ document.getElementById('shipmentList').addEventListener('click',async e=>{
     return;
   }
   const idx=shipmentRows.findIndex(r=>r.id===id);
-  if(e.target.closest('[data-ship-up]')||e.target.closest('[data-ship-down]')){
-    const dir=e.target.closest('[data-ship-up]')?-1:1;
-    if(moveInArray(shipmentRows,idx,dir)){ renderShipmentList(); await persistOrder('shipments',shipmentRows); }
-    return;
-  }
   if(e.target.closest('[data-ship-del]')){
     if(!sb) return;
     const {error}=await sb.from('shipments').update({deleted_at:new Date().toISOString()}).eq('id',id);
@@ -5694,8 +5741,6 @@ function renderConsolList(){
           title="Select" style="${consolSelectMode?'':'visibility:hidden;width:0;margin:0;'}"/>
         <span style="flex:1;">${escapeHtml(c.freight_number)}${c.created_at?` <span class="hint" style="font-weight:400;">· ${shortDate(c.created_at)}</span>`:''}</span>
         ${consolTag(p)}
-        <button class="icon-btn" data-consol-up ${i===0?'disabled':''} title="Move up">▲</button>
-        <button class="icon-btn" data-consol-down ${i===consolRows.length-1?'disabled':''} title="Move down">▼</button>
         <button class="del-btn" data-consol-del title="Delete">×</button>
       </div>
       <p class="hint" style="margin:0;">ETA ${c.eta?escapeHtml(c.eta):'—'} · ${p.total} order(s)</p>
@@ -5734,11 +5779,6 @@ document.getElementById('consolList').addEventListener('click',async e=>{
     return;
   }
   const idx=consolRows.findIndex(c=>c.id===id);
-  if(e.target.closest('[data-consol-up]')||e.target.closest('[data-consol-down]')){
-    const dir=e.target.closest('[data-consol-up]')?-1:1;
-    if(moveInArray(consolRows,idx,dir)){ renderConsolList(); await persistOrder('consolidations',consolRows); await refreshConsolList(); }
-    return;
-  }
   if(e.target.closest('[data-consol-del]')){
     if(!sb) return;
     if((consolProgressById[id]||{}).complete){
