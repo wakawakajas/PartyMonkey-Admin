@@ -240,11 +240,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .calc{font-family:'IBM Plex Sans',sans-serif;font-size:11.5px;color:var(--muted);background:var(--nest);
   border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-top:10px;line-height:1.6;
   font-variant-numeric:tabular-nums;}
-/* Set apart from the Grand total above it, and given a little more weight.
-   The two are near neighbours and deliberately not the same number, so they
-   must not read as one running total where the second is a correction. */
-.order-all-in{margin-top:7px;padding-top:7px;border-top:1px solid var(--border);
-  font-size:12.5px;color:var(--ink);}
+/* The one figure on an order's card that is money rather than measurement, so
+   it is the one set in the reading colour rather than the aside grey. */
+.ord-allin{margin:3px 0 0;}
+.ord-allin strong{color:var(--blueprint);}
 
 /* ---- full-screen login gate ---- */
 .auth-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}
@@ -1855,7 +1854,6 @@ body{overflow-x:hidden;}
             <div class="thumb" id="finalThumbFront"><span class="ico">＋</span></div>
             <div class="info" id="finalInfoFront">No file</div>
             <button class="btn-outline btn-sm" data-pick="final|front">Upload</button>
-            <button class="btn-outline btn-sm" data-paste="final|front" title="Paste a copied picture">📋</button>
           </div>
           <div class="grid2" style="margin-top:8px;">
             <label class="field"><span>WIDTH</span><input type="number" step="0.1" id="artWFront" placeholder="—"/></label>
@@ -1866,7 +1864,6 @@ body{overflow-x:hidden;}
             <div class="thumb" id="finalThumbBack"><span class="ico">＋</span></div>
             <div class="info" id="finalInfoBack">No file</div>
             <button class="btn-outline btn-sm" data-pick="final|back">Upload</button>
-            <button class="btn-outline btn-sm" data-paste="final|back" title="Paste a copied picture">📋</button>
           </div>
           <div class="grid2" style="margin-top:8px;">
             <label class="field"><span>WIDTH</span><input type="number" step="0.1" id="artWBack" placeholder="—"/></label>
@@ -2147,11 +2144,7 @@ body{overflow-x:hidden;}
     <div class="sheet-title">Add a photo</div>
     <button class="btn-primary" id="photoFromCam">📷 Take a photo</button>
     <button class="btn-outline" id="photoFromLib">🖼️ Choose from library</button>
-    <!-- A supplier's picture is nearly always already copied — off a 1688
-         listing, out of a chat, a screenshot just taken. Saving it to the
-         gallery first only to go and find it again is a detour. -->
-    <button class="btn-outline" id="photoFromPaste">📋 Paste copied picture</button>
-    <p class="hint" id="photoSheetMsg" style="margin:0;" hidden></p>
+    <p class="hint" style="margin:0;">…or press Ctrl+V to paste a copied picture.</p>
     <button class="btn-outline" id="photoSheetCancel">Cancel</button>
   </div>
 </div>
@@ -2273,41 +2266,8 @@ function pickFileFor(group,side){
   inp.onchange=()=>{ const f=inp.files[0]; if(f) useArtFile(group,side,f); };
   inp.click();
 }
-// Front and back are two slots, so a pasted picture has to say which it is
-// for. Each side gets its own button rather than the app guessing, and the
-// last side touched is what a plain Ctrl+V lands on.
-let lastArtSide='front';
 document.querySelectorAll('[data-pick]').forEach(b=>{
-  b.addEventListener('click',()=>{const[g,s]=b.dataset.pick.split('|');lastArtSide=s;pickFileFor(g,s);});
-});
-document.querySelectorAll('[data-paste]').forEach(b=>{
-  b.addEventListener('click',async()=>{
-    const [g,s]=b.dataset.paste.split('|');
-    lastArtSide=s;
-    const infoEl=document.getElementById('finalInfo'+(s==='front'?'Front':'Back'));
-    if(!canPasteImage()){ infoEl.textContent='Press Ctrl+V on this page instead.'; return; }
-    infoEl.textContent='Reading the clipboard…';
-    try{
-      const f=await clipboardImageFile();
-      if(f) useArtFile(g,s,f);
-      else infoEl.textContent='Nothing copied that is a picture.';
-    }catch(err){
-      infoEl.textContent='Could not read the clipboard — press Ctrl+V instead.';
-    }
-  });
-});
-// The fallback the message above promises, and the only route on a browser
-// that refuses to hand the clipboard to a button press. Ignored while a photo
-// sheet is up, which does its own pasting, and while typing into a field.
-document.addEventListener('paste',e=>{
-  if(currentScreen!=='tool-custom') return;
-  if(document.querySelector('.sheet-bg.open')) return;
-  const t=e.target;
-  if(t&&t.matches&&t.matches('input,textarea,[contenteditable]')) return;
-  const f=imageFromPasteEvent(e);
-  if(!f) return;
-  e.preventDefault();
-  useArtFile('final',lastArtSide,f);
+  b.addEventListener('click',()=>{const[g,s]=b.dataset.pick.split('|');pickFileFor(g,s);});
 });
 function setSlot(t,i,o){
   document.getElementById(t).innerHTML=o.data?`<img src="${o.data}"/>`:'<span class="ico">＋</span>';
@@ -4562,7 +4522,39 @@ async function refreshShipmentList(){
   if(res.error){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load shipments.</p>'; return; }
   shipmentRows=res.data||[];
   shipMeta=meta;
+  allInByOrder(shipMeta);
   renderShipmentList();
+}
+// What each order comes to, all in. Worked out by the very functions the order
+// screen uses rather than a second costing that would drift from it: each
+// order is made current in turn, its rows put in place, and everything put
+// back afterwards — the same trick the PO export already relies on. Only
+// rmbRate reads the screen rather than the row, so that is swapped too.
+//
+// Once per load, not once per redraw: the list repaints on every keystroke in
+// the search box, and this walks every line of every order.
+function allInByOrder(meta){
+  meta.allIn={};
+  const raw=meta.raw; if(!raw) return;
+  const keep={id:currentShipmentId,items:itemRows,boxes:boxRows,allocs:allocRows};
+  const rateEl=document.getElementById('detailRmbRate');
+  const keepRate=rateEl.value;
+  const group=rows=>{ const m={}; rows.forEach(r=>{ (m[r.shipment_id]=m[r.shipment_id]||[]).push(r); }); return m; };
+  const gi=group(raw.items), gb=group(raw.boxes), ga=group(raw.allocs);
+  try{
+    shipmentRows.forEach(s=>{
+      itemRows=gi[s.id]||[];
+      if(!itemRows.length) return;          // nothing bought yet, nothing to total
+      currentShipmentId=s.id;
+      boxRows=gb[s.id]||[]; allocRows=ga[s.id]||[];
+      rateEl.value=Number(s.rmb_rate)||0;
+      meta.allIn[s.id]=orderAllInRounded();
+    });
+  }catch(e){ /* one bad order must not cost the whole list its figures */ }
+  finally{
+    currentShipmentId=keep.id; itemRows=keep.items; boxRows=keep.boxes; allocRows=keep.allocs;
+    rateEl.value=keepRate;
+  }
 }
 // everything the order list needs to badge and search rows, in one round trip
 let shipMeta={status:{},skusBySh:{},consolById:{},cbm:{}};
@@ -4572,12 +4564,18 @@ async function loadShipmentMeta(){
   const [it,al,co,bx]=await Promise.all([
     // photo_path so the list can show what the order is, sort_order so the
     // one it shows is the first line rather than whichever row arrives first
-    sb.from('shipment_items').select('id,shipment_id,sku,qty,photo_path,photo_url,sort_order')
+    // unit_price_rmb, the box ids and the allocations come back too, because
+    // the list now costs each order as well as counting it — see allInByOrder
+    sb.from('shipment_items')
+      .select('id,shipment_id,sku,qty,unit_price_rmb,qty_per_unit,unit_price_base_rmb,photo_path,photo_url,sort_order')
       .order('sort_order',{ascending:true}).order('created_at',{ascending:true}),
-    sb.from('shipment_box_items').select('item_id,qty'),
+    sb.from('shipment_box_items').select('id,box_id,item_id,shipment_id,qty'),
     sb.from('consolidations').select('id,freight_number,eta').is('deleted_at',null),
-    sb.from('shipment_boxes').select('shipment_id,length_cm,breadth_cm,height_cm,cbm_rate_rmb')
+    sb.from('shipment_boxes').select('id,shipment_id,length_cm,breadth_cm,height_cm,cbm_rate_rmb')
   ]);
+  // kept for the costing pass, which cannot run until the orders themselves
+  // have arrived — they are read in parallel with this
+  out.raw={items:it.data||[],boxes:bx.data||[],allocs:al.data||[]};
   // a box with a dimension still at zero has not been measured yet, so it
   // adds nothing and does not count towards the box tally either
   (bx.data||[]).forEach(b=>{
@@ -4656,6 +4654,7 @@ function renderShipmentList(){
           <p class="ord-desc">${desc}</p>
           ${consol?`<p class="hint ord-freight">freight ${escapeHtml(consol.freight_number)}</p>`:''}
           ${cbmLine(shipMeta.cbm[r.id],r)}
+          ${allInLine((shipMeta.allIn||{})[r.id])}
         </div>
       </div>
       ${progressBar(shipMeta.status[r.id])}
@@ -4692,6 +4691,16 @@ function cbmLine(m,row){
   return `<p class="hint" style="margin:3px 0 0;">`
     +`<strong style="color:var(--ink);">${m.total.toFixed(4)} m³</strong>${fee}`
     +` · ${m.boxes} box${m.boxes>1?'es':''} measured</p>`;
+}
+// What the order costs, all in — every line's price per piece as quoted,
+// times its quantity. It sits under the volume and the freight because those
+// are two of the things inside it, and because the question the list is asked
+// most often is what an order came to.
+function allInLine(t){
+  if(!t||!t.rmb) return '';
+  return `<p class="hint ord-allin">all in `
+    +`<strong>¥${t.rmb.toFixed(2)}</strong>`
+    +(t.sgd!=null?` = <strong>S$${t.sgd.toFixed(2)}</strong>`:'')+`</p>`;
 }
 // arrived-vs-ordered as a bar, so how far along an order is reads at a glance
 const shortDate=d=>d?String(d).slice(0,10):'';
@@ -5300,14 +5309,7 @@ function renderTotals(){
     `Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China Shipping Fee ${fmtFromRmb(china)} &nbsp;·&nbsp; Freight ${fmtFromRmb(ship)}<br/>`+
     `Service ${servicePct()}% ${fmtFromRmb(svc)} &nbsp;·&nbsp; GST ${gstPct()}% ${fmtFromRmb(gst)}<br/>`+
     `<strong>Grand total ${fmtFromRmb(goods+china+ship+svc+gst)}</strong><br/>`+
-    `<span style="opacity:.7">China: ${chinaBasis()==='arrived'?'arrived pcs only':'all ordered pcs'} · Freight: ${freightMode()==='shared'?'shared across all':'own box'}</span>`+
-    // Under the lines it is the sum of, so the per-piece prices above and the
-    // figure they come to are read together. Ruled off from the Grand total
-    // because the two are deliberately not the same number.
-    (()=>{ const t=orderAllInRounded();
-      return `<div class="order-all-in">Whole order at the prices shown
-        <strong>¥${t.rmb.toFixed(2)}</strong>${t.sgd!=null?`
-        = <strong>S$${t.sgd.toFixed(2)}</strong>`:''}</div>`; })();
+    `<span style="opacity:.7">China: ${chinaBasis()==='arrived'?'arrived pcs only':'all ordered pcs'} · Freight: ${freightMode()==='shared'?'shared across all':'own box'}</span>`;
 }
 // multi-select delete for SKU lines
 const pickedItems=new Set();
@@ -5510,22 +5512,10 @@ document.getElementById('boxPhotoThumb').addEventListener('click',()=>{
 // "capture" is what actually reaches the camera — without it Samsung drops
 // you into the gallery with no way back out to take a photo. Desktop has no
 // camera to speak of, so it skips the question.
-// Reading the clipboard needs permission and a secure page; where it is not
-// on offer the button is simply not shown, rather than shown and apologetic.
-const canPasteImage=()=>!!(navigator.clipboard&&navigator.clipboard.read
-  &&window.isSecureContext);
-// The first image on the clipboard, as a File the rest of the upload path can
-// treat exactly like one that came out of the gallery.
-async function clipboardImageFile(){
-  const items=await navigator.clipboard.read();
-  for(const it of items){
-    const type=(it.types||[]).find(t=>/^image\//.test(t));
-    if(!type) continue;
-    const blob=await it.getType(type);
-    return new File([blob],'pasted.'+(type.split('/')[1]||'png'),{type});
-  }
-  return null;
-}
+// The picture out of a paste, as a File the rest of the upload path can treat
+// exactly like one that came out of the gallery. Everything goes through the
+// paste event rather than reading the clipboard on a button press: the paste
+// is its own permission, so it works on every browser and asks for nothing.
 const imageFromPasteEvent=e=>{
   const d=e.clipboardData; if(!d) return null;
   const f=[...(d.files||[])].find(x=>/^image\//.test(x.type));
@@ -5538,29 +5528,20 @@ const imageFromPasteEvent=e=>{
 // open, or null if the question was dismissed.
 function askPhotoSource(){
   const sheet=document.getElementById('photoSheet');
-  const msg=document.getElementById('photoSheetMsg');
   const touch=matchMedia('(pointer:coarse)').matches;
-  const paste=canPasteImage();
-  // with no camera worth the name and no clipboard there is nothing to choose
-  // between, so the question is not worth asking
-  if(!touch&&!paste) return Promise.resolve({src:'library'});
-  document.getElementById('photoFromCam').style.display=touch?'':'none';
-  document.getElementById('photoFromPaste').style.display=paste?'':'none';
-  msg.hidden=true; msg.textContent='';
+  if(!touch) return Promise.resolve({src:'library'});
   sheet.classList.add('open');
   return new Promise(res=>{
     const done=v=>{
       sheet.classList.remove('open');
-      ['photoFromCam','photoFromLib','photoFromPaste','photoSheetCancel'].forEach(id=>
+      ['photoFromCam','photoFromLib','photoSheetCancel'].forEach(id=>
         document.getElementById(id).onclick=null);
       sheet.onclick=null;
       document.removeEventListener('paste',onPaste);
       res(v);
     };
-    const say=t=>{ msg.textContent=t; msg.hidden=false; };
-    // A real Ctrl+V while the question is on screen answers it. This is the
-    // only route on a browser that will not hand over the clipboard to a
-    // button press, because the paste itself is the permission.
+    // Ctrl+V while the question is on screen answers it, the same as it does
+    // on the slot itself — there is no reason for the question to be a dead end
     const onPaste=e=>{
       const f=imageFromPasteEvent(e);
       if(!f) return;
@@ -5570,24 +5551,14 @@ function askPhotoSource(){
     document.addEventListener('paste',onPaste);
     document.getElementById('photoFromCam').onclick=()=>done({src:'camera'});
     document.getElementById('photoFromLib').onclick=()=>done({src:'library'});
-    document.getElementById('photoFromPaste').onclick=async()=>{
-      say('Reading the clipboard…');
-      try{
-        const f=await clipboardImageFile();
-        if(f) done({file:f});
-        // the sheet stays open: the answer is "not that one", not "never mind"
-        else say('Nothing copied that is a picture. Copy an image, then tap this again.');
-      }catch(err){
-        say(/denied|permission/i.test((err&&err.message)||'')
-          ? 'This browser would not hand over the clipboard. Press Ctrl+V here instead.'
-          : 'Could not read the clipboard. Press Ctrl+V here instead.');
-      }
-    };
     document.getElementById('photoSheetCancel').onclick=()=>done(null);
     sheet.onclick=e=>{ if(e.target===sheet) done(null); };   // tapping outside closes
   });
 }
+// A picture pasted onto a slot is already here, so the question is not asked.
+let pastedFileWaiting=null;
 async function pickImageFile(){
+  if(pastedFileWaiting){ const f=pastedFileWaiting; pastedFileWaiting=null; return f; }
   const a=await askPhotoSource();
   if(!a) return null;
   if(a.file) return a.file;                 // pasted, so there is nothing to open
@@ -5601,6 +5572,73 @@ async function pickImageFile(){
     inp.click();
   });
 }
+// ---- Ctrl+V onto the slot you are on ----
+// Every square that takes a picture, so a paste can find the one being used.
+// A button keeps focus after it is pressed, which answers it nearly always;
+// the last one pressed covers the browsers that do not focus on click.
+const PHOTO_SLOTS='[data-item-photo-slot],[data-pk-photo],[data-sku-photo],[data-sku-shot],'
+  +'[data-announce-add],[data-req-add-shot],[data-new-shot-add],[data-wh-box-shoot],'
+  +'#boxPhotoBtn,#boxPhotoThumb,[data-pick]';
+let lastPhotoSlot=null;
+document.addEventListener('pointerdown',e=>{
+  const s=e.target.closest&&e.target.closest(PHOTO_SLOTS);
+  if(s) lastPhotoSlot=s;
+},true);
+function pasteTargetSlot(){
+  const a=document.activeElement;
+  const focused=a&&a.closest&&a.closest(PHOTO_SLOTS);
+  if(focused) return focused;
+  // A slot from a list that has since been redrawn is not on screen any more,
+  // and pasting into it would go nowhere. getClientRects rather than
+  // offsetParent, for the reason tabbableFields gives: the latter is null for
+  // anything inside a fixed or transformed ancestor, which is most of a screen
+  // mid-transition.
+  if(lastPhotoSlot&&lastPhotoSlot.isConnected&&lastPhotoSlot.getClientRects().length)
+    return lastPhotoSlot;
+  return null;
+}
+// The slot's own pick path is used, so a pasted picture travels exactly the
+// route a chosen one does — downscaled, previewed, and held until Submit on
+// the screens that work that way.
+//
+// The slots that enlarge an existing photo when tapped are called directly
+// rather than clicked: pasting onto a full slot means replace it, not open it.
+function pasteIntoSlot(slot,file){
+  const art=slot.getAttribute&&slot.getAttribute('data-pick');
+  if(art){ const[g,s]=art.split('|'); useArtFile(g,s,file); return true; }
+  pastedFileWaiting=file;
+  const card=sel=>slot.closest(sel);
+  let handled=true;
+  if(slot.matches('[data-item-photo-slot]')){
+    const c=card('[data-item-id]');
+    if(c) pickItemPhoto(c.dataset.itemId); else handled=false;
+  }else if(slot.matches('[data-pk-photo]')){
+    const c=card('.ph-card'), p=c&&pickupRows.find(x=>x.id===c.dataset.id);
+    if(p) pickPickupPhoto(p); else handled=false;
+  }else if(slot.matches('[data-sku-photo]')){
+    const sku=slot.getAttribute('data-sku-photo');
+    pickImageFile().then(f=>{ if(f) attachSkuPhoto(sku,f); });
+  }else if(slot.matches('[data-sku-shot]')){
+    const c=card('[data-sku-id]'), r=c&&skuRows.find(x=>x.id===c.dataset.skuId);
+    if(r) pickImageFile().then(async f=>{ if(f){ await attachSkuPhoto(r.sku,f); await refreshSkus(); } });
+    else handled=false;
+  }else{
+    slot.click();               // the rest always open the picker when tapped
+  }
+  if(!handled) pastedFileWaiting=null;
+  return handled;
+}
+document.addEventListener('paste',e=>{
+  // the sheet does its own pasting while it is up, and a paste into a text
+  // field is a paste into a text field
+  if(document.querySelector('.sheet-bg.open')) return;
+  const t=e.target;
+  if(t&&t.matches&&t.matches('input,textarea,[contenteditable]')) return;
+  const slot=pasteTargetSlot(); if(!slot) return;
+  const f=imageFromPasteEvent(e); if(!f) return;
+  e.preventDefault();
+  pasteIntoSlot(slot,f);
+});
 async function pickItemPhoto(itemId){
   const file=await pickImageFile();
   if(!file) return;
