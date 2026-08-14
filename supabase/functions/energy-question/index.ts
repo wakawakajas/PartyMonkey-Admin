@@ -40,38 +40,40 @@ const json = (body: unknown, status = 200) =>
 // should not mean a redeploy.
 const model = () => Deno.env.get("GEMINI_MODEL") || "gemini-3.6-flash";
 
-// The theme is the subject: ask about the thing the admin typed. What stays
-// fixed is the shape of the answer — four choices, most first, least last.
-// That ordering is load-bearing. It is what the bar on the card is drawn from
-// and what lets a Monday and a Friday be compared when the wording differs, so
-// it is spelled out here, constrained by the schema below, and checked again
-// on the way out.
-const INSTRUCTION = `You write one short check-in question for a small
-warehouse and print shop team, asked once a day on their phones.
+// Not a check-in any more: a daft question at the start of the shift. The four
+// slots no longer run most-to-least anything — there is no scale in "which
+// biscuit" — so the card's bar has become a plain split of who picked what.
+// Exactly four is still required, by the schema here and by the table, because
+// the card renders four and the mix is counted by position.
+const INSTRUCTION = `You write one short question for a small team to answer on
+their phones, one a day. It is a bit of fun at the start of the shift and
+nothing more.
 
-The theme you are given is the SUBJECT of the question. Ask about that thing.
-A theme of "the Christmas rush" gives a question about the Christmas rush. A
-theme of "the new warehouse" gives a question about the new warehouse. Do not
-translate the theme into a generic question and do not treat it as mere
-flavour.
+Make it HARD TO CHOOSE. All four answers should be tempting, or all four
+slightly awful — the fun is in not being able to pick. A question with an
+obvious answer has failed.
 
-It must be answerable by tapping one of exactly four choices, and those four
-MUST be ordered from MOST to LEAST on whatever scale the question implies —
-most ready to least ready, most confident to least, most capacity to least.
-Position carries the meaning: the first is the fullest answer, the fourth is
-the emptiest. Never reorder them.
+Any subject at all: food, animals, weather, films, music, silly hypotheticals,
+small everyday dilemmas, would-you-rather, desert islands, superpowers.
+Surprise them.
+
+NEVER about work, the job, the warehouse, the shop, deadlines, colleagues, or
+how someone is coping or feeling. They get enough of that.
+
+It must be answerable by tapping exactly one of four choices.
 
 Each choice needs:
   ico  - one emoji, no text
   name - one or two words, fits under a circle on a phone
-  hint - at most six words, saying what picking it means
+  hint - at most six words
 
 Rules:
-- Keep it warm and plain. No corporate language, no jargon, no exclamation marks.
-- Keep it about work. Do not ask for anything medical, financial or personal
-  about someone's home life, whatever the theme suggests.
-- Vary the wording day to day. Do not open with "How" every time.
-- With no theme given, ask how much capacity they have for the day's work.`;
+- Light and plain. No corporate language, no exclamation marks.
+- Nothing medical, financial, political or religious, and nothing about
+  anyone's family or relationships.
+- Nothing anybody could be embarrassed to have picked. It is answered by
+  people who work together.
+- Vary it day to day: not always "Would you rather", not always food.`;
 
 const SCHEMA = {
   type: "object",
@@ -152,8 +154,10 @@ async function writeQuestion(theme: string, day: string) {
   // The day goes in the prompt purely so two consecutive days do not come back
   // identical when the theme has not changed.
   const asked = theme.trim()
-    ? `Subject: ${theme.trim()}\nToday is ${day}. Write today's question about that subject.`
-    : `Today is ${day}. Write today's question. No subject was given, so ask about capacity for the day's work.`;
+    ? `Subject: ${theme.trim()}\nToday is ${day}. Write today's question about that subject — ` +
+      `still funny, still hard to pick between.`
+    : `Today is ${day}. Write today's question. No subject was given, so pick one yourself — ` +
+      `something they will not see coming.`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": key },
