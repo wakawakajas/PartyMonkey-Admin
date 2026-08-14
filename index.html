@@ -620,6 +620,20 @@ body{overflow-x:hidden;}
   align-items:center;justify-content:center;border-bottom-left-radius:10px;
   background:rgba(0,0,0,.62);color:#fff;font-size:14px;line-height:1;}
 .req-shots:empty{display:none;}
+/* ---- multiple qty, sitting under the line it belongs to ---- */
+.mq{margin-top:9px;padding-left:11px;border-left:2px solid var(--blueprint);border-radius:0;}
+.mq-top{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;}
+.mq-f{flex:0 0 108px;}
+.mq-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr) minmax(0,.8fr);
+  gap:8px;align-items:end;margin-top:8px;}
+.mq-lbl{font-size:11px;color:var(--faint);padding-bottom:11px;}
+/* The divided price is long on purpose — it is the exact one, and an input
+   would cut it off at the width of the box. It wraps instead, and is not a
+   field at all, so no stray tap can round it to two decimals. */
+.mq-val{padding:8px 10px;border:1px solid var(--border);border-radius:12px;
+  background:var(--paper);color:var(--ink);font-size:12px;line-height:1.35;
+  font-variant-numeric:tabular-nums;overflow-wrap:anywhere;min-height:var(--tap);
+  display:flex;align-items:center;}
 /* ---- Search Warehouse ---- */
 /* Pictures on the left, words on the right: what the goods are, then which
    box they are in, then everything that has to be read rather than glanced at.
@@ -4216,12 +4230,51 @@ async function loadOrderData(){
   boxOriginal=JSON.parse(JSON.stringify(boxRows));
   dirty.clear();
 }
+// ---------- multiple qty ----------
+// A line bought by the carton, counted in pieces. qty and unit_price_rmb hold
+// the final figures, so every calculation, the box allocations and the PO
+// export go on reading a line exactly as they always did — only these two
+// helpers and the two writes below know a breakdown ever happened.
+const perUnitOf=r=>Math.max(1,Number(r.qty_per_unit)||1);
+// what was actually bought: the price kept from before the division, and the
+// piece count divided back down
+function baseOf(r){
+  const f=perUnitOf(r);
+  const unit=r.unit_price_base_rmb!=null?Number(r.unit_price_base_rmb):(Number(r.unit_price_rmb)||0);
+  return {unit,qty:(Number(r.qty)||0)/f};
+}
+// which lines have the field showing without being broken down yet
+const mqOpen=new Set();
+function mqBlock(r,per,qty,unit){
+  if(per<=1&&!mqOpen.has(r.id)) return '';
+  return `<div class="mq">
+    <div class="mq-top">
+      <label class="field mq-f"><span>QTY PER UNIT</span>
+        <input type="number" min="2" step="1" data-mq-factor value="${per>1?per:''}"
+          placeholder="e.g. 24" inputmode="numeric"/></label>
+      <button class="btn-outline btn-sm" data-mq-apply>${per>1?'Update':'Break down'}</button>
+      ${per>1?'<button class="btn-outline btn-sm" data-mq-combine>Combine</button>'
+             :'<button class="btn-outline btn-sm" data-mq-cancel>Cancel</button>'}
+    </div>
+    ${per>1?`<div class="mq-row">
+      <span class="mq-lbl">broken down</span>
+      <div class="field"><span>UNIT PRICE ¥</span>
+        <div class="mq-val" title="Kept exact — only the final all-in price is rounded">${unit}</div></div>
+      <div class="field"><span>QTY (PIECES)</span>
+        <div class="mq-val">${qty}</div></div>
+    </div>`:''}
+  </div>`;
+}
 function renderItems(){
   const el=document.getElementById('itemsWrap');
   // the empty case has to update the count too, or it keeps the last one
   if(!itemRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">No items yet — tap “Add line”.</p>'; renderTotals(); syncItemBulk(); return; }
   el.innerHTML=itemRows.map((r,i)=>{
     const qty=Number(r.qty)||0, unit=Number(r.unit_price_rmb)||0;
+    // qty and unit_price are always the FINAL figures — pieces, and the price
+    // of a piece. The purchased unit is derived back from the factor, so the
+    // row above the breakdown still reads as what was actually bought.
+    const per=perUnitOf(r), base=baseOf(r);
     const arr=arrivedQtyOf(r), out=outstandingOf(r);
     const goods=unit*qty, ship=itemFreightRmb(r), china=itemChinaRmb(r);
     const svc=itemServiceRmb(r), gst=itemGstRmb(r);
@@ -4242,7 +4295,10 @@ function renderItems(){
         <input type="checkbox" class="pick" data-item-pick ${pickedItems.has(r.id)?'checked':''}
           title="Select" style="${itemSelectMode?'':'visibility:hidden;width:0;margin:0;'}"/>
         <span style="flex:1;">Line ${i+1}</span>
+        ${per>1?`<span class="tag part" title="One purchased unit is ${per} pieces">${per}/UNIT</span>`:''}
         <span class="tag ${state[0]}">${state[1]}</span>
+        <button class="icon-btn${per>1?' on':''}" data-item-mq
+          title="${per>1?'Change or undo the breakdown':'One unit is several pieces'}">⌗ Multiple qty</button>
         <button class="del-btn" data-item-del title="Delete line">×</button>
       </div>
       <div class="item-main">
@@ -4253,10 +4309,15 @@ function renderItems(){
         </div>
         <div class="grid3e item-fields">
           <label class="field"><span>SKU</span><input type="text" data-f="sku" value="${escapeHtml(r.sku||'')}"/></label>
-          <label class="field"><span>UNIT PRICE ¥</span><input type="number" min="0" step="0.01" data-f="unit_price_rmb" value="${unit}"/></label>
-          <label class="field"><span>QTY</span><input type="number" min="0" step="1" data-f="qty" value="${qty}"/></label>
+          <label class="field"><span>UNIT PRICE ¥</span>
+            <input type="number" min="0" step="0.01" data-f="unit_price_rmb"
+              value="${per>1?base.unit:unit}" ${per>1?'readonly title="Combine first to change what a unit costs"':''}/></label>
+          <label class="field"><span>QTY${per>1?' (UNITS)':''}</span>
+            <input type="number" min="0" step="1" data-f="qty"
+              value="${per>1?base.qty:qty}" ${per>1?'readonly title="Combine first to change how many units"':''}/></label>
         </div>
       </div>
+      ${mqBlock(r,per,qty,unit)}
       <div class="calc calc-split" style="margin-top:0;">
         <div class="calc-left">
           Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China Shipping Fee ${fmtFromRmb(china)} &nbsp;·&nbsp; Freight ${fmtFromRmb(ship)}<br/>
@@ -4542,6 +4603,35 @@ document.getElementById('itemsWrap').addEventListener('click',async e=>{
     return;
   }
   // one small square: view it if there is a photo, otherwise start an upload
+  // ---- multiple qty ----
+  if(e.target.closest('[data-item-mq]')){
+    const row=itemRows.find(r=>r.id===id); if(!row) return;
+    // on a line already broken down the field is always showing, so the
+    // button is only a way in for one that is not
+    if(perUnitOf(row)<=1){
+      if(mqOpen.has(id)) mqOpen.delete(id); else mqOpen.add(id);
+      renderItems();
+    }
+    return;
+  }
+  if(e.target.closest('[data-mq-cancel]')){ mqOpen.delete(id); renderItems(); return; }
+  if(e.target.closest('[data-mq-combine]')){
+    const row=itemRows.find(r=>r.id===id); if(!row) return;
+    if(!confirm('Combine "'+(row.sku||'this line')+'" back into whole units?')) return;
+    await applyMultipleQty(row,1);
+    return;
+  }
+  if(e.target.closest('[data-mq-apply]')){
+    const row=itemRows.find(r=>r.id===id); if(!row) return;
+    const card=e.target.closest('.ph-card');
+    const n=parseInt((card.querySelector('[data-mq-factor]')||{}).value,10);
+    if(!(n>=2)){
+      showMsg(document.getElementById('itemsMsg'),'Enter how many pieces are in one unit — 2 or more.',false);
+      return;
+    }
+    await applyMultipleQty(row,n);
+    return;
+  }
   if(e.target.closest('[data-item-photo-slot]')){
     const row=itemRows.find(r=>r.id===id);
     if(row&&(row.photo_path||row.photo_url)) openPhotoModal(row.photo_path,row.sku||'Item photo',row.photo_url);
@@ -4565,6 +4655,51 @@ document.getElementById('itemsWrap').addEventListener('click',async e=>{
 });
 // Field edits only touch local state; nothing reaches the database until
 // Submit. Structural actions (add/delete line, photos, boxes) stay immediate.
+// Applies a factor, or 1 to put it back. Written straight to the database
+// rather than waiting for Submit, because it also rewrites the box
+// allocations — and those are saved from a different screen, so a deferred
+// version could land as half a change.
+async function applyMultipleQty(row,to){
+  const msg=document.getElementById('itemsMsg');
+  if(!sb) return;
+  if(row._new){ showMsg(msg,'Submit the line first, then break it down.',false); return; }
+  const from=perUnitOf(row);
+  const allocs=allocRows.filter(a=>a.item_id===row.id);
+  // Everything is recomputed from what was bought, so 7 → 12 gives twelve
+  // pieces per unit and not eighty-four.
+  if(from>1){
+    const bad=(Number(row.qty)||0)%from!==0||allocs.some(a=>(Number(a.qty)||0)%from!==0);
+    if(bad){
+      showMsg(msg,'The piece counts no longer divide by '+from
+        +' — a box holds a part unit. Adjust the boxed quantities first.',false);
+      return;
+    }
+  }
+  const base=baseOf(row);
+  const qty=Math.round(base.qty*to);
+  const unit=base.unit/to;
+  try{
+    const patch=to>1
+      ? {qty,unit_price_rmb:unit,qty_per_unit:to,unit_price_base_rmb:base.unit}
+      : {qty,unit_price_rmb:base.unit,qty_per_unit:1,unit_price_base_rmb:null};
+    const {error}=await sb.from('shipment_items').update(patch).eq('id',row.id);
+    if(error) throw error;
+    // each allocation stays in its own box and is simply re-counted
+    for(const a of allocs){
+      const n=Math.round((Number(a.qty)||0)/from*to);
+      if(n===Number(a.qty)) continue;
+      const {error:e2}=await sb.from('shipment_box_items').update({qty:n}).eq('id',a.id);
+      if(e2) throw e2;
+    }
+    mqOpen.delete(row.id);
+    await loadOrderData();
+    renderItems();
+    showMsg(msg,to>1?`✓ ${qty} pieces at ¥${unit} each — the line still costs the same.`
+                    :'✓ Combined back.',true);
+  }catch(err){
+    showMsg(msg,'Could not apply: '+((err&&err.message)||'unknown error'),false);
+  }
+}
 document.getElementById('itemsWrap').addEventListener('change',e=>{
   const inp=e.target.closest('[data-f]'); if(!inp) return;
   const id=e.target.closest('.ph-card').dataset.itemId;
