@@ -1391,8 +1391,11 @@ body{overflow-x:hidden;}
 
     <div class="sect-label">Send a pop-up</div>
     <div class="card"><div class="card-body" style="padding:14px;">
-      <p class="hint">Appears on everyone's screen, once each — as soon as they have the app
-      open, or the next time they open it. No phone notification is sent.</p>
+      <p class="hint">Appears once on the screen of whoever it is for — as soon as they have
+      the app open, or the next time they open it. No phone notification is sent.</p>
+      <div class="field" style="margin-bottom:8px;"><span>WHO IT IS FOR</span>
+        <button type="button" class="btn-outline" id="announceTo"
+                style="width:100%;">Everyone</button></div>
       <label class="field" style="margin-bottom:8px;"><span>TITLE</span>
         <input type="text" id="announceTitle" placeholder="e.g. Stock take at 4pm"/></label>
       <label class="field" style="margin-bottom:10px;"><span>MESSAGE</span>
@@ -2069,6 +2072,23 @@ body{overflow-x:hidden;}
 
 <!-- shown for a moment when a request is taken on or finished -->
 <div class="req-cheer" id="requestCheer" hidden><span>🤝</span></div>
+
+<!-- Who a pop-up is for. Nobody picked means everyone, which is what this
+     always did and stays the default — choosing names narrows it, and the
+     people not named never receive the message at all. -->
+<div class="sheet-bg" id="announceToSheet">
+  <div class="sheet">
+    <button class="req-x" id="announceToClose" title="Close" aria-label="Close">×</button>
+    <div class="sheet-title">Who it is for</div>
+    <p class="hint" style="margin:0 0 4px;">Pick nobody and it goes to everyone.</p>
+    <div id="announceToOpts"></div>
+    <div class="filter-acts">
+      <button class="btn-outline" id="announceToEveryone">Everyone</button>
+      <button class="btn-outline" id="announceToAll">Select all</button>
+    </div>
+    <button class="btn-primary" id="announceToDone">Done</button>
+  </div>
+</div>
 
 <!-- One filter, wherever it was opened from. Each list used to front its
      statuses as a row of chips plus All and None, which on a phone wrapped to
@@ -4137,9 +4157,29 @@ document.getElementById('skuList').addEventListener('focusout',async e=>{
 // Shown once each. The last one seen is remembered on the device, so a
 // message does not reappear every time the app is opened.
 const SEEN_KEY='pigu.seenAnnouncement';
-function showAnnouncement(a){
+// Who is signed in, for deciding whether a message is addressed to us. The
+// requests screen keeps the same answer in myUserId, but it only fills it in
+// once that screen has loaded, and a pop-up can arrive before then.
+async function currentUserId(){
+  if(myUserId) return myUserId;
+  if(!sb) return null;
+  const {data:{session}}=await sb.auth.getSession();
+  myUserId=session?session.user.id:null;
+  return myUserId;
+}
+async function showAnnouncement(a){
   if(!a) return;
   if(localStorage.getItem(SEEN_KEY)===a.id) return;
+  // A message addressed to particular people is not for anybody else. The
+  // database says so too, and is the part that actually enforces it — this is
+  // here because a row arriving over the socket is somebody else's message
+  // until proven otherwise, and "it was probably filtered upstream" is not
+  // proof. An unaddressed message is for everyone, as it always was.
+  const to=a.recipients;
+  if(Array.isArray(to)&&to.length){
+    const me=await currentUserId();
+    if(!me||!to.includes(me)) return;
+  }
   document.getElementById('announceShownTitle').textContent=a.title||'Message';
   const body=document.getElementById('announceShownBody');
   body.textContent=a.body||'';           // pre-wrap keeps the typed line breaks
@@ -4193,10 +4233,86 @@ renderAnnounceShot();
 document.getElementById('announceDismiss').addEventListener('click',()=>
   document.getElementById('announceSheet').classList.remove('open'));
 
+// ---- who the pop-up is for ----
+// Empty means everyone, which is what this always did and stays the default.
+// The names come from the accounts list already loaded on this screen, so
+// there is nothing extra to fetch — and yourself is left out, because you do
+// not need telling what you just typed.
+const announceTo=new Set();
+function announceAudience(){
+  const names=[...announceTo].map(id=>{
+    const u=userRows.find(x=>x.user_id===id);
+    return (u&&String(u.email||'').split('@')[0])||'someone';
+  });
+  if(!names.length) return {n:0,word:'Everyone'};
+  if(names.length===1) return {n:1,word:names[0]};
+  if(names.length===2) return {n:2,word:names.join(' and ')};
+  return {n:names.length,word:names.length+' people'};
+}
+function renderAnnounceTo(){
+  const a=announceAudience();
+  document.getElementById('announceTo').textContent=a.word;
+  document.getElementById('announceSend').textContent='Send to '+(a.n?a.word:'everyone');
+}
+async function renderAnnounceToOpts(){
+  const me=await currentUserId();
+  const list=userRows.filter(u=>u.user_id!==me);
+  document.getElementById('announceToOpts').innerHTML=list.length
+    ? list.map(u=>`<div class="toggle-row filter-opt" data-to-row>
+        <span style="overflow-wrap:anywhere;">${escapeHtml(u.email||u.user_id)}</span>
+        <label class="switch"><input type="checkbox" data-to="${escapeHtml(u.user_id)}"
+          ${announceTo.has(u.user_id)?'checked':''}/><span class="slider"></span></label>
+      </div>`).join('')
+    : '<p class="hint" style="margin:4px 0 0;">Nobody else has an account yet.</p>';
+}
+async function openAnnounceTo(){
+  await renderAnnounceToOpts();
+  document.getElementById('announceToSheet').classList.add('open');
+}
+function closeAnnounceTo(){
+  document.getElementById('announceToSheet').classList.remove('open');
+}
+document.getElementById('announceTo').addEventListener('click',openAnnounceTo);
+document.getElementById('announceToOpts').addEventListener('change',e=>{
+  const cb=e.target.closest('[data-to]'); if(!cb) return;
+  const id=cb.getAttribute('data-to');
+  if(cb.checked) announceTo.add(id); else announceTo.delete(id);
+  renderAnnounceTo();
+});
+// the whole row answers, not only the switch on the end of it
+document.getElementById('announceToOpts').addEventListener('click',e=>{
+  if(e.target.closest('.switch')) return;
+  const row=e.target.closest('[data-to-row]'); if(!row) return;
+  const cb=row.querySelector('[data-to]'); if(!cb) return;
+  cb.checked=!cb.checked;
+  if(cb.checked) announceTo.add(cb.getAttribute('data-to'));
+  else announceTo.delete(cb.getAttribute('data-to'));
+  renderAnnounceTo();
+});
+// "Everyone" is the absence of a choice rather than every name ticked — sent
+// that way it also reaches an account created after this was written
+document.getElementById('announceToEveryone').addEventListener('click',async()=>{
+  announceTo.clear(); renderAnnounceTo(); await renderAnnounceToOpts();
+});
+document.getElementById('announceToAll').addEventListener('click',async()=>{
+  const me=await currentUserId();
+  userRows.filter(u=>u.user_id!==me).forEach(u=>announceTo.add(u.user_id));
+  renderAnnounceTo(); await renderAnnounceToOpts();
+});
+document.getElementById('announceToDone').addEventListener('click',closeAnnounceTo);
+document.getElementById('announceToClose').addEventListener('click',closeAnnounceTo);
+document.getElementById('announceToSheet').addEventListener('click',e=>{
+  if(e.target.id==='announceToSheet') closeAnnounceTo();
+});
+
 async function checkAnnouncements(){
   if(!sb) return;
+  // recipients comes back so the check on arrival can be made; row level
+  // security has already dropped the ones addressed elsewhere, so the newest
+  // visible row is the newest one that is actually ours
   const {data,error}=await sb.from('announcements')
-    .select('id,title,body,created_at').order('created_at',{ascending:false}).limit(1);
+    .select('id,title,body,photo_path,recipients,created_at')
+    .order('created_at',{ascending:false}).limit(1);
   if(error||!data||!data.length) return;
   // anything older than a day is stale news to someone opening the app now
   const a=data[0];
@@ -4217,15 +4333,18 @@ document.getElementById('announceSend').addEventListener('click',async()=>{
   const title=document.getElementById('announceTitle').value.trim();
   const body=document.getElementById('announceBody').value.trim();
   if(!title&&!body){ showMsg(msg,'Type something to send.',false); return; }
-  btn.disabled=true; const label=btn.textContent; btn.textContent='Sending…';
+  btn.disabled=true; btn.textContent='Sending…';
   try{
     const session=await requireSession(msg); if(!session) return;
     // Inserted first, because the picture is filed under the message's id —
     // and the row is only pointed at it once the upload has worked, so a
     // failed upload shows a message without a picture rather than one with a
     // broken square in it.
+    // null rather than an empty array for everyone, so the rows written before
+    // this existed and the ones written after it read the same
+    const to=announceTo.size?[...announceTo]:null;
     const {data:row,error}=await sb.from('announcements')
-      .insert({user_id:session.user.id,title,body}).select().single();
+      .insert({user_id:session.user.id,title,body,recipients:to}).select().single();
     if(error) throw error;
     if(announceShot&&row){
       const path=session.user.id+'/announce-'+row.id+'/'+Date.now()+'.jpg';
@@ -4238,11 +4357,19 @@ document.getElementById('announceSend').addEventListener('click',async()=>{
     // notification for it as well would be twice for one message
     document.getElementById('announceTitle').value='';
     document.getElementById('announceBody').value='';
-    showMsg(msg,'✓ Sent',true);
+    // say who it went to, because "Sent" is the one word that does not confirm
+    // the part most easily got wrong
+    const went=announceAudience();
+    announceTo.clear(); renderAnnounceTo();
+    showMsg(msg,'✓ Sent to '+(went.n?escapeHtml(went.word):'everyone'),true);
   }catch(err){
     showMsg(msg,'Could not send: '+((err&&err.message)||'unknown error'),false);
-  }finally{ btn.disabled=false; btn.textContent=label; }
+  // the label is rebuilt rather than restored: on a successful send the
+  // audience has just been cleared, and putting the old wording back would
+  // leave the button naming somebody it is no longer addressed to
+  }finally{ btn.disabled=false; renderAnnounceTo(); }
 });
+renderAnnounceTo();
 
 // Search Warehouse deliberately has nothing here yet — the SKU catalogue it
 // used to list belongs to Ad-Hoc Picking, and what this screen should look up
