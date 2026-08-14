@@ -240,6 +240,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .calc{font-family:'IBM Plex Sans',sans-serif;font-size:11.5px;color:var(--muted);background:var(--nest);
   border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-top:10px;line-height:1.6;
   font-variant-numeric:tabular-nums;}
+/* The three lines above it are about the parcel in front of you; this one is
+   about the order the parcel belongs to. A rule and a little more weight, so
+   the two are not read as one running total. */
+.box-order-total{margin-top:7px;padding-top:7px;border-top:1px solid var(--border);
+  font-size:12.5px;color:var(--ink);}
 
 /* ---- full-screen login gate ---- */
 .auth-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}
@@ -4450,25 +4455,66 @@ document.getElementById('navBackBtn').addEventListener('click',goBack);
 // so does every screen added later. It starts within a thumb's width of the
 // edge, which is the one place a horizontal drag cannot be anything else —
 // no list, slider or photo strip begins there.
+// It used to fire the moment the finger had travelled far enough, mid-drag,
+// while the page carried on scrolling underneath — so a swipe that was
+// half-meant took you back anyway, and the screen you were reading moved under
+// your thumb on the way out. Now the gesture is committed to on release: once
+// it is unmistakably sideways the page is held still and the screen follows
+// your finger, and letting go either completes it or puts it back.
 (function swipeBack(){
-  const EDGE=28, TRAVEL=64, SLOPE=1.4;
-  let x0=null,y0=null,live=false;
+  const EDGE=28,        // from within a thumb's width of the edge
+        DECIDE=10,      // travel before the direction is called either way
+        TRAVEL=64,      // and how far it has to get to count on release
+        SLOPE=1.4,      // sideways has to beat downwards by this much
+        FOLLOW=0.45,    // the screen trails the finger rather than matching it
+        MAX=64;
+  let x0=null,y0=null,dragging=false,el=null,dx=0;
+  const settle=(target,instant)=>{
+    if(!target) return;
+    target.style.transition=instant?'':'transform .18s ease-out';
+    target.style.transform='';
+    if(!instant) setTimeout(()=>{ target.style.transition=''; },220);
+  };
   document.addEventListener('touchstart',e=>{
     if(e.touches.length!==1){ x0=null; return; }
     const t=e.touches[0];
-    x0=t.clientX<=EDGE?t.clientX:null; y0=t.clientY; live=false;
+    // nowhere to go back to means there is no gesture to start
+    if(t.clientX>EDGE||!navStack.length){ x0=null; return; }
+    x0=t.clientX; y0=t.clientY; dragging=false; dx=0;
   },{passive:true});
   document.addEventListener('touchmove',e=>{
-    if(x0==null||live) return;
-    const t=e.touches[0], dx=t.clientX-x0, dy=Math.abs(t.clientY-y0);
-    // must be going sideways rather than down, or scrolling a page that
-    // happens to start near the edge would count as going back
-    if(dx>TRAVEL&&dx>dy*SLOPE){
-      live=true; x0=null;
-      if(navStack.length) goBack();
+    if(x0==null) return;
+    const t=e.touches[0], mx=t.clientX-x0, my=Math.abs(t.clientY-y0);
+    if(!dragging){
+      // Until the direction is clear the page keeps the gesture, so a list
+      // that happens to be scrolled from near the edge still scrolls. Once it
+      // is called it cannot be taken back — half a swipe and half a scroll is
+      // worse than either.
+      if(my>DECIDE&&my>mx){ x0=null; return; }
+      if(mx<DECIDE||mx<=my*SLOPE) return;
+      dragging=true;
+      el=currentScreen?document.getElementById(SCREEN_EL[currentScreen]):null;
+      if(el) el.style.transition='none';
     }
-  },{passive:true});
-  document.addEventListener('touchend',()=>{ x0=null; },{passive:true});
+    // nothing scrolls, bounces or rubber-bands while this is being decided
+    e.preventDefault();
+    dx=Math.max(0,mx);
+    if(el) el.style.transform='translateX('+Math.min(dx*FOLLOW,MAX)+'px)';
+  },{passive:false});
+  const finish=()=>{
+    if(x0==null&&!dragging) return;
+    const go=dragging&&dx>=TRAVEL, target=el;
+    x0=null; y0=null; dragging=false; el=null; dx=0;
+    if(!target){ if(go) goBack(); return; }
+    if(go){
+      // handed over clean — the leaving animation sets its own transform, and
+      // it would be measuring this one otherwise
+      settle(target,true);
+      goBack();
+    }else settle(target,false);   // not far enough: back where it was
+  };
+  document.addEventListener('touchend',finish,{passive:true});
+  document.addEventListener('touchcancel',finish,{passive:true});
 })();
 // re-runs whatever the current screen loads, so it pulls fresh rows without
 // a full reload — which on the installed app means losing your place
@@ -6041,6 +6087,16 @@ function openBoxEditor(){
   renderBoxCalc(); renderBoxItems(); renderBoxPhoto();
   showScreen('shipment-box');
 }
+// Every line's all-in price per piece times its quantity, added up — which
+// works out to goods plus the China fee, the freight, the service fee and GST
+// across the whole order. It is shown while a box is being measured because
+// this screen is where that number is being moved: the dimensions and the rate
+// keyed above decide the freight, and the freight is part of it.
+function orderAllInRmb(){
+  return itemRows.reduce((s,i)=>
+    s+(Number(i.unit_price_rmb)||0)*(Number(i.qty)||0)
+     +itemChinaRmb(i)+itemFreightRmb(i)+itemServiceRmb(i)+itemGstRmb(i),0);
+}
 function renderBoxCalc(){
   const b=currentBox(); if(!b) return;
   const cbm=cbmOf(b), vw=volWeightOf(b), shipRmb=boxShipRmb(b);
@@ -6060,7 +6116,12 @@ function renderBoxCalc(){
     (shared
       ? `${q} piece(s) ticked below &nbsp;·&nbsp; <span style="opacity:.7">freight is pooled across all boxes</span><br/>`+
         `Pooled ¥${totalFreightRmb().toFixed(2)} over ${(+pooledOver.toFixed(2))} ordered ${word}(s) &nbsp;·&nbsp; per ${word} <strong>¥${sharedPU.toFixed(2)}</strong>${r?` = <strong>S$${(sharedPU/r).toFixed(2)}</strong>`:''}`
-      : `${q} piece(s) ticked below &nbsp;·&nbsp; per ${word} <strong>¥${perUnitRmb.toFixed(2)}</strong>${r?` = <strong>S$${(perUnitRmb/r).toFixed(2)}</strong>`:''}`);
+      : `${q} piece(s) ticked below &nbsp;·&nbsp; per ${word} <strong>¥${perUnitRmb.toFixed(2)}</strong>${r?` = <strong>S$${(perUnitRmb/r).toFixed(2)}</strong>`:''}`)
+    // the whole order rather than this box, so it is set apart from the three
+    // lines above it — they are all about the parcel in front of you
+    +`<div class="box-order-total">Whole order, everything in
+        <strong>¥${orderAllInRmb().toFixed(2)}</strong>${r?`
+        = <strong>S$${(orderAllInRmb()/r).toFixed(2)}</strong>`:''}</div>`;
 }
 // which SKUs this box may account for, and which of those are ticked for a
 // bulk action — kept out here so the buttons above the list act on exactly
