@@ -1415,6 +1415,25 @@ body{overflow-x:hidden;}
       <div id="energyGenPreview"></div>
       <div id="energyThemeMsg"></div>
     </div></div>
+    <!-- What has actually been asked. A model occasionally writes something
+         that does not land, and fixing the wording in place is better than
+         deleting the day and hoping the next attempt is funnier. -->
+    <div class="sect-label">Written, and coming up</div>
+    <p class="hint" style="margin:0 0 8px;">Any day already here is left alone, so setting one ahead
+      is how you decide tomorrow’s rather than leaving it to chance. Editing a day that has been
+      answered changes the wording under the answers already given.</p>
+    <div class="grid2" style="margin-bottom:8px;">
+      <label class="field"><span>DAY</span><input type="date" id="qotdDay"/></label>
+      <div>
+        <div class="slot-label">Set it</div>
+        <div class="row" style="gap:7px;">
+          <button class="btn-outline btn-sm" id="qotdWriteFor" style="flex:1;">Write it</button>
+          <button class="btn-outline btn-sm" id="qotdMine" style="flex:1;">My own</button>
+        </div>
+      </div>
+    </div>
+    <div id="energyWrittenList"><p class="hint" style="margin:4px 0 0;">Loading…</p></div>
+    <div id="energyWrittenMsg"></div>
     <div class="sect-label">Hand-written sets</div>
     <div id="energySets"><p class="hint" style="margin:4px 0 0;">Loading…</p></div>
     <button class="btn-outline" id="energyAddSet" style="width:100%;">+ Add a set <span id="energySetCount"></span></button>
@@ -7414,9 +7433,142 @@ document.getElementById('energyGenNow').addEventListener('click',async()=>{
     <strong style="color:var(--ink);">${escapeHtml(data.set.question)}</strong><br/>
     ${(modes||[]).map((m,i)=>`${i+1}. ${escapeHtml(m.ico||'')} <strong style="color:var(--ink);">${escapeHtml(m.name||'')}</strong>
        <span style="opacity:.75;">${escapeHtml(m.hint||'')}</span>`).join('<br/>')}
-    <br/><span style="opacity:.7;">most capacity first, least last</span></div>`;
+    </div>`;
   msg.innerHTML='';
+  await refreshWritten();          // it has just been rewritten, so the list is stale
   await refreshEnergyCard();
+});
+// ---- what has already been written ----
+// A fortnight is enough: older days are answered and gone, and the point of
+// the list is fixing something that has just landed badly or is about to.
+const QOTD_HISTORY=14;
+let writtenRows=[];
+async function refreshWritten(){
+  const el=document.getElementById('energyWrittenList');
+  if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
+  const {data,error}=await sb.from('energy_generated')
+    .select('day,question,modes,theme').order('day',{ascending:false}).limit(QOTD_HISTORY);
+  if(error){
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">Nothing to show yet — run '
+      +'supabase-migration-ENERGY-GEMINI.sql, then turn the switch on.</p>';
+    return;
+  }
+  writtenRows=data||[];
+  const picker=document.getElementById('qotdDay');
+  if(!picker.value) picker.value=qotdTomorrow();   // the day you most likely mean
+  renderWritten();
+}
+function renderWritten(){
+  const el=document.getElementById('energyWrittenList');
+  if(!writtenRows.length){
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none written yet —</p>';
+    return;
+  }
+  const today=energyDayKey();
+  el.innerHTML=writtenRows.map(r=>{
+    const modes=energyModes(r);
+    // a day still to come is the one worth spotting: it can be changed freely,
+    // because nobody has answered it
+    const tag=r.day===today?'<span class="live">ASKED TODAY</span>'
+      :r.day>today?'<span class="live">COMING UP</span>':'';
+    return `<div class="setcard${r.day>=today?' today':''}" data-written="${escapeHtml(r.day)}">
+      <div class="set-top">
+        <strong style="flex:1;min-width:0;font-family:'Space Grotesk',sans-serif;">${escapeHtml(r.day)}</strong>
+        ${tag}
+        <button class="del-btn" data-written-del title="Delete, so it is written again">×</button>
+      </div>
+      ${r.theme?`<p class="hint" style="margin:0 0 6px;">subject: ${escapeHtml(r.theme)}</p>`:''}
+      <label class="field"><span>QUESTION</span>
+        <input type="text" data-wf="question" value="${escapeHtml(r.question||'')}"/></label>
+      ${modes.map((m,i)=>`
+        <div class="moderow" data-written-slot="${i}">
+          <span class="slot" style="background:${ENERGY_SLOTS[i]}"></span>
+          <input type="text" class="emo" data-wf="ico"  value="${escapeHtml(m.ico||'')}"  aria-label="Emoji"/>
+          <input type="text" class="nm"  data-wf="name" value="${escapeHtml(m.name||'')}" aria-label="Name"/>
+          <input type="text" class="ht"  data-wf="hint" value="${escapeHtml(m.hint||'')}" aria-label="Description"/>
+        </div>`).join('')}
+    </div>`;
+  }).join('');
+}
+// Tomorrow in Singapore, which is what the day picker opens on — the day the
+// person setting it is most likely to mean.
+const qotdTomorrow=()=>new Date(Date.now()+8*3600*1000+864e5).toISOString().slice(0,10);
+const qotdChosenDay=()=>document.getElementById('qotdDay').value||qotdTomorrow();
+// Ask the writer for a particular day rather than today. force, because a day
+// already written would otherwise be handed straight back unchanged, and the
+// button says "write it".
+document.getElementById('qotdWriteFor').addEventListener('click',async()=>{
+  const msg=document.getElementById('energyWrittenMsg');
+  const btn=document.getElementById('qotdWriteFor');
+  const day=qotdChosenDay();
+  if(!document.getElementById('energyGenOn').checked){
+    showMsg(msg,'Turn “Write it each day” on and save first.',false); return;
+  }
+  btn.disabled=true; const label=btn.textContent; btn.textContent='Writing…';
+  const {data,error}=await invokeFn('energy-question',{day,force:true});
+  btn.disabled=false; btn.textContent=label;
+  if(error){ showMsg(msg,'Could not write it: '+await functionError(error),false); return; }
+  if(data&&data.error){ showMsg(msg,'Could not write it: '+data.error,false); return; }
+  if(!data||!data.set){ showMsg(msg,'Nothing came back.',false); return; }
+  showMsg(msg,'✓ Written for '+day+'.',true);
+  await refreshWritten();
+  if(day===energyDayKey()) await refreshEnergyCard();
+});
+// A day put here by hand is left alone by the writer, which is what makes this
+// a way of deciding a day rather than a suggestion. It starts as a shell and
+// is filled in on the card below, the same as editing any other day.
+document.getElementById('qotdMine').addEventListener('click',async()=>{
+  const msg=document.getElementById('energyWrittenMsg');
+  const day=qotdChosenDay();
+  // asked and answered locally, before anything is sent — a day that is
+  // already set should say so whether or not there is a connection
+  if(writtenRows.some(r=>r.day===day)){
+    showMsg(msg,day+' is already set — edit it below, or delete it first.',false); return;
+  }
+  if(!sb){ showMsg(msg,'Sync unavailable — check your connection.',false); return; }
+  const blank=[['🙂','One',''],['🙃','Two',''],['😐','Three',''],['🫠','Four','']]
+    .map(([ico,name,hint])=>({ico,name,hint}));
+  const {error}=await sb.from('energy_generated')
+    .insert({day,theme:'',question:'Your question here',modes:blank});
+  if(error){ showMsg(msg,'Could not add it: '+error.message,false); return; }
+  showMsg(msg,'✓ Added '+day+' — fill it in below.',true);
+  await refreshWritten();
+  if(day===energyDayKey()) await refreshEnergyCard();
+});
+// Saved on the way out of the field, the same as the hand-written sets — there
+// is no Submit on this screen and there never was.
+document.getElementById('energyWrittenList').addEventListener('change',async e=>{
+  const card=e.target.closest('[data-written]'); if(!card||!sb) return;
+  const day=card.dataset.written;
+  const row=writtenRows.find(r=>r.day===day); if(!row) return;
+  const slot=e.target.closest('.moderow'), f=e.target.dataset.wf;
+  const patch={};
+  if(slot){
+    const modes=energyModes(row);
+    modes[Number(slot.dataset.writtenSlot)][f]=e.target.value;
+    row.modes=modes; patch.modes=modes;
+  }else{
+    row[f]=e.target.value; patch[f]=e.target.value;
+  }
+  const msg=document.getElementById('energyWrittenMsg');
+  const {error}=await sb.from('energy_generated').update(patch).eq('day',day);
+  if(error){ showMsg(msg,'Could not save: '+error.message,false); return; }
+  showMsg(msg,'✓ Saved',true);
+  // if it is today's, the card on the home screen is showing the old wording
+  if(day===energyDayKey()) await refreshEnergyCard();
+});
+document.getElementById('energyWrittenList').addEventListener('click',async e=>{
+  if(!e.target.closest('[data-written-del]')) return;
+  const day=e.target.closest('[data-written]').dataset.written;
+  const msg=document.getElementById('energyWrittenMsg');
+  if(!confirm('Delete the question for '+day+'?\n\n'
+    +'It will be written again the next time somebody opens the app. Answers already '
+    +'given stay, and will be filed against the new wording.')) return;
+  const {error}=await sb.from('energy_generated').delete().eq('day',day);
+  if(error){ showMsg(msg,'Could not delete: '+error.message,false); return; }
+  showMsg(msg,'✓ Deleted — it will be written again.',true);
+  await refreshWritten();
+  if(day===energyDayKey()) await refreshEnergyCard();
 });
 async function refreshEnergySets(){
   const el=document.getElementById('energySets');
@@ -7428,6 +7580,7 @@ async function refreshEnergySets(){
   }
   energySets=data||[];
   await refreshEnergyTheme();
+  await refreshWritten();
   renderEnergySets();
 }
 function renderEnergySets(){
