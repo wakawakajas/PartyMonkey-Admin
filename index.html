@@ -1850,6 +1850,7 @@ body{overflow-x:hidden;}
             <div class="thumb" id="finalThumbFront"><span class="ico">＋</span></div>
             <div class="info" id="finalInfoFront">No file</div>
             <button class="btn-outline btn-sm" data-pick="final|front">Upload</button>
+            <button class="btn-outline btn-sm" data-paste="final|front" title="Paste a copied picture">📋</button>
           </div>
           <div class="grid2" style="margin-top:8px;">
             <label class="field"><span>WIDTH</span><input type="number" step="0.1" id="artWFront" placeholder="—"/></label>
@@ -1860,6 +1861,7 @@ body{overflow-x:hidden;}
             <div class="thumb" id="finalThumbBack"><span class="ico">＋</span></div>
             <div class="info" id="finalInfoBack">No file</div>
             <button class="btn-outline btn-sm" data-pick="final|back">Upload</button>
+            <button class="btn-outline btn-sm" data-paste="final|back" title="Paste a copied picture">📋</button>
           </div>
           <div class="grid2" style="margin-top:8px;">
             <label class="field"><span>WIDTH</span><input type="number" step="0.1" id="artWBack" placeholder="—"/></label>
@@ -2140,6 +2142,11 @@ body{overflow-x:hidden;}
     <div class="sheet-title">Add a photo</div>
     <button class="btn-primary" id="photoFromCam">📷 Take a photo</button>
     <button class="btn-outline" id="photoFromLib">🖼️ Choose from library</button>
+    <!-- A supplier's picture is nearly always already copied — off a 1688
+         listing, out of a chat, a screenshot just taken. Saving it to the
+         gallery first only to go and find it again is a detour. -->
+    <button class="btn-outline" id="photoFromPaste">📋 Paste copied picture</button>
+    <p class="hint" id="photoSheetMsg" style="margin:0;" hidden></p>
     <button class="btn-outline" id="photoSheetCancel">Cancel</button>
   </div>
 </div>
@@ -2242,27 +2249,60 @@ async function shrink(dataURL,maxPx,q){
   ctx.drawImage(img,0,0,c.width,c.height);
   return c.toDataURL('image/jpeg',q);
 }
+// however the artwork arrived — chosen, or pasted
+async function useArtFile(group,side,file){
+  const infoEl=document.getElementById('finalInfo'+(side==='front'?'Front':'Back'));
+  infoEl.textContent='Loading…';
+  try{
+    const dataURL=await fileToImageData(file);
+    const img=await loadImage(dataURL);
+    state[group][side]={data:dataURL,img,name:file.name};
+    fitArtToCard(side);
+    refreshSlots();refreshArtInputs();drawAll();
+  }catch(err){ infoEl.textContent=(err&&err.message)||'Could not read that file'; }
+}
 function pickFileFor(group,side){
   const inp=document.createElement('input');
   inp.type='file';
   inp.accept='image/png,image/jpeg,image/webp,application/pdf,.pdf,.png,.jpg,.jpeg';
-  inp.onchange=async()=>{
-    const file=inp.files[0]; if(!file) return;
-    const cap=side==='front'?'Front':'Back';
-    const infoEl=document.getElementById('finalInfo'+cap);
-    infoEl.textContent='Loading…';
-    try{
-      const dataURL=await fileToImageData(file);
-      const img=await loadImage(dataURL);
-      state[group][side]={data:dataURL,img,name:file.name};
-      fitArtToCard(side);
-      refreshSlots();refreshArtInputs();drawAll();
-    }catch(err){ infoEl.textContent=(err&&err.message)||'Could not read that file'; }
-  };
+  inp.onchange=()=>{ const f=inp.files[0]; if(f) useArtFile(group,side,f); };
   inp.click();
 }
+// Front and back are two slots, so a pasted picture has to say which it is
+// for. Each side gets its own button rather than the app guessing, and the
+// last side touched is what a plain Ctrl+V lands on.
+let lastArtSide='front';
 document.querySelectorAll('[data-pick]').forEach(b=>{
-  b.addEventListener('click',()=>{const[g,s]=b.dataset.pick.split('|');pickFileFor(g,s);});
+  b.addEventListener('click',()=>{const[g,s]=b.dataset.pick.split('|');lastArtSide=s;pickFileFor(g,s);});
+});
+document.querySelectorAll('[data-paste]').forEach(b=>{
+  b.addEventListener('click',async()=>{
+    const [g,s]=b.dataset.paste.split('|');
+    lastArtSide=s;
+    const infoEl=document.getElementById('finalInfo'+(s==='front'?'Front':'Back'));
+    if(!canPasteImage()){ infoEl.textContent='Press Ctrl+V on this page instead.'; return; }
+    infoEl.textContent='Reading the clipboard…';
+    try{
+      const f=await clipboardImageFile();
+      if(f) useArtFile(g,s,f);
+      else infoEl.textContent='Nothing copied that is a picture.';
+    }catch(err){
+      infoEl.textContent='Could not read the clipboard — press Ctrl+V instead.';
+    }
+  });
+});
+// The fallback the message above promises, and the only route on a browser
+// that refuses to hand the clipboard to a button press. Ignored while a photo
+// sheet is up, which does its own pasting, and while typing into a field.
+document.addEventListener('paste',e=>{
+  if(currentScreen!=='tool-custom') return;
+  if(document.querySelector('.sheet-bg.open')) return;
+  const t=e.target;
+  if(t&&t.matches&&t.matches('input,textarea,[contenteditable]')) return;
+  const f=imageFromPasteEvent(e);
+  if(!f) return;
+  e.preventDefault();
+  useArtFile('final',lastArtSide,f);
 });
 function setSlot(t,i,o){
   document.getElementById(t).innerHTML=o.data?`<img src="${o.data}"/>`:'<span class="ico">＋</span>';
@@ -5417,32 +5457,91 @@ document.getElementById('boxPhotoThumb').addEventListener('click',()=>{
 // "capture" is what actually reaches the camera — without it Samsung drops
 // you into the gallery with no way back out to take a photo. Desktop has no
 // camera to speak of, so it skips the question.
+// Reading the clipboard needs permission and a secure page; where it is not
+// on offer the button is simply not shown, rather than shown and apologetic.
+const canPasteImage=()=>!!(navigator.clipboard&&navigator.clipboard.read
+  &&window.isSecureContext);
+// The first image on the clipboard, as a File the rest of the upload path can
+// treat exactly like one that came out of the gallery.
+async function clipboardImageFile(){
+  const items=await navigator.clipboard.read();
+  for(const it of items){
+    const type=(it.types||[]).find(t=>/^image\//.test(t));
+    if(!type) continue;
+    const blob=await it.getType(type);
+    return new File([blob],'pasted.'+(type.split('/')[1]||'png'),{type});
+  }
+  return null;
+}
+const imageFromPasteEvent=e=>{
+  const d=e.clipboardData; if(!d) return null;
+  const f=[...(d.files||[])].find(x=>/^image\//.test(x.type));
+  if(f) return f;
+  const it=[...(d.items||[])].find(x=>/^image\//.test(x.type||''));
+  return it?it.getAsFile():null;
+};
+// Resolves to {file} when the picture came off the clipboard — there is
+// nothing left to pick at that point — or to {src} saying which picker to
+// open, or null if the question was dismissed.
 function askPhotoSource(){
   const sheet=document.getElementById('photoSheet');
+  const msg=document.getElementById('photoSheetMsg');
   const touch=matchMedia('(pointer:coarse)').matches;
-  if(!touch) return Promise.resolve('library');
+  const paste=canPasteImage();
+  // with no camera worth the name and no clipboard there is nothing to choose
+  // between, so the question is not worth asking
+  if(!touch&&!paste) return Promise.resolve({src:'library'});
+  document.getElementById('photoFromCam').style.display=touch?'':'none';
+  document.getElementById('photoFromPaste').style.display=paste?'':'none';
+  msg.hidden=true; msg.textContent='';
   sheet.classList.add('open');
   return new Promise(res=>{
     const done=v=>{
       sheet.classList.remove('open');
-      ['photoFromCam','photoFromLib','photoSheetCancel'].forEach(id=>
+      ['photoFromCam','photoFromLib','photoFromPaste','photoSheetCancel'].forEach(id=>
         document.getElementById(id).onclick=null);
       sheet.onclick=null;
+      document.removeEventListener('paste',onPaste);
       res(v);
     };
-    document.getElementById('photoFromCam').onclick=()=>done('camera');
-    document.getElementById('photoFromLib').onclick=()=>done('library');
+    const say=t=>{ msg.textContent=t; msg.hidden=false; };
+    // A real Ctrl+V while the question is on screen answers it. This is the
+    // only route on a browser that will not hand over the clipboard to a
+    // button press, because the paste itself is the permission.
+    const onPaste=e=>{
+      const f=imageFromPasteEvent(e);
+      if(!f) return;
+      e.preventDefault();
+      done({file:f});
+    };
+    document.addEventListener('paste',onPaste);
+    document.getElementById('photoFromCam').onclick=()=>done({src:'camera'});
+    document.getElementById('photoFromLib').onclick=()=>done({src:'library'});
+    document.getElementById('photoFromPaste').onclick=async()=>{
+      say('Reading the clipboard…');
+      try{
+        const f=await clipboardImageFile();
+        if(f) done({file:f});
+        // the sheet stays open: the answer is "not that one", not "never mind"
+        else say('Nothing copied that is a picture. Copy an image, then tap this again.');
+      }catch(err){
+        say(/denied|permission/i.test((err&&err.message)||'')
+          ? 'This browser would not hand over the clipboard. Press Ctrl+V here instead.'
+          : 'Could not read the clipboard. Press Ctrl+V here instead.');
+      }
+    };
     document.getElementById('photoSheetCancel').onclick=()=>done(null);
     sheet.onclick=e=>{ if(e.target===sheet) done(null); };   // tapping outside closes
   });
 }
 async function pickImageFile(){
-  const src=await askPhotoSource();
-  if(!src) return null;
+  const a=await askPhotoSource();
+  if(!a) return null;
+  if(a.file) return a.file;                 // pasted, so there is nothing to open
   return new Promise(res=>{
     const inp=document.createElement('input');
     inp.type='file'; inp.accept='image/*';
-    if(src==='camera') inp.capture='environment';
+    if(a.src==='camera') inp.capture='environment';
     inp.onchange=()=>res(inp.files[0]||null);
     // a cancelled picker fires nothing on most phones, so nothing is left waiting
     inp.oncancel=()=>res(null);
@@ -7333,15 +7432,14 @@ document.getElementById('warehouseResults').addEventListener('click',e=>{
   if(e.target.closest('[data-wh-photo]')&&(row.photo_path||row.photo_url))
     openPhotoModal(row.photo_path,row.sku||'SKU photo',row.photo_url);
 });
-function pickBoxPhoto(row,box){
+// This used to open the camera directly, since it is used standing in front of
+// the box rather than at a desk. It now asks like every other photo slot, so a
+// picture already copied can be pasted here too — the camera is still the
+// first thing offered, so the standing-at-the-box case costs one tap.
+async function pickBoxPhoto(row,box){
   if(!box) return;
-  const inp=document.createElement('input');
-  inp.type='file'; inp.accept='image/*';
-  // straight to the camera where there is one, because this is used standing
-  // in front of the box rather than at a desk
-  inp.capture='environment';
-  inp.addEventListener('change',()=>{ const f=inp.files&&inp.files[0]; if(f) replaceBoxPhoto(row,box,f); });
-  inp.click();
+  const f=await pickImageFile();
+  if(f) replaceBoxPhoto(row,box,f);
 }
 // Straight to the database, unlike the order screen where photos wait for
 // Submit — there is nothing else on this screen to submit alongside them.
