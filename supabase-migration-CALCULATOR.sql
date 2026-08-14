@@ -61,6 +61,13 @@ create table if not exists public.calc_settings (
   updated_by uuid references auth.users(id)
 );
 
+-- The marketplace programmes a product can be entered into, each taking its
+-- own cut. A list rather than columns, so one can be added when the
+-- marketplace invents another without a migration to go with it.
+alter table public.calc_settings
+  add column if not exists programs jsonb not null
+  default '[{"name": "PXP", "pct": 5.45}]'::jsonb;
+
 -- the one row, created if it is not already there
 insert into public.calc_settings(id) values (true) on conflict (id) do nothing;
 

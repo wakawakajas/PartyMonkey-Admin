@@ -659,10 +659,15 @@ body{overflow-x:hidden;}
 /* a loss should not read as a win in the app's own accent colour */
 .calc-big.bad{border-color:var(--rust);}
 .calc-big.bad strong{color:var(--rust);}
-.calc-row{display:flex;align-items:center;gap:10px;padding:5px 0;font-size:13px;
-  border-bottom:1px solid var(--paper-line);}
-.calc-row > span:first-child{flex:1;min-width:0;color:var(--muted);}
-.calc-v{flex-shrink:0;font-variant-numeric:tabular-nums;text-align:right;}
+/* the amounts get a column of their own so their decimal points line up,
+   rather than each sitting wherever its label happens to end */
+.calc-row{display:grid;grid-template-columns:minmax(0,1fr) 108px;align-items:center;
+  gap:10px;padding:6px 0;font-size:13px;border-bottom:1px solid var(--paper-line);}
+.calc-row > span:first-child{min-width:0;color:var(--muted);overflow-wrap:anywhere;}
+.calc-v{font-variant-numeric:tabular-nums;text-align:right;color:var(--ink);}
+/* the rate belongs to the name of the thing charging it */
+.calc-pct{color:var(--faint);font-size:12px;}
+.calc-prog-name{width:100%;text-align:left;}
 .calc-sum{border-bottom:none;border-top:1px solid var(--border);margin-top:4px;
   padding-top:8px;font-weight:600;font-size:14px;}
 .calc-sum .calc-v{color:var(--blueprint);}
@@ -1204,12 +1209,20 @@ body{overflow-x:hidden;}
         <label class="field" style="margin-bottom:0;"><span>SELLING PRICE (PER PC)</span>
           <input type="number" step="0.01" min="0" id="calcPrice" inputmode="decimal" placeholder="0.00"/></label>
       </div>
-      <div class="grid2">
+      <div class="grid2" style="margin-bottom:10px;">
         <label class="field" style="margin-bottom:0;"><span>MPQ (PIECES)</span>
           <input type="number" step="1" min="1" id="calcMpq" inputmode="numeric" placeholder="1"/></label>
         <label class="field" style="margin-bottom:0;"><span>WEIGHT PER PC (KG)</span>
           <input type="number" step="0.001" min="0" id="calcWeight" inputmode="decimal" placeholder="0.000"/></label>
       </div>
+      <label class="field" style="margin-bottom:10px;"><span>PROGRAM</span>
+        <select id="calcProgram"></select></label>
+      <!-- it changes the transaction fee as well as the money in, because that
+           fee is charged on what the buyer paid, shipping included -->
+      <label class="toggle-row" style="min-height:auto;">
+        <span style="font-size:13px;color:var(--muted);">Customer pays the shipping fee</span>
+        <span class="switch"><input type="checkbox" id="calcBuyerShips" checked/><span class="slider"></span></span>
+      </label>
     </div></div>
 
     <div class="calc-answer" id="calcAnswer"></div>
@@ -7785,7 +7798,15 @@ const CALC_FALLBACK={customer_shipping_fee:1.99,commission_pct:10.9,transaction_
   cashback_pct:5.45,free_shipping:0,campaign_discount_pct:2,campaign_commission_pct:7.63,
   campaign_transaction_pct:3.27,campaign_cashback_pct:5.45,campaign_free_shipping:0,
   weight_bands:[{upTo:1,cost:2.3},{upTo:4.9,cost:3.21},{upTo:9.9,cost:3.79},
-                {upTo:19.9,cost:6.07},{upTo:30,cost:11.2}]};
+                {upTo:19.9,cost:6.07},{upTo:30,cost:11.2}],
+  programs:[{name:'PXP',pct:5.45}]};
+// which programme the product is entered into. None is always an option and
+// takes nothing; the rest come from the settings, so the marketplace adding
+// another is an admin edit rather than a release.
+let calcProgramIdx=0;
+const calcPrograms=()=>[{name:'None',pct:0}]
+  .concat(Array.isArray(calcSettings.programs)?calcSettings.programs:[]);
+const calcProgram=()=>calcPrograms()[calcProgramIdx]||{name:'None',pct:0};
 let calcSettings={...CALC_FALLBACK};
 // The bands are read in order and the first one the weight fits wins, which is
 // what the nested IFs in the sheet amount to. Past the last band there is no
@@ -7804,10 +7825,16 @@ function calcFigures(){
   const shipping=shippingCostFor(totalWeight);
   const goods=cost*mpq;
   const subtotal=price*mpq;
-  const buyerPays=subtotal+Number(s.customer_shipping_fee);
+  // If the customer is not charged for shipping there is nothing to add, and
+  // the transaction fee falls with it — that fee is a cut of what the buyer
+  // actually paid, so it is charged on the shipping too when they pay it.
+  const buyerShips=document.getElementById('calcBuyerShips').checked;
+  const shipFee=buyerShips?Number(s.customer_shipping_fee):0;
+  const prog=calcProgram(), progPct=Number(prog.pct)||0;
+  const buyerPays=subtotal+shipFee;
   const commission=subtotal*Number(s.commission_pct)/100;
   const transaction=buyerPays*Number(s.transaction_pct)/100;
-  const cashback=subtotal*Number(s.cashback_pct)/100;
+  const cashback=subtotal*progPct/100;
   const freeShip=Number(s.free_shipping);
   const profit=shipping==null?null
     :subtotal-goods-shipping-commission-transaction-cashback-freeShip;
@@ -7815,16 +7842,20 @@ function calcFigures(){
   const margin=(shipping==null||!goods)?null:profit/goods*100;
   const campPrice=price-(price*Number(s.campaign_discount_pct)/100);
   const campSubtotal=campPrice*mpq;
-  const campBuyerPays=campSubtotal+Number(s.customer_shipping_fee);
+  const campBuyerPays=campSubtotal+shipFee;
   const campCommission=campSubtotal*Number(s.campaign_commission_pct)/100;
   const campTransaction=campBuyerPays*Number(s.campaign_transaction_pct)/100;
-  const campCashback=campSubtotal*Number(s.campaign_cashback_pct)/100;
+  // the same programme applies either way — it is the product that is entered
+  // into it, not the campaign
+  const campCashback=campSubtotal*progPct/100;
   const campFreeShip=Number(s.campaign_free_shipping);
   const campProfit=shipping==null?null
     :campSubtotal-goods-shipping-campCommission-campTransaction-campCashback-campFreeShip;
+  const campMargin=(shipping==null||!goods)?null:campProfit/goods*100;
   return {cost,price,mpq,perPc,totalWeight,shipping,goods,subtotal,buyerPays,commission,
     transaction,cashback,freeShip,profit,margin,campPrice,campSubtotal,campBuyerPays,
-    campCommission,campTransaction,campCashback,campFreeShip,campProfit};
+    campCommission,campTransaction,campCashback,campFreeShip,campProfit,campMargin,
+    shipFee,buyerShips,prog,progPct};
 }
 const money=v=>(v==null||!isFinite(v))?'—':(v<0?'−$':'$')+Math.abs(v).toFixed(2);
 function renderCalc(){
@@ -7846,29 +7877,36 @@ function renderCalc(){
     +(over?`<p class="hint" style="color:var(--rust);margin:8px 0 0;">
         ${f.totalWeight.toFixed(3)} kg is past the last shipping band, so there is no
         price for it — the sheet gives ERROR here too.</p>`:'');
-  const row=(label,value,note)=>`<div class="calc-row"><span>${label}</span>
-    <span class="calc-v">${value}${note?` <span class="hint" style="margin:0;">${note}</span>`:''}</span></div>`;
+  // One number per line, right-aligned in its own column so the decimal points
+  // stack. The rate belongs to the name of the thing charging it, not trailing
+  // after the amount in grey where it was competing with the figure.
+  const row=(label,value,cls)=>`<div class="calc-row${cls?' '+cls:''}">
+    <span>${label}</span><span class="calc-v">${value}</span></div>`;
   const s=calcSettings;
+  const pct=v=>' <span class="calc-pct">'+(+Number(v).toFixed(2))+'%</span>';
+  const shipLabel=f.buyerShips
+    ? 'Buyer Paid '+money(Number(s.customer_shipping_fee))+' Shipping Fee'
+    : 'Buyer payment, no shipping fee';
   document.getElementById('calcWorking').innerHTML=
-    row('Total weight',f.totalWeight.toFixed(3)+' kg',f.mpq+' × '+f.perPc)
-    +row('Shipping cost',f.shipping==null?'—':money(f.shipping),'by weight band')
-    +row('Goods cost',money(f.goods),f.mpq+' × '+money(f.cost))
-    +row('Subtotal',money(f.subtotal),f.mpq+' × '+money(f.price))
-    +row('Buyer payment',money(f.buyerPays),'+ '+money(Number(s.customer_shipping_fee))+' shipping fee')
-    +row('Commission',money(-f.commission),s.commission_pct+'% of subtotal')
-    +row('Transaction fee',money(-f.transaction),s.transaction_pct+'% of buyer payment')
-    +row('Cashback program',money(-f.cashback),s.cashback_pct+'% of subtotal')
-    +row('Free shipping program',money(-f.freeShip),'')
-    +`<div class="calc-row calc-sum"><span>Profit</span><span class="calc-v">${money(f.profit)}</span></div>`
+    row('Total weight',f.totalWeight.toFixed(3)+' kg')
+    +row('Shipping cost',f.shipping==null?'—':money(f.shipping))
+    +row('Goods cost',money(f.goods))
+    +row('Subtotal',money(f.subtotal))
+    +row(shipLabel,money(f.buyerPays))
+    +row('Commission'+pct(s.commission_pct),money(-f.commission))
+    +row('Transaction fee'+pct(s.transaction_pct),money(-f.transaction))
+    +row(escapeHtml(f.prog.name)+(f.progPct?pct(f.progPct):''),money(-f.cashback))
+    +row('Free shipping program',money(-f.freeShip))
+    +row('Profit'+(f.margin==null?'':pct(f.margin)),money(f.profit),'calc-sum')
     +`<div class="sect-label" style="margin:12px 0 6px;">In a campaign</div>`
-    +row('Discounted price',money(f.campPrice),s.campaign_discount_pct+'% off')
-    +row('Campaign subtotal',money(f.campSubtotal),'')
-    +row('Campaign buyer payment',money(f.campBuyerPays),'')
-    +row('Campaign commission',money(-f.campCommission),s.campaign_commission_pct+'% of subtotal')
-    +row('Campaign transaction fee',money(-f.campTransaction),s.campaign_transaction_pct+'% of buyer payment')
-    +row('Campaign cashback',money(-f.campCashback),s.campaign_cashback_pct+'% of subtotal')
-    +row('Campaign free shipping',money(-f.campFreeShip),'')
-    +`<div class="calc-row calc-sum"><span>Campaign profit</span><span class="calc-v">${money(f.campProfit)}</span></div>`;
+    +row('Discounted price'+pct(s.campaign_discount_pct),money(f.campPrice))
+    +row('Campaign subtotal',money(f.campSubtotal))
+    +row('Campaign buyer payment',money(f.campBuyerPays))
+    +row('Campaign commission'+pct(s.campaign_commission_pct),money(-f.campCommission))
+    +row('Campaign transaction fee'+pct(s.campaign_transaction_pct),money(-f.campTransaction))
+    +row('Campaign '+escapeHtml(f.prog.name)+(f.progPct?pct(f.progPct):''),money(-f.campCashback))
+    +row('Campaign free shipping',money(-f.campFreeShip))
+    +row('Campaign profit'+(f.campMargin==null?'':pct(f.campMargin)),money(f.campProfit),'calc-sum');
 }
 // The rates are the same for everyone, so only an admin may change them —
 // everyone else is shown what they are, because a profit you cannot see the
@@ -7877,14 +7915,20 @@ const CALC_RATE_FIELDS=[
   ['customer_shipping_fee','Customer shipping fee','$'],
   ['commission_pct','Commission','%'],
   ['transaction_pct','Transaction fee','%'],
-  ['cashback_pct','Cashback program','%'],
   ['free_shipping','Free shipping program','$'],
   ['campaign_discount_pct','Campaign discount','%'],
   ['campaign_commission_pct','Campaign commission','%'],
   ['campaign_transaction_pct','Campaign transaction fee','%'],
-  ['campaign_cashback_pct','Campaign cashback','%'],
   ['campaign_free_shipping','Campaign free shipping','$']
 ];
+// the programme list feeds both the picker above and the rates below
+function renderCalcPrograms(){
+  const sel=document.getElementById('calcProgram');
+  const list=calcPrograms();
+  if(calcProgramIdx>=list.length) calcProgramIdx=0;
+  sel.innerHTML=list.map((p,i)=>`<option value="${i}"${i===calcProgramIdx?' selected':''}>`
+    +escapeHtml(p.name)+(Number(p.pct)?' — '+(+Number(p.pct).toFixed(2))+'%':'')+'</option>').join('');
+}
 function renderCalcRates(){
   const editable=access.admin;
   document.getElementById('calcRatesWho').textContent=
@@ -7895,6 +7939,15 @@ function renderCalcRates(){
       <span class="calc-v">${editable
         ? `<input type="number" step="0.01" class="calc-rate" data-rate="${k}" value="${Number(calcSettings[k])}"/> ${unit}`
         : (unit==='%'?Number(calcSettings[k])+'%':money(Number(calcSettings[k])))}</span></div>`).join('')
+    +`<div class="sect-label" style="margin:12px 0 6px;">Programs</div>`
+    +(Array.isArray(calcSettings.programs)?calcSettings.programs:[]).map((p,i)=>
+      `<div class="calc-row"><span>${editable
+        ? `<input type="text" class="calc-rate calc-prog-name" data-prog="${i}" data-prog-f="name" value="${escapeHtml(p.name||'')}"/>`
+        : escapeHtml(p.name||'')}</span>
+      <span class="calc-v">${editable
+        ? `<input type="number" step="0.01" class="calc-rate" data-prog="${i}" data-prog-f="pct" value="${Number(p.pct)}"/> %`
+        : (+Number(p.pct).toFixed(2))+'%'}</span></div>`).join('')
+    +(editable?`<button class="btn-outline btn-sm" id="calcAddProgram" style="margin-top:6px;">+ Add program</button>`:'')
     +`<div class="sect-label" style="margin:12px 0 6px;">Shipping by weight</div>`
     +bands.map((b,i)=>`<div class="calc-row"><span>up to ${editable
         ? `<input type="number" step="0.1" class="calc-rate" data-band="${i}" data-band-f="upTo" value="${Number(b.upTo)}"/>`
@@ -7911,19 +7964,33 @@ async function openCalculator(){
     else if(error) showMsg(document.getElementById('calcMsg'),
       'Using the built-in rates — run supabase-migration-CALCULATOR.sql to make them editable.',false);
   }
-  renderCalcRates(); renderCalc();
+  renderCalcPrograms(); renderCalcRates(); renderCalc();
 }
 ['calcCost','calcPrice','calcMpq','calcWeight'].forEach(id=>{
   document.getElementById(id).addEventListener('input',renderCalc);
 });
+document.getElementById('calcBuyerShips').addEventListener('change',renderCalc);
+document.getElementById('calcProgram').addEventListener('change',e=>{
+  calcProgramIdx=Number(e.target.value)||0; renderCalc();
+});
 document.getElementById('calcRates').addEventListener('input',e=>{
   const el=e.target.closest('.calc-rate'); if(!el) return;
   if(el.dataset.rate) calcSettings[el.dataset.rate]=Number(el.value)||0;
-  else{
+  else if(el.dataset.prog!==undefined){
+    const p=calcSettings.programs[Number(el.dataset.prog)];
+    if(p) p[el.dataset.progF]=el.dataset.progF==='pct'?(Number(el.value)||0):el.value;
+    renderCalcPrograms();            // the picker shows the new name and rate
+  }else{
     const b=calcSettings.weight_bands[Number(el.dataset.band)];
     if(b) b[el.dataset.bandF]=Number(el.value)||0;
   }
   renderCalc();                      // the answer follows the rate as it is typed
+});
+document.getElementById('calcRates').addEventListener('click',e=>{
+  if(!e.target.closest('#calcAddProgram')) return;
+  if(!Array.isArray(calcSettings.programs)) calcSettings.programs=[];
+  calcSettings.programs.push({name:'New program',pct:0});
+  renderCalcRates(); renderCalcPrograms();
 });
 document.getElementById('calcRates').addEventListener('click',async e=>{
   if(!e.target.closest('#calcSaveRates')) return;
@@ -7934,7 +8001,7 @@ document.getElementById('calcRates').addEventListener('click',async e=>{
   try{
     const {data:{session}}=await sb.auth.getSession();
     const patch={updated_at:new Date().toISOString(),updated_by:session?session.user.id:null,
-      weight_bands:calcSettings.weight_bands};
+      weight_bands:calcSettings.weight_bands,programs:calcSettings.programs};
     CALC_RATE_FIELDS.forEach(([k])=>{ patch[k]=Number(calcSettings[k])||0; });
     const {error}=await sb.from('calc_settings').update(patch).eq('id',true);
     if(error) throw error;
