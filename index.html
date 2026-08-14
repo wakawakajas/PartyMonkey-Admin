@@ -649,6 +649,15 @@ body{overflow-x:hidden;}
   align-items:center;justify-content:center;border-bottom-left-radius:10px;
   background:rgba(0,0,0,.62);color:#fff;font-size:14px;line-height:1;}
 .req-shots:empty{display:none;}
+/* ---- dragging an order into place ---- */
+/* the card leaves the page while it travels, so the ones it passes can close
+   the gap behind it */
+.ph-card.dragging{position:relative;z-index:3;cursor:grabbing;
+  box-shadow:0 10px 26px rgba(0,0,0,.5);border-color:var(--blueprint);}
+/* once a drag is real the finger owns the gesture, not the scroller */
+.dragging-list .ph-card{touch-action:none;user-select:none;}
+/* and while selecting, a card advertises that it can be moved */
+.dragging-list,.ph-card.selectable{cursor:grab;}
 /* ---- an order on the list: what it is, before what it costs ---- */
 /* the ID is the thing being searched for, and the description is what tells
    two of them apart at a glance, so both are read at arm's length */
@@ -4230,6 +4239,95 @@ function moveInArray(arr,idx,dir){
   [arr[idx],arr[j]]=[arr[j],arr[idx]];
   return true;
 }
+// ---------- dragging an order up or down, while selecting ----------
+// Only in select mode: the rest of the time a card is a link into the order,
+// and a list you can accidentally reorder by brushing it is worse than one
+// with arrows. On touch it takes a short hold to engage, so an ordinary swipe
+// still scrolls the list; a mouse starts on the first movement, having no
+// such conflict.
+(function dragToReorder(){
+  const list=document.getElementById('shipmentList');
+  const HOLD_MS=220, SLOP=8;
+  let card=null, startY=0, armed=false, moved=false, holdTimer=null, autoTimer=null, didDrag=false;
+
+  const cards=()=>[...list.querySelectorAll('.ph-card')];
+  function cleanup(){
+    clearTimeout(holdTimer); clearInterval(autoTimer); autoTimer=null;
+    if(card){ card.classList.remove('dragging'); card.style.transform=''; }
+    list.classList.remove('dragging-list');
+    card=null; armed=false; moved=false;
+  }
+  function engage(){
+    armed=true; didDrag=true;
+    card.classList.add('dragging');
+    list.classList.add('dragging-list');
+    // the page must stop scrolling under the finger once the drag is real
+    autoTimer=setInterval(()=>{
+      if(!armed||lastY==null) return;
+      if(lastY<90) window.scrollBy(0,-14);
+      else if(lastY>window.innerHeight-120) window.scrollBy(0,14);
+    },16);
+  }
+  let lastY=null;
+  list.addEventListener('pointerdown',e=>{
+    if(!selectMode) return;
+    if(e.target.closest('button,input,a,[data-copy]')) return;
+    const c=e.target.closest('.ph-card'); if(!c) return;
+    card=c; startY=e.clientY; lastY=e.clientY; moved=false; armed=false; didDrag=false;
+    if(e.pointerType==='mouse'){ /* engages on the first real movement */ }
+    else holdTimer=setTimeout(()=>{ if(card&&!moved) engage(); },HOLD_MS);
+  });
+  list.addEventListener('pointermove',e=>{
+    if(!card) return;
+    lastY=e.clientY;
+    const dy=e.clientY-startY;
+    if(!armed){
+      if(Math.abs(dy)>SLOP){
+        // a mouse drag is unambiguous; a finger that moved this soon was scrolling
+        if(e.pointerType==='mouse') engage(); else { moved=true; cleanup(); }
+      }
+      return;
+    }
+    e.preventDefault();
+    card.style.transform='translateY('+dy+'px)';
+    // swap with whichever neighbour's midpoint the card has passed
+    const mid=card.getBoundingClientRect().top+card.offsetHeight/2;
+    for(const other of cards()){
+      if(other===card) continue;
+      const r=other.getBoundingClientRect();
+      const om=r.top+r.height/2;
+      if(mid<om&&other.compareDocumentPosition(card)&Node.DOCUMENT_POSITION_FOLLOWING){
+        list.insertBefore(card,other); startY=e.clientY; card.style.transform=''; break;
+      }
+      if(mid>om&&other.compareDocumentPosition(card)&Node.DOCUMENT_POSITION_PRECEDING){
+        list.insertBefore(card,other.nextSibling); startY=e.clientY; card.style.transform=''; break;
+      }
+    }
+  },{passive:false});
+  async function drop(){
+    if(!armed){ cleanup(); return; }
+    const order=cards().map(c=>c.dataset.id);
+    cleanup();
+    // The list only shows what the chips and the search leave visible, so the
+    // new sequence is threaded back through the full list: hidden rows keep
+    // their places and the visible ones land in the order just dragged.
+    const byId={};
+    shipmentRows.forEach(r=>{ byId[r.id]=r; });
+    const queue=order.filter(id=>byId[id]);
+    const visible=new Set(queue);
+    // rebuilt from a snapshot rather than from the array being replaced, and
+    // any id that does not resolve is dropped rather than leaving a hole
+    shipmentRows=shipmentRows.map(r=>visible.has(r.id)?byId[queue.shift()]:r);
+    renderShipmentList();
+    await persistOrder('shipments',shipmentRows);
+  }
+  list.addEventListener('pointerup',drop);
+  list.addEventListener('pointercancel',cleanup);
+  // a drag ends over a card, and that must not also open or select it
+  list.addEventListener('click',e=>{
+    if(didDrag){ didDrag=false; e.stopPropagation(); e.preventDefault(); }
+  },true);
+})();
 document.getElementById('shipmentList').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
   const id=card.dataset.id;
