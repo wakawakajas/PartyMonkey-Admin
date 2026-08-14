@@ -267,9 +267,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* thumb-sized, because these are pressed one-handed while holding a parcel —
    a 26px square was a thing you aimed at rather than a thing you hit */
 .copy-btn{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;
-  width:40px;height:36px;min-height:36px;padding:0;margin-left:6px;vertical-align:middle;
-  border:1px solid var(--border);border-radius:10px;background:var(--card);
-  color:var(--faint);font-size:17px;line-height:1;touch-action:manipulation;}
+  width:34px;height:32px;min-height:32px;padding:0;margin-left:6px;vertical-align:middle;
+  border:1px solid var(--border);border-radius:9px;background:var(--card);
+  color:var(--faint);font-size:15px;line-height:1;touch-action:manipulation;}
 .copy-btn:active{background:var(--nest);}
 .copy-btn.done{color:var(--lime-ink);background:var(--blueprint);border-color:var(--blueprint);}
 .chip-xs{margin-left:auto;align-self:center;min-height:26px;height:26px;padding:0 10px;font-size:11px;}
@@ -638,6 +638,16 @@ body{overflow-x:hidden;}
   align-items:center;justify-content:center;border-bottom-left-radius:10px;
   background:rgba(0,0,0,.62);color:#fff;font-size:14px;line-height:1;}
 .req-shots:empty{display:none;}
+/* ---- an order on the list: what it is, before what it costs ---- */
+/* the ID is the thing being searched for, and the description is what tells
+   two of them apart at a glance, so both are read at arm's length */
+.ord-id .oid-text{font-size:15px;}
+.ord-main{display:flex;align-items:flex-start;gap:10px;margin-top:2px;}
+.ord-shot{width:56px;height:56px;flex-shrink:0;border-radius:12px;overflow:hidden;
+  border:1px solid var(--border);background:#101113;display:block;}
+.ord-shot img{width:100%;height:100%;object-fit:cover;display:block;}
+.ord-desc{margin:0;font-size:14px;line-height:1.35;color:var(--blueprint);
+  overflow-wrap:anywhere;}
 /* ---- multiple qty, sitting under the line it belongs to ---- */
 .mq{margin-top:9px;padding-left:11px;border-left:2px solid var(--blueprint);border-radius:0;}
 .mq-top{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;}
@@ -3881,26 +3891,36 @@ async function loadShipmentMeta(){
   const out={status:{},skusBySh:{},consolById:{},cbm:{}};
   if(!sb) return out;
   const [it,al,co,bx]=await Promise.all([
-    sb.from('shipment_items').select('id,shipment_id,sku,qty'),
+    // photo_path so the list can show what the order is, sort_order so the
+    // one it shows is the first line rather than whichever row arrives first
+    sb.from('shipment_items').select('id,shipment_id,sku,qty,photo_path,photo_url,sort_order')
+      .order('sort_order',{ascending:true}).order('created_at',{ascending:true}),
     sb.from('shipment_box_items').select('item_id,qty'),
     sb.from('consolidations').select('id,freight_number,eta').is('deleted_at',null),
-    sb.from('shipment_boxes').select('shipment_id,length_cm,breadth_cm,height_cm')
+    sb.from('shipment_boxes').select('shipment_id,length_cm,breadth_cm,height_cm,cbm_rate_rmb')
   ]);
   // a box with a dimension still at zero has not been measured yet, so it
   // adds nothing and does not count towards the box tally either
   (bx.data||[]).forEach(b=>{
     const v=(Number(b.length_cm)||0)*(Number(b.breadth_cm)||0)*(Number(b.height_cm)||0)/1e6;
     if(!v) return;
-    const m=out.cbm[b.shipment_id]||(out.cbm[b.shipment_id]={total:0,boxes:0});
+    const m=out.cbm[b.shipment_id]||(out.cbm[b.shipment_id]={total:0,boxes:0,rmb:0});
     m.total+=v; m.boxes++;
+    // what that volume is being charged at, so the list shows the freight
+    // without opening the order to work it out
+    m.rmb+=v*(Number(b.cbm_rate_rmb)||0);
   });
   const arrivedBy={};
   (al.data||[]).forEach(a=>{ arrivedBy[a.item_id]=(arrivedBy[a.item_id]||0)+(Number(a.qty)||0); });
+  out.photo={};
   (it.data||[]).forEach(i=>{
     const m=out.status[i.shipment_id]||(out.status[i.shipment_id]={ordered:0,arrived:0});
     const q=Number(i.qty)||0;
     m.ordered+=q; m.arrived+=Math.min(arrivedBy[i.id]||0,q);
     (out.skusBySh[i.shipment_id]=out.skusBySh[i.shipment_id]||[]).push(i.sku||'');
+    // the first line that has a picture speaks for the order on the list
+    if(!out.photo[i.shipment_id]&&(i.photo_path||i.photo_url))
+      out.photo[i.shipment_id]={path:i.photo_path||null,url:i.photo_url||null};
   });
   Object.values(out.status).forEach(m=>{ m.outstanding=Math.max(0,m.ordered-m.arrived); });
   (co.data||[]).forEach(c=>{ out.consolById[c.id]=c; });
@@ -3941,28 +3961,57 @@ function renderShipmentList(){
     const i=shipmentRows.indexOf(r);
     const oid=escapeHtml(r.order_id), desc=escapeHtml(r.description||'—');
     const consol=r.consolidation_id?shipMeta.consolById[r.consolidation_id]:null;
+    const ph=(shipMeta.photo||{})[r.id];
     return `<div class="ph-card row-link${pickClasses(selectMode,pickedOrders.has(r.id))}" data-id="${r.id}" data-ship-open>
       <div class="ph-card-head">
         <input type="checkbox" class="pick" data-ship-pick ${pickedOrders.has(r.id)?'checked':''}
           title="Select" style="${selectMode?'':'visibility:hidden;width:0;margin:0;'}"/>
-        <span style="flex:1;">${oidCopy(r.order_id)}${r.created_at?` <span class="hint" style="font-weight:400;">· ${shortDate(r.created_at)}</span>`:''}</span>
+        <span style="flex:1;" class="ord-id">${oidCopy(r.order_id)}${r.created_at?` <span class="hint" style="font-weight:400;">· ${shortDate(r.created_at)}</span>`:''}</span>
         ${arrivalTag(shipMeta.status[r.id])}
-        <button class="icon-btn" data-ship-up ${i===0?'disabled':''} title="Move up">▲</button>
-        <button class="icon-btn" data-ship-down ${i===shipmentRows.length-1?'disabled':''} title="Move down">▼</button>
+        ${selectMode?`<button class="icon-btn" data-ship-up ${i===0?'disabled':''} title="Move up">▲</button>
+        <button class="icon-btn" data-ship-down ${i===shipmentRows.length-1?'disabled':''} title="Move down">▼</button>`:''}
         <button class="del-btn" data-ship-del title="Delete">×</button>
       </div>
-      <p class="hint" style="margin:0;">${desc}${consol?` · freight ${escapeHtml(consol.freight_number)}`:''}</p>
-      ${cbmLine(shipMeta.cbm[r.id])}
+      <div class="ord-main">
+        ${ph?`<span class="ord-shot"><img alt="" data-ord-thumb="${escapeHtml(ph.path||'')}"
+              ${!ph.path&&ph.url?`src="${escapeHtml(ph.url)}" referrerpolicy="no-referrer"`:''}/></span>`:''}
+        <div style="flex:1;min-width:0;">
+          <p class="ord-desc">${desc}${consol?` <span class="hint" style="margin:0;">· freight ${escapeHtml(consol.freight_number)}</span>`:''}</p>
+          ${cbmLine(shipMeta.cbm[r.id],r)}
+        </div>
+      </div>
       ${progressBar(shipMeta.status[r.id])}
     </div>`;
   }).join('');
+  hydrateOrderThumbs();
+}
+// storage paths are private, so each thumbnail needs a signed URL; the cache
+// is shared with the rest of the app so a photo is only signed once an hour
+async function hydrateOrderThumbs(){
+  if(!sb) return;
+  for(const img of document.querySelectorAll('#shipmentList img[data-ord-thumb]')){
+    const path=img.getAttribute('data-ord-thumb');
+    if(!path) continue;                       // an imported link, already set
+    if(!photoUrlCache[path]){
+      const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(path,3600);
+      if(data&&data.signedUrl) photoUrlCache[path]=data.signedUrl;
+    }
+    if(photoUrlCache[path]) img.src=photoUrlCache[path];
+  }
 }
 // once any box on the order has been measured, its volume is worth seeing
 // without opening the order — it is what the freight is charged on
-function cbmLine(m){
+function cbmLine(m,row){
   if(!m||!m.total) return '';
-  return `<p class="hint" style="margin:2px 0 0;">`
-    +`<strong style="color:var(--ink);">${m.total.toFixed(4)} m³</strong>`
+  // what the volume is being charged, beside the volume itself — the two are
+  // read together, and opening the order to multiply them was the only way
+  const rate=row?Number(row.rmb_rate)||0:0;
+  const fee=m.rmb>0
+    ? ` · <strong style="color:var(--ink);">¥${m.rmb.toFixed(2)}</strong>`
+      +(rate?` <span style="opacity:.75;">= S$${(m.rmb/rate).toFixed(2)}</span>`:'')
+    : '';
+  return `<p class="hint" style="margin:3px 0 0;">`
+    +`<strong style="color:var(--ink);">${m.total.toFixed(4)} m³</strong>${fee}`
     +` · ${m.boxes} box${m.boxes>1?'es':''} measured</p>`;
 }
 // arrived-vs-ordered as a bar, so how far along an order is reads at a glance
@@ -6581,7 +6630,11 @@ async function exportShipmentWorkbook(){
     if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
     const [sh,it,al,bx,tr,co]=await Promise.all([
       sb.from('shipments').select('*').is('deleted_at',null).order('sort_order'),
-      sb.from('shipment_items').select('*'),
+      // the same ordering the detail screen reads in, so the sheet comes out
+      // in the order it was looked at rather than however the rows arrive
+      sb.from('shipment_items').select('*')
+        .order('sort_order',{ascending:true}).order('created_at',{ascending:true})
+        .order('id',{ascending:true}),
       sb.from('shipment_box_items').select('*'),
       sb.from('shipment_boxes').select('*'),
       sb.from('shipment_tracking').select('*'),
