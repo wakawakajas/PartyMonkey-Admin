@@ -5579,23 +5579,55 @@ async function pickImageFile(){
 const PHOTO_SLOTS='[data-item-photo-slot],[data-pk-photo],[data-sku-photo],[data-sku-shot],'
   +'[data-announce-add],[data-req-add-shot],[data-new-shot-add],[data-wh-box-shoot],'
   +'#boxPhotoBtn,#boxPhotoThumb,[data-pick]';
-let lastPhotoSlot=null;
-document.addEventListener('pointerdown',e=>{
-  const s=e.target.closest&&e.target.closest(PHOTO_SLOTS);
-  if(s) lastPhotoSlot=s;
+// Aiming at the 58px square itself is a fiddly thing to ask for. Anywhere on
+// the line will do: from wherever you are, walk outwards until you reach
+// something that owns exactly one picture square, and that is the one you
+// meant. One square is the test — a container holding two would be a guess.
+//
+// It also means the front and back of a print template are told apart by the
+// width and height fields beside each, and an order line by its SKU box.
+const PHOTO_LINE_REACH=6;
+function slotFor(el){
+  if(!el||!el.closest) return null;
+  const direct=el.closest(PHOTO_SLOTS);
+  if(direct) return direct;
+  let n=el;
+  for(let i=0;i<PHOTO_LINE_REACH&&n&&n!==document.body;i++){
+    if(n.querySelectorAll){
+      const found=n.querySelectorAll(PHOTO_SLOTS);
+      if(found.length===1) return found[0];
+      if(found.length>1) return null;      // an ambiguous line is not an answer
+    }
+    n=n.parentElement;
+  }
+  return null;
+}
+let lastPressEl=null,hoverEl=null;
+document.addEventListener('pointerdown',e=>{ lastPressEl=e.target; },true);
+// Pointing at a line is the plainest way of saying "that one", and it costs
+// nothing: clicking a slot opens a file dialog straight away on a desktop, so
+// requiring a click first would mean cancelling that dialog before pasting.
+// Mouse only — a touch has no hover, and on a phone every pointerover is
+// really a tap that is about to happen.
+document.addEventListener('pointerover',e=>{
+  if(e.pointerType&&e.pointerType!=='mouse') return;
+  hoverEl=e.target;
 },true);
 function pasteTargetSlot(){
-  const a=document.activeElement;
-  const focused=a&&a.closest&&a.closest(PHOTO_SLOTS);
-  if(focused) return focused;
   // A slot from a list that has since been redrawn is not on screen any more,
   // and pasting into it would go nowhere. getClientRects rather than
   // offsetParent, for the reason tabbableFields gives: the latter is null for
   // anything inside a fixed or transformed ancestor, which is most of a screen
   // mid-transition.
-  if(lastPhotoSlot&&lastPhotoSlot.isConnected&&lastPhotoSlot.getClientRects().length)
-    return lastPhotoSlot;
-  return null;
+  const live=el=>el&&el.isConnected&&el.getClientRects().length?el:null;
+  const a=document.activeElement;
+  // Typing somewhere says where you are more definitely than where the mouse
+  // has been left resting — so a picture pasted while filling in a line goes
+  // to that line.
+  if(a&&a.matches&&a.matches('input,textarea,[contenteditable]')){
+    const s=live(slotFor(a)); if(s) return s;
+  }
+  return live(slotFor(hoverEl))||live(slotFor(a))||live(slotFor(lastPressEl));
 }
 // The slot's own pick path is used, so a pasted picture travels exactly the
 // route a chosen one does — downscaled, previewed, and held until Submit on
@@ -5629,13 +5661,12 @@ function pasteIntoSlot(slot,file){
   return handled;
 }
 document.addEventListener('paste',e=>{
-  // the sheet does its own pasting while it is up, and a paste into a text
-  // field is a paste into a text field
-  if(document.querySelector('.sheet-bg.open')) return;
-  const t=e.target;
-  if(t&&t.matches&&t.matches('input,textarea,[contenteditable]')) return;
-  const slot=pasteTargetSlot(); if(!slot) return;
+  if(document.querySelector('.sheet-bg.open')) return;   // the sheet does its own
+  // Only a picture is ever claimed. Text pasted into a field is text pasted
+  // into a field, whatever line it happens to be on — which is why this asks
+  // what is on the clipboard before it asks where the cursor is.
   const f=imageFromPasteEvent(e); if(!f) return;
+  const slot=pasteTargetSlot(); if(!slot) return;
   e.preventDefault();
   pasteIntoSlot(slot,f);
 });
