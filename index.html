@@ -1391,6 +1391,29 @@ body{overflow-x:hidden;}
       <b style="color:var(--rust)">least</b>, whatever you call them. That is what lets a Monday and
       a Friday still be compared when the wording differs. Keep the names short — they sit under a
       circle on a phone.</p>
+    <!-- The written-each-day alternative. Off until it is turned on, and the
+         hand-written sets below carry on underneath it either way — if the
+         writing fails on any morning, that day falls back to them. -->
+    <div class="card"><div class="card-body" style="padding:14px;">
+      <div class="toggle-row" style="min-height:auto;margin-bottom:8px;">
+        <span style="flex:1;min-width:0;">
+          <strong style="font-family:'Space Grotesk',sans-serif;">Write it each day</strong>
+          <br/><span class="hint">Gemini writes the question and its four answers to your theme,
+          once each morning. Everyone gets the same one.</span>
+        </span>
+        <label class="switch"><input type="checkbox" id="energyGenOn"/><span class="slider"></span></label>
+      </div>
+      <label class="field" style="margin-bottom:8px;"><span>THIS WEEK’S THEME</span>
+        <input type="text" id="energyTheme" placeholder="e.g. the run-up to Christmas"/></label>
+      <p class="hint" style="margin:0 0 10px;">The theme colours the wording, it is not the subject —
+        “the Christmas rush” gives a question about capacity during a rush, not a question about Christmas.
+        Leave it empty for something general.</p>
+      <button class="btn-outline" id="energyThemeSave" style="width:100%;margin-bottom:8px;">Save theme</button>
+      <button class="btn-outline" id="energyGenNow" style="width:100%;">Write today’s question again</button>
+      <div id="energyGenPreview"></div>
+      <div id="energyThemeMsg"></div>
+    </div></div>
+    <div class="sect-label">Hand-written sets</div>
     <div id="energySets"><p class="hint" style="margin:4px 0 0;">Loading…</p></div>
     <button class="btn-outline" id="energyAddSet" style="width:100%;">+ Add a set <span id="energySetCount"></span></button>
     <div id="energyAdminMsg"></div>
@@ -7165,6 +7188,9 @@ function energyHash(key){
 // Knowing where yesterday landed means walking from somewhere, and the walk is
 // anchored at the first of January so it never reaches back more than a year.
 function energySetForDay(key){
+  // What was written for today wins outright. It is one question for the whole
+  // team, already stored, so there is nothing to draw.
+  if(energyWritten&&key===energyDayKey()) return energyWritten;
   const n=energySets.length;
   if(!n) return null;
   if(n===1) return energySets[0];
@@ -7189,10 +7215,13 @@ async function refreshEnergyCard(){
     sb.rpc('energy_mix',{d:day}),
     sb.rpc('energy_team_size')
   ]);
+  // asked for alongside, so a day with a written question needs no hand-written
+  // set behind it to show anything at all
+  await loadWrittenQuestion(day);
   // the table not being there yet is not an error worth shouting about — the
   // card simply does not appear until the migration has been run
-  if(setsRes.error||!(setsRes.data||[]).length){ card.style.display='none'; return; }
-  energySets=setsRes.data;
+  if(setsRes.error||(!(setsRes.data||[]).length&&!energyWritten)){ card.style.display='none'; return; }
+  energySets=setsRes.data||[];
   energyMine=mineRes.data?Number(mineRes.data.slot):null;
   energyOthers=[0,0,0,0];
   (mixRes.data||[]).forEach(r=>{ energyOthers[Number(r.slot)]=Number(r.n)||0; });
@@ -7301,8 +7330,12 @@ document.getElementById('energyFaces').addEventListener('click',async e=>{
   const before=energyMine;
   energyMine=slot; energyPicking=false;         // answer first, explain later
   renderEnergyCard();
+  // set_id is a real key into energy_sets, so a written question files as
+  // null: there is no row there to point at, and the day is enough to find it
+  // again in energy_generated, which is keyed by exactly that.
+  const written=set&&typeof set.id==='string'&&set.id.startsWith('written:');
   const {error}=await sb.from('energy_signals').upsert(
-    {user_id:session.user.id,day:energyDayKey(),slot,set_id:set?set.id:null},
+    {user_id:session.user.id,day:energyDayKey(),slot,set_id:(set&&!written)?set.id:null},
     {onConflict:'user_id,day'});
   if(error){
     energyMine=before; renderEnergyCard();
@@ -7312,8 +7345,75 @@ document.getElementById('energyFaces').addEventListener('click',async e=>{
   await refreshEnergyCard();
 });
 
+// ---- the written-each-day question ----
+// Asked for once when the card loads. Anything other than a set — the switch
+// off, no key, a model having a bad morning — leaves energyWritten null and
+// the hand-written draw carries the day, which is the point of keeping both.
+let energyWritten=null, energyTheme={theme:'',enabled:false};
+async function loadWrittenQuestion(day){
+  energyWritten=null;
+  if(!sb) return;
+  try{
+    const {data,error}=await invokeFn('energy-question',{day});
+    if(error||!data||!data.set) return;
+    const modes=typeof data.set.modes==='string'?JSON.parse(data.set.modes):data.set.modes;
+    if(!Array.isArray(modes)||modes.length!==4) return;
+    // shaped like a row from energy_sets, so everything downstream — the
+    // rendering, the answer, the mix — cannot tell the difference
+    energyWritten={id:'written:'+day,name:'Written today',question:data.set.question,
+                   modes,theme:data.set.theme||''};
+  }catch(e){ /* the day falls back to the sets */ }
+}
 // ---- the admin editor ----
 document.getElementById('goToEnergyBtn').addEventListener('click',()=>showScreen('energy'));
+async function refreshEnergyTheme(){
+  if(!sb) return;
+  const {data,error}=await sb.from('energy_theme').select('theme,enabled').eq('id',true).maybeSingle();
+  if(error||!data) return;                      // migration not run yet
+  energyTheme=data;
+  document.getElementById('energyTheme').value=data.theme||'';
+  document.getElementById('energyGenOn').checked=!!data.enabled;
+}
+document.getElementById('energyThemeSave').addEventListener('click',async()=>{
+  const msg=document.getElementById('energyThemeMsg');
+  const btn=document.getElementById('energyThemeSave');
+  const session=await requireSession(msg); if(!session) return;
+  btn.disabled=true;
+  const theme=document.getElementById('energyTheme').value.trim();
+  const enabled=document.getElementById('energyGenOn').checked;
+  const {error}=await sb.from('energy_theme')
+    .update({theme,enabled,updated_at:new Date().toISOString(),updated_by:session.user.id})
+    .eq('id',true);
+  btn.disabled=false;
+  if(error){ showMsg(msg,'Could not save: '+error.message,false); return; }
+  energyTheme={theme,enabled};
+  // today's question was already written to the old theme, and stays that way
+  // until it is asked for again — say so rather than let it look ignored
+  showMsg(msg,'✓ Saved.'+(enabled?' Today’s question was written to the previous theme — use the button below to write it again.':''),true);
+});
+document.getElementById('energyGenNow').addEventListener('click',async()=>{
+  const msg=document.getElementById('energyThemeMsg');
+  const out=document.getElementById('energyGenPreview');
+  const btn=document.getElementById('energyGenNow');
+  if(!document.getElementById('energyGenOn').checked){
+    showMsg(msg,'Turn “Write it each day” on and save first.',false); return;
+  }
+  btn.disabled=true; const label=btn.textContent; btn.textContent='Writing…';
+  out.innerHTML='';
+  const {data,error}=await invokeFn('energy-question',{day:energyDayKey(),force:true});
+  btn.disabled=false; btn.textContent=label;
+  if(error){ showMsg(msg,'Could not write it: '+await functionError(error),false); return; }
+  if(data&&data.error){ showMsg(msg,'Could not write it: '+data.error,false); return; }
+  if(!data||!data.set){ showMsg(msg,'Nothing came back — is the switch saved as on?',false); return; }
+  const modes=typeof data.set.modes==='string'?JSON.parse(data.set.modes):data.set.modes;
+  out.innerHTML=`<div class="calc" style="margin-top:10px;">
+    <strong style="color:var(--ink);">${escapeHtml(data.set.question)}</strong><br/>
+    ${(modes||[]).map((m,i)=>`${i+1}. ${escapeHtml(m.ico||'')} <strong style="color:var(--ink);">${escapeHtml(m.name||'')}</strong>
+       <span style="opacity:.75;">${escapeHtml(m.hint||'')}</span>`).join('<br/>')}
+    <br/><span style="opacity:.7;">most capacity first, least last</span></div>`;
+  msg.innerHTML='';
+  await refreshEnergyCard();
+});
 async function refreshEnergySets(){
   const el=document.getElementById('energySets');
   if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
@@ -7323,6 +7423,7 @@ async function refreshEnergySets(){
     return;
   }
   energySets=data||[];
+  await refreshEnergyTheme();
   renderEnergySets();
 }
 function renderEnergySets(){
@@ -7331,11 +7432,20 @@ function renderEnergySets(){
   document.getElementById('energySetCount').textContent=`· ${energySets.length} of ${ENERGY_MAX_SETS}`;
   add.disabled=energySets.length>=ENERGY_MAX_SETS;
   const live=energySetForDay(energyDayKey());
+  // a written question is today's, so none of these is — say so, rather than
+  // leave the list looking as though the draw had quietly stopped working
+  const writtenToday=live&&typeof live.id==='string'&&live.id.startsWith('written:');
   if(!energySets.length){
-    el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet, so nothing is asked —</p>';
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">'
+      +(writtenToday?'— none, and none needed while the question is written each day —'
+                    :'— none yet, so nothing is asked —')+'</p>';
     return;
   }
-  el.innerHTML=energySets.map(s=>{
+  const note=writtenToday
+    ? '<p class="hint" style="margin:0 0 8px;">Today’s question was written, so none of these is being '
+      +'asked. They are still here, and one of them is asked on any day the writing does not happen.</p>'
+    : '';
+  el.innerHTML=note+energySets.map(s=>{
     const modes=energyModes(s);
     return `<div class="setcard${live&&live.id===s.id?' today':''}" data-energy-set="${s.id}">
       <div class="set-top">
