@@ -7956,11 +7956,31 @@ let templateRows=[];
 async function refreshTemplateList(){
   const el=document.getElementById('templateList');
   if(!sb){ templateRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable — check your connection.</p>'; return; }
-  const {data,error}=await sb.from('templates').select('name,sort_order').order('sort_order',{ascending:true});
+  // id, because the list is shared now: two people may each have an "A6
+  // postcard", and a name no longer picks out one row
+  const {data,error}=await sb.from('templates').select('id,name,sort_order,user_id')
+    .order('sort_order',{ascending:true});
   if(error){ templateRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load templates.</p>'; return; }
   templateRows=data||[];
+  const {data:{session}}=await sb.auth.getSession();
+  myTemplateOwner=session?session.user.id:null;
+  // only worth naming an owner where a name is ambiguous; otherwise the list
+  // reads as it always did
+  const seen={};
+  templateRows.forEach(r=>{ seen[r.name]=(seen[r.name]||0)+1; });
+  templateRows.forEach(r=>{ r._ambiguous=seen[r.name]>1; });
+  if(templateRows.some(r=>r._ambiguous)) await loadTemplateOwners();
   renderTemplateList();
 }
+let myTemplateOwner=null, templateOwners={};
+// the same directory the request screen uses, so a shared template can say
+// whose it is without another table
+async function loadTemplateOwners(){
+  if(Object.keys(templateOwners).length) return;
+  const {data}=await sb.rpc('team_members');
+  (data||[]).forEach(m=>{ templateOwners[m.user_id]=String(m.email||'').split('@')[0]; });
+}
+const templateById=id=>templateRows.find(r=>String(r.id)===String(id))||null;
 // Templates live in a searchable dropdown rather than a long open list:
 // type to filter, pick one, then act on the selection.
 let selectedTemplate=null;
@@ -7972,11 +7992,13 @@ function comboOpen(open){
 }
 // the picked template is already shown in the combo input, so the only thing
 // selection needs to drive is whether Load and Delete are usable
-function setSelectedTemplate(name){
-  selectedTemplate=name||null;
+// holds the row's id now, not its name — see refreshTemplateList
+function setSelectedTemplate(id){
+  selectedTemplate=id||null;
   document.getElementById('loadTemplateBtn').disabled=!selectedTemplate;
   document.getElementById('deleteTemplateBtn').disabled=!selectedTemplate;
 }
+const selectedTemplateName=()=>{ const r=templateById(selectedTemplate); return r?r.name:''; };
 function renderTemplateList(){
   const el=document.getElementById('templateList');
   const raw=(document.getElementById('templateSearch').value||'').trim();
@@ -7984,13 +8006,19 @@ function renderTemplateList(){
   if(!templateRows.length){ el.innerHTML='<div class="combo-empty">No templates saved yet.</div>'; return; }
   // once a template is picked its name sits in the box; that shouldn't then
   // filter the list down to just itself when reopened
-  const filter=(q&&q!==String(selectedTemplate||'').toLowerCase())?q:'';
+  const filter=(q&&q!==selectedTemplateName().toLowerCase())?q:'';
   const rows=templateRows.filter(r=>!filter||r.name.toLowerCase().includes(filter));
   if(!rows.length){ el.innerHTML='<div class="combo-empty">No templates match “'+escapeHtml(raw)+'”.</div>'; return; }
   el.innerHTML=rows.map(r=>{
     const n=escapeHtml(r.name);
-    return `<div class="combo-opt${r.name===selectedTemplate?' active':''}" role="option" data-name="${n}">
-      <span class="nm">${n}</span>
+    // whose it is, but only where the name alone would not tell you
+    const who=r._ambiguous
+      ? ` <span class="hint" style="margin:0;">· ${escapeHtml(
+          r.user_id===myTemplateOwner?'yours':(templateOwners[r.user_id]||'someone else'))}</span>`
+      : '';
+    return `<div class="combo-opt${String(r.id)===String(selectedTemplate)?' active':''}"
+       role="option" data-id="${escapeHtml(String(r.id))}">
+      <span class="nm">${n}${who}</span>
     </div>`;
   }).join('');
 }
@@ -8003,9 +8031,8 @@ document.getElementById('templateCaret').addEventListener('click',()=>{
 });
 document.getElementById('templateList').addEventListener('click',e=>{
   const opt=e.target.closest('.combo-opt'); if(!opt) return;
-  const name=opt.dataset.name;
-  setSelectedTemplate(name);
-  document.getElementById('templateSearch').value=name;
+  setSelectedTemplate(opt.dataset.id);
+  document.getElementById('templateSearch').value=selectedTemplateName();
   comboOpen(false);
 });
 document.getElementById('loadTemplateBtn').addEventListener('click',()=>{
@@ -8037,7 +8064,10 @@ async function saveTemplate(){
     readLayoutInputs();
     const meta={name,paper:state.paper,layout:state.layout,placeholders:state.placeholders,
       showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate};
-    const isNew=!templateRows.some(r=>r.name===name);
+    // yours by that name, not anybody's — saving overwrites your own copy and
+    // never touches a colleague's, so somebody else's "A6 postcard" must not
+    // make this look like an existing one
+    const isNew=!templateRows.some(r=>r.name===name&&r.user_id===session.user.id);
     const payload={user_id:session.user.id,name,data:meta,updated_at:new Date().toISOString()};
     if(isNew) payload.sort_order=templateRows.length; // append new templates at the end
     const {error}=await sb.from('templates').upsert(payload,{onConflict:'user_id,name'});
@@ -8048,10 +8078,13 @@ async function saveTemplate(){
     showMsg(msgEl,'Could not save: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false;btn.textContent='Save template'; }
 }
-async function loadTemplate(name){
+async function loadTemplate(id){
   if(!sb){showMsg(msgEl,'Template sync unavailable — check your connection.',false);return;}
-  if(!name){showMsg(msgEl,'No template selected.',false);return;}
-  const {data,error}=await sb.from('templates').select('data').eq('name',name).single();
+  if(!id){showMsg(msgEl,'No template selected.',false);return;}
+  const row=templateById(id);
+  const name=row?row.name:'';
+  // by id: the list is shared, and two people may each have saved this name
+  const {data,error}=await sb.from('templates').select('data').eq('id',id).single();
   if(error||!data){showMsg(msgEl,'Could not find that template.',false);return;}
   const meta=data.data;
   state.paper=meta.paper||state.paper;
@@ -8077,10 +8110,19 @@ async function loadTemplate(name){
   renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();drawAll();
   showMsg(msgEl,'✓ Loaded "'+name+'"',true);
 }
-async function deleteTemplate(name){
+async function deleteTemplate(id){
   if(!sb){showMsg(msgEl,'Template sync unavailable — check your connection.',false);return;}
-  if(!name){showMsg(msgEl,'No template selected.',false);return;}
-  const {error}=await sb.from('templates').delete().eq('name',name);
+  if(!id){showMsg(msgEl,'No template selected.',false);return;}
+  const row=templateById(id);
+  const name=row?row.name:'';
+  // Somebody else's layout is deletable now, so it says so first. By id, or a
+  // shared name would take every copy of it with one tap.
+  if(row&&row.user_id&&row.user_id!==myTemplateOwner){
+    await loadTemplateOwners();          // names are only fetched when needed
+    const who=templateOwners[row.user_id]||'someone else';
+    if(!confirm('Delete "'+name+'"?\n\nThis one was saved by '+who+', and deleting it removes it for everybody.')) return;
+  }
+  const {error}=await sb.from('templates').delete().eq('id',id);
   if(error){showMsg(msgEl,'Could not delete: '+error.message,false);return;}
   await refreshTemplateList();
   showMsg(msgEl,'✓ Deleted "'+name+'"',true);
