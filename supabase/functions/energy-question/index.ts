@@ -40,19 +40,26 @@ const json = (body: unknown, status = 200) =>
 // should not mean a redeploy.
 const model = () => Deno.env.get("GEMINI_MODEL") || "gemini-3.6-flash";
 
-// The four slots always run most capacity first, least last. That ordering is
-// load-bearing — it is what lets a Monday and a Friday be compared when the
-// wording differs — so it is spelled out here, constrained by the schema
-// below, and checked again on the way out.
+// The theme is the subject: ask about the thing the admin typed. What stays
+// fixed is the shape of the answer — four choices, most first, least last.
+// That ordering is load-bearing. It is what the bar on the card is drawn from
+// and what lets a Monday and a Friday be compared when the wording differs, so
+// it is spelled out here, constrained by the schema below, and checked again
+// on the way out.
 const INSTRUCTION = `You write one short check-in question for a small
 warehouse and print shop team, asked once a day on their phones.
 
-The question asks how much capacity someone has today. It must be answerable
-by tapping one of exactly four choices.
+The theme you are given is the SUBJECT of the question. Ask about that thing.
+A theme of "the Christmas rush" gives a question about the Christmas rush. A
+theme of "the new warehouse" gives a question about the new warehouse. Do not
+translate the theme into a generic question and do not treat it as mere
+flavour.
 
-The four choices MUST be ordered from MOST capacity to LEAST capacity.
-Position carries the meaning: the first is someone with plenty in the tank,
-the fourth is someone who is running on empty. Never reorder them.
+It must be answerable by tapping one of exactly four choices, and those four
+MUST be ordered from MOST to LEAST on whatever scale the question implies —
+most ready to least ready, most confident to least, most capacity to least.
+Position carries the meaning: the first is the fullest answer, the fourth is
+the emptiest. Never reorder them.
 
 Each choice needs:
   ico  - one emoji, no text
@@ -61,12 +68,10 @@ Each choice needs:
 
 Rules:
 - Keep it warm and plain. No corporate language, no jargon, no exclamation marks.
-- Never ask about anything private: health, money, family, mood in a clinical
-  sense. Capacity for the day's work only.
-- The theme colours the wording, it is not the subject. A theme of
-  "the Christmas rush" gives a question about capacity during a rush, not a
-  question about Christmas.
-- Vary the wording day to day. Do not open with "How" every time.`;
+- Keep it about work. Do not ask for anything medical, financial or personal
+  about someone's home life, whatever the theme suggests.
+- Vary the wording day to day. Do not open with "How" every time.
+- With no theme given, ask how much capacity they have for the day's work.`;
 
 const SCHEMA = {
   type: "object",
@@ -147,8 +152,8 @@ async function writeQuestion(theme: string, day: string) {
   // The day goes in the prompt purely so two consecutive days do not come back
   // identical when the theme has not changed.
   const asked = theme.trim()
-    ? `This week's theme: ${theme.trim()}\nToday is ${day}. Write today's question.`
-    : `Today is ${day}. Write today's question. There is no theme this week, so keep it general.`;
+    ? `Subject: ${theme.trim()}\nToday is ${day}. Write today's question about that subject.`
+    : `Today is ${day}. Write today's question. No subject was given, so ask about capacity for the day's work.`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": key },
