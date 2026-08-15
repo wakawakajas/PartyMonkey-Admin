@@ -233,6 +233,34 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   padding:14px;padding-bottom:calc(14px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch;}
 .modal-scroll canvas{border:1px solid #555;}
 .zoom-btn{background:#333;border:1px solid #555;color:#fff;font-size:17px;min-height:36px;width:38px;border-radius:3px;}
+/* ---- the mark-up-a-photo screen ----
+   It sits above the plain photo viewer (70) because a picture can be opened
+   from inside a sheet, and this one is opened while a sheet is still closing.
+   The stage is a fixed box the picture is fitted into: the canvas must never
+   be taller than the screen, or the toolbar walks off the bottom on a phone
+   and there is no way to press Save. */
+#photoEditor{z-index:72;}
+.pe-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px;overflow:hidden;}
+.pe-stage canvas{max-width:100%;max-height:100%;width:auto;height:auto;border:1px solid #555;
+  border-radius:4px;background:#111;touch-action:none;cursor:crosshair;}
+.pe-bar{flex-shrink:0;background:#1b1b1b;display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+  padding:10px 12px;padding-bottom:calc(10px + env(safe-area-inset-bottom));
+  padding-left:calc(12px + env(safe-area-inset-left));
+  padding-right:calc(12px + env(safe-area-inset-right));}
+.pe-colors,.pe-sizes{display:flex;gap:8px;align-items:center;}
+/* a colour is its own label, so the swatch is the button — the picked one is
+   ringed rather than merely brighter, which survives a colour being white */
+.pe-swatch{width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border:2px solid #555;}
+.pe-swatch.on{border-color:#fff;box-shadow:0 0 0 2px #1b1b1b,0 0 0 4px #fff;}
+.pe-size{width:34px;height:30px;min-height:30px;padding:0;border-radius:8px;background:#333;
+  border:1px solid #555;display:flex;align-items:center;justify-content:center;}
+.pe-size.on{background:#fff;border-color:#fff;}
+.pe-size i{display:block;border-radius:50%;background:#fff;}
+.pe-size.on i{background:#1b1b1b;}
+.pe-tool{background:#333;border:1px solid #555;color:#fff;font-size:12px;min-height:34px;padding:0 12px;border-radius:8px;}
+.pe-tool:disabled{opacity:.4;}
+.pe-spacer{flex:1;min-width:0;}
+.pe-bar .btn-primary{min-height:34px;border-radius:8px;}
 /* a bare grey × on a dark bar is easy to miss, and this is the only way out
    of a full-screen photo — so it reads as a button */
 .close-btn{display:flex;align-items:center;justify-content:center;flex-shrink:0;
@@ -2266,6 +2294,26 @@ body{overflow-x:hidden;}
   </div>
   <div class="modal-scroll" id="photoModalBody">
     <img id="photoModalImg" alt="" style="max-width:100%;height:auto;cursor:zoom-in;"/>
+  </div>
+</div>
+
+<!-- Every picture on its way in stops here first, whether it came off the
+     camera, the library or the clipboard: mark it up, or just press Save. -->
+<div class="modal-bg" id="photoEditor">
+  <div class="modal-top">
+    <h4>Edit photo</h4>
+    <span class="zoomlbl" id="photoEditHint">draw on it, or just save</span>
+    <button class="close-btn" id="photoEditCancel">×</button>
+  </div>
+  <div class="pe-stage"><canvas id="photoEditCanvas"></canvas></div>
+  <div class="pe-bar">
+    <div class="pe-colors" id="photoEditColors"></div>
+    <div class="pe-sizes" id="photoEditSizes"></div>
+    <button class="pe-tool" id="photoEditRotate" title="Rotate">↻</button>
+    <button class="pe-tool" id="photoEditUndo" disabled>↶ Undo</button>
+    <button class="pe-tool" id="photoEditClear" disabled>Clear</button>
+    <span class="pe-spacer"></span>
+    <button class="btn-primary" id="photoEditSave">Save</button>
   </div>
 </div>
 
@@ -5747,7 +5795,7 @@ function askPhotoSource(){
 }
 // A picture pasted onto a slot is already here, so the question is not asked.
 let pastedFileWaiting=null;
-async function pickImageFile(){
+async function pickImageSourceFile(){
   if(pastedFileWaiting){ const f=pastedFileWaiting; pastedFileWaiting=null; return f; }
   const a=await askPhotoSource();
   if(!a) return null;
@@ -5761,6 +5809,200 @@ async function pickImageFile(){
     inp.oncancel=()=>res(null);
     inp.click();
   });
+}
+// ---- marking up a picture before it is used ----
+// A photo of a shelf or a bag is usually about one thing in it, and saying
+// which by circling it beats any amount of typing. So every picture stops on
+// this screen on its way in — draw on it or don't, then Save.
+//
+// Strokes are kept as points in 0..1 of the canvas rather than as pixels laid
+// down on it. That is what makes Undo a matter of dropping the last one and
+// drawing the rest again, and it is also what lets the picture be turned
+// without the marks sliding off the thing they were pointing at.
+const PHOTO_EDIT_MAX_PX=2000;            // far above what the upload path keeps
+const PHOTO_EDIT_COLORS=['#E64A19','#FFD400','#39FF6A','#20B7F3','#111111','#FFFFFF'];
+const PHOTO_EDIT_SIZES=[0.004,0.008,0.016];   // of the picture's longest side
+const photoEdit={img:null,rot:0,strokes:[],history:[],color:PHOTO_EDIT_COLORS[0],
+                 size:PHOTO_EDIT_SIZES[1],live:null,resolve:null,file:null};
+// turning a point a quarter turn with the picture it sits on
+const rotPtCW=p=>({x:1-p.y,y:p.x});
+const rotPtCCW=p=>({x:p.y,y:1-p.x});
+function photoEditRender(){
+  const c=document.getElementById('photoEditCanvas'),img=photoEdit.img;
+  if(!img) return;
+  const turned=photoEdit.rot%2===1;
+  const w=turned?img.height:img.width, h=turned?img.width:img.height;
+  if(c.width!==w||c.height!==h){ c.width=w; c.height=h; }
+  const ctx=c.getContext('2d');
+  ctx.save();
+  ctx.translate(w/2,h/2); ctx.rotate(photoEdit.rot*Math.PI/2);
+  ctx.drawImage(img,-img.width/2,-img.height/2);
+  ctx.restore();
+  // the longest side, so a line keeps its weight when the picture is turned
+  const unit=Math.max(w,h);
+  ctx.lineCap='round'; ctx.lineJoin='round';
+  const paint=s=>{
+    if(!s.pts.length) return;
+    ctx.strokeStyle=s.color; ctx.lineWidth=Math.max(1,s.size*unit);
+    ctx.beginPath();
+    ctx.moveTo(s.pts[0].x*w,s.pts[0].y*h);
+    if(s.pts.length===1) ctx.lineTo(s.pts[0].x*w+0.01,s.pts[0].y*h);   // a tap is a dot
+    else s.pts.slice(1).forEach(p=>ctx.lineTo(p.x*w,p.y*h));
+    ctx.stroke();
+  };
+  photoEdit.strokes.forEach(paint);
+  if(photoEdit.live) paint(photoEdit.live);
+}
+function photoEditSyncButtons(){
+  const any=photoEdit.history.length>0;
+  document.getElementById('photoEditUndo').disabled=!any;
+  document.getElementById('photoEditClear').disabled=!photoEdit.strokes.length;
+}
+function photoEditUndo(){
+  const last=photoEdit.history.pop();
+  if(!last) return;
+  if(last==='s') photoEdit.strokes.pop();
+  else{
+    photoEdit.rot=(photoEdit.rot+3)%4;
+    photoEdit.strokes.forEach(s=>{ s.pts=s.pts.map(rotPtCCW); });
+  }
+  photoEditRender(); photoEditSyncButtons();
+}
+function photoEditRotate(){
+  photoEdit.rot=(photoEdit.rot+1)%4;
+  photoEdit.strokes.forEach(s=>{ s.pts=s.pts.map(rotPtCW); });
+  photoEdit.history.push('r');
+  photoEditRender(); photoEditSyncButtons();
+}
+// Nothing was drawn and nothing was turned, so the file that came in is the
+// file that goes out — re-encoding an untouched photo only costs it detail.
+function photoEditResult(){
+  if(!photoEdit.history.length) return photoEdit.file;
+  const c=document.getElementById('photoEditCanvas');
+  return new Promise(res=>{
+    c.toBlob(b=>{
+      if(!b) return res(photoEdit.file);
+      const base=(photoEdit.file.name||'photo').replace(/\.[^.]+$/,'');
+      res(new File([b],base+'.jpg',{type:'image/jpeg',lastModified:Date.now()}));
+    },'image/jpeg',0.92);
+  });
+}
+function closePhotoEditor(file){
+  document.getElementById('photoEditor').classList.remove('open');
+  const done=photoEdit.resolve;
+  photoEdit.resolve=null; photoEdit.img=null; photoEdit.file=null;
+  photoEdit.strokes=[]; photoEdit.history=[]; photoEdit.live=null; photoEdit.rot=0;
+  if(done) done(file);
+}
+// Builds the colour and width buttons once, on first use.
+function photoEditBuildTools(){
+  const cw=document.getElementById('photoEditColors');
+  if(cw.children.length) return;
+  PHOTO_EDIT_COLORS.forEach(col=>{
+    const b=document.createElement('button');
+    b.className='pe-swatch'+(col===photoEdit.color?' on':'');
+    b.style.background=col; b.dataset.col=col;
+    b.setAttribute('aria-label','Draw in '+col);
+    b.onclick=()=>{
+      photoEdit.color=col;
+      [...cw.children].forEach(x=>x.classList.toggle('on',x.dataset.col===col));
+    };
+    cw.appendChild(b);
+  });
+  const sw=document.getElementById('photoEditSizes');
+  PHOTO_EDIT_SIZES.forEach((sz,i)=>{
+    const b=document.createElement('button');
+    b.className='pe-size'+(sz===photoEdit.size?' on':'');
+    b.dataset.size=sz;
+    b.setAttribute('aria-label',['Thin','Medium','Thick'][i]+' line');
+    const dot=document.createElement('i');
+    const px=[4,7,11][i]; dot.style.width=px+'px'; dot.style.height=px+'px';
+    b.appendChild(dot);
+    b.onclick=()=>{
+      photoEdit.size=sz;
+      [...sw.children].forEach(x=>x.classList.toggle('on',+x.dataset.size===sz));
+    };
+    sw.appendChild(b);
+  });
+}
+// Opens the screen on a file and resolves with what should be used in its
+// place — the same file if it was left alone, a new one if it was drawn on,
+// or null if the whole thing was called off.
+async function editPhotoFile(file){
+  if(!file||!/^image\//.test(file.type||'')) return file;   // not a picture to draw on
+  let img;
+  try{ img=await loadImage(await fileToDataURL(file)); }
+  catch(e){ return file; }                                   // unreadable here; let the upload path say so
+  // a phone photo is bigger than any screen and bigger than anything the
+  // upload keeps, and drawing on every one of those pixels costs a phone dearly
+  const s=Math.min(1,PHOTO_EDIT_MAX_PX/Math.max(img.naturalWidth,img.naturalHeight));
+  if(s<1){
+    const c=document.createElement('canvas');
+    c.width=Math.max(1,Math.round(img.naturalWidth*s));
+    c.height=Math.max(1,Math.round(img.naturalHeight*s));
+    c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+    img=await loadImage(c.toDataURL('image/jpeg',0.92));
+  }
+  photoEditBuildTools();
+  photoEdit.img=img; photoEdit.file=file;
+  photoEdit.rot=0; photoEdit.strokes=[]; photoEdit.history=[]; photoEdit.live=null;
+  document.getElementById('photoEditor').classList.add('open');
+  photoEditRender(); photoEditSyncButtons();
+  return new Promise(res=>{ photoEdit.resolve=res; });
+}
+(function wirePhotoEditor(){
+  const c=document.getElementById('photoEditCanvas');
+  // where a finger is, in 0..1 of the picture — the canvas is drawn at the
+  // photo's own size and shown at whatever size fits, so the two never match
+  const at=e=>{
+    const r=c.getBoundingClientRect();
+    return {x:Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),
+            y:Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))};
+  };
+  c.addEventListener('pointerdown',e=>{
+    if(!photoEdit.img) return;
+    e.preventDefault();
+    c.setPointerCapture(e.pointerId);
+    photoEdit.live={color:photoEdit.color,size:photoEdit.size,pts:[at(e)]};
+    photoEditRender();
+  });
+  c.addEventListener('pointermove',e=>{
+    if(!photoEdit.live) return;
+    photoEdit.live.pts.push(at(e));
+    photoEditRender();
+  });
+  const finish=()=>{
+    if(!photoEdit.live) return;
+    photoEdit.strokes.push(photoEdit.live);
+    photoEdit.history.push('s');
+    photoEdit.live=null;
+    photoEditRender(); photoEditSyncButtons();
+  };
+  c.addEventListener('pointerup',finish);
+  c.addEventListener('pointercancel',finish);
+  document.getElementById('photoEditUndo').onclick=photoEditUndo;
+  document.getElementById('photoEditRotate').onclick=photoEditRotate;
+  document.getElementById('photoEditClear').onclick=()=>{
+    // the marks go, a turn stays — Clear is about the drawing
+    photoEdit.strokes=[];
+    photoEdit.history=photoEdit.history.filter(h=>h==='r');
+    photoEditRender(); photoEditSyncButtons();
+  };
+  document.getElementById('photoEditSave').onclick=async()=>{
+    const out=await photoEditResult();
+    closePhotoEditor(out);
+  };
+  document.getElementById('photoEditCancel').onclick=()=>closePhotoEditor(null);
+  document.addEventListener('keydown',e=>{
+    if(!document.getElementById('photoEditor').classList.contains('open')) return;
+    if(e.key==='Escape'){ e.preventDefault(); closePhotoEditor(null); }
+    else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){ e.preventDefault(); photoEditUndo(); }
+  });
+})();
+async function pickImageFile(){
+  const f=await pickImageSourceFile();
+  if(!f) return null;
+  return await editPhotoFile(f);
 }
 // ---- Ctrl+V onto the slot you are on ----
 // Every square that takes a picture, so a paste can find the one being used.
@@ -5852,6 +6094,8 @@ function pasteIntoSlot(slot,file){
 }
 document.addEventListener('paste',e=>{
   if(document.querySelector('.sheet-bg.open')) return;   // the sheet does its own
+  // a picture is already on the mark-up screen; a second one would talk over it
+  if(document.getElementById('photoEditor').classList.contains('open')) return;
   // Only a picture is ever claimed. Text pasted into a field is text pasted
   // into a field, whatever line it happens to be on — which is why this asks
   // what is on the clipboard before it asks where the cursor is.
