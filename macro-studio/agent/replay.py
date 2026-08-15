@@ -1,0 +1,775 @@
+"""Background macro replay.
+
+Priority per step, matching the build spec exactly:
+  1. UIA invoke/toggle/select -- no cursor movement, works on unfocused
+     and partially covered windows. Default path.
+  2. PostMessage to the window (or specific child control), for controls
+     with no UIA pattern. Still no cursor movement.
+  3. Physical cursor/keyboard control -- last resort only, and only when
+     the caller explicitly passes allow_foreground=True. The web UI only
+     does that after warning the user, never automatically.
+
+Self-exclusion applies on replay exactly as it does on recording: a step
+is refused, not executed, if it targets a Macro Studio window.
+
+Key/hotkey steps carry no window of their own (position-based UIA
+capture doesn't apply to keystrokes), so they target whichever window
+the run's most recent click step resolved to -- never whatever the user
+happens to have focused live, since replay runs in the background while
+they keep working. A recording that starts with a keystroke before any
+click fails that step clearly rather than guessing.
+"""
+from __future__ import annotations
+
+import re
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from agent import actions, config, run_reports, self_exclusion, toast, uia, video, winapi
+
+_replay_lock = threading.Lock()
+
+MODIFIER_KEYS = ("ctrl", "alt", "shift", "win")
+POLL_INTERVAL = 0.2
+
+
+class ReplayBusyError(RuntimeError):
+    pass
+
+
+def _compare(actual, operator: str, expected: str) -> bool:
+    """Shared comparison logic for both conditional and until-loop
+    steps. Unknown operators are treated as never matching rather than
+    raising -- a typo in a hand-edited macro shouldn't crash a run."""
+    actual_s = str(actual)
+    if operator == "equals":
+        return actual_s == expected
+    if operator == "not_equals":
+        return actual_s != expected
+    if operator == "contains":
+        return expected in actual_s
+    if operator == "regex":
+        try:
+            return re.search(expected, actual_s) is not None
+        except re.error:
+            return False
+    if operator in ("greater_than", "less_than"):
+        try:
+            a, b = float(actual_s), float(expected)
+        except (TypeError, ValueError):
+            return False
+        return a > b if operator == "greater_than" else a < b
+    return False
+
+
+def _call_ok(fn) -> bool:
+    """Runs an attempt callable and normalizes its outcome to a bool: a
+    call that raises is a failure; one that returns None (most win32
+    calls) or True is a success; one that explicitly returns False
+    (a uia.try_* pattern call reporting "pattern not available") is not."""
+    try:
+        result = fn()
+        return True if result is None else bool(result)
+    except Exception:
+        return False
+
+
+def _is_self(hwnd: int) -> bool:
+    return self_exclusion.is_own_window(winapi.window_pid(hwnd), winapi.window_title(hwnd))
+
+
+def _find_window(window_info: dict) -> Optional[int]:
+    """Re-find the window a recorded step targeted. HWNDs (and even
+    titles) can change since recording, so this matches on the best
+    available signal: exact title, falling back to class name. Never
+    matches one of Macro Studio's own windows, even if generically
+    similar -- e.g. Macro Studio running in Chrome shouldn't shadow some
+    other Chrome window a step is trying to find."""
+    if not window_info:
+        return None
+    title = (window_info.get("title") or "").strip()
+    class_name = (window_info.get("class_name") or "").strip()
+    if not title and not class_name:
+        return None
+
+    same_class = None
+    for hwnd in winapi.enum_top_level_windows():
+        if _is_self(hwnd):
+            continue
+        if title and winapi.window_title(hwnd) == title:
+            return hwnd
+        if class_name and same_class is None and winapi.window_class_name(hwnd) == class_name:
+            same_class = hwnd
+    return same_class
+
+
+def _find_window_by_title_fragment(fragment: str) -> Optional[int]:
+    """Case-insensitive substring match against visible top-level window
+    titles, for the hand-typed "window title" field on Phase 7 steps --
+    exact matching is impractical to type by hand. Never matches one of
+    Macro Studio's own windows. If more than one window matches, the
+    first found wins (ambiguous on purpose rather than guessing further)."""
+    fragment = fragment.strip().lower()
+    if not fragment:
+        return None
+    for hwnd in winapi.enum_top_level_windows():
+        if _is_self(hwnd):
+            continue
+        if fragment in winapi.window_title(hwnd).lower():
+            return hwnd
+    return None
+
+
+def _resolve_click_target(step: dict) -> dict:
+    """Fresh hwnd/rect/pid for the window a click step targeted, plus a
+    live UIA element if the recorded semantic target can be re-matched."""
+    window_info = step.get("window") or {}
+    hwnd = _find_window(window_info)
+    resolved = {"hwnd": hwnd, "rect": None, "pid": None, "element": None}
+    if not hwnd:
+        return resolved
+    resolved["rect"] = dict(zip(("left", "top", "right", "bottom"), winapi.window_rect(hwnd)))
+    resolved["pid"] = winapi.window_pid(hwnd)
+
+    target = (step.get("semantic") or {}).get("target")
+    if target and (target.get("name") or target.get("automation_id")):
+        root = uia.element_from_handle(hwnd)
+        resolved["element"] = uia.find_descendant(root, target)
+    return resolved
+
+
+def _coords_for(step: dict, resolved: dict) -> tuple[int, int]:
+    """Coordinate fallback re-derived from the window's CURRENT position
+    plus the recorded window-relative offset -- not the stale absolute
+    screen coordinates, which break if the window has moved."""
+    rect = resolved.get("rect")
+    if rect and step.get("relative_x") is not None:
+        return rect["left"] + step["relative_x"], rect["top"] + step["relative_y"]
+    return step.get("x", 0), step.get("y", 0)
+
+
+class ReplayEngine:
+    def __init__(self, broadcast):
+        self._broadcast = broadcast
+        self._stop_event = threading.Event()
+        self._video_recorder: Optional[video.VideoRecorder] = None
+
+    def run(self, steps: list[dict], allow_foreground: bool = False,
+            macro_id: Optional[str] = None, macro_name: str = "(unsaved recording)",
+            video_config: Optional[dict] = None) -> dict:
+        if not _replay_lock.acquire(blocking=False):
+            raise ReplayBusyError("A replay is already in progress -- wait for it to finish or stop it first.")
+        self._stop_event.clear()
+        try:
+            return self._run_locked(steps, allow_foreground, macro_id, macro_name, video_config)
+        finally:
+            _replay_lock.release()
+
+    def request_stop(self) -> bool:
+        """Called from the Stop button (or the panic hotkey). Returns
+        False if nothing was running to stop."""
+        if _replay_lock.locked():
+            self._stop_event.set()
+            return True
+        return False
+
+    def _interruptible_sleep(self, seconds: float) -> bool:
+        """Sleeps in small increments, checking for a stop request.
+        Returns False if interrupted early."""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if self._stop_event.is_set():
+                return False
+            time.sleep(min(POLL_INTERVAL, max(0.0, deadline - time.time())))
+        return not self._stop_event.is_set()
+
+    def _run_locked(self, steps: list[dict], allow_foreground: bool, macro_id: Optional[str], macro_name: str,
+                     video_config: Optional[dict] = None) -> dict:
+        run_id = run_reports.new_run_id()
+        self._run_id = run_id  # read by _run_step_list for failure screenshots, incl. from nested blocks
+        started_at = datetime.now(timezone.utc).isoformat()
+        results: list[dict] = []
+        context = {"hwnd": None, "variables": {}}
+        exec_counter = [0]  # shared mutable counter -- results are numbered by actual execution
+        self._broadcast({"type": "run_state", "state": "running", "step_count": len(steps), "run_id": run_id})
+
+        video_path, video_error = self._start_video(run_id, video_config)
+        if video_error:
+            self._broadcast({"type": "video_error", "message": video_error})
+
+        completed = self._run_step_list(steps, allow_foreground, context, results, exec_counter)
+        stopped = not completed
+
+        if self._video_recorder is not None:
+            video_path = self._video_recorder.stop()
+            self._video_recorder = None
+
+        passed = sum(1 for r in results if r["status"] == "success")
+        failed = sum(1 for r in results if r["status"] == "failed")
+        summary = {"total": len(results), "passed": passed, "failed": failed, "stopped": stopped}
+        finished_at = datetime.now(timezone.utc).isoformat()
+
+        video_url = f"/runs/{run_id}/{Path(video_path).name}" if video_path else None
+        report = {
+            "results": results, "summary": summary, "started_at": started_at, "finished_at": finished_at,
+            "video": video_url, "video_error": video_error,
+        }
+        run_reports.save_report(run_id, macro_id, macro_name, report)
+
+        outcome_word = "stopped" if stopped else ("failed" if failed else "succeeded")
+        toast.notify(
+            f"Macro Studio -- {macro_name}",
+            f"Run {outcome_word}: {passed}/{len(results)} steps succeeded" + (f", {failed} failed" if failed else ""),
+            is_error=failed > 0 and not stopped,
+        )
+
+        self._broadcast({"type": "run_state", "state": "finished", "summary": summary, "run_id": run_id, "video": video_url})
+        return {**report, "run_id": run_id}
+
+    def _start_video(self, run_id: str, video_config: Optional[dict]) -> tuple[Optional[str], Optional[str]]:
+        """Returns (video_path placeholder, error message). video_path is
+        always None here -- the real path only exists once stop()
+        finalizes the file; this just starts capture (or explains why it
+        didn't) and stores the recorder on self for _run_locked to stop."""
+        self._video_recorder = None
+        if not video_config or not video_config.get("enabled"):
+            return None, None
+        output_path = config.RUNS_DIR / run_id / "recording.mp4"
+        recorder = video.VideoRecorder(
+            output_path,
+            mode=video_config.get("mode", "fullscreen"),
+            fps=video_config.get("fps", video.DEFAULT_FPS),
+            region=video_config.get("region"),
+            window_title=video_config.get("window_title"),
+        )
+        try:
+            recorder.start()
+        except RuntimeError as exc:
+            return None, str(exc)
+        self._video_recorder = recorder
+        return None, None
+
+    def _run_step_list(self, steps: list[dict], allow_foreground: bool, context: dict,
+                        results: list[dict], exec_counter: list[int]) -> bool:
+        """Runs a flat list of steps -- the top-level run, or a
+        conditional/loop's nested block -- appending each leaf step's
+        result to `results` in actual execution order (not list position,
+        since loops repeat and conditionals skip) and broadcasting it
+        live. Returns False if a stop was requested, in which case the
+        caller should unwind without running anything further."""
+        for i, step in enumerate(steps):
+            if self._stop_event.is_set():
+                return False
+
+            step_type = step.get("type")
+            if step_type == "conditional":
+                if not self._run_conditional(step, allow_foreground, context, results, exec_counter):
+                    return False
+                continue
+            if step_type == "loop":
+                if not self._run_loop(step, allow_foreground, context, results, exec_counter):
+                    return False
+                continue
+
+            expect_window_title = self._lookahead_window_title(steps, i)
+            result = self._run_step(step, allow_foreground, context, expect_window_title)
+            result["seq"] = exec_counter[0]
+            exec_counter[0] += 1
+
+            if result["status"] == "failed":
+                screenshot = run_reports.capture_failure_screenshot(self._run_id, result["seq"])
+                if screenshot:
+                    result["screenshot"] = screenshot
+
+            results.append(result)
+            self._broadcast({"type": "run_step_result", "result": result})
+
+            if self._stop_event.is_set():
+                return False
+            delay = min(step.get("delay_ms", 0) / 1000.0, 5.0)  # cap so one long idle gap can't hang a run
+            if delay > 0 and not self._interruptible_sleep(delay):
+                return False
+        return True
+
+    def _emit_meta_result(self, results: list[dict], exec_counter: list[int], step: dict, reason: str) -> None:
+        """A non-leaf progress marker (a conditional's branch choice, a
+        loop's iteration count) -- shown in the report like any other
+        step so the flow is legible, but always "success" since deciding
+        a branch/iteration isn't itself something that can fail."""
+        result = {
+            "status": "success", "tier": None, "reason": reason,
+            "step_id": step.get("id"), "seq": exec_counter[0], "duration_ms": 0,
+        }
+        exec_counter[0] += 1
+        results.append(result)
+        self._broadcast({"type": "run_step_result", "result": result})
+
+    def _run_conditional(self, step: dict, allow_foreground: bool, context: dict,
+                          results: list[dict], exec_counter: list[int]) -> bool:
+        var_name = step.get("variable", "")
+        operator = step.get("operator", "equals")
+        compare_value = actions.substitute(step.get("value", ""), context["variables"])
+        actual_value = context["variables"].get(var_name, "")
+        condition_met = _compare(actual_value, operator, compare_value)
+
+        branch_name = "then" if condition_met else "else"
+        self._emit_meta_result(
+            results, exec_counter, step,
+            f'If {var_name!r} {operator} {compare_value!r}: {actual_value!r} -> {condition_met} (running "{branch_name}").',
+        )
+        branch = step.get("then_steps" if condition_met else "else_steps", [])
+        return self._run_step_list(branch, allow_foreground, context, results, exec_counter)
+
+    def _run_loop(self, step: dict, allow_foreground: bool, context: dict,
+                  results: list[dict], exec_counter: list[int]) -> bool:
+        mode = step.get("mode", "count")
+        body = step.get("body_steps", [])
+        max_iterations = min(max(1, step.get("max_iterations", 100)), 1000)
+        iterations = min(max(0, step.get("count", 0)), max_iterations) if mode == "count" else max_iterations
+
+        for i in range(iterations):
+            if self._stop_event.is_set():
+                return False
+
+            if mode == "until":
+                var_name = step.get("variable", "")
+                operator = step.get("operator", "equals")
+                compare_value = actions.substitute(step.get("value", ""), context["variables"])
+                actual_value = context["variables"].get(var_name, "")
+                if _compare(actual_value, operator, compare_value):
+                    self._emit_meta_result(results, exec_counter, step,
+                                            f'Loop: {var_name!r} {operator} {compare_value!r} already true -- stopping after {i} iteration(s).')
+                    break
+
+            self._emit_meta_result(results, exec_counter, step, f"Loop iteration {i + 1}/{iterations}.")
+            if not self._run_step_list(body, allow_foreground, context, results, exec_counter):
+                return False
+        return True
+
+    @staticmethod
+    def _lookahead_window_title(steps: list[dict], i: int) -> Optional[str]:
+        """If the next click/double_click step targets a different window
+        than this one, this step is expected to open/switch to it -- e.g.
+        a "Save As..." menu click, or pressing Enter in a search box to
+        launch an app. Used to verify the step actually did something
+        instead of trusting a call that merely didn't error. For a
+        key/hotkey step (which has no window of its own), "this window"
+        is whatever the most recent preceding click targeted."""
+        step = steps[i]
+        step_type = step.get("type")
+        if step_type not in ("click", "double_click", "key", "hotkey", "keyboard_shortcut", "find_click_text"):
+            return None
+        if i + 1 >= len(steps):
+            return None
+        nxt = steps[i + 1]
+        if nxt.get("type") not in ("click", "double_click"):
+            return None
+        nxt_title = (nxt.get("window") or {}).get("title", "")
+        if not nxt_title:
+            return None
+
+        if step_type in ("click", "double_click"):
+            cur_title = (step.get("window") or {}).get("title", "")
+        else:
+            cur_title = None
+            for j in range(i - 1, -1, -1):
+                if steps[j].get("type") in ("click", "double_click"):
+                    cur_title = (steps[j].get("window") or {}).get("title", "")
+                    break
+        return nxt_title if nxt_title != cur_title else None
+
+    def _run_step(self, step: dict, allow_foreground: bool, context: dict, expect_window_title: Optional[str] = None) -> dict:
+        start = time.time()
+        step_type = step.get("type")
+        try:
+            if step_type in ("click", "double_click"):
+                outcome, resolved = self._run_click(step, allow_foreground, expect_window_title)
+                if resolved and resolved.get("hwnd"):
+                    context["hwnd"] = resolved["hwnd"]
+                    context["focus_element"] = resolved.get("element")  # may be None -- fine, gates itself
+            elif step_type in ("key", "hotkey", "keyboard_shortcut"):
+                outcome = self._run_key(step, allow_foreground, context, expect_window_title)
+            elif step_type == "scroll":
+                outcome = {"status": "skipped", "tier": None, "reason": "Scroll replay isn't implemented yet."}
+            elif step_type == "wait":
+                outcome = self._run_wait(step)
+            elif step_type == "wait_for_element":
+                outcome = self._run_wait_for_element(step, context)
+            elif step_type == "wait_for_text":
+                outcome = self._run_wait_for_text(step, context)
+            elif step_type == "find_click_text":
+                outcome = self._run_find_click_text(step, context, expect_window_title)
+            elif step_type == "open_url":
+                outcome = self._run_open_url(step, context)
+            elif step_type == "file_search":
+                outcome = self._run_file_search(step, context)
+            elif step_type == "file_op":
+                outcome = self._run_file_op(step, context)
+            elif step_type == "clipboard":
+                outcome = self._run_clipboard(step, context)
+            elif step_type == "get_cursor_position":
+                outcome = self._run_get_cursor_position(step, context)
+            elif step_type == "read_control_value":
+                outcome = self._run_read_control_value(step, context)
+            else:
+                outcome = {"status": "skipped", "tier": None, "reason": f"Unknown step type '{step_type}'."}
+        except Exception as exc:
+            outcome = {"status": "failed", "tier": None, "reason": f"Unexpected error: {exc}"}
+        outcome["step_id"] = step.get("id")
+        outcome["seq"] = step.get("seq")
+        outcome["duration_ms"] = round((time.time() - start) * 1000)
+        return outcome
+
+    def _run_wait(self, step: dict) -> dict:
+        """An explicit Wait step (added in the step editor, not recorded)
+        -- separate from delay_ms's idle-gap replay, which stays capped at
+        5s regardless. This is deliberate user intent, so it gets a more
+        generous cap."""
+        requested_ms = max(0, step.get("duration_ms", 0))
+        actual_ms = min(requested_ms, 30_000)
+        if not self._interruptible_sleep(actual_ms / 1000.0):
+            return {"status": "stopped", "tier": None, "reason": "Stopped by user."}
+        reason = None
+        if actual_ms < requested_ms:
+            reason = f"Capped at {actual_ms}ms (requested {requested_ms}ms)."
+        return {"status": "success", "tier": None, "reason": reason}
+
+    def _wait_for_window(self, title: str, timeout: float = 6.0) -> bool:
+        """Substring match, not exact -- a live page's title can drift
+        slightly from what was recorded (unread counts, trailing state),
+        and this is a "did something plausible happen" check, not a
+        precise re-identification (that's what _find_window is for)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._stop_event.is_set():
+                return False
+            if _find_window_by_title_fragment(title):
+                return True
+            time.sleep(0.1)
+        return False
+
+    def _resolve_window_for_step(self, step: dict, context: dict) -> Optional[int]:
+        """Steps that reference a window explicitly (window_title) use
+        that; otherwise they target whatever the run's most recent click
+        resolved to, same rule as key/hotkey steps."""
+        window_title = (step.get("window_title") or "").strip()
+        if window_title:
+            return _find_window_by_title_fragment(window_title)
+        return context.get("hwnd")
+
+    # -- Phase 7: extra action types --------------------------------------
+    def _run_wait_for_element(self, step: dict, context: dict) -> dict:
+        hwnd = self._resolve_window_for_step(step, context)
+        if not hwnd:
+            return {"status": "failed", "tier": None,
+                    "reason": "No window to search in -- set window_title, or click into a window first in this run."}
+        target = step.get("target", {})
+        timeout = min(max(0, step.get("timeout_ms", 5000)) / 1000.0, 60.0)
+        deadline = time.time() + timeout
+        while True:
+            if self._stop_event.is_set():
+                return {"status": "stopped", "tier": None, "reason": "Stopped by user."}
+            root = uia.element_from_handle(hwnd)
+            if uia.find_descendant(root, target) is not None:
+                return {"status": "success", "tier": "uia", "reason": "Element appeared."}
+            if time.time() >= deadline:
+                return {"status": "failed", "tier": None,
+                        "reason": f"Timed out after {round(timeout*1000)}ms waiting for element (name={target.get('name')!r})."}
+            time.sleep(0.2)
+
+    def _run_wait_for_text(self, step: dict, context: dict) -> dict:
+        hwnd = self._resolve_window_for_step(step, context)
+        if not hwnd:
+            return {"status": "failed", "tier": None, "reason": "No window to search in -- set window_title, or click into a window first in this run."}
+        target = step.get("target", {})
+        expected = actions.substitute(step.get("expected", ""), context["variables"])
+        is_regex = bool(step.get("is_regex"))
+        timeout = min(max(0, step.get("timeout_ms", 5000)) / 1000.0, 60.0)
+        deadline = time.time() + timeout
+        pattern = re.compile(expected) if is_regex else None
+        last_value = None
+        while True:
+            if self._stop_event.is_set():
+                return {"status": "stopped", "tier": None, "reason": "Stopped by user."}
+            root = uia.element_from_handle(hwnd)
+            element = uia.find_descendant(root, target)
+            if element is not None:
+                last_value = uia.get_current_value(element)
+                if last_value is not None:
+                    matched = pattern.search(last_value) if is_regex else last_value == expected
+                    if matched:
+                        return {"status": "success", "tier": "uia", "reason": f"Matched: {last_value!r}"}
+            if time.time() >= deadline:
+                return {"status": "failed", "tier": None,
+                        "reason": f"Timed out after {round(timeout*1000)}ms; last value was {last_value!r}, expected {expected!r}."}
+            time.sleep(0.2)
+
+    def _run_find_click_text(self, step: dict, context: dict, expect_window_title: Optional[str] = None) -> dict:
+        hwnd = self._resolve_window_for_step(step, context)
+        if not hwnd:
+            return {"status": "failed", "tier": None, "reason": "No window to search in -- set window_title, or click into a window first in this run."}
+        if self_exclusion.is_own_window(winapi.window_pid(hwnd), winapi.window_title(hwnd)):
+            return {"status": "failed", "tier": None, "reason": "Refusing to replay against Macro Studio's own window."}
+
+        elevation_reason = self._elevation_block_reason(winapi.window_pid(hwnd))
+        if elevation_reason:
+            return {"status": "failed", "tier": None, "reason": elevation_reason}
+
+        text = actions.substitute(step.get("text", ""), context["variables"])
+        if not text:
+            return {"status": "failed", "tier": None, "reason": "No text given to search for."}
+        root = uia.element_from_handle(hwnd)
+        element = uia.find_by_text(root, text, exact=bool(step.get("exact")))
+        if element is None:
+            return {"status": "failed", "tier": None, "reason": f'No element with text "{text}" found in this window.'}
+
+        if not _call_ok(lambda: uia.try_invoke(element) or uia.try_select(element) or uia.try_toggle(element)):
+            return {"status": "failed", "tier": None, "reason": f'Found "{text}" but it has no invokable UIA pattern (no PostMessage fallback for text-based targeting yet).'}
+        if expect_window_title and not self._wait_for_window(expect_window_title):
+            return {"status": "failed", "tier": None, "reason": f'Clicked "{text}" without error, but "{expect_window_title}" never appeared.'}
+
+        context["hwnd"] = hwnd
+        context["focus_element"] = element
+        return {"status": "success", "tier": "uia"}
+
+    def _run_open_url(self, step: dict, context: dict) -> dict:
+        url = actions.substitute(step.get("url", ""), context["variables"])
+        if not url:
+            return {"status": "failed", "tier": None, "reason": "No URL given."}
+        try:
+            actions.open_url_in_chrome(url)
+            return {"status": "success", "tier": None, "reason": f"Opened {url} in Chrome."}
+        except RuntimeError as exc:
+            return {"status": "failed", "tier": None, "reason": str(exc)}
+
+    def _run_file_search(self, step: dict, context: dict) -> dict:
+        folder = actions.substitute(step.get("folder", ""), context["variables"])
+        pattern = actions.substitute(step.get("pattern", "*"), context["variables"])
+        try:
+            matches = actions.search_files(folder, pattern, recursive=bool(step.get("recursive")))
+        except RuntimeError as exc:
+            return {"status": "failed", "tier": None, "reason": str(exc)}
+        store_as = step.get("store_as")
+        if store_as:
+            context["variables"][store_as] = matches
+        return {"status": "success", "tier": None, "reason": f"Found {len(matches)} match(es)."}
+
+    def _run_file_op(self, step: dict, context: dict) -> dict:
+        source = actions.substitute(step.get("source", ""), context["variables"])
+        destination = step.get("destination")
+        destination = actions.substitute(destination, context["variables"]) if destination else None
+        try:
+            message = actions.file_op(step.get("operation", ""), source, destination, overwrite=bool(step.get("overwrite")))
+            return {"status": "success", "tier": None, "reason": message}
+        except (RuntimeError, OSError) as exc:
+            return {"status": "failed", "tier": None, "reason": str(exc)}
+
+    def _run_clipboard(self, step: dict, context: dict) -> dict:
+        mode = step.get("mode", "write")
+        try:
+            if mode == "write":
+                value = actions.substitute(step.get("value", ""), context["variables"])
+                actions.clipboard_write(value)
+                return {"status": "success", "tier": None, "reason": f"Wrote {len(value)} character(s) to the clipboard."}
+            value = actions.clipboard_read()
+            store_as = step.get("store_as")
+            if store_as:
+                context["variables"][store_as] = value
+            return {"status": "success", "tier": None, "reason": f"Read {len(value)} character(s) from the clipboard."}
+        except RuntimeError as exc:
+            return {"status": "failed", "tier": None, "reason": str(exc)}
+
+    def _run_get_cursor_position(self, step: dict, context: dict) -> dict:
+        x, y = winapi.get_cursor_pos()
+        store_as = step.get("store_as")
+        if store_as:
+            context["variables"][store_as] = {"x": x, "y": y}
+        return {"status": "success", "tier": None, "reason": f"Cursor at ({x}, {y})."}
+
+    def _run_read_control_value(self, step: dict, context: dict) -> dict:
+        hwnd = self._resolve_window_for_step(step, context)
+        if not hwnd:
+            return {"status": "failed", "tier": None, "reason": "No window to search in -- set window_title, or click into a window first in this run."}
+        target = step.get("target", {})
+        root = uia.element_from_handle(hwnd)
+        element = uia.find_descendant(root, target)
+        if element is None:
+            return {"status": "failed", "tier": None, "reason": f"Element not found (name={target.get('name')!r})."}
+        value = uia.get_current_value(element)
+        if value is None:
+            return {"status": "failed", "tier": None, "reason": "Element has no readable value (no ValuePattern)."}
+        store_as = step.get("store_as")
+        if store_as:
+            context["variables"][store_as] = value
+        return {"status": "success", "tier": "uia", "reason": f"Read: {value!r}"}
+
+    # -- click/double-click ------------------------------------------------
+    def _run_click(self, step: dict, allow_foreground: bool, expect_window_title: Optional[str] = None) -> tuple[dict, Optional[dict]]:
+        resolved = _resolve_click_target(step)
+        hwnd = resolved.get("hwnd")
+
+        if hwnd is None:
+            window_title = (step.get("window") or {}).get("title", "")
+            return {"status": "failed", "tier": None,
+                    "reason": f'Could not find the target window "{window_title}" -- it may be closed.'}, None
+
+        if self_exclusion.is_own_window(resolved.get("pid"), winapi.window_title(hwnd)):
+            return {"status": "failed", "tier": None,
+                    "reason": "Refusing to replay against Macro Studio's own window."}, resolved
+
+        elevation_reason = self._elevation_block_reason(resolved.get("pid"))
+        if elevation_reason:
+            return {"status": "failed", "tier": None, "reason": elevation_reason}, resolved
+
+        x, y = _coords_for(step, resolved)
+        cx, cy = winapi.screen_to_client(hwnd, x, y)
+        target_hwnd = winapi.child_window_from_point(hwnd, cx, cy)
+        element = resolved.get("element")
+        button = step.get("button", "left")
+        double = step_is_double(step)
+
+        attempts: list[tuple[str, object]] = []
+        if element is not None:
+            attempts.append(("uia", lambda: uia.try_invoke(element) or uia.try_select(element) or uia.try_toggle(element)))
+        attempts.append(("postmessage", lambda: winapi.post_click(target_hwnd, cx, cy, button, double=double)))
+        if allow_foreground:
+            attempts.append(("cursor", lambda: winapi.physical_move_and_click(x, y, button, double=double)))
+
+        tier_notes = {
+            "postmessage": "No UIA pattern was available; sent as a posted click. Double-check this control actually reacted.",
+            "cursor": "Used physical cursor control (foreground).",
+        }
+
+        for tier, action in attempts:
+            if not _call_ok(action):
+                continue
+            if expect_window_title and not self._wait_for_window(expect_window_title):
+                continue  # call didn't error, but the expected window never showed up -- escalate
+            return {"status": "success", "tier": tier, "reason": tier_notes.get(tier)}, resolved
+
+        if expect_window_title:
+            if not allow_foreground:
+                return {"status": "failed", "tier": "cursor_required",
+                        "reason": f'Ran without error but "{expect_window_title}" never appeared -- may need real mouse input. Re-run with foreground execution allowed.'}, resolved
+            return {"status": "failed", "tier": None,
+                    "reason": f'Tried UIA, posted click, and physical click, but "{expect_window_title}" never appeared -- this app may need more time, or the recording needs redoing here.'}, resolved
+
+        if not allow_foreground:
+            return {"status": "failed", "tier": "cursor_required",
+                    "reason": "Needs to take over your mouse (no UIA pattern or posted click worked) -- re-run with foreground execution allowed."}, resolved
+        return {"status": "failed", "tier": None, "reason": "Physical click was attempted but still failed."}, resolved
+
+    # -- key/hotkey ----------------------------------------------------------
+    def _run_key(self, step: dict, allow_foreground: bool, context: dict, expect_window_title: Optional[str] = None) -> dict:
+        hwnd = context.get("hwnd")
+        if not hwnd:
+            return {"status": "failed", "tier": None,
+                    "reason": "No prior click in this run established which window to type into."}
+
+        if self_exclusion.is_own_window(winapi.window_pid(hwnd), winapi.window_title(hwnd)):
+            return {"status": "failed", "tier": None, "reason": "Refusing to replay against Macro Studio's own window."}
+
+        elevation_reason = self._elevation_block_reason(winapi.window_pid(hwnd))
+        if elevation_reason:
+            return {"status": "failed", "tier": None, "reason": elevation_reason}
+
+        keys = step.get("keys", [])
+
+        # Prefer UIA SetValue on the most recently clicked element over
+        # synthetic keystrokes, per spec -- far more reliable than posted
+        # or physical keys for standard edit controls (including most
+        # Windows common-dialog text fields, e.g. a Save As filename box).
+        # Skipped entirely when this key is expected to open a new window
+        # (e.g. Enter in a search box) -- SetValue can't do that.
+        focus_element = context.get("focus_element")
+        if focus_element is not None and not expect_window_title:
+            current = uia.get_current_value(focus_element)
+            if current is not None:
+                new_value = None
+                if len(keys) == 1 and len(keys[0]) == 1:
+                    new_value = current + keys[0]
+                elif keys == ["backspace"] and current:
+                    new_value = current[:-1]
+                if new_value is not None and uia.try_set_value(focus_element, new_value):
+                    return {"status": "success", "tier": "uia", "reason": "Set via UIA ValuePattern instead of synthetic keystrokes."}
+
+        attempts: list[tuple[str, object]] = [("postmessage", lambda: self._post_keys(hwnd, keys))]
+        if allow_foreground:
+            attempts.append(("cursor", lambda: self._physical_keys(keys)))
+
+        tier_notes = {
+            "postmessage": "Sent as posted key events. Some apps ignore posted keys for shortcuts/accelerators.",
+            "cursor": "Used physical keyboard input (foreground).",
+        }
+
+        for tier, action in attempts:
+            if not _call_ok(action):
+                continue
+            if expect_window_title and not self._wait_for_window(expect_window_title):
+                continue  # didn't error, but the expected window never showed up -- escalate
+            return {"status": "success", "tier": tier, "reason": tier_notes.get(tier)}
+
+        if expect_window_title:
+            if not allow_foreground:
+                return {"status": "failed", "tier": "cursor_required",
+                        "reason": f'Ran without error but "{expect_window_title}" never appeared -- may need real keyboard input. Re-run with foreground execution allowed.'}
+            return {"status": "failed", "tier": None,
+                    "reason": f'Tried posted and physical keys, but "{expect_window_title}" never appeared -- this app may need more time, or the recording needs redoing here.'}
+
+        if not allow_foreground:
+            return {"status": "failed", "tier": "cursor_required",
+                    "reason": "Needs to send real keystrokes (posted keys didn't work) -- re-run with foreground execution allowed."}
+        return {"status": "failed", "tier": None, "reason": "Physical keys were attempted but still failed."}
+
+    def _post_keys(self, hwnd: int, keys: list[str]) -> None:
+        modifiers = [k for k in keys if k in MODIFIER_KEYS]
+        main_keys = [k for k in keys if k not in MODIFIER_KEYS]
+        for mod in modifiers:
+            vk = winapi.vk_for(mod)
+            if vk:
+                winapi.post_key_down(hwnd, vk)
+        for k in main_keys:
+            if len(k) == 1 and not modifiers:
+                winapi.post_char(hwnd, k)
+            else:
+                vk = winapi.vk_for(k)
+                if vk:
+                    winapi.post_key_down(hwnd, vk)
+                    winapi.post_key_up(hwnd, vk)
+        for mod in reversed(modifiers):
+            vk = winapi.vk_for(mod)
+            if vk:
+                winapi.post_key_up(hwnd, vk)
+
+    def _physical_keys(self, keys: list[str]) -> None:
+        modifiers = [k for k in keys if k in MODIFIER_KEYS]
+        main_keys = [k for k in keys if k not in MODIFIER_KEYS]
+        for mod in modifiers:
+            vk = winapi.vk_for(mod)
+            if vk:
+                winapi.physical_key(vk, key_up=False)
+        for k in main_keys:
+            vk = winapi.vk_for(k)
+            if vk:
+                winapi.physical_key(vk, key_up=False)
+                winapi.physical_key(vk, key_up=True)
+        for mod in reversed(modifiers):
+            vk = winapi.vk_for(mod)
+            if vk:
+                winapi.physical_key(vk, key_up=True)
+
+    def _elevation_block_reason(self, pid: Optional[int]) -> Optional[str]:
+        if pid is None:
+            return None
+        target_elevated = winapi.is_process_elevated(pid)
+        if target_elevated and not winapi.is_self_elevated():
+            return ("Target app appears to be running elevated (as Administrator) but Macro Studio is not -- "
+                    "restart Macro Studio as Administrator to control it.")
+        return None
+
+
+def step_is_double(step: dict) -> bool:
+    return step.get("type") == "double_click"
