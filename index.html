@@ -1403,6 +1403,28 @@ body{overflow-x:hidden;}
       Completed requests are cleared out three days after they are finished.</p>
   </div>
 
+  <!-- MACRO STUDIO -->
+  <div class="home-wrap" id="macroStudioScreen" style="display:none;">
+    <h1>Macro Studio</h1>
+    <p class="sub">A separate Windows desktop tool for recording and replaying clicks and
+      keystrokes in the background. Runs locally on your own PC — download it once, then
+      Start Program launches whatever's installed on this computer.</p>
+
+    <div class="card"><div class="card-body" style="padding:14px;">
+      <button class="btn-primary" id="macroStudioDownloadBtn" style="width:100%;">Download Macro Studio (.zip)</button>
+      <p class="hint" id="macroStudioBuildInfo" style="margin:8px 0 0;"></p>
+      <button class="btn-outline" id="macroStudioUploadBtn" style="width:100%;margin-top:10px;" hidden>Upload new build&hellip;</button>
+      <div id="macroStudioMsg"></div>
+    </div></div>
+
+    <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
+      <h2 style="margin:0 0 6px;font-size:15px;">Already installed?</h2>
+      <p class="sub" style="margin:0 0 10px;">If you've already run <code>start.bat</code> once on
+        this PC, this starts it directly and opens its page.</p>
+      <button class="btn-primary" id="macroStudioStartBtn" style="width:100%;">Start Program</button>
+    </div></div>
+  </div>
+
   <!-- USERS & ACCESS (admins only) -->
   <!-- ENERGY QUESTION SETS (admins only) -->
   <div class="home-wrap" id="energyScreen" style="display:none;">
@@ -2955,7 +2977,7 @@ const SCREEN_EL={home:'homeScreen',tool:'toolLandingScreen','tool-custom':'appSc
   'adhoc':'adhocStoreScreen','adhoc-list':'adhocScreen',
   'adhoc-detail':'adhocDetailScreen','adhoc-trash':'adhocTrashScreen',
   'warehouse':'warehouseScreen','skus':'skusScreen','request':'requestScreen',
-  'calculator':'calculatorScreen'};
+  'calculator':'calculatorScreen','macro-studio':'macroStudioScreen'};
 // which permission each screen sits behind; anything unlisted is always open
 const SCREEN_SECTION={tool:'print','tool-custom':'print',
   shipment:'shipping','shipment-add':'shipping','shipment-detail':'shipping',
@@ -2964,7 +2986,7 @@ const SCREEN_SECTION={tool:'print','tool-custom':'print',
   consol:'shipping','consol-detail':'shipping',calendar:'shipping',trash:'shipping',
   pickup:'pickup',users:'admin',energy:'admin',
   adhoc:'adhoc','adhoc-list':'adhoc','adhoc-detail':'adhoc','adhoc-trash':'adhoc',
-  skus:'adhoc',warehouse:'warehouse',calculator:'calculator'};
+  skus:'adhoc',warehouse:'warehouse',calculator:'calculator','macro-studio':'macro_studio'};
 const SCREENS=Object.keys(SCREEN_EL);
 // ---- the add buttons, lifted clear of the animated screens ----
 // Each is written inside the screen it belongs to, so it stays next to the
@@ -3080,7 +3102,7 @@ function applyAccess(){
                ['goToWarehouseBtn','warehouse'],['navWarehouseBtn','warehouse'],
                ['goToCalculatorBtn','calculator'],
                ['goToMacroStudioBtn','macro_studio'],
-               ['navUsersBtn','admin']];
+               ['navUsersBtn','admin'],['macroStudioUploadBtn','admin']];
   pairs.forEach(([id,sec])=>{ const el=document.getElementById(id); if(el) el.style.display=may(sec)?'':'none'; });
   const none=!may('print')&&!may('shipping')&&!may('pickup');
   const note=document.getElementById('homeNoAccess');
@@ -3236,6 +3258,7 @@ function showScreen(name,viaBack){
   if(name==='skus') refreshSkus();
   if(name==='request') refreshRequests();
   if(name==='calculator') openCalculator();
+  if(name==='macro-studio') refreshMacroStudio();
   // nothing to go back to from the first screen of the session
   document.getElementById('navBackBtn').disabled=!navStack.length;
   // a new screen starts at the top, so the button should not be left showing
@@ -3449,15 +3472,80 @@ document.getElementById('navWarehouseBtn').addEventListener('click',()=>showScre
 // deliberately not in SCREEN_SECTION: anyone with an account can be asked for
 // something, so gating this would only make people unreachable
 document.getElementById('goToRequestBtn').addEventListener('click',()=>showScreen('request'));
-// Macro Studio is a separate local desktop tool -- each machine runs its own copy.
-// The macrostudio:// link is registered by that machine's start.bat (per-user
-// registry, no admin needed) and points at THAT install: it launches the agent
-// if it's not already running, then opens the UI -- so this always reaches
-// whichever instance belongs to the person clicking it, never a shared one.
-// A PC that has never run start.bat has no handler registered yet -- the
-// browser's own "no app found" prompt is what tells them that, same as any
-// other unregistered custom link, no special-casing needed here.
-document.getElementById('goToMacroStudioBtn').addEventListener('click',()=>{ window.location.href='macrostudio://launch'; });
+// Macro Studio is a separate local desktop tool, downloaded once and then run
+// from each person's own PC -- the tile opens an in-app screen with a
+// Download, an admin-only Upload, and a Start Program button, rather than
+// jumping straight to the local agent (which a first-time visitor won't have
+// installed yet).
+document.getElementById('goToMacroStudioBtn').addEventListener('click',()=>showScreen('macro-studio'));
+
+const MACRO_STUDIO_BUCKET='macro-studio-builds';
+const MACRO_STUDIO_BUILD_PATH='latest/MacroStudio-Setup.zip';
+
+async function refreshMacroStudio(){
+  document.getElementById('macroStudioUploadBtn').hidden=!access.admin;
+  const info=document.getElementById('macroStudioBuildInfo');
+  if(!sb){ info.textContent=''; return; }
+  try{
+    const {data,error}=await sb.storage.from(MACRO_STUDIO_BUCKET).list('latest');
+    if(error) throw error;
+    const file=(data||[]).find(f=>f.name==='MacroStudio-Setup.zip');
+    info.textContent=file
+      ? `Current build: updated ${new Date(file.updated_at||file.created_at).toLocaleDateString()}`
+      : 'No build has been uploaded yet.';
+  }catch(err){
+    info.textContent='';
+  }
+}
+
+document.getElementById('macroStudioDownloadBtn').addEventListener('click',async()=>{
+  const msg=document.getElementById('macroStudioMsg');
+  const session=await requireSession(msg); if(!session) return;
+  showMsg(msg,'Preparing download…',true);
+  try{
+    const {data,error}=await sb.storage.from(MACRO_STUDIO_BUCKET)
+      .createSignedUrl(MACRO_STUDIO_BUILD_PATH,3600,{download:'MacroStudio-Setup.zip'});
+    if(error) throw error;
+    window.location.href=data.signedUrl;
+    showMsg(msg,'✓ Download starting.',true);
+  }catch(err){
+    showMsg(msg,'No build has been uploaded yet, or the download failed: '+((err&&err.message)||'unknown error'),false);
+  }
+});
+
+document.getElementById('macroStudioUploadBtn').addEventListener('click',()=>{
+  if(!access.admin) return;
+  const msg=document.getElementById('macroStudioMsg');
+  const inp=document.createElement('input');
+  inp.type='file'; inp.accept='.zip,application/zip';
+  inp.onchange=async()=>{
+    const file=inp.files[0]; if(!file) return;
+    const session=await requireSession(msg); if(!session) return;
+    const btn=document.getElementById('macroStudioUploadBtn');
+    btn.disabled=true; const label=btn.textContent; btn.textContent='Uploading…';
+    try{
+      const {error}=await sb.storage.from(MACRO_STUDIO_BUCKET)
+        .upload(MACRO_STUDIO_BUILD_PATH,file,{contentType:'application/zip',upsert:true});
+      if(error) throw error;
+      showMsg(msg,'✓ Build uploaded.',true);
+      refreshMacroStudio();
+    }catch(err){
+      showMsg(msg,'Could not upload: '+((err&&err.message)||'unknown error'),false);
+    }finally{
+      btn.disabled=false; btn.textContent=label;
+    }
+  };
+  inp.click();
+});
+
+// The macrostudio:// link is registered by that machine's own start.bat
+// (per-user registry, no admin needed) and points at THAT install: it
+// launches the agent if it's not already running, then opens the UI -- so
+// this always reaches whichever instance belongs to the person clicking it,
+// never a shared one. A PC that has never run start.bat has no handler
+// registered yet -- the browser's own "no app found" prompt is what tells
+// them that; the Download button above is how they fix that.
+document.getElementById('macroStudioStartBtn').addEventListener('click',()=>{ window.location.href='macrostudio://launch'; });
 
 // ---------- ad-hoc picking ----------
 // A pick list made up on the spot: add an order, search the warehouse
