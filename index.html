@@ -2143,12 +2143,34 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <label class="switch"><input type="checkbox" id="gtHoleOn"/><span class="slider"></span></label>
     </div>
     <div class="grid3e" id="gtHoleFields" style="margin-bottom:14px;">
-      <label class="field"><span>X (% ACROSS)</span><input type="number" step="0.5" id="gtHoleX" value="50"/></label>
-      <label class="field"><span>Y (% DOWN)</span><input type="number" step="0.5" id="gtHoleY" value="8"/></label>
+      <label class="field"><span>X (mm ACROSS)</span><input type="number" step="0.1" id="gtHoleX"/></label>
+      <label class="field"><span>Y (mm DOWN)</span><input type="number" step="0.1" id="gtHoleY"/></label>
       <label class="field"><span>DIAMETER (mm)</span><input type="number" step="0.1" id="gtHoleD" value="4"/></label>
     </div>
 
     <div class="sect-label">Text fields</div>
+    <!-- Lining boxes up by eye, or by keying percentages, is the fiddliest part
+         of setting a design up. Tick the ones that belong together and move
+         them against the artwork in one go. -->
+    <div class="bulkbar">
+      <button class="btn-outline btn-sm" id="gtPickAllBtn">Select all</button>
+      <span class="n" id="gtPickCount">none ticked</span>
+      <div class="seg" id="gtAlignModeSeg" style="max-width:180px;">
+        <button type="button" data-gtam="together" class="on">Together</button>
+        <button type="button" data-gtam="each">Each</button>
+      </div>
+    </div>
+    <p class="hint" style="margin:0 0 8px;">“Together” keeps the ticked boxes arranged as they are and moves them as one. “Each” lines every ticked box up on its own.</p>
+    <div class="grid3e" style="margin-bottom:6px;">
+      <button class="btn-outline btn-sm" data-gtalign="left" disabled>⇤ Left</button>
+      <button class="btn-outline btn-sm" data-gtalign="cx" disabled>↔ Centre</button>
+      <button class="btn-outline btn-sm" data-gtalign="right" disabled>Right ⇥</button>
+    </div>
+    <div class="grid3e" style="margin-bottom:12px;">
+      <button class="btn-outline btn-sm" data-gtalign="top" disabled>⇧ Top</button>
+      <button class="btn-outline btn-sm" data-gtalign="cy" disabled>↕ Middle</button>
+      <button class="btn-outline btn-sm" data-gtalign="bottom" disabled>⇩ Bottom</button>
+    </div>
     <div id="gtFieldList"></div>
     <button class="btn-outline" id="gtAddFieldBtn" style="width:100%;margin-top:10px;">+ Add a text field</button>
 
@@ -11581,12 +11603,26 @@ function gtRenderTextList(){
   const el=document.getElementById('gtTextPanel');
   el.innerHTML=hits.length?hits.map(t=>`<div class="combo-opt" data-gt-text="${t.id}">
       <span class="nm" title="${escapeHtml(t.text)}">${escapeHtml(t.name)} — ${escapeHtml(t.text)}</span>
+      <button class="icon-btn" data-gt-edit-text title="Rename or reword">✎</button>
       <button class="icon-btn" data-gt-del-text title="Remove">×</button></div>`).join('')
     :`<div class="combo-empty">${gtLib.texts.length?'nothing matches':'no phrases saved yet'}</div>`;
 }
 document.getElementById('gtTextPanel').addEventListener('click',async e=>{
   const row=e.target.closest('[data-gt-text]'); if(!row) return;
   const id=row.dataset.gtText;
+  if(e.target.closest('[data-gt-edit-text]')){
+    const t=gtLib.texts.find(x=>x.id===id); if(!t) return;
+    // the wording is what usually needs changing, so it is asked for second and
+    // an empty answer leaves the phrase exactly as it was
+    const name=(prompt('Name for this phrase',t.name)||'').trim();
+    if(!name) return;
+    const text=prompt('The words',t.text);
+    if(text===null) return;
+    t.name=name; t.text=text;
+    await gtSaveLib(); gtRenderTextList(); gtRenderOrder();
+    if(currentScreen==='tool-gift-tag-design') gtRenderFields();
+    return;
+  }
   if(e.target.closest('[data-gt-del-text]')){
     gtLib.texts=gtLib.texts.filter(t=>t.id!==id);
     await gtSaveLib(); gtRenderTextList(); gtRenderOrder();
@@ -12212,13 +12248,80 @@ let gtEditSel=null, gtEditDrag=null;
   c.addEventListener('pointerup',stop);
   c.addEventListener('pointercancel',stop);
 })();
+// ---------- lining boxes up ----------
+// Fields are stored as fractions of the artwork rect, so the artwork is simply
+// 0 to 1 in both directions and every sum below is against those edges.
+const gtFieldPick=new Set();
+let gtAlignMode='together';
+function gtSyncPickBar(){
+  const d=gtCurrentDesign;
+  const n=d?d.fields.filter(f=>gtFieldPick.has(f.id)).length:0;
+  document.getElementById('gtPickCount').textContent=
+    n?`${n} ticked`:'none ticked';
+  document.querySelectorAll('[data-gtalign]').forEach(b=>{ b.disabled=!n; });
+  const all=d&&d.fields.length&&n===d.fields.length;
+  document.getElementById('gtPickAllBtn').textContent=all?'Select none':'Select all';
+}
+function gtAlign(how){
+  const d=gtCurrentDesign; if(!d) return;
+  const picked=d.fields.filter(f=>gtFieldPick.has(f.id));
+  if(!picked.length) return;
+  if(gtAlignMode==='each'){
+    picked.forEach(f=>{
+      if(how==='left') f.x=0;
+      else if(how==='cx') f.x=(1-f.w)/2;
+      else if(how==='right') f.x=1-f.w;
+      else if(how==='top') f.y=0;
+      else if(how==='cy') f.y=(1-f.h)/2;
+      else if(how==='bottom') f.y=1-f.h;
+    });
+  }else{
+    // one box round the lot, moved as a unit so the arrangement inside it holds
+    const x0=Math.min(...picked.map(f=>f.x)), y0=Math.min(...picked.map(f=>f.y));
+    const x1=Math.max(...picked.map(f=>f.x+f.w)), y1=Math.max(...picked.map(f=>f.y+f.h));
+    let dx=0,dy=0;
+    if(how==='left') dx=-x0;
+    else if(how==='cx') dx=(1-(x1-x0))/2-x0;
+    else if(how==='right') dx=1-x1;
+    else if(how==='top') dy=-y0;
+    else if(how==='cy') dy=(1-(y1-y0))/2-y0;
+    else if(how==='bottom') dy=1-y1;
+    picked.forEach(f=>{ f.x+=dx; f.y+=dy; });
+  }
+  gtRenderFields(); gtDrawDesign();
+}
+document.querySelectorAll('[data-gtalign]').forEach(b=>{
+  b.addEventListener('click',()=>gtAlign(b.dataset.gtalign));
+});
+document.querySelectorAll('#gtAlignModeSeg button').forEach(b=>{
+  b.addEventListener('click',()=>{
+    gtAlignMode=b.dataset.gtam;
+    document.querySelectorAll('#gtAlignModeSeg button').forEach(x=>x.classList.toggle('on',x===b));
+  });
+});
+document.getElementById('gtPickAllBtn').addEventListener('click',()=>{
+  const d=gtCurrentDesign; if(!d) return;
+  const all=d.fields.length&&d.fields.every(f=>gtFieldPick.has(f.id));
+  gtFieldPick.clear();
+  if(!all) d.fields.forEach(f=>gtFieldPick.add(f.id));
+  gtRenderFields();
+});
 function gtRenderFields(){
   const d=gtCurrentDesign; if(!d) return;
   const wrap=document.getElementById('gtFieldList');
+  gtSyncPickBar();
   if(!d.fields.length){ wrap.innerHTML='<p class="hint" style="margin:0;">No text fields yet.</p>'; return; }
+  // Boxes are held as fractions of the artwork so a design keeps its layout at
+  // any tag size, but nobody measures a gift tag in percentages. The artwork's
+  // own size on the sheet turns them into millimetres for the form and back
+  // again on the way in.
+  const A=gtEditGeom().art;
   wrap.innerHTML='<div class="ph-list list-full">'+d.fields.map((f,i)=>`
     <div class="ph-card${f===gtEditSel?' is-picked':''}" data-gt-field="${f.id}">
-      <div class="ph-card-head"><span>Field ${i+1}</span>
+      <div class="ph-card-head">
+        <input type="checkbox" class="pick" data-gt-pick${gtFieldPick.has(f.id)?' checked':''}
+               title="Tick to line this box up with the others"/>
+        <span style="flex:1;">Field ${i+1}</span>
         <button class="del-btn" data-gt-del-field title="Remove">×</button></div>
       <div class="grid2" style="margin-bottom:7px;">
         <label class="field"><span>LABEL</span>
@@ -12249,10 +12352,10 @@ function gtRenderFields(){
         <button type="button" data-align="right" class="${f.align==='right'?'on':''}">Right</button>
       </div>
       <div class="grid4">
-        <label class="field"><span>X %</span><input type="number" step="0.5" value="${round(f.x*100)}" data-gtd="x"/></label>
-        <label class="field"><span>Y %</span><input type="number" step="0.5" value="${round(f.y*100)}" data-gtd="y"/></label>
-        <label class="field"><span>W %</span><input type="number" step="0.5" value="${round(f.w*100)}" data-gtd="w"/></label>
-        <label class="field"><span>H %</span><input type="number" step="0.5" value="${round(f.h*100)}" data-gtd="h"/></label>
+        <label class="field"><span>X mm</span><input type="number" step="0.1" value="${round(f.x*A.w)}" data-gtd="x"/></label>
+        <label class="field"><span>Y mm</span><input type="number" step="0.1" value="${round(f.y*A.h)}" data-gtd="y"/></label>
+        <label class="field"><span>W mm</span><input type="number" step="0.1" value="${round(f.w*A.w)}" data-gtd="w"/></label>
+        <label class="field"><span>H mm</span><input type="number" step="0.1" value="${round(f.h*A.h)}" data-gtd="h"/></label>
       </div>
     </div>`).join('')+'</div>';
 }
@@ -12276,15 +12379,25 @@ document.getElementById('gtFieldList').addEventListener('input',e=>{
   if(k==='name'||k==='def'||k==='color'||k==='font') f[k]=e.target.value;
   else if(k==='size') f.size=Math.max(0.5,Number(e.target.value)||f.size);
   else if(k==='rot') f.rot=Number(e.target.value)||0;
-  else f[k]=Math.min(1,Math.max(0,(Number(e.target.value)||0)/100));
+  else{
+    const A=gtEditGeom().art;
+    const span=(k==='x'||k==='w')?A.w:A.h;
+    f[k]=span?Math.min(1,Math.max(0,(Number(e.target.value)||0)/span)):0;
+  }
   gtDrawDesign();
 });
 document.getElementById('gtFieldList').addEventListener('click',async e=>{
   const d=gtCurrentDesign; if(!d) return;
   const card=e.target.closest('[data-gt-field]'); if(!card) return;
   const f=d.fields.find(x=>x.id===card.dataset.gtField); if(!f) return;
+  if(e.target.matches('[data-gt-pick]')){
+    if(e.target.checked) gtFieldPick.add(f.id); else gtFieldPick.delete(f.id);
+    gtSyncPickBar();
+    return;
+  }
   if(e.target.closest('[data-gt-del-field]')){
     d.fields=d.fields.filter(x=>x!==f);
+    gtFieldPick.delete(f.id);
     if(gtEditSel===f) gtEditSel=null;
     gtRenderFields(); gtDrawDesign();
     return;
@@ -12307,7 +12420,11 @@ document.getElementById('gtDesignName').addEventListener('input',e=>{
     const d=gtCurrentDesign; if(!d) return;
     const v=Number(e.target.value)||0;
     if(id==='gtHoleD') d.hole.d=Math.max(0.5,v);
-    else d.hole[id==='gtHoleX'?'x':'y']=Math.min(1,Math.max(0,v/100));
+    else{
+      const A=gtEditGeom().art;
+      const span=id==='gtHoleX'?A.w:A.h;
+      d.hole[id==='gtHoleX'?'x':'y']=span?Math.min(1,Math.max(0,v/span)):0;
+    }
     gtDrawDesign();
   });
 });
@@ -12360,11 +12477,13 @@ function gtDesignOpen(){
   document.getElementById('gtDesignName').value=d.name||'';
   document.getElementById('gtHoleOn').checked=d.hole.on;
   document.getElementById('gtHoleFields').style.display=d.hole.on?'':'none';
-  document.getElementById('gtHoleX').value=round(d.hole.x*100);
-  document.getElementById('gtHoleY').value=round(d.hole.y*100);
+  const A=gtEditGeom().art;
+  document.getElementById('gtHoleX').value=round(d.hole.x*A.w);
+  document.getElementById('gtHoleY').value=round(d.hole.y*A.h);
   document.getElementById('gtHoleD').value=d.hole.d;
   document.getElementById('gtGuideOver').checked=!!gtSheet.guideOver;
   gtEditSel=null;
+  gtFieldPick.clear();      // a tick belongs to the design it was made on
   gtRenderFields(); gtDrawDesign();
 }
 
