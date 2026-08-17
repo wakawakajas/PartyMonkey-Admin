@@ -11158,6 +11158,7 @@ function gtNormalizeDesign(d){
   return {id:d.id||gtId('d'),name:d.name||'Untitled',file:d.file||'',
     fields:(d.fields||[]).map(f=>({id:f.id||gtId('f'),name:f.name||'Text',def:f.def||'',
       font:f.font||'',size:Number(f.size)||6,color:f.color||'#232323',align:f.align||'center',
+      rot:Number(f.rot)||0,
       x:Number(f.x)||0,y:Number(f.y)||0,w:Number(f.w)||0.8,h:Number(f.h)||0.2})),
     hole:{on:!!(d.hole&&d.hole.on),x:Number(d.hole&&d.hole.x)||0.5,
           y:Number(d.hole&&d.hole.y)||0.08,d:Number(d.hole&&d.hole.d)||4}};
@@ -11401,6 +11402,8 @@ function gtVal(line,f){
   return {text:v.text===undefined?(f.def||''):v.text,
           font:v.font===undefined?f.font:v.font,
           size:Number(v.size||f.size)||6,
+          rot:v.rot===undefined?(Number(f.rot)||0):(Number(v.rot)||0),
+          align:v.align||f.align||'center',
           dx:Number(v.dx)||0, dy:Number(v.dy)||0};
 }
 // The words on a design, in the artwork rect they are positioned against.
@@ -11413,13 +11416,19 @@ function gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc){
     if(!v.text) return;
     const bx=ax+f.x*aw+v.dx, by=ay+f.y*ah+v.dy, bw=f.w*aw, bh=f.h*ah;
     ctx.save();
+    // turned about the middle of its own box, so a rotated line stays where it
+    // was put rather than swinging off the tag
+    if(v.rot){
+      const cx=(bx+bw/2)*sc, cy=(by+bh/2)*sc;
+      ctx.translate(cx,cy); ctx.rotate(v.rot*Math.PI/180); ctx.translate(-cx,-cy);
+    }
     ctx.fillStyle=f.color||'#232323';
     ctx.font=(v.size*sc)+'px '+gtFamily(v.font);
     ctx.textBaseline='alphabetic';
     const lines=gtWrap(ctx,v.text,bw*sc);
     const lh=v.size*1.25;
-    ctx.textAlign=f.align||'center';
-    const tx=f.align==='left'?bx:f.align==='right'?bx+bw:bx+bw/2;
+    ctx.textAlign=v.align;
+    const tx=v.align==='left'?bx:v.align==='right'?bx+bw:bx+bw/2;
     // the block of lines is centred in the box, whatever it grew to
     let ty=by+(bh-lines.length*lh)/2+lh*0.8;
     lines.forEach(ln=>{ ctx.fillText(ln,tx*sc,ty*sc); ty+=lh; });
@@ -11641,13 +11650,19 @@ function gtRenderOrder(){
         <div class="grid2" style="margin-bottom:7px;">
           <label class="field"><span>FONT</span>
             <select data-gtf="${f.id}|font">${gtFontOptions(v.font)}</select></label>
-          <label class="field"><span>SIZE (mm)</span>
-            <input type="number" step="0.1" min="0.5" value="${v.size}" data-gtf="${f.id}|size"/></label>
+          <label class="field"><span>ALIGN</span>
+            <select data-gtf="${f.id}|align">${
+              ['left','center','right'].map(a=>`<option value="${a}"${a===v.align?' selected':''}>${
+                a==='left'?'Left':a==='center'?'Centre':'Right'}</option>`).join('')}</select></label>
         </div>
-        <div class="grid2">
-          <label class="field"><span>NUDGE X (mm)</span>
+        <div class="grid4">
+          <label class="field"><span>SIZE mm</span>
+            <input type="number" step="0.1" min="0.5" value="${v.size}" data-gtf="${f.id}|size"/></label>
+          <label class="field"><span>ROT °</span>
+            <input type="number" step="1" value="${v.rot}" data-gtf="${f.id}|rot"/></label>
+          <label class="field"><span>NUDGE X</span>
             <input type="number" step="0.5" value="${v.dx}" data-gtf="${f.id}|dx"/></label>
-          <label class="field"><span>NUDGE Y (mm)</span>
+          <label class="field"><span>NUDGE Y</span>
             <input type="number" step="0.5" value="${v.dy}" data-gtf="${f.id}|dy"/></label>
         </div>`;
     }).join(''):'';
@@ -11689,7 +11704,7 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
   const [fid,key]=fk.split('|');
   line.vals=line.vals||{};
   const v=line.vals[fid]||(line.vals[fid]={});
-  v[key]=(key==='text'||key==='font')?e.target.value:Number(e.target.value)||0;
+  v[key]=(key==='text'||key==='font'||key==='align')?e.target.value:Number(e.target.value)||0;
   gtDraw();
 });
 document.getElementById('gtOrderList').addEventListener('click',async e=>{
@@ -12111,6 +12126,9 @@ function gtDrawDesign(){
     const x=(art.x+f.x*art.w)*sc, y=(art.y+f.y*art.h)*sc;
     const bw=f.w*art.w*sc, bh=f.h*art.h*sc;
     ctx.save();
+    if(f.rot){                                   // the box turns with its words
+      ctx.translate(x+bw/2,y+bh/2); ctx.rotate(f.rot*Math.PI/180); ctx.translate(-x-bw/2,-y-bh/2);
+    }
     ctx.strokeStyle=f===gtEditSel?'#4C7BB2':'#B24C25';
     ctx.setLineDash([4,3]); ctx.lineWidth=1.5;
     ctx.strokeRect(x,y,bw,bh);
@@ -12142,7 +12160,21 @@ let gtEditSel=null, gtEditDrag=null;
     const r=c.getBoundingClientRect(), g=gtEditGeom();
     const mx=(e.clientX-r.left)/r.width*g.tag.w;
     const my=(e.clientY-r.top)/r.height*g.tag.h;
-    return {x:(mx-g.art.x)/g.art.w,y:(my-g.art.y)/g.art.h};
+    return {x:(mx-g.art.x)/g.art.w,y:(my-g.art.y)/g.art.h,mx,my,g};
+  };
+  // A turned box is still a box from its own point of view, so the tap is
+  // turned back the other way and tested against the upright one. It has to be
+  // done in millimetres: the fractions are of an artwork rect that is rarely
+  // square, and an angle does not survive being measured in two different units.
+  const localFrac=(p,f,g)=>{
+    const bx=g.art.x+f.x*g.art.w, by=g.art.y+f.y*g.art.h;
+    const bw=f.w*g.art.w, bh=f.h*g.art.h;
+    let dx=p.mx-(bx+bw/2), dy=p.my-(by+bh/2);
+    if(f.rot){
+      const a=-f.rot*Math.PI/180, cs=Math.cos(a), sn=Math.sin(a);
+      [dx,dy]=[dx*cs-dy*sn,dx*sn+dy*cs];
+    }
+    return {u:bw?(dx+bw/2)/bw:0, v:bh?(dy+bh/2)/bh:0};
   };
   c.addEventListener('pointerdown',e=>{
     const d=gtCurrentDesign; if(!d) return;
@@ -12150,9 +12182,10 @@ let gtEditSel=null, gtEditDrag=null;
     // topmost first, so a box drawn over another takes the tap
     for(let i=d.fields.length-1;i>=0;i--){
       const f=d.fields[i];
-      const inside=p.x>=f.x&&p.x<=f.x+f.w&&p.y>=f.y&&p.y<=f.y+f.h;
+      const l=localFrac(p,f,p.g);
+      const inside=l.u>=0&&l.u<=1&&l.v>=0&&l.v<=1;
       if(!inside) continue;
-      const near=(p.x>f.x+f.w-0.06)&&(p.y>f.y+f.h-0.09);
+      const near=l.u>0.92&&l.v>0.86;
       gtEditSel=f;
       gtEditDrag={f,mode:near?'resize':'move',px:p.x,py:p.y,x:f.x,y:f.y,w:f.w,h:f.h};
       c.setPointerCapture(e.pointerId);
@@ -12206,14 +12239,14 @@ function gtRenderFields(){
       <div class="grid2" style="margin-bottom:7px;">
         <label class="field"><span>COLOUR</span>
           <input type="text" value="${escapeHtml(f.color)}" data-gtd="color" placeholder="#232323"/></label>
-        <div>
-          <div class="slot-label">Align</div>
-          <div class="seg" data-gt-align>
-            <button type="button" data-align="left" class="${f.align==='left'?'on':''}">Left</button>
-            <button type="button" data-align="center" class="${f.align==='center'?'on':''}">Centre</button>
-            <button type="button" data-align="right" class="${f.align==='right'?'on':''}">Right</button>
-          </div>
-        </div>
+        <label class="field"><span>ROTATION (°)</span>
+          <input type="number" step="1" value="${round(f.rot)}" data-gtd="rot"/></label>
+      </div>
+      <div class="slot-label">Align</div>
+      <div class="seg" data-gt-align style="margin-bottom:7px;">
+        <button type="button" data-align="left" class="${f.align==='left'?'on':''}">Left</button>
+        <button type="button" data-align="center" class="${f.align==='center'?'on':''}">Centre</button>
+        <button type="button" data-align="right" class="${f.align==='right'?'on':''}">Right</button>
       </div>
       <div class="grid4">
         <label class="field"><span>X %</span><input type="number" step="0.5" value="${round(f.x*100)}" data-gtd="x"/></label>
@@ -12242,6 +12275,7 @@ document.getElementById('gtFieldList').addEventListener('input',e=>{
   const k=e.target.dataset.gtd; if(!k) return;
   if(k==='name'||k==='def'||k==='color'||k==='font') f[k]=e.target.value;
   else if(k==='size') f.size=Math.max(0.5,Number(e.target.value)||f.size);
+  else if(k==='rot') f.rot=Number(e.target.value)||0;
   else f[k]=Math.min(1,Math.max(0,(Number(e.target.value)||0)/100));
   gtDrawDesign();
 });
@@ -12262,7 +12296,7 @@ document.getElementById('gtFieldList').addEventListener('click',async e=>{
 document.getElementById('gtAddFieldBtn').addEventListener('click',()=>{
   const d=gtCurrentDesign; if(!d) return;
   d.fields.push({id:gtId('f'),name:'Text '+(d.fields.length+1),def:'',font:'',size:6,
-    color:'#232323',align:'center',x:0.12,y:0.2+d.fields.length*0.12,w:0.76,h:0.16});
+    color:'#232323',align:'center',rot:0,x:0.12,y:0.2+d.fields.length*0.12,w:0.76,h:0.16});
   gtRenderFields(); gtDrawDesign();
 });
 document.getElementById('gtDesignName').addEventListener('input',e=>{
