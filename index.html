@@ -11280,6 +11280,43 @@ function gtElPathData(el){
   }
   return '';
 }
+// A cutting file rarely draws one path per tag. A row, or a whole sheet, is
+// usually one path holding a closed subpath for each shape — and taken whole
+// that is a single placeholder the size of the row. Each subpath is a tag, so
+// the path is broken back up into them.
+//
+// Relative subpaths start where the one before them ended, so they cannot
+// simply be lifted out. The browser is asked where that was and the subpath is
+// rewritten to start there in absolute terms.
+function gtSplitSubpaths(svg,d){
+  const parts=String(d||'').match(/[Mm][^Mm]*/g);
+  if(!parts||parts.length<2) return null;
+  const tmp=document.createElementNS('http://www.w3.org/2000/svg','path');
+  svg.appendChild(tmp);
+  const out=[];
+  let sofar='';
+  try{
+    for(const part of parts){
+      let abs=part;
+      if(part[0]==='m'){
+        const m=/^m\s*(-?[\d.eE+-]+)[\s,]+(-?[\d.eE+-]+)([\s\S]*)$/.exec(part);
+        if(!m){ sofar+=part; continue; }
+        let ex=0,ey=0;
+        if(sofar){
+          tmp.setAttribute('d',sofar);
+          const len=tmp.getTotalLength();
+          const p=tmp.getPointAtLength(len);      // where the previous subpath left off
+          ex=p.x; ey=p.y;
+        }
+        abs='M'+(ex+parseFloat(m[1]))+' '+(ey+parseFloat(m[2]))+m[3];
+      }
+      out.push(abs);
+      sofar+=part;
+    }
+  }catch(e){ svg.removeChild(tmp); return null; }
+  svg.removeChild(tmp);
+  return out.length>1?out:null;
+}
 // the box a transformed shape occupies, from the corners of its own box
 function gtMapBox(bb,m){
   const pt=(x,y)=>({x:m.a*x+m.c*y+m.e,y:m.b*x+m.d*y+m.f});
@@ -11320,17 +11357,25 @@ function gtBuildLayout(text){
     svg.querySelectorAll('path,rect,circle,ellipse,polygon,polyline').forEach(el=>{
       const d=gtElPathData(el); if(!d) return;
       const m=typeof el.getCTM==='function'?el.getCTM():null;
-      const p=new Path2D();
-      if(m) p.addPath(new Path2D(d),new DOMMatrix([m.a,m.b,m.c,m.d,m.e,m.f]));
-      else p.addPath(new Path2D(d));
-      let b;
-      try{
-        const bb=el.getBBox();
-        b=m?gtMapBox(bb,m):{x:bb.x,y:bb.y,w:bb.width,h:bb.height};
-      }catch(e){ return; }
-      if(!(b.w>0.5&&b.h>0.5)) return;             // a rule or a fold mark, not a tag
-      if(b.w*b.h>area*0.9) return;                // the sheet's own border, not a tag
-      shapes.push({path:p,bbox:b});
+      // each closed loop in the element is its own tag
+      const pieces=gtSplitSubpaths(el.ownerSVGElement||svg,d)||[d];
+      const measure=document.createElementNS('http://www.w3.org/2000/svg','path');
+      (el.parentNode||svg).appendChild(measure);
+      pieces.forEach(pd=>{
+        const p=new Path2D();
+        if(m) p.addPath(new Path2D(pd),new DOMMatrix([m.a,m.b,m.c,m.d,m.e,m.f]));
+        else p.addPath(new Path2D(pd));
+        let b;
+        try{
+          measure.setAttribute('d',pd);
+          const bb=measure.getBBox();
+          b=m?gtMapBox(bb,m):{x:bb.x,y:bb.y,w:bb.width,h:bb.height};
+        }catch(e){ return; }
+        if(!(b.w>0.5&&b.h>0.5)) return;           // a rule or a fold mark, not a tag
+        if(b.w*b.h>area*0.9) return;              // the sheet's own border, not a tag
+        shapes.push({path:p,bbox:b});
+      });
+      (el.parentNode||svg).removeChild(measure);
     });
     // filled top to bottom, left to right. Rows are banded rather than sorted on
     // an exact Y, so a row whose shapes sit a hair apart still reads as one row.
