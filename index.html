@@ -2023,6 +2023,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
           <button class="btn-outline btn-sm" id="gtLayoutFitBtn">Fit to sheet</button>
           <button class="btn-outline btn-sm" id="gtLayoutActualBtn">File's own size</button>
         </div>
+        <div class="sect-label">Where it sits</div>
+        <p class="hint">The top-left corner of the layout, measured from the top-left of the sheet. It centres itself until you say otherwise.</p>
+        <div class="grid2">
+          <label class="field"><span>X (mm)</span><input type="number" step="0.1" id="gtLayoutX"/></label>
+          <label class="field"><span>Y (mm)</span><input type="number" step="0.1" id="gtLayoutY"/></label>
+        </div>
+        <button class="btn-outline btn-sm" id="gtLayoutCentreBtn" style="width:100%;margin-top:9px;">Centre it again</button>
         <div class="calc" id="gtSheetCalc" style="margin-top:12px;"></div>
 
         <!-- with no layout file the placeholders are worked out the plain way -->
@@ -11064,6 +11071,9 @@ let gtLoaded=false;
 let gtCurrentDesign=null;          // the design open in the editor
 const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
+  // null rather than a number: the layout centres itself until it is told
+  // where to go, and goes back to centring when it is told to forget
+  layoutX:null,layoutY:null,
   baseFile:'',guideOver:false,slots:[]};
 let gtLayout=null;                 // {vb,mm,shapes:[{path,bbox}]} read off the SVG
 let gtBaseImg=null;                // the sheet's base layer, printed under everything
@@ -11142,13 +11152,22 @@ async function gtSaveLib(){
   }
   await gtIdbPut('lib',{manifest:man,assets:Object.fromEntries(gtAssets)});
 }
+// The sheet, the layout and the placeholders are changed a keystroke at a time,
+// and writing the library on every one of those would be a file write per digit.
+// This waits for the typing to stop, so what is on the screen is what is on disk
+// without a save button nobody should have to find.
+let gtSaveTimer=null;
+function gtSaveSoon(){
+  clearTimeout(gtSaveTimer);
+  gtSaveTimer=setTimeout(()=>{ gtSaveLib().catch(()=>{}); },600);
+}
 async function gtLoadLib(){
   gtLib.designs=[]; gtLib.fonts=[]; gtLib.texts=[];
   gtAssets.clear(); gtImgs.clear();
   // the sheet's own files come from the manifest as well, so they go with it
   gtLayout=null; gtBaseImg=null; gtLayoutFrom=''; gtBaseFrom='';
   gtSheet.layoutFile=''; gtSheet.baseFile=''; gtSheet.slots=[];
-  gtSheet.layoutW=0; gtSheet.layoutH=0;
+  gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   let man=null;
   if(gtDir&&await gtDirOk(gtDir)){
     try{ man=JSON.parse(await (await gtDirRead(gtDir,'library.json')).text()); }catch(e){ man=null; }
@@ -11332,7 +11351,8 @@ function gtRebuildSlots(){
     const nat=gtLayoutNatural();
     const LW=S.layoutW>0?S.layoutW:nat.w, LH=S.layoutH>0?S.layoutH:nat.h;
     const sx=LW/vw, sy=LH/vh;
-    const ox=(S.paperW-LW)/2, oy=(S.paperH-LH)/2;
+    const ox=S.layoutX==null?(S.paperW-LW)/2:S.layoutX;
+    const oy=S.layoutY==null?(S.paperH-LH)/2:S.layoutY;
     S.slots=gtLayout.shapes.map((sh,i)=>({id:'s'+i,shape:i,
       x:ox+(sh.bbox.x-minx)*sx, y:oy+(sh.bbox.y-miny)*sy,
       w:sh.bbox.w*sx, h:sh.bbox.h*sy}));
@@ -11777,7 +11797,7 @@ const GT_GRID_FIELDS=[['gtTagW','tagW'],['gtTagH','tagH'],['gtMargin','margin'],
     const v=parseFloat(e.target.value);
     if(isFinite(v)&&v>=0) gtSheet[key]=v;
     if(!gtLayout) gtRebuildSlots();
-    gtRenderSlots(); gtDraw();
+    gtRenderSlots(); gtDraw(); gtSaveSoon();
   });
 });
 // The layout's size on the sheet. Changing either rebuilds the placeholders,
@@ -11787,12 +11807,25 @@ const GT_GRID_FIELDS=[['gtTagW','tagW'],['gtTagH','tagH'],['gtMargin','margin'],
   document.getElementById(id).addEventListener('input',e=>{
     const v=parseFloat(e.target.value);
     gtSheet[id==='gtLayoutW'?'layoutW':'layoutH']=(isFinite(v)&&v>0)?v:0;
-    gtRebuildSlots(); gtRenderSlots(); gtDraw();
+    gtRebuildSlots(); gtRenderSlots(); gtDraw(); gtSaveSoon();
   });
+});
+// Typing a corner is what makes it explicit. An emptied box hands the layout
+// back to centring rather than pinning it at zero.
+['gtLayoutX','gtLayoutY'].forEach(id=>{
+  document.getElementById(id).addEventListener('input',e=>{
+    const v=parseFloat(e.target.value);
+    gtSheet[id==='gtLayoutX'?'layoutX':'layoutY']=isFinite(v)?v:null;
+    gtRebuildSlots(); gtRenderSlots(); gtDraw(); gtSaveSoon();
+  });
+});
+document.getElementById('gtLayoutCentreBtn').addEventListener('click',()=>{
+  gtSheet.layoutX=null; gtSheet.layoutY=null;
+  gtRebuildSlots(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw(); gtSaveSoon();
 });
 function gtSetLayoutSize(box){
   gtSheet.layoutW=round(box.w); gtSheet.layoutH=round(box.h);
-  gtRebuildSlots(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
+  gtRebuildSlots(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw(); gtSaveSoon();
 }
 document.getElementById('gtLayoutFitBtn').addEventListener('click',()=>{
   if(gtLayout) gtSetLayoutSize(gtLayoutFitted());
@@ -11805,12 +11838,16 @@ function gtWriteSheetInputs(){
     document.getElementById(id).value=gtSheet[key];
   });
   const nat=gtLayoutNatural();
-  document.getElementById('gtLayoutW').value=round(gtSheet.layoutW||nat.w)||'';
-  document.getElementById('gtLayoutH').value=round(gtSheet.layoutH||nat.h)||'';
-  document.getElementById('gtLayoutW').disabled=!gtLayout;
-  document.getElementById('gtLayoutH').disabled=!gtLayout;
-  document.getElementById('gtLayoutFitBtn').disabled=!gtLayout;
-  document.getElementById('gtLayoutActualBtn').disabled=!gtLayout;
+  const LW=gtSheet.layoutW||nat.w, LH=gtSheet.layoutH||nat.h;
+  document.getElementById('gtLayoutW').value=round(LW)||'';
+  document.getElementById('gtLayoutH').value=round(LH)||'';
+  // shown wherever it actually is, whether that was chosen or worked out
+  document.getElementById('gtLayoutX').value=
+    gtLayout?round(gtSheet.layoutX==null?(gtSheet.paperW-LW)/2:gtSheet.layoutX):'';
+  document.getElementById('gtLayoutY').value=
+    gtLayout?round(gtSheet.layoutY==null?(gtSheet.paperH-LH)/2:gtSheet.layoutY):'';
+  ['gtLayoutW','gtLayoutH','gtLayoutX','gtLayoutY','gtLayoutFitBtn','gtLayoutActualBtn','gtLayoutCentreBtn']
+    .forEach(id=>{ document.getElementById(id).disabled=!gtLayout; });
   document.getElementById('gtCutToggle').checked=gtSheet.showCut;
   document.getElementById('gtHoleToggle').checked=gtSheet.showHole;
   gtSyncShapeSlots();
@@ -11818,10 +11855,10 @@ function gtWriteSheetInputs(){
 document.getElementById('gtSwapOrientBtn').addEventListener('click',()=>{
   const w=gtSheet.paperW; gtSheet.paperW=gtSheet.paperH; gtSheet.paperH=w;
   if(!gtLayout) gtRebuildSlots();
-  gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
+  gtWriteSheetInputs(); gtRenderSlots(); gtDraw(); gtSaveSoon();
 });
-document.getElementById('gtCutToggle').addEventListener('change',e=>{ gtSheet.showCut=e.target.checked; gtDraw(); });
-document.getElementById('gtHoleToggle').addEventListener('change',e=>{ gtSheet.showHole=e.target.checked; gtDraw(); });
+document.getElementById('gtCutToggle').addEventListener('change',e=>{ gtSheet.showCut=e.target.checked; gtDraw(); gtSaveSoon(); });
+document.getElementById('gtHoleToggle').addEventListener('change',e=>{ gtSheet.showHole=e.target.checked; gtDraw(); gtSaveSoon(); });
 function gtRenderSlots(){
   document.getElementById('gtGridFields').style.display=gtLayout?'none':'';
   const el=document.getElementById('gtSlotList');
@@ -11843,13 +11880,13 @@ document.getElementById('gtSlotList').addEventListener('input',e=>{
   const k=e.target.dataset.gts; if(!k) return;
   const v=parseFloat(e.target.value);
   if(isFinite(v)) s[k]=(k==='w'||k==='h')?Math.max(1,v):v;
-  gtDraw();
+  gtDraw(); gtSaveSoon();
 });
 document.getElementById('gtSlotList').addEventListener('click',e=>{
   if(!e.target.closest('[data-gt-del-slot]')) return;
   const id=e.target.closest('[data-gt-slot]').dataset.gtSlot;
   gtSheet.slots=gtSheet.slots.filter(s=>s.id!==id);
-  gtRenderSlots(); gtDraw();
+  gtRenderSlots(); gtDraw(); gtSaveSoon();
 });
 document.getElementById('gtResetSlotsBtn').addEventListener('click',async()=>{
   gtRebuildSlots();
@@ -11993,7 +12030,7 @@ document.getElementById('gtCutBtn').addEventListener('click',async()=>{
   gtAssets.set(path,file);
   gtSheet.layoutFile=path; gtLayout=built; gtLayoutFrom=path;
   // a fresh file starts at its own size, and the size boxes are there to argue
-  gtSheet.layoutW=0; gtSheet.layoutH=0;
+  gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   if(built.mm){ gtSheet.paperW=built.mm.w; gtSheet.paperH=built.mm.h; }
   gtRebuildSlots();
   await gtSaveLib();
@@ -12001,7 +12038,7 @@ document.getElementById('gtCutBtn').addEventListener('click',async()=>{
 });
 document.getElementById('gtCutDelBtn').addEventListener('click',async()=>{
   gtSheet.layoutFile=''; gtLayout=null; gtLayoutFrom='';
-  gtSheet.layoutW=0; gtSheet.layoutH=0;
+  gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   gtRebuildSlots();
   await gtSaveLib(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
 });
