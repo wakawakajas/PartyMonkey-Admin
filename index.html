@@ -1984,7 +1984,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <div class="preview-card">
         <div class="top-row"><span id="gtPageLbl">SHEET</span>
           <div style="display:flex;gap:4px;">
-            <button class="icon-btn" id="gtZoomBtn" title="Close in on the tag being edited">300%</button>
+            <button class="icon-btn" id="gtZoomBtn" title="Close in on the tag being worked on — the bottom-left one until a line is picked">Zoom in</button>
             <button class="icon-btn" id="gtPrevPageBtn" title="Previous page">‹</button>
             <button class="icon-btn" id="gtNextPageBtn" title="Next page">›</button>
           </div>
@@ -11119,6 +11119,9 @@ const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   // null rather than a number: the layout centres itself until it is told
   // where to go, and goes back to centring when it is told to forget
   layoutX:null,layoutY:null,bleedOn:false,bleed:2.5,
+  // which corner the tags start from; a library saved before they started at
+  // the bottom left has its placeholders worked out again on the way in
+  slotOrder:'bottom',
   baseFile:'',guideOver:false,slots:[]};
 let gtLayout=null;                 // {vb,mm,shapes:[{path,bbox}]} read off the SVG
 let gtBaseImg=null;                // the sheet's base layer, printed under everything
@@ -11234,9 +11237,13 @@ async function gtLoadLib(){
   gtLib.texts=man.texts||[];
   if(man.sheet) Object.assign(gtSheet,man.sheet);
   if(!Array.isArray(gtSheet.slots)) gtSheet.slots=[];
+  const wasOrder=gtSheet.slotOrder;
+  gtSheet.slotOrder='bottom';
   await gtHydrate();
   // a library written before placeholders existed has none saved; work them out
   if(!gtSheet.slots.length) gtRebuildSlots();
+  // one saved while the sheet still filled from the top has them in that order
+  else if(wasOrder!=='bottom') gtRebuildSlots();
   // and one saved when the cutting file was read as more shapes than it has
   // tags holds placeholders the file no longer has — a saved placeholder that
   // outnumbers them, or points at a shape that is gone, is worked out again.
@@ -11555,10 +11562,13 @@ function gtBuildLayout(text){
       (el.parentNode||svg).removeChild(measure);
     });
     const tags=gtPruneShapes(shapes);
-    // filled top to bottom, left to right. Rows are banded rather than sorted on
-    // an exact Y, so a row whose shapes sit a hair apart still reads as one row.
+    // Filled from the bottom left, along each row and then up: a part sheet
+    // comes off the printer with its blank half at the top, where it is the
+    // easiest to feed again and the least likely to be cut into. Rows are
+    // banded rather than sorted on an exact Y, so a row whose shapes sit a
+    // hair apart still reads as one row.
     const band=Math.max(1,(tags.reduce((s,x)=>s+x.bbox.h,0)/Math.max(1,tags.length))/2);
-    tags.sort((a,b)=>(Math.round(a.bbox.y/band)-Math.round(b.bbox.y/band))||(a.bbox.x-b.bbox.x));
+    tags.sort((a,b)=>(Math.round(b.bbox.y/band)-Math.round(a.bbox.y/band))||(a.bbox.x-b.bbox.x));
     return tags.length?{vb,mm,shapes:tags}:null;
   }catch(e){ return null; }
   finally{ host.innerHTML=''; }
@@ -11606,7 +11616,8 @@ function gtRebuildSlots(){
   // never square to the printer, and the error is smallest in the middle
   const x0=(S.paperW-totalW)/2, y0=(S.paperH-totalH)/2;
   S.slots=[];
-  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++)
+  // bottom row first, as the layout file is read
+  for(let r=rows-1;r>=0;r--) for(let c=0;c<cols;c++)
     S.slots.push({id:'s'+S.slots.length,shape:null,
       x:x0+c*(S.tagW+S.gap), y:y0+r*(S.tagH+S.gap), w:S.tagW, h:S.tagH});
 }
@@ -11862,7 +11873,17 @@ function gtZoomTo(lineId){
   gtPage=at.page; gtZoomSlot=at.slot; gtZoomOn=true;
   gtDraw();
 }
-document.getElementById('gtZoomBtn').addEventListener('click',()=>{ gtZoomOn=!gtZoomOn; gtDraw(); });
+document.getElementById('gtZoomBtn').addEventListener('click',()=>{
+  gtZoomOn=!gtZoomOn;
+  // straight to the tag being worked on, and to the first one — bottom left —
+  // when no line has been picked yet
+  if(gtZoomOn){
+    const at=gtSelLine?gtFirstSlotOf(gtSelLine):null;
+    if(at){ gtPage=at.page; gtZoomSlot=at.slot; }
+    else gtZoomSlot=0;
+  }
+  gtDraw();
+});
 // Focus is what says which line is being worked on, and it covers every way in
 // — tapping a box, tabbing between them, or Enter walking down the form.
 document.getElementById('gtOrderList').addEventListener('focusin',e=>{
@@ -11889,7 +11910,7 @@ function gtDraw(){
   const dim=Math.max(160,avail*long/wide);
   gtRenderPage(document.getElementById('gtCanvas'),gtPage,dim,false,view);
   const zb=document.getElementById('gtZoomBtn');
-  zb.textContent=gtZoomOn?'Fit':'300%';
+  zb.textContent=gtZoomOn?'Whole sheet':'Zoom in';
   zb.classList.toggle('on',gtZoomOn);
   zb.disabled=!gtSheet.slots.length;
   document.getElementById('gtPageLbl').textContent=
