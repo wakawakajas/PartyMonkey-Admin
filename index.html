@@ -2211,7 +2211,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 
         <div class="sect-label" style="margin-top:0;">Designs</div>
         <p class="hint">Artwork in the <strong>designs</strong> folder is the library: a new file there becomes a design the next time you come back to this window. It is taken on once, by the name it has, so nothing arrives twice — and one taken out with × stays out until you add it back from the list below.</p>
-        <p class="hint">A <strong>one-off design</strong> is for artwork a customer sent for this job alone: it is uploaded, printed and forgotten, never written into the folder and gone when the page is reloaded. Put the file in the designs folder instead if it should come back.</p>
+        <p class="hint">A <strong>one-off design</strong> is for artwork a customer sent for this job alone: it is uploaded, printed and forgotten, never written into the folder and gone when the page is reloaded. A picture on the clipboard is the same thing — paste it anywhere on this screen and it lands on the line being worked on. Put the file in the designs folder instead if it should come back.</p>
         <label class="field" style="margin-bottom:8px;"><span>SEARCH DESIGNS</span>
           <input type="text" id="gtDesignSearch" placeholder="Type a name, e.g. Kuromi" autocomplete="off"/></label>
         <div class="calc" id="gtDesignCount" style="margin-bottom:8px;"></div>
@@ -13258,23 +13258,57 @@ document.getElementById('gtBaseDelBtn').addEventListener('click',async()=>{
   await gtSaveLib(); gtSyncShapeSlots(); gtDraw();
 });
 document.getElementById('gtDesignSearch').addEventListener('input',()=>gtRenderDesignList());
-document.getElementById('gtAddDesignBtn').addEventListener('click',async()=>{
-  const file=await gtPickFile('image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp');
-  if(!file) return;
+// One-off artwork, from a file or from the clipboard: the same design either
+// way, held in this session's own corner and never given a path in the folder.
+async function gtAdhocDesign(blob,filename){
   const id=gtId('d');
-  const name=(file.name||'Design').replace(/\.[^.]+$/,'');
-  // its own corner of this session, never a path in the folder
-  const path='adhoc/'+id+'-'+(file.name||'art');
-  gtAssets.set(path,file);
+  const name=String(filename||'Pasted image').replace(/\.[^.]+$/,'')||'Pasted image';
+  const path='adhoc/'+id+'-'+(filename||'art.png');
+  gtAssets.set(path,blob);
   const d=gtNormalizeDesign({id,name,file:path,adhoc:true,
     fields:[{id:gtId('f'),name:'Text',def:'Thank you',size:6,align:'center',
              x:0.12,y:0.4,w:0.76,h:0.2}]});
   gtLib.designs.push(d);
-  try{ gtImgs.set(id,await loadImage(await fileToDataURL(file))); }catch(e){}
+  try{ gtImgs.set(id,await loadImage(await fileToDataURL(blob))); }catch(e){}
   await gtSaveLib();
-  showMsg(document.getElementById('gtLibMsg'),
-    `✓ ${d.name} is on this order as a one-off — nothing has been written to the folder. `
-    +`Drop the file into the designs folder if it should come back next time.`,true);
+  return d;
+}
+const gtAdhocSaid=d=>showMsg(document.getElementById('gtLibMsg'),
+  `✓ ${d.name} is on this order as a one-off — nothing has been written to the folder. `
+  +`Drop the file into the designs folder if it should come back next time.`,true);
+document.getElementById('gtAddDesignBtn').addEventListener('click',async()=>{
+  const file=await gtPickFile('image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp');
+  if(!file) return;
+  const d=await gtAdhocDesign(file,file.name||'art.png');
+  gtAdhocSaid(d);
+  gtCurrentDesign=d;
+  showScreen('tool-gift-tag-design');
+});
+// A customer's artwork arrives in a chat window as often as it does as a file,
+// and going by way of the desktop to save it first is a step for nothing. A
+// picture on the clipboard is a one-off design, pasted straight onto the order.
+// Text on the clipboard is left alone, so pasting into a box still pastes.
+document.addEventListener('paste',async e=>{
+  if(currentScreen!=='tool-gift-tag'&&currentScreen!=='tool-gift-tag-design') return;
+  const items=[...((e.clipboardData&&e.clipboardData.items)||[])];
+  const shot=items.find(i=>i.kind==='file'&&/^image\//.test(i.type));
+  if(!shot) return;
+  const blob=shot.getAsFile();
+  if(!blob) return;
+  e.preventDefault();
+  const when=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  const d=await gtAdhocDesign(blob,blob.name&&blob.name!=='image.png'?blob.name:('Pasted '+when+'.png'));
+  // straight onto the line being worked on where there is one, since that is
+  // what the artwork was pasted for; otherwise open it to be set up
+  const line=gtOrder.find(l=>l.id===gtSelLine)||null;
+  if(line&&currentScreen==='tool-gift-tag'){
+    line.designId=d.id; line.vals={};
+    gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+    gtAdhocSaid(d);
+    return;
+  }
+  gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+  gtAdhocSaid(d);
   gtCurrentDesign=d;
   showScreen('tool-gift-tag-design');
 });
