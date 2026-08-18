@@ -2001,7 +2001,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     </div>
 
     <!-- 1 CANVAS -->
-    <div class="card collapsed" data-card>
+    <div class="card collapsed has-combo" data-card>
       <div class="card-head"><span class="num">1</span><h3>Canvas &amp; base layer</h3><span class="chev">▾</span></div>
       <div class="card-body">
         <p class="hint">The sheet everything prints on. All values in mm. A layout SVG carrying its own size in mm sets this for you.</p>
@@ -2018,6 +2018,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
           <div class="info" id="gtBaseInfo">No file</div>
           <button class="btn-outline btn-sm" id="gtBaseBtn">Upload</button>
           <button class="del-btn" id="gtBaseDelBtn" style="display:none;" title="Remove">×</button>
+        </div>
+        <div class="combo" id="gtBaseCombo" style="margin-top:10px;">
+          <label class="field"><span>OR ONE ALREADY IN THE SHAPE FOLDER</span>
+            <input type="text" id="gtBaseSearch" placeholder="Search the shape folder…" autocomplete="off"
+                   role="combobox" aria-expanded="false" aria-controls="gtBasePanel"/>
+          </label>
+          <button class="combo-caret" id="gtBaseCaret" type="button" aria-label="Show what is in the shape folder">▾</button>
+          <div class="combo-panel" id="gtBasePanel" role="listbox"></div>
         </div>
       </div>
     </div>
@@ -2037,7 +2045,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     </div>
 
     <!-- 3 PLACEHOLDERS -->
-    <div class="card collapsed" data-card>
+    <div class="card collapsed has-combo" data-card>
       <div class="card-head"><span class="num">3</span><h3>Placeholders</h3><span class="chev">▾</span></div>
       <div class="card-body">
         <p class="hint">Upload your cutting file and every shape in it becomes a placeholder, where it sits and at the size it is. Designs from the order fill them in turn, each fitted inside its own shape. The outlines are drawn over the artwork so you can see the trim — never printed.</p>
@@ -2046,6 +2054,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
           <div class="info" id="gtCutInfo">No file</div>
           <button class="btn-outline btn-sm" id="gtCutBtn">Upload SVG</button>
           <button class="del-btn" id="gtCutDelBtn" style="display:none;" title="Remove">×</button>
+        </div>
+        <div class="combo" id="gtCutCombo" style="margin-top:10px;">
+          <label class="field"><span>OR ONE ALREADY IN THE SHAPE FOLDER</span>
+            <input type="text" id="gtCutSearch" placeholder="Search the shape folder…" autocomplete="off"
+                   role="combobox" aria-expanded="false" aria-controls="gtCutPanel"/>
+          </label>
+          <button class="combo-caret" id="gtCutCaret" type="button" aria-label="Show what is in the shape folder">▾</button>
+          <div class="combo-panel" id="gtCutPanel" role="listbox"></div>
         </div>
         <!-- a cutting file drawn in the wrong units, or at the wrong size for
              this sheet, is the normal case rather than the exception -->
@@ -11375,9 +11391,97 @@ async function gtScanFolder(){
     }
   }
   added+=await gtScanShape(known);
+  await gtShapeList();
   if(added){ await gtHydrate(); await gtSaveLib(); }
   return added;
 }
+// What the shape folder holds, so it can be picked from rather than only
+// dropped in: the sheet is changed often enough — a different die, last
+// season's template — that the newest file is not always the one wanted.
+let gtShapeFiles=[];
+async function gtShapeList(){
+  if(!gtDir||!await gtDirOk(gtDir)) return gtShapeFiles;
+  let dh=null, prefix='shape/';
+  try{ dh=await gtDir.getDirectoryHandle('shape'); }
+  catch(e){ dh=gtDir; prefix=''; }
+  const out=[];
+  try{ for await (const entry of dh.values()){
+    if(entry.kind!=='file') continue;
+    if(GT_CUT.test(entry.name)) out.push({name:entry.name,path:prefix+entry.name,kind:'cut'});
+    else if(GT_ART.test(entry.name)) out.push({name:entry.name,path:prefix+entry.name,kind:'art'});
+  } }catch(e){ return gtShapeFiles; }
+  out.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
+  gtShapeFiles=out;
+  return out;
+}
+// the file itself, from this session where it is already in hand and off the
+// folder where it is not
+async function gtShapeFile(path){
+  return gtAssets.get(path)||await gtDirFile(path);
+}
+function gtApplyCut(file,path,text){
+  const built=gtBuildLayout(text);
+  if(!built) return false;
+  gtAssets.set(path,file);
+  gtSheet.layoutFile=path; gtLayout=built; gtLayoutFrom=path;
+  // a fresh file starts at its own size, as one chosen through the button does
+  gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
+  if(built.mm){ gtSheet.paperW=built.mm.w; gtSheet.paperH=built.mm.h; }
+  gtRebuildSlots();
+  return true;
+}
+async function gtApplyBase(file,path){
+  gtAssets.set(path,file);
+  gtSheet.baseFile=path; gtBaseFrom=path;
+  try{ gtBaseImg=await loadImage(await fileToDataURL(file)); }
+  catch(e){ gtBaseImg=null; return false; }
+  return true;
+}
+function gtShapePanel(kind,q,sel){
+  const s=(q||'').trim().toLowerCase();
+  const hits=gtShapeFiles.filter(f=>f.kind===kind&&(!s||f.name.toLowerCase().includes(s)));
+  if(!hits.length) return `<div class="combo-empty">${
+    gtDir?(gtShapeFiles.some(f=>f.kind===kind)?'nothing matches'
+      :(kind==='cut'?'no SVG in the shape folder':'no picture in the shape folder'))
+    :'no folder chosen — see the Design Library below'}</div>`;
+  return hits.map(f=>`<div class="combo-opt${f.path===sel?' active':''}" data-gt-shape="${escapeHtml(f.path)}">
+    <span class="nm">${escapeHtml(f.name)}</span></div>`).join('');
+}
+function gtRenderCutPick(){
+  document.getElementById('gtCutPanel').innerHTML=
+    gtShapePanel('cut',document.getElementById('gtCutSearch').value,gtSheet.layoutFile);
+}
+function gtRenderBasePick(){
+  document.getElementById('gtBasePanel').innerHTML=
+    gtShapePanel('art',document.getElementById('gtBaseSearch').value,gtSheet.baseFile);
+}
+gtWireCombo('gtCutSearch','gtCutCaret','gtCutPanel',()=>{ gtShapeList().then(gtRenderCutPick); gtRenderCutPick(); });
+gtWireCombo('gtBaseSearch','gtBaseCaret','gtBasePanel',()=>{ gtShapeList().then(gtRenderBasePick); gtRenderBasePick(); });
+document.getElementById('gtCutPanel').addEventListener('click',async e=>{
+  const row=e.target.closest('[data-gt-shape]'); if(!row) return;
+  const path=row.dataset.gtShape;
+  const file=await gtShapeFile(path);
+  const msg=document.getElementById('gtExportMsg');
+  if(!file){ showMsg(msg,'That file is no longer in the folder.',false); return; }
+  if(!gtApplyCut(file,path,await file.text())){
+    showMsg(msg,'No shapes found in that SVG.',false); return;
+  }
+  document.getElementById('gtCutSearch').value='';
+  document.getElementById('gtCutPanel').classList.remove('open');
+  await gtSaveLib();
+  gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
+});
+document.getElementById('gtBasePanel').addEventListener('click',async e=>{
+  const row=e.target.closest('[data-gt-shape]'); if(!row) return;
+  const path=row.dataset.gtShape;
+  const file=await gtShapeFile(path);
+  if(!file){ showMsg(document.getElementById('gtExportMsg'),'That file is no longer in the folder.',false); return; }
+  await gtApplyBase(file,path);
+  document.getElementById('gtBaseSearch').value='';
+  document.getElementById('gtBasePanel').classList.remove('open');
+  await gtSaveLib();
+  gtSyncShapeSlots(); gtDraw();
+});
 async function gtScanShape(known){
   // shape/ where the folder keeps one, and the folder itself where it does
   // not — pointing the app straight at a folder of cutting files should work
@@ -11407,25 +11511,12 @@ async function gtScanShape(known){
   let took=0;
   if(cut) try{
     const file=await cut.entry.getFile();
-    const built=gtBuildLayout(await file.text());
-    if(built){
-      const path=prefix+cut.name;
-      gtAssets.set(path,file);
-      gtSheet.layoutFile=path; gtLayout=built; gtLayoutFrom=path;
-      // a fresh file starts at its own size, as one chosen through the button does
-      gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
-      if(built.mm){ gtSheet.paperW=built.mm.w; gtSheet.paperH=built.mm.h; }
-      gtRebuildSlots(); took++;
-    }
+    if(gtApplyCut(file,prefix+cut.name,await file.text())) took++;
   }catch(e){}
   if(art) try{
     const file=await art.entry.getFile();
-    const path=prefix+art.name;
-    gtAssets.set(path,file);
-    gtSheet.baseFile=path; gtBaseFrom=path;
-    gtBaseImg=await loadImage(await fileToDataURL(file));
-    took++;
-  }catch(e){ gtBaseImg=null; }
+    if(await gtApplyBase(file,prefix+art.name)) took++;
+  }catch(e){}
   return took;
 }
 // Files are dropped in with the app sitting in another window, so the folder is
