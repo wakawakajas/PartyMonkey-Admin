@@ -2026,7 +2026,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="card has-combo" data-card>
       <div class="card-head"><span class="num">2</span><h3>Order</h3><span class="chev">▾</span></div>
       <div class="card-body">
-        <p class="hint">One row per design the customer asked for. The words start from the design's own default and are yours to change, as are the font and its size. Nudge X and Y move that line's text box; long words wrap inside it.</p>
+        <p class="hint">One row per design the customer asked for. The words start from the design's own default and are yours to change, as are the font and its size. Nudge X and Y move that line's text box; long words wrap inside it. Hold a line and drag it to move it up or down the run — the first line fills the first placeholder.</p>
         <div id="gtOrderList"></div>
         <div class="grid2" style="margin-top:10px;">
           <button class="btn-outline" id="gtAddDesignBtn">+ Upload a design</button>
@@ -5540,11 +5540,14 @@ function makeReorderable(listId,opts){
       const r=other.getBoundingClientRect();
       const om=r.top+r.height/2;
       if(mid<om&&(other.compareDocumentPosition(card)&Node.DOCUMENT_POSITION_FOLLOWING)){
-        slideOthers(()=>list.insertBefore(card,other));
+        // put back beside the row it passed, not into the list element: an
+        // order line sits inside a wrapper of its own, and the list is only
+        // where the rows are looked for
+        slideOthers(()=>other.parentNode.insertBefore(card,other));
         startY=e.clientY; card.style.transform=''; break;
       }
       if(mid>om&&(other.compareDocumentPosition(card)&Node.DOCUMENT_POSITION_PRECEDING)){
-        slideOthers(()=>list.insertBefore(card,other.nextSibling));
+        slideOthers(()=>other.parentNode.insertBefore(card,other.nextSibling));
         startY=e.clientY; card.style.transform=''; break;
       }
     }
@@ -5563,7 +5566,10 @@ function makeReorderable(listId,opts){
     // a snapshot rather than in place, which left holes where an id had moved.
     opts.setRows(rows.map(r=>visible.has(r.id)?byId[queue.shift()]:r));
     opts.render();
-    await persistOrder(opts.table,opts.rows());
+    // a list held in a table says so and its rows carry their own places; one
+    // held in the gift tag library is written out whole instead
+    if(opts.table) await persistOrder(opts.table,opts.rows());
+    else if(opts.save) await opts.save();
   }
   list.addEventListener('pointerup',drop);
   list.addEventListener('pointercancel',cleanup);
@@ -12054,7 +12060,7 @@ function gtRenderTextList(){
   const q=(document.getElementById('gtTextSearch').value||'').trim().toLowerCase();
   const hits=gtLib.texts.filter(t=>!q||t.name.toLowerCase().includes(q)||t.text.toLowerCase().includes(q));
   const el=document.getElementById('gtTextPanel');
-  el.innerHTML=hits.length?hits.map(t=>`<div class="combo-opt" data-gt-text="${t.id}">
+  el.innerHTML=hits.length?hits.map(t=>`<div class="combo-opt" data-gt-text="${t.id}" data-id="${t.id}">
       <span class="nm" title="${escapeHtml(t.text)}">${escapeHtml(t.name)} — ${escapeHtml(t.text)}</span>
       <button class="icon-btn" data-gt-edit-text title="Rename or reword">✎</button>
       <button class="icon-btn" data-gt-del-text title="Remove">×</button></div>`).join('')
@@ -12185,7 +12191,7 @@ function gtRenderOrder(){
             <input type="number" step="0.5" min="0" value="${round(v.bh||f.h*A.h)}" data-gtf="${f.id}|bh"/></label>
         </div>`;
     }).join(''):'<p class="hint" style="margin:6px 0 0;">Pick a design for this line.</p>';
-    return `<div class="ph-card${l.id===gtSelLine?' is-sel':''}" data-gt-line="${l.id}">
+    return `<div class="ph-card${l.id===gtSelLine?' is-sel':''}" data-gt-line="${l.id}" data-id="${l.id}">
       <div class="ph-card-head"><span>Line ${i+1}</span>
         <button class="del-btn" data-gt-del-line title="Remove">×</button></div>
       <div class="gt-pick">
@@ -12480,7 +12486,7 @@ function gtRenderDesignList(){
   if(!gtLib.designs.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet —</p>'; return; }
   el.innerHTML=gtLib.designs.map(d=>{
     const img=gtImgs.get(d.id);
-    return `<div class="ph-card row-link" data-gt-design="${d.id}">
+    return `<div class="ph-card row-link" data-gt-design="${d.id}" data-id="${d.id}">
       <div class="item-main" style="margin-bottom:0;align-items:center;">
         <div class="item-photo-wrap">
           <span class="item-photo${img?' has':''}">${img?`<img src="${img.src}" alt=""/>`:'🏷'}</span>
@@ -12498,7 +12504,7 @@ function gtRenderFontList(){
   const hits=gtLib.fonts.filter(f=>!q||f.name.toLowerCase().includes(q));
   const el=document.getElementById('gtFontPanel');
   // each name in its own face, which is the quickest check that it loaded
-  el.innerHTML=hits.length?hits.map(f=>`<div class="combo-opt" data-gt-font="${f.id}">
+  el.innerHTML=hits.length?hits.map(f=>`<div class="combo-opt" data-gt-font="${f.id}" data-id="${f.id}">
       <span class="nm" style="font-family:'gtf-${f.id}','IBM Plex Sans',sans-serif;">${escapeHtml(f.name)}</span>
       <button class="icon-btn" data-gt-del-font title="Remove">×</button></div>`).join('')
     :`<div class="combo-empty">${gtLib.fonts.length?'nothing matches':'no fonts added yet'}</div>`;
@@ -13263,6 +13269,25 @@ document.getElementById('gtExportBtn').addEventListener('click',async()=>{
     },180);
   });
 })();
+
+// ---------- putting the lists in the order they are worked in ----------
+// The order lines are the sheet: the first line fills the first placeholder,
+// so dragging one is how a tag is moved to the front of the run. The library
+// lists are read top down like the templates are, and the same hold picks a
+// row up — these rows are the way into the design and into the phrase, so a
+// pointer that merely slips must not rearrange anything.
+makeReorderable('gtOrderList',{selecting:()=>true,row:'.ph-card',hold:true,slide:320,
+  rows:()=>gtOrder,setRows:v=>{gtOrder=v;},
+  render:()=>{ gtRenderOrder(); gtDraw(); }});
+makeReorderable('gtDesignList',{selecting:()=>true,row:'.ph-card',hold:true,slide:320,
+  rows:()=>gtLib.designs,setRows:v=>{gtLib.designs=v;},
+  render:()=>{ gtRenderDesignList(); gtRenderOrder(); },save:()=>gtSaveLib()});
+makeReorderable('gtFontPanel',{selecting:()=>true,row:'.combo-opt',hold:true,slide:320,
+  rows:()=>gtLib.fonts,setRows:v=>{gtLib.fonts=v;},
+  render:()=>{ gtRenderFontList(); gtRenderOrder(); },save:()=>gtSaveLib()});
+makeReorderable('gtTextPanel',{selecting:()=>true,row:'.combo-opt',hold:true,slide:320,
+  rows:()=>gtLib.texts,setRows:v=>{gtLib.texts=v;},
+  render:()=>{ gtRenderTextList(); gtRenderOrder(); },save:()=>gtSaveLib()});
 
 // ---------- arriving on the screen ----------
 async function gtOpen(){
