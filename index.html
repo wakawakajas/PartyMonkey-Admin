@@ -2157,7 +2157,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <div class="card-head"><span class="num">4</span><h3>Design Library</h3><span class="chev">▾</span></div>
       <div class="card-body">
         <p class="hint">Designs, fonts and saved phrases live in a folder on this computer or on the network. Pick it once and the app remembers it; copy the folder to a colleague and she has the whole library. Chrome and Edge on a computer only — elsewhere, use the library file below.</p>
-        <p class="hint">Artwork dropped into <strong>designs</strong>, font files into <strong>fonts</strong>, and the cutting file and base layer into <strong>shape</strong> are picked up on their own the next time you come back to this window. Each is taken on once and never copied — a file already in the folder is used where it lies — and anything you take out of the library stays out.</p>
+        <p class="hint">Anything put in the folder is picked up on its own the next time you come back to this window: artwork becomes a design, a font file a font, an SVG the sheet. The subfolders <strong>designs</strong>, <strong>fonts</strong> and <strong>shape</strong> are where the app keeps things tidy, but a file dropped straight into the folder is read just the same. Each is taken on once and never copied — a file already there is used where it lies — and anything you take out of the library stays out.</p>
         <div class="grid2" style="margin-bottom:10px;">
           <button class="btn-outline" id="gtPickFolderBtn">📁 Choose folder</button>
           <button class="btn-outline" id="gtForgetFolderBtn">Forget folder</button>
@@ -11430,23 +11430,27 @@ async function gtScanRun(){
   const known=new Set([...gtLib.designs.map(d=>d.file),...gtLib.fonts.map(f=>f.file),
     gtSheet.layoutFile,gtSheet.baseFile,
     ...(gtSheet.shapeSeen||[]),...gtSheet.libSeen]);
-  const jobs=[
-    ['designs',GT_ART,(name,file)=>gtLib.designs.push(gtNormalizeDesign({
-      id:gtId('d'),name,file,
-      fields:[{id:gtId('f'),name:'Text',def:'Thank you',size:6,align:'center',
-               x:0.12,y:0.4,w:0.76,h:0.2}]}))],
-    ['fonts',GT_FACE,(name,file)=>gtLib.fonts.push({id:gtId('t'),name,file})]];
+  const takeDesign=(name,file)=>gtLib.designs.push(gtNormalizeDesign({
+    id:gtId('d'),name,file,
+    fields:[{id:gtId('f'),name:'Text',def:'Thank you',size:6,align:'center',
+             x:0.12,y:0.4,w:0.76,h:0.2}]}));
+  const takeFont=(name,file)=>gtLib.fonts.push({id:gtId('t'),name,file});
+  // the folders where each kind belongs, and the folder itself: a file dropped
+  // straight into it is not filed away yet, and waiting to be filed is no
+  // reason to be ignored
+  const jobs=[['designs',GT_ART,takeDesign],['fonts',GT_FACE,takeFont],
+              ['',GT_ART,takeDesign],['',GT_FACE,takeFont]];
   let added=0;
   for(const [folder,wanted,take] of jobs){
-    let dh=null;
-    try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; }
+    let dh=gtDir;
+    if(folder){ try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; } }
     const found=[];
     try{ for await (const entry of dh.values())
       if(entry.kind==='file'&&wanted.test(entry.name)) found.push(entry); }catch(e){ continue; }
     // in the order the folder reads them, so a numbered set lands in its order
     found.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
     for(const entry of found){
-      const path=folder+'/'+entry.name;
+      const path=(folder?folder+'/':'')+entry.name;
       if(known.has(path)) continue;
       try{ gtAssets.set(path,await entry.getFile()); }catch(e){ continue; }
       take(entry.name.replace(/\.[^.]+$/,''),path);
@@ -11493,14 +11497,16 @@ let gtLibFiles={designs:[],fonts:[]};
 async function gtLibList(){
   if(!gtDir||!await gtDirOk(gtDir)) return gtLibFiles;
   const out={designs:[],fonts:[]};
-  for(const [folder,wanted] of [['designs',GT_ART],['fonts',GT_FACE]]){
-    let dh=null;
-    try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; }
+  for(const [kind,wanted,folder] of [['designs',GT_ART,'designs'],['fonts',GT_FACE,'fonts'],
+                                     ['designs',GT_ART,''],['fonts',GT_FACE,'']]){
+    let dh=gtDir;
+    if(folder){ try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; } }
     try{ for await (const entry of dh.values())
       if(entry.kind==='file'&&wanted.test(entry.name))
-        out[folder].push({name:entry.name,path:folder+'/'+entry.name}); }catch(e){}
-    out[folder].sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
+        out[kind].push({name:entry.name,path:(folder?folder+'/':'')+entry.name}); }catch(e){}
   }
+  Object.values(out).forEach(list=>
+    list.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true})));
   gtLibFiles=out;
   return out;
 }
@@ -11562,15 +11568,14 @@ async function gtTakeFromFolder(path){
 let gtShapeFiles=[];
 async function gtShapeList(){
   if(!gtDir||!await gtDirOk(gtDir)) return gtShapeFiles;
-  let dh=null, prefix='shape/';
-  try{ dh=await gtDir.getDirectoryHandle('shape'); }
-  catch(e){ dh=gtDir; prefix=''; }
   const out=[];
-  try{ for await (const entry of dh.values()){
-    if(entry.kind!=='file') continue;
-    if(GT_CUT.test(entry.name)) out.push({name:entry.name,path:prefix+entry.name,kind:'cut'});
-    else if(GT_ART.test(entry.name)) out.push({name:entry.name,path:prefix+entry.name,kind:'art'});
-  } }catch(e){ return gtShapeFiles; }
+  for(const [dh,prefix] of await gtShapeSpots()){
+    try{ for await (const entry of dh.values()){
+      if(entry.kind!=='file') continue;
+      if(GT_CUT.test(entry.name)) out.push({name:entry.name,path:prefix+entry.name,kind:'cut'});
+      else if(GT_ART.test(entry.name)) out.push({name:entry.name,path:prefix+entry.name,kind:'art'});
+    } }catch(e){}
+  }
   out.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
   gtShapeFiles=out;
   return out;
@@ -11643,40 +11648,46 @@ document.getElementById('gtBasePanel').addEventListener('click',async e=>{
   await gtSaveLib();
   gtSyncShapeSlots(); gtDraw();
 });
+// Where the sheet can come from: shape/ if the folder keeps one, and the folder
+// itself either way — a cutting file dropped straight in is meant for the
+// sheet as surely as one filed away. A picture in the folder itself is artwork
+// for the library instead; the base layer is the one thing that has to be filed
+// in shape/ or picked, since a picture alone cannot say which it is.
+async function gtShapeSpots(){
+  const out=[];
+  try{ out.push([await gtDir.getDirectoryHandle('shape'),'shape/']); }catch(e){}
+  out.push([gtDir,'']);
+  return out;
+}
 async function gtScanShape(known){
-  // shape/ where the folder keeps one, and the folder itself where it does
-  // not — pointing the app straight at a folder of cutting files should work
-  // as well as pointing it at the library above them
-  let dh=null, prefix='shape/';
-  try{ dh=await gtDir.getDirectoryHandle('shape'); }
-  catch(e){ dh=gtDir; prefix=''; }
   const fresh=[];
-  try{ for await (const entry of dh.values()){
-    if(entry.kind!=='file'||known.has(prefix+entry.name)) continue;
-    if(GT_CUT.test(entry.name)||GT_ART.test(entry.name)) fresh.push(entry);
-  } }catch(e){ return 0; }
-  // the most recently written of them is the one that was just dropped in
-  const dated=[];
-  for(const entry of fresh){
-    let at=0;
-    try{ at=(await entry.getFile()).lastModified||0; }catch(e){}
-    dated.push({entry,at,name:entry.name});
+  for(const [dh,prefix] of await gtShapeSpots()){
+    try{ for await (const entry of dh.values()){
+      if(entry.kind!=='file') continue;
+      const path=prefix+entry.name;
+      if(known.has(path)) continue;
+      const art=GT_ART.test(entry.name);
+      if(!GT_CUT.test(entry.name)&&!(art&&prefix)) continue;
+      fresh.push({entry,path,name:entry.name,art});
+    } }catch(e){}
   }
-  dated.sort((a,b)=>b.at-a.at);
+  // the most recently written of them is the one that was just dropped in
+  for(const f of fresh){
+    f.at=0;
+    try{ f.at=(await f.entry.getFile()).lastModified||0; }catch(e){}
+  }
+  fresh.sort((a,b)=>b.at-a.at);
   if(!Array.isArray(gtSheet.shapeSeen)) gtSheet.shapeSeen=[];
-  dated.forEach(d=>{
-    const at=prefix+d.name;
-    if(!gtSheet.shapeSeen.includes(at)) gtSheet.shapeSeen.push(at);
-  });
-  const cut=dated.find(d=>GT_CUT.test(d.name)), art=dated.find(d=>GT_ART.test(d.name));
+  fresh.forEach(f=>{ if(!gtSheet.shapeSeen.includes(f.path)) gtSheet.shapeSeen.push(f.path); });
+  const cut=fresh.find(f=>!f.art), art=fresh.find(f=>f.art);
   let took=0;
   if(cut) try{
     const file=await cut.entry.getFile();
-    if(gtApplyCut(file,prefix+cut.name,await file.text())) took++;
+    if(gtApplyCut(file,cut.path,await file.text())) took++;
   }catch(e){}
   if(art) try{
     const file=await art.entry.getFile();
-    if(await gtApplyBase(file,prefix+art.name)) took++;
+    if(await gtApplyBase(file,art.path)) took++;
   }catch(e){}
   return took;
 }
