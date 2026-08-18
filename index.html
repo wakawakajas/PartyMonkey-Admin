@@ -11355,6 +11355,25 @@ async function gtDirRead(dir,path){
   const target=folder?await dir.getDirectoryHandle(folder):dir;
   return (await (await target.getFileHandle(name)).getFile());
 }
+// A folder handle survives a reload but the permission to write to it does
+// not: the browser hands it back saying "ask again", and asking has to come off
+// a tap. Every upload is a tap, so this is called at the top of one — before
+// the file picker opens, while the tap still counts as one — and the folder is
+// connected again there and then. Without it the file went into the browser's
+// own copy, and the design looked as though it had been made up on the spot.
+let gtFolderPending=false;
+async function gtEnsureDir(ask){
+  if(gtDir) return await gtDirOk(gtDir,ask);
+  const saved=await gtIdbGet('dir').catch(()=>null);
+  if(!saved) return false;
+  if(!await gtDirOk(saved,ask)){ gtFolderPending=true; return false; }
+  gtDir=saved; gtFolderPending=false;
+  // the folder is the library, so what it holds is what is worked from — the
+  // browser's copy is not written over it
+  await gtLoadLib();
+  gtRefreshLibraryUi(); gtRenderOrder(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
+  return true;
+}
 async function gtSaveLib(){
   const man=gtManifest();
   if(gtDir&&await gtDirOk(gtDir)){
@@ -12987,7 +13006,11 @@ function gtSyncFolderState(){
   }
   pick.disabled=false;
   el.innerHTML=gtDir?`Folder: <strong>${escapeHtml(gtDir.name)}</strong>`
-                    :'No folder chosen — the library is kept in this browser.';
+    :(gtFolderPending
+      ?'⚠ A folder is remembered but not connected yet — the browser asks again each visit. Choose folder, or upload anything, and it reconnects. Until then new files are kept in this browser only.'
+      :'No folder chosen — the library is kept in this browser.');
+  el.style.borderColor=(!gtDir&&gtFolderPending)?'var(--amber)':'';
+  el.style.color=(!gtDir&&gtFolderPending)?'var(--amber)':'';
 }
 // The two uploads that belong to the sheet rather than to any one design.
 function gtSyncShapeSlots(){
@@ -13147,7 +13170,7 @@ document.getElementById('gtPickFolderBtn').addEventListener('click',async()=>{
   try{
     const dir=await window.showDirectoryPicker({mode:'readwrite'});
     if(!await gtDirOk(dir,true)){ showMsg(msg,'Permission to that folder was not given.',false); return; }
-    gtDir=dir;
+    gtDir=dir; gtFolderPending=false;
     await gtIdbPut('dir',dir);
     await gtLoadLib();
     // a folder chosen with nothing in it takes over whatever was in the browser
@@ -13181,6 +13204,7 @@ document.getElementById('gtForgetFolderBtn').addEventListener('click',async()=>{
   showMsg(document.getElementById('gtLibMsg'),'✓ Folder forgotten — the library stays in this browser.',true);
 });
 document.getElementById('gtCutBtn').addEventListener('click',async()=>{
+  await gtEnsureDir(true);
   const file=await gtPickFile('image/svg+xml,.svg');
   if(!file) return;
   const built=gtBuildLayout(await file.text());
@@ -13206,6 +13230,7 @@ document.getElementById('gtCutDelBtn').addEventListener('click',async()=>{
   await gtSaveLib(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
 });
 document.getElementById('gtBaseBtn').addEventListener('click',async()=>{
+  await gtEnsureDir(true);
   const file=await gtPickFile('image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp');
   if(!file) return;
   const path=await gtAssetPath('shape',file);
@@ -13221,6 +13246,7 @@ document.getElementById('gtBaseDelBtn').addEventListener('click',async()=>{
 });
 document.getElementById('gtDesignSearch').addEventListener('input',()=>gtRenderDesignList());
 document.getElementById('gtAddDesignBtn').addEventListener('click',async()=>{
+  const linked=await gtEnsureDir(true);
   const file=await gtPickFile('image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp');
   if(!file) return;
   const id=gtId('d');
@@ -13233,10 +13259,15 @@ document.getElementById('gtAddDesignBtn').addEventListener('click',async()=>{
   gtLib.designs.push(d);
   try{ gtImgs.set(id,await loadImage(await fileToDataURL(file))); }catch(e){}
   await gtSaveLib();
+  showMsg(document.getElementById('gtLibMsg'),
+    linked?`✓ ${d.name} written into ${path}`
+          :`⚠ ${d.name} is in this browser only — no library folder is connected, so nothing was written to disk.`,
+    linked);
   gtCurrentDesign=d;
   showScreen('tool-gift-tag-design');
 });
 document.getElementById('gtAddFontBtn').addEventListener('click',async()=>{
+  const linked=await gtEnsureDir(true);
   const files=await gtPickFile('.ttf,.otf,.woff2,font/ttf,font/otf,font/woff2',true);
   if(!files||!files.length) return;
   for(const file of files){
@@ -13248,7 +13279,10 @@ document.getElementById('gtAddFontBtn').addEventListener('click',async()=>{
   }
   await gtHydrate(); await gtSaveLib();
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
-  showMsg(document.getElementById('gtLibMsg'),'✓ '+files.length+' font(s) added.',true);
+  showMsg(document.getElementById('gtLibMsg'),
+    linked?'✓ '+files.length+' font(s) written into the fonts folder.'
+          :'⚠ '+files.length+' font(s) added, in this browser only — no library folder is connected.',
+    linked);
 });
 
 // ---------- the library as one file ----------
@@ -13737,6 +13771,7 @@ document.getElementById('gtHoleOn').addEventListener('change',e=>{
 });
 document.getElementById('gtReplaceArtBtn').addEventListener('click',async()=>{
   const d=gtCurrentDesign; if(!d) return;
+  await gtEnsureDir(true);
   const file=await gtPickFile('image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp');
   if(!file) return;
   // artwork replaced by a different file of the same name is numbered rather
@@ -14045,6 +14080,7 @@ async function gtOpen(){
       // the handle survives a reload but its permission may not, and asking
       // again cannot happen here — that takes a tap, which the button is for
       if(saved&&await gtDirOk(saved)) gtDir=saved;
+      else if(saved) gtFolderPending=true;
       await gtLoadLib();
     }catch(e){}
     if(!gtSheet.slots.length) gtRebuildSlots();
