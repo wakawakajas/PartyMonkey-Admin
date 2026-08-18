@@ -11208,6 +11208,12 @@ async function gtLoadLib(){
   await gtHydrate();
   // a library written before placeholders existed has none saved; work them out
   if(!gtSheet.slots.length) gtRebuildSlots();
+  // and one saved when the cutting file was read as more shapes than it has
+  // tags holds placeholders the file no longer has — a saved placeholder that
+  // outnumbers them, or points at a shape that is gone, is worked out again.
+  // Nudged or dropped placeholders that still match the file are left alone.
+  else if(gtLayout&&(gtSheet.slots.length>gtLayout.shapes.length
+    ||gtSheet.slots.some(s=>s.shape!=null&&!gtLayout.shapes[s.shape]))) gtRebuildSlots();
 }
 // A design read back off disk is trusted for its shape but not its contents —
 // a hand-edited library.json should not be able to take the screen down.
@@ -11335,6 +11341,30 @@ function gtLenMm(v){
   const u=(m[2]||'').toLowerCase();
   return GT_UNIT_MM[u]?n*GT_UNIT_MM[u]:0;
 }
+// A cutting file holds more loops than the sheet has tags. A tag punched for
+// ribbon is two loops, the hole sitting inside the tag; a sheet drawn with a
+// frame round its tags is a loop holding all of them; and a registration mark
+// is a loop the size of nothing. Every one of those became a placeholder, so
+// the tags past the real ones landed in holes and margins. Only the loop a tag
+// is cut from is kept.
+function gtPruneShapes(shapes){
+  // b sits inside a, allowing for the width of the line each is drawn with
+  const inside=(b,a)=>{
+    const t=Math.min(a.w,a.h)*0.02;
+    return b.x>=a.x-t&&b.y>=a.y-t&&b.x+b.w<=a.x+a.w+t&&b.y+b.h<=a.y+a.h+t
+      &&b.w*b.h<a.w*a.h*0.99;
+  };
+  const holds=shapes.map(s=>shapes.filter(o=>o!==s&&inside(o.bbox,s.bbox)).length);
+  // a loop holding two or more others is a frame drawn round them, not a tag
+  let keep=shapes.filter((s,i)=>holds[i]<2);
+  // and what is left inside a loop that stayed is the hole punched out of it
+  keep=keep.filter(s=>!keep.some(o=>o!==s&&inside(s.bbox,o.bbox)));
+  // marks and folds are drawn far smaller than the tags they sit beside
+  const areas=keep.map(s=>s.bbox.w*s.bbox.h).sort((a,b)=>a-b);
+  const med=areas.length?areas[Math.floor(areas.length/2)]:0;
+  keep=keep.filter(s=>s.bbox.w*s.bbox.h>=med*0.25);
+  return keep.length?keep:shapes;
+}
 // Laid out off-screen at its own viewBox size, so getCTM and getBBox hand back
 // coordinates already in viewBox units with every group transform folded in.
 function gtBuildLayout(text){
@@ -11377,11 +11407,12 @@ function gtBuildLayout(text){
       });
       (el.parentNode||svg).removeChild(measure);
     });
+    const tags=gtPruneShapes(shapes);
     // filled top to bottom, left to right. Rows are banded rather than sorted on
     // an exact Y, so a row whose shapes sit a hair apart still reads as one row.
-    const band=Math.max(1,(shapes.reduce((s,x)=>s+x.bbox.h,0)/Math.max(1,shapes.length))/2);
-    shapes.sort((a,b)=>(Math.round(a.bbox.y/band)-Math.round(b.bbox.y/band))||(a.bbox.x-b.bbox.x));
-    return shapes.length?{vb,mm,shapes}:null;
+    const band=Math.max(1,(tags.reduce((s,x)=>s+x.bbox.h,0)/Math.max(1,tags.length))/2);
+    tags.sort((a,b)=>(Math.round(a.bbox.y/band)-Math.round(b.bbox.y/band))||(a.bbox.x-b.bbox.x));
+    return tags.length?{vb,mm,shapes:tags}:null;
   }catch(e){ return null; }
   finally{ host.innerHTML=''; }
 }
