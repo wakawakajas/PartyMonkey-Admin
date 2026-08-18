@@ -2157,7 +2157,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <div class="card-head"><span class="num">4</span><h3>Design Library</h3><span class="chev">▾</span></div>
       <div class="card-body">
         <p class="hint">Designs, fonts and saved phrases live in a folder on this computer or on the network. Pick it once and the app remembers it; copy the folder to a colleague and she has the whole library. Chrome and Edge on a computer only — elsewhere, use the library file below.</p>
-        <p class="hint">The cutting file and base layer dropped into <strong>shape</strong> are picked up on their own the next time you come back to this window. Artwork and fonts are kept in <strong>designs</strong> and <strong>fonts</strong> and are listed to be picked from — they never join the library uninvited. Nothing is ever copied: a file already in the folder is used where it lies.</p>
+        <p class="hint">Artwork dropped into <strong>designs</strong>, font files into <strong>fonts</strong>, and the cutting file and base layer into <strong>shape</strong> are picked up on their own the next time you come back to this window. Each is taken on once and never copied — a file already in the folder is used where it lies — and anything you take out of the library stays out.</p>
         <div class="grid2" style="margin-bottom:10px;">
           <button class="btn-outline" id="gtPickFolderBtn">📁 Choose folder</button>
           <button class="btn-outline" id="gtForgetFolderBtn">Forget folder</button>
@@ -2165,7 +2165,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         <div class="calc" id="gtFolderState" style="margin-bottom:14px;"></div>
 
         <div class="sect-label" style="margin-top:0;">Designs</div>
-        <p class="hint">Only what you add is here. Artwork sitting in the <strong>designs</strong> folder is listed below to be picked from — nothing joins the library until you choose it, so a folder of exports stays a folder of exports.</p>
+        <p class="hint">Artwork in the <strong>designs</strong> folder is the library: a new file there becomes a design the next time you come back to this window. It is taken on once, by the name it has, so nothing arrives twice — and one taken out with × stays out until you add it back from the list below.</p>
         <div class="ph-list list-full" id="gtDesignList"><p class="hint" style="margin:4px 0 0;">— none yet —</p></div>
         <div class="combo" id="gtDesignFolderCombo" style="margin-top:10px;">
           <label class="field"><span>ADD ONE FROM THE DESIGNS FOLDER</span>
@@ -11340,6 +11340,7 @@ async function gtLoadLib(){
   gtLib.texts=man.texts||[];
   if(man.sheet) Object.assign(gtSheet,man.sheet);
   if(!Array.isArray(gtSheet.slots)) gtSheet.slots=[];
+  gtDedupeLib();                       // one entry per file, whatever was saved
   const wasOrder=gtSheet.slotOrder;
   gtSheet.slotOrder='bottom';
   await gtHydrate();
@@ -11409,16 +11410,83 @@ async function gtHydrate(){
 // that was set up by hand afterwards.
 const GT_ART=/\.(png|jpe?g|webp)$/i, GT_FACE=/\.(ttf|otf|woff2)$/i;
 const GT_CUT=/\.svg$/i;
+// One look at the folder at a time. Arriving on the screen starts one and
+// coming back to the window starts another, and two of them reading designs/
+// side by side both decided the same file was new — which is how the library
+// filled with the same artwork twice over.
+let gtScanning=null;
 async function gtScanFolder(){
+  if(gtScanning) return gtScanning;
+  gtScanning=gtScanRun().finally(()=>{ gtScanning=null; });
+  return gtScanning;
+}
+// The library keeps to the folder: artwork in designs/ is a design and a face
+// in fonts/ is a font, without being asked for. A file is taken on once — a
+// second look knows it by the path it came from — and one taken out by hand
+// stays out, so nothing arrives twice and nothing comes back uninvited.
+async function gtScanRun(){
   if(!gtDir||!await gtDirOk(gtDir)) return 0;
-  const known=new Set([gtSheet.layoutFile,gtSheet.baseFile,...(gtSheet.shapeSeen||[])]);
-  let added=await gtScanShape(known);
-  // what designs/ and fonts/ hold is listed, not taken on: the folder is where
-  // artwork is kept, and a folder of exports is not a hundred designs anybody
-  // asked for. They are added from the pickers, one chosen at a time.
+  if(!Array.isArray(gtSheet.libSeen)) gtSheet.libSeen=[];
+  const known=new Set([...gtLib.designs.map(d=>d.file),...gtLib.fonts.map(f=>f.file),
+    gtSheet.layoutFile,gtSheet.baseFile,
+    ...(gtSheet.shapeSeen||[]),...gtSheet.libSeen]);
+  const jobs=[
+    ['designs',GT_ART,(name,file)=>gtLib.designs.push(gtNormalizeDesign({
+      id:gtId('d'),name,file,
+      fields:[{id:gtId('f'),name:'Text',def:'Thank you',size:6,align:'center',
+               x:0.12,y:0.4,w:0.76,h:0.2}]}))],
+    ['fonts',GT_FACE,(name,file)=>gtLib.fonts.push({id:gtId('t'),name,file})]];
+  let added=0;
+  for(const [folder,wanted,take] of jobs){
+    let dh=null;
+    try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; }
+    const found=[];
+    try{ for await (const entry of dh.values())
+      if(entry.kind==='file'&&wanted.test(entry.name)) found.push(entry); }catch(e){ continue; }
+    // in the order the folder reads them, so a numbered set lands in its order
+    found.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
+    for(const entry of found){
+      const path=folder+'/'+entry.name;
+      if(known.has(path)) continue;
+      try{ gtAssets.set(path,await entry.getFile()); }catch(e){ continue; }
+      take(entry.name.replace(/\.[^.]+$/,''),path);
+      known.add(path); gtSheet.libSeen.push(path); added++;
+    }
+  }
+  added+=await gtScanShape(known);
   await Promise.all([gtShapeList(),gtLibList()]);
+  if(gtDedupeLib()) added=Math.max(added,1);
   if(added){ await gtHydrate(); await gtSaveLib(); }
   return added;
+}
+// Two entries for one file are two of the same design, however they got there.
+// The first is kept, and anything an order line was pointing at is moved onto
+// it rather than left holding an id that no longer exists.
+function gtDedupeLib(){
+  let dropped=false;
+  const seen=new Map();
+  const keep=[];
+  gtLib.designs.forEach(d=>{
+    const had=d.file&&seen.get(d.file);
+    if(had){
+      gtOrder.forEach(l=>{ if(l.designId===d.id) l.designId=had.id; });
+      if(gtCurrentDesign&&gtCurrentDesign.id===d.id) gtCurrentDesign=had;
+      gtImgs.delete(d.id);
+      dropped=true;
+      return;
+    }
+    if(d.file) seen.set(d.file,d);
+    keep.push(d);
+  });
+  if(dropped) gtLib.designs=keep;
+  const faces=new Set(), fonts=[];
+  gtLib.fonts.forEach(f=>{
+    if(f.file&&faces.has(f.file)){ dropped=true; return; }
+    if(f.file) faces.add(f.file);
+    fonts.push(f);
+  });
+  gtLib.fonts=fonts;
+  return dropped;
 }
 // ---------- what is in the folder, waiting to be asked for ----------
 let gtLibFiles={designs:[],fonts:[]};
