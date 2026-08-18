@@ -11346,7 +11346,8 @@ function gtLenMm(v){
 // frame round its tags is a loop holding all of them; and a registration mark
 // is a loop the size of nothing. Every one of those became a placeholder, so
 // the tags past the real ones landed in holes and margins. Only the loop a tag
-// is cut from is kept.
+// is cut from is kept — the loops inside it stay with it as part of its
+// outline, so the hole is still drawn where the blade will make it.
 function gtPruneShapes(shapes){
   // b sits inside a, allowing for the width of the line each is drawn with
   const inside=(b,a)=>{
@@ -11358,12 +11359,24 @@ function gtPruneShapes(shapes){
   // a loop holding two or more others is a frame drawn round them, not a tag
   let keep=shapes.filter((s,i)=>holds[i]<2);
   // and what is left inside a loop that stayed is the hole punched out of it
-  keep=keep.filter(s=>!keep.some(o=>o!==s&&inside(s.bbox,o.bbox)));
+  const inner=keep.filter(s=>keep.some(o=>o!==s&&inside(s.bbox,o.bbox)));
+  keep=keep.filter(s=>!inner.includes(s));
   // marks and folds are drawn far smaller than the tags they sit beside
   const areas=keep.map(s=>s.bbox.w*s.bbox.h).sort((a,b)=>a-b);
   const med=areas.length?areas[Math.floor(areas.length/2)]:0;
   keep=keep.filter(s=>s.bbox.w*s.bbox.h>=med*0.25);
-  return keep.length?keep:shapes;
+  if(!keep.length) return shapes;
+  // a hole belongs to the smallest tag it sits in — drawn with that tag rather
+  // than counted as one, and in the same coordinates, so it stretches with it
+  inner.forEach(h=>{
+    let host=null;
+    keep.forEach(s=>{
+      if(!inside(h.bbox,s.bbox)) return;
+      if(!host||s.bbox.w*s.bbox.h<host.bbox.w*host.bbox.h) host=s;
+    });
+    if(host) (host.holes||(host.holes=[])).push(h.path);
+  });
+  return keep;
 }
 // Laid out off-screen at its own viewBox size, so getCTM and getBBox hand back
 // coordinates already in viewBox units with every group transform folded in.
@@ -11481,6 +11494,7 @@ function gtStrokeSlot(ctx,slot,sc){
   ctx.strokeStyle='#B24C25';
   ctx.lineWidth=1/(Math.min(sx,sy)*sc);   // a hairline on screen whatever the scale
   ctx.stroke(sh.path);
+  (sh.holes||[]).forEach(h=>ctx.stroke(h));
   ctx.restore();
   return true;
 }
