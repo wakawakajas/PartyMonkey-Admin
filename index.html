@@ -1978,7 +1978,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="wrap" id="giftTagScreen" style="display:none;">
     <div class="eyebrow">PRINT TEMPLATE</div>
     <h1>Gift Tag</h1>
-    <p class="sub">Pick a design, type the words, set the quantity. The sheet fills itself and starts another page when it runs out of room.</p>
+    <p class="sub">Pick a design, type the words, set the quantity. The sheet fills itself and starts another page when it runs out of room. Tap a tag to work on that line, then drag its words to move them or the corner to resize the box — that line only. Words too long for their box wrap onto a second line, and shrink from there.</p>
 
     <div class="preview-wrap">
       <div class="preview-card">
@@ -11654,6 +11654,23 @@ function gtFit(iw,ih,bw,bh){
   const w=iw*s,h=ih*s;
   return {w,h,x:(bw-w)/2,y:(bh-h)/2};
 }
+// where a design's artwork lands inside one placeholder, and where one of its
+// text boxes lands inside that — the same sums the sheet is drawn with, kept
+// here so the pointer can be tested against them
+function gtTagArt(line,slot){
+  const d=gtDesign(line.designId);
+  const img=d&&gtImgs.get(d.id);
+  if(img&&img.naturalWidth){
+    const f=gtFit(img.naturalWidth,img.naturalHeight,slot.w,slot.h);
+    return {x:slot.x+f.x,y:slot.y+f.y,w:f.w,h:f.h};
+  }
+  return {x:slot.x,y:slot.y,w:slot.w,h:slot.h};
+}
+function gtFieldRect(line,f,art){
+  const v=gtVal(line,f);
+  return {x:art.x+f.x*art.w+v.dx, y:art.y+f.y*art.h+v.dy,
+          w:v.bw>0?v.bw:f.w*art.w, h:v.bh>0?v.bh:f.h*art.h, rot:v.rot};
+}
 // where the base layer sits on the sheet, in mm — fitted and centred, never
 // stretched, so a backing drawn at the wrong aspect is obvious rather than sly
 function gtBaseRect(){
@@ -11676,6 +11693,24 @@ function gtWrap(ctx,text,maxW){
     out.push(line);
   });
   return out;
+}
+// The words at the size the design asks for, or smaller where that will not
+// fit the box. Wrapping is tried first — a long name reads better on two lines
+// than at half the size — and only when the wrapped block is still too wide or
+// too tall does the size come down, a step at a time. The size keyed in stays
+// the control: it is the largest the words will ever be drawn, so making it
+// bigger or smaller still does what it says even on a name that had to shrink.
+function gtFitText(ctx,text,family,size,sc,bw,bh){
+  let s=Math.max(0.8,size);
+  for(let i=0;i<40;i++){
+    ctx.font=(s*sc)+'px '+family;
+    const lines=gtWrap(ctx,text,bw*sc);
+    const widest=lines.reduce((m,l)=>Math.max(m,ctx.measureText(l).width),0);
+    if((widest<=bw*sc&&lines.length*s*1.25<=bh)||s<=0.8) return {lines,size:s};
+    s=Math.max(0.8,s*0.93);
+  }
+  ctx.font=(s*sc)+'px '+family;
+  return {lines:gtWrap(ctx,text,bw*sc),size:s};
 }
 // A field's live values: what the order line says, falling back to what the
 // design says. Nothing here writes to the design.
@@ -11709,10 +11744,9 @@ function gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc){
       ctx.translate(cx,cy); ctx.rotate(v.rot*Math.PI/180); ctx.translate(-cx,-cy);
     }
     ctx.fillStyle=f.color||'#232323';
-    ctx.font=(v.size*sc)+'px '+gtFamily(v.font);
     ctx.textBaseline='alphabetic';
-    const lines=gtWrap(ctx,v.text,bw*sc);
-    const lh=v.size*1.25;
+    const fit=gtFitText(ctx,v.text,gtFamily(v.font),v.size,sc,bw,bh);
+    const lines=fit.lines, lh=fit.size*1.25;
     ctx.textAlign=v.align;
     const tx=v.align==='left'?bx:v.align==='right'?bx+bw:bx+bw/2;
     // the block of lines is centred in the box, whatever it grew to
@@ -11765,6 +11799,26 @@ function gtRenderPage(canvas,page,maxDim,forExport,view){
   S.slots.forEach((slot,i)=>{
     const line=q[start+i]; if(!line) return;
     gtDrawTag(ctx,line,slot.x,slot.y,slot.w,slot.h,sc,forExport);
+  });
+  // the boxes of the line being worked on, because they are dragged here
+  if(!forExport&&gtSelLine) S.slots.forEach((slot,i)=>{
+    const line=q[start+i]; if(!line||line.id!==gtSelLine) return;
+    const d=gtDesign(line.designId); if(!d) return;
+    const art=gtTagArt(line,slot);
+    d.fields.forEach(f=>{
+      const b=gtFieldRect(line,f,art);
+      ctx.save();
+      if(b.rot){
+        const cx=(b.x+b.w/2)*sc, cy=(b.y+b.h/2)*sc;
+        ctx.translate(cx,cy); ctx.rotate(b.rot*Math.PI/180); ctx.translate(-cx,-cy);
+      }
+      ctx.strokeStyle='#CCF344'; ctx.setLineDash([3,3]); ctx.lineWidth=1;
+      ctx.strokeRect(b.x*sc,b.y*sc,b.w*sc,b.h*sc);
+      ctx.setLineDash([]);
+      ctx.fillStyle='#CCF344';
+      ctx.fillRect((b.x+b.w)*sc-6,(b.y+b.h)*sc-6,6,6);   // the corner you drag
+      ctx.restore();
+    });
   });
   // the outlines last, over every tag — the cut is what you read the sheet by
   if(!forExport&&S.showCut) S.slots.forEach(slot=>{
@@ -11854,6 +11908,78 @@ function gtDraw(){
   sc.style.borderColor=per?'var(--border)':'var(--rust)';
   sc.style.color=per?'var(--muted)':'var(--rust)';
 }
+
+// ---------- moving the words on the sheet ----------
+// A name keyed in while somebody waits is the one that does not fit, and going
+// to the design to move its box would move it on every tag on the sheet. A drag
+// here writes to the line instead — where its words sit, and how big a box they
+// are given — for that line alone, which is what the nudge and box boxes on the
+// form hold. The corner resizes; anywhere else moves.
+(function gtSheetDrag(){
+  const c=document.getElementById('gtCanvas');
+  c.style.touchAction='none';
+  const at=e=>{
+    const r=c.getBoundingClientRect();
+    const V=gtView()||{x:0,y:0,w:gtSheet.paperW,h:gtSheet.paperH};
+    if(!r.width||!r.height) return null;
+    return {mx:V.x+(e.clientX-r.left)/r.width*V.w, my:V.y+(e.clientY-r.top)/r.height*V.h};
+  };
+  const hit=p=>{
+    const per=gtSheet.slots.length; if(!per||!p) return null;
+    const q=gtQueue(), start=gtPage*per;
+    for(let i=0;i<per;i++){
+      const slot=gtSheet.slots[i], line=q[start+i];
+      if(!line) continue;
+      if(p.mx<slot.x||p.my<slot.y||p.mx>slot.x+slot.w||p.my>slot.y+slot.h) continue;
+      const d=gtDesign(line.designId); if(!d) return {line};
+      const art=gtTagArt(line,slot);
+      // topmost first, so a box drawn over another takes the tap
+      for(let k=d.fields.length-1;k>=0;k--){
+        const f=d.fields[k], b=gtFieldRect(line,f,art);
+        let dx=p.mx-(b.x+b.w/2), dy=p.my-(b.y+b.h/2);
+        if(b.rot){
+          const a=-b.rot*Math.PI/180, cs=Math.cos(a), sn=Math.sin(a);
+          [dx,dy]=[dx*cs-dy*sn,dx*sn+dy*cs];
+        }
+        const u=b.w?(dx+b.w/2)/b.w:0, v=b.h?(dy+b.h/2)/b.h:0;
+        if(u<0||u>1||v<0||v>1) continue;
+        return {line,f,b,corner:u>0.84&&v>0.78};
+      }
+      return {line};                       // the tag, but not a box: still its line
+    }
+    return null;
+  };
+  let drag=null;
+  c.addEventListener('pointerdown',e=>{
+    const h=hit(at(e)); if(!h) return;
+    const card=document.querySelector('#gtOrderList [data-gt-line="'+h.line.id+'"]');
+    if(card) gtMarkLine(card); else gtSelLine=h.line.id;
+    if(!h.f){ gtDraw(); return; }
+    const v=gtVal(h.line,h.f), p=at(e);
+    drag={line:h.line,f:h.f,mode:h.corner?'resize':'move',
+      px:p.mx,py:p.my,dx:v.dx,dy:v.dy,bw:h.b.w,bh:h.b.h};
+    try{ c.setPointerCapture(e.pointerId); }catch(err){}
+    gtDraw();
+  });
+  c.addEventListener('pointermove',e=>{
+    if(!drag) return;
+    const p=at(e); if(!p) return;
+    e.preventDefault();
+    const vals=drag.line.vals||(drag.line.vals={});
+    const v=vals[drag.f.id]||(vals[drag.f.id]={});
+    if(drag.mode==='move'){
+      v.dx=round(drag.dx+p.mx-drag.px);
+      v.dy=round(drag.dy+p.my-drag.py);
+    }else{
+      v.bw=Math.max(3,round(drag.bw+p.mx-drag.px));
+      v.bh=Math.max(2,round(drag.bh+p.my-drag.py));
+    }
+    gtDraw();
+  });
+  const stop=()=>{ if(!drag) return; drag=null; gtRenderOrder(); gtDraw(); };
+  c.addEventListener('pointerup',stop);
+  c.addEventListener('pointercancel',stop);
+})();
 
 // ---------- saved phrases ----------
 function gtTextOptions(){
