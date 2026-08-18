@@ -1075,8 +1075,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 @media(min-width:600px){ .gt-two{grid-template-columns:1fr 1fr;} }
 /* the boxes under a line, however many of them there are */
 .gt-nudge{display:grid;gap:6px;grid-template-columns:repeat(auto-fit,minmax(72px,1fr));}
-/* how many of a design are wanted is the number the sheet is counted in */
-#gtOrderList .qty input{color:var(--blueprint);font-weight:700;}
+/* How many of a design are wanted is the number the whole sheet is counted in,
+   so it is in the app's lime and sits in the line's own heading, beside the way
+   out of the line rather than among the millimetres. */
+#gtOrderList .qty input{color:var(--blueprint);font-weight:700;text-align:center;}
+#gtOrderList .ph-card-head{gap:8px;}
+#gtOrderList .ph-card-head .qty{flex:0 0 62px;width:62px;margin:0;}
+#gtOrderList .ph-card-head .qty input{height:34px;min-height:34px;padding:0 4px;font-size:16px;}
 /* the design a line is set to: its picture, the picker, how many, and the way
    through to the design itself, all on one line */
 .gt-pick{display:flex;align-items:flex-end;gap:7px;margin-bottom:6px;flex-wrap:wrap;}
@@ -2015,13 +2020,15 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="wrap" id="giftTagScreen" style="display:none;">
     <div class="eyebrow">PRINT TEMPLATE</div>
     <h1>Gift Tag</h1>
-    <p class="sub">Pick a design, type the words, set the quantity. The sheet fills itself and starts another page when it runs out of room. Tap a tag to work on that line, then drag its words to move them or the corner to resize the box — that line only. Words too long for their box wrap onto a second line, and shrink from there.</p>
+    <p class="sub">Pick a design, type the words, set the quantity. The sheet fills itself and starts another page when it runs out of room. Tap a tag to work on that line, then drag its words to move them or the corner to resize the box — that line only. Zoom in fills the view with the tag being worked on; + and − or the wheel take it closer or further out, and dragging the paper between the tags moves the view about. Words too long for their box wrap onto a second line, and shrink from there.</p>
 
     <div class="preview-wrap">
       <div class="preview-card">
         <div class="top-row"><span id="gtPageLbl">SHEET</span>
           <div style="display:flex;gap:4px;">
-            <button class="icon-btn" id="gtZoomBtn" title="Close in on the tag being worked on — the bottom-left one until a line is picked">Zoom in</button>
+            <button class="icon-btn" id="gtZoomOutBtn" title="Further out">−</button>
+            <button class="icon-btn" id="gtZoomBtn" title="Fill the view with the tag being worked on — the bottom-left one until a line is picked">Zoom in</button>
+            <button class="icon-btn" id="gtZoomInBtn" title="Closer in">+</button>
             <button class="icon-btn" id="gtPrevPageBtn" title="Previous page">‹</button>
             <button class="icon-btn" id="gtNextPageBtn" title="Next page">›</button>
           </div>
@@ -12247,11 +12254,15 @@ function gtRenderPage(canvas,page,maxDim,forExport,view){
 }
 // ---------- closing in on the tag being edited ----------
 // A tag is a couple of centimetres on a sheet the size of a page: at the size
-// the whole sheet is shown, the words being typed are a few pixels tall. While
-// an order line is being worked on the sheet is looked at through a window
-// three times closer, over the placeholder that line's first tag lands in.
-const GT_ZOOM=3;
+// the whole sheet is shown, the words being typed are a few pixels tall. So the
+// sheet is looked at through a window, and zooming in fills that window with
+// the tag being worked on rather than closing in by some fixed amount that
+// suits one sheet and not the next. From there it can be taken closer or
+// further out, and dragged about by the paper between the tags.
 let gtZoomOn=false, gtZoomSlot=0;
+let gtZoomScale=1;                 // 1 is the whole sheet; 8 is eight times closer
+let gtZoomAt=null;                 // what the window is centred on, in mm
+const GT_ZOOM_MAX=60;
 // where a line's first tag falls: which sheet, and which placeholder on it
 function gtFirstSlotOf(lineId){
   const per=gtSheet.slots.length;
@@ -12260,35 +12271,78 @@ function gtFirstSlotOf(lineId){
   if(i<0) return null;
   return {page:Math.floor(i/per),slot:i%per};
 }
+// how close a placeholder has to be looked at to fill the window. The window
+// keeps the sheet's own shape, so a tag of another shape fills it the way it
+// can and leaves a little either side.
+function gtFillScale(slot){
+  const S=gtSheet;
+  if(!slot||!slot.w||!slot.h) return 3;
+  return Math.max(1,Math.min(GT_ZOOM_MAX,
+    Math.min(S.paperW/(slot.w*1.06), S.paperH/(slot.h*1.06))));
+}
 function gtView(){
   const S=gtSheet;
   if(!gtZoomOn) return null;
-  const slot=S.slots[gtZoomSlot]||S.slots[0];
-  if(!slot) return null;
-  const w=S.paperW/GT_ZOOM, h=S.paperH/GT_ZOOM;
-  // centred on the placeholder, then held inside the sheet so the window never
-  // shows a strip of nothing beside the edge tags
+  const z=Math.max(1,Math.min(GT_ZOOM_MAX,gtZoomScale));
+  const w=S.paperW/z, h=S.paperH/z;
+  const c=gtZoomAt||{x:S.paperW/2,y:S.paperH/2};
+  // held inside the sheet, so the window never shows a strip of nothing beside
+  // the edge tags
   const clamp=(v,hi)=>Math.min(Math.max(v,0),Math.max(0,hi));
-  return {x:clamp(slot.x+slot.w/2-w/2,S.paperW-w),
-          y:clamp(slot.y+slot.h/2-h/2,S.paperH-h),w,h};
+  return {x:clamp(c.x-w/2,S.paperW-w), y:clamp(c.y-h/2,S.paperH-h), w,h};
+}
+// fill the window with one placeholder, wherever it sits on the sheet
+function gtZoomSlotTo(i){
+  const slot=gtSheet.slots[i]||gtSheet.slots[0];
+  if(!slot) return false;
+  gtZoomSlot=gtSheet.slots.indexOf(slot);
+  gtZoomScale=gtFillScale(slot);
+  gtZoomAt={x:slot.x+slot.w/2,y:slot.y+slot.h/2};
+  gtZoomOn=true;
+  return true;
 }
 function gtZoomTo(lineId){
   const at=gtFirstSlotOf(lineId);
   if(!at) return;
-  gtPage=at.page; gtZoomSlot=at.slot; gtZoomOn=true;
+  gtPage=at.page;
+  gtZoomSlotTo(at.slot);
+  gtDraw();
+}
+// closer in or further out about the middle of the window, or about a point on
+// the sheet where one is given — which is what the wheel hands over
+function gtZoomBy(mul,about){
+  const S=gtSheet;
+  const before=gtView()||{x:0,y:0,w:S.paperW,h:S.paperH};
+  const z=Math.max(1,Math.min(GT_ZOOM_MAX,(gtZoomOn?gtZoomScale:1)*mul));
+  if(z<=1){ gtZoomOn=false; gtZoomScale=1; gtDraw(); return; }
+  const at=about||{x:before.x+before.w/2,y:before.y+before.h/2};
+  // the point under the pointer stays under it: the window shrinks towards it
+  const k=(gtZoomOn?gtZoomScale:1)/z;
+  gtZoomAt={x:at.x+((before.x+before.w/2)-at.x)*k,
+            y:at.y+((before.y+before.h/2)-at.y)*k};
+  gtZoomScale=z; gtZoomOn=true;
   gtDraw();
 }
 document.getElementById('gtZoomBtn').addEventListener('click',()=>{
-  gtZoomOn=!gtZoomOn;
+  if(gtZoomOn){ gtZoomOn=false; gtZoomScale=1; gtDraw(); return; }
   // straight to the tag being worked on, and to the first one — bottom left —
   // when no line has been picked yet
-  if(gtZoomOn){
-    const at=gtSelLine?gtFirstSlotOf(gtSelLine):null;
-    if(at){ gtPage=at.page; gtZoomSlot=at.slot; }
-    else gtZoomSlot=0;
-  }
+  const at=gtSelLine?gtFirstSlotOf(gtSelLine):null;
+  if(at) gtPage=at.page;
+  gtZoomSlotTo(at?at.slot:0);
   gtDraw();
 });
+document.getElementById('gtZoomInBtn').addEventListener('click',()=>gtZoomBy(1.4));
+document.getElementById('gtZoomOutBtn').addEventListener('click',()=>gtZoomBy(1/1.4));
+document.getElementById('gtCanvas').addEventListener('wheel',e=>{
+  if(!gtSheet.slots.length) return;
+  e.preventDefault();
+  const c=e.currentTarget, r=c.getBoundingClientRect();
+  if(!r.width||!r.height) return;
+  const V=gtView()||{x:0,y:0,w:gtSheet.paperW,h:gtSheet.paperH};
+  gtZoomBy(e.deltaY<0?1.2:1/1.2,
+    {x:V.x+(e.clientX-r.left)/r.width*V.w, y:V.y+(e.clientY-r.top)/r.height*V.h});
+},{passive:false});
 // Focus is what says which line is being worked on, and it covers every way in
 // — tapping a box, tabbing between them, or Enter walking down the form.
 document.getElementById('gtOrderList').addEventListener('focusin',e=>{
@@ -12316,10 +12370,13 @@ function gtDraw(){
   gtRenderPage(document.getElementById('gtCanvas'),gtPage,dim,false,view);
   const zb=document.getElementById('gtZoomBtn');
   zb.textContent=gtZoomOn?'Whole sheet':'Zoom in';
+  document.getElementById('gtZoomInBtn').disabled=!gtSheet.slots.length||gtZoomScale>=GT_ZOOM_MAX;
+  document.getElementById('gtZoomOutBtn').disabled=!gtZoomOn;
   zb.classList.toggle('on',gtZoomOn);
   zb.disabled=!gtSheet.slots.length;
   document.getElementById('gtPageLbl').textContent=
-    pages?(gtZoomOn?`SHEET ${gtPage+1} · TAG ${gtZoomSlot+1}`:`SHEET ${gtPage+1} OF ${pages}`):'SHEET';
+    pages?(gtZoomOn?`SHEET ${gtPage+1} · ×${gtZoomScale.toFixed(1)}`
+                   :`SHEET ${gtPage+1} OF ${pages}`):'SHEET';
   document.getElementById('gtPrevPageBtn').disabled=gtPage<=0;
   document.getElementById('gtNextPageBtn').disabled=gtPage>=pages-1;
   const per=S.slots.length, q=gtQueue().length;
@@ -12376,12 +12433,27 @@ function gtDraw(){
     }
     return null;
   };
-  let drag=null;
+  let drag=null, pan=null;
+  // Dragging the paper between the tags moves the window, the way a map is
+  // pushed about; dragging a tag's own words still moves the words. Which one
+  // it is answers itself from what is under the pointer when it goes down.
+  const startPan=e=>{
+    if(!gtZoomOn) return false;
+    const r=c.getBoundingClientRect();
+    if(!r.width||!r.height) return false;
+    const V=gtView(); if(!V) return false;
+    pan={cx:e.clientX,cy:e.clientY,mmx:V.w/r.width,mmy:V.h/r.height,
+         at:{x:V.x+V.w/2,y:V.y+V.h/2}};
+    try{ c.setPointerCapture(e.pointerId); }catch(err){}
+    c.style.cursor='grabbing';
+    return true;
+  };
   c.addEventListener('pointerdown',e=>{
-    const h=hit(at(e)); if(!h) return;
+    const h=hit(at(e));
+    if(!h){ startPan(e); return; }
     const card=document.querySelector('#gtOrderList [data-gt-line="'+h.line.id+'"]');
     if(card) gtMarkLine(card); else gtSelLine=h.line.id;
-    if(!h.f){ gtDraw(); return; }
+    if(!h.f){ startPan(e); gtDraw(); return; }
     const v=gtVal(h.line,h.f), p=at(e);
     drag={line:h.line,f:h.f,mode:h.corner?'resize':'move',
       px:p.mx,py:p.my,dx:v.dx,dy:v.dy,bw:h.b.w,bh:h.b.h};
@@ -12389,6 +12461,13 @@ function gtDraw(){
     gtDraw();
   });
   c.addEventListener('pointermove',e=>{
+    if(pan){
+      e.preventDefault();
+      gtZoomAt={x:pan.at.x-(e.clientX-pan.cx)*pan.mmx,
+                y:pan.at.y-(e.clientY-pan.cy)*pan.mmy};
+      gtDraw();
+      return;
+    }
     if(!drag) return;
     const p=at(e); if(!p) return;
     e.preventDefault();
@@ -12403,7 +12482,11 @@ function gtDraw(){
     }
     gtDraw();
   });
-  const stop=()=>{ if(!drag) return; drag=null; gtRenderOrder(); gtDraw(); };
+  const stop=()=>{
+    if(pan){ pan=null; c.style.cursor=''; }
+    if(!drag) return;
+    drag=null; gtRenderOrder(); gtDraw();
+  };
   c.addEventListener('pointerup',stop);
   c.addEventListener('pointercancel',stop);
 })();
@@ -12554,8 +12637,6 @@ function gtRenderOrder(){
             <select data-gtp="${f.id}">${gtTextOptions()}</select></label>`}
         </div>
         <div class="gt-nudge">
-          ${fi===0?`<label class="field qty"><span>QTY</span>
-            <input type="number" min="0" step="1" value="${l.qty}" data-gtl="qty"/></label>`:''}
           <label class="field"><span>NUDGE X</span>
             <input type="number" step="0.5" value="${v.dx}" data-gtf="${f.id}|dx"/></label>
           <label class="field"><span>NUDGE Y</span>
@@ -12571,7 +12652,9 @@ function gtRenderOrder(){
         </div>`;
     }).join(''):'<p class="hint" style="margin:6px 0 0;">Pick a design for this line.</p>';
     return `<div class="ph-card${l.id===gtSelLine?' is-sel':''}" data-gt-line="${l.id}" data-id="${l.id}">
-      <div class="ph-card-head"><span>Line ${i+1}</span>
+      <div class="ph-card-head"><span style="flex:1;">Line ${i+1}</span>
+        <label class="field qty" title="How many of this design">
+          <input type="number" min="0" step="1" value="${l.qty}" data-gtl="qty"/></label>
         <button class="del-btn" data-gt-del-line title="Remove">×</button></div>
       <div class="gt-pick">
         ${gtArt(l.designId)}
