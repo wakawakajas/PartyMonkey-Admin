@@ -137,6 +137,7 @@ button:focus-visible{outline:2px solid var(--blueprint);outline-offset:2px;}
 @media (max-width:399px){ .grid2{grid-template-columns:1fr;} }
 .grid3{display:grid;grid-template-columns:1fr 1fr auto;gap:9px;align-items:end;}
 .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;}
+.grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;}
 /* the four shipment actions: 2x2 on a phone, one row once there is room.
    labels wrap rather than truncate, so none of them become guesswork. */
 /* front and back artwork sit together, each keeping its own size fields */
@@ -1047,8 +1048,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 #gtOrderList .field,#gtFieldList .field{margin-bottom:0;}
 #gtOrderList input,#gtOrderList select,#gtFieldList input,#gtFieldList select{
   height:40px;min-height:40px;padding:0 9px;border-radius:10px;}
-#gtOrderList .grid2,#gtOrderList .grid4,#gtOrderList .grid3e,
-#gtFieldList .grid2,#gtFieldList .grid4,#gtFieldList .grid3e{gap:6px;}
+#gtOrderList .grid2,#gtOrderList .grid4,#gtOrderList .grid5,#gtOrderList .grid3e,
+#gtFieldList .grid2,#gtFieldList .grid4,#gtFieldList .grid5,#gtFieldList .grid3e{gap:6px;}
 #gtOrderList .ph-card,#gtFieldList .ph-card{padding:9px;}
 #gtOrderList .btn-sm,#gtFieldList .btn-sm{min-height:40px;}
 /* the line being worked on, picked out in the same lime as the headings */
@@ -2034,7 +2035,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="card has-combo" data-card>
       <div class="card-head"><span class="num">2</span><h3>Order</h3><span class="chev">▾</span></div>
       <div class="card-body">
-        <p class="hint">One row per design the customer asked for. The words start from the design's own default and are yours to change, as are the font and its size. Nudge X and Y move that line's text box; long words wrap inside it. Hold a line and drag it to move it up or down the run — the first line fills the first placeholder.</p>
+        <p class="hint">One row per design the customer asked for. The words start from the design's own default and are yours to change, as are the font and its size. Nudge X and Y move that line's text box; long words wrap inside it. Curve bends the words round an arc — over the middle above zero, under it below. Hold a line and drag it to move it up or down the run — the first line fills the first placeholder.</p>
         <div id="gtOrderList"></div>
         <div class="grid2" style="margin-top:10px;">
           <button class="btn-outline" id="gtAddDesignBtn">+ Upload a design</button>
@@ -11314,7 +11315,7 @@ function gtNormalizeDesign(d){
   return {id:d.id||gtId('d'),name:d.name||'Untitled',file:d.file||'',
     fields:(d.fields||[]).map(f=>({id:f.id||gtId('f'),name:f.name||'Text',def:f.def||'',
       font:f.font||'',size:Number(f.size)||6,color:f.color||'#232323',align:f.align||'center',
-      rot:Number(f.rot)||0,group:f.group||'',
+      rot:Number(f.rot)||0,curve:Number(f.curve)||0,group:f.group||'',
       x:Number(f.x)||0,y:Number(f.y)||0,w:Number(f.w)||0.8,h:Number(f.h)||0.2})),
     hole:{on:!!(d.hole&&d.hole.on),x:Number(d.hole&&d.hole.x)||0.5,
           y:Number(d.hole&&d.hole.y)||0.08,d:Number(d.hole&&d.hole.d)||4}};
@@ -11860,6 +11861,34 @@ function gtFitText(ctx,text,family,size,sc,bw,bh){
   ctx.font=(s*sc)+'px '+family;
   return {lines:gtWrap(ctx,text,bw*sc),size:s};
 }
+// A name round the top of an arch tag is set letter by letter along a circle,
+// not squeezed into a curve after the fact. How far the line bends is what is
+// asked for, in degrees, and the radius falls out of it: a longer name bends on
+// a bigger circle, so the letters keep the spacing the font gave them and only
+// the line they sit on changes. Positive arches up over the middle, negative
+// hangs below it.
+function gtDrawCurved(ctx,text,cx,y,deg){
+  const arc=Math.abs(deg)*Math.PI/180;
+  const w=ctx.measureText(text).width;
+  if(!w||!arc){ ctx.fillText(text,cx,y); return; }
+  const r=w/arc, up=deg>0;
+  const was=ctx.textAlign;
+  ctx.textAlign='center';
+  ctx.save();
+  ctx.translate(cx,up?y+r:y-r);          // the centre of that circle
+  let a=-arc/2;
+  for(const ch of Array.from(text)){
+    const step=ctx.measureText(ch).width/r;
+    ctx.save();
+    if(up){ ctx.rotate(a+step/2); ctx.translate(0,-r); }
+    else  { ctx.rotate(-(a+step/2)); ctx.translate(0,r); }
+    ctx.fillText(ch,0,0);
+    ctx.restore();
+    a+=step;
+  }
+  ctx.restore();
+  ctx.textAlign=was;
+}
 // A field's live values: what the order line says, falling back to what the
 // design says. Nothing here writes to the design.
 function gtVal(line,f){
@@ -11868,6 +11897,7 @@ function gtVal(line,f){
           font:v.font===undefined?f.font:v.font,
           size:Number(v.size||f.size)||6,
           rot:v.rot===undefined?(Number(f.rot)||0):(Number(v.rot)||0),
+          curve:v.curve===undefined?(Number(f.curve)||0):(Number(v.curve)||0),
           align:v.align||f.align||'center',
           dx:Number(v.dx)||0, dy:Number(v.dy)||0,
           // the box itself, in mm, where the line has been given one; zero is
@@ -11899,7 +11929,13 @@ function gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc){
     const tx=v.align==='left'?bx:v.align==='right'?bx+bw:bx+bw/2;
     // the block of lines is centred in the box, whatever it grew to
     let ty=by+(bh-lines.length*lh)/2+lh*0.8;
-    lines.forEach(ln=>{ ctx.fillText(ln,tx*sc,ty*sc); ty+=lh; });
+    // a bent line is centred on its arc whatever the field's own alignment is:
+    // there is no left edge to hang it off once it is on a circle
+    lines.forEach(ln=>{
+      if(v.curve) gtDrawCurved(ctx,ln,(bx+bw/2)*sc,ty*sc,v.curve);
+      else ctx.fillText(ln,tx*sc,ty*sc);
+      ty+=lh;
+    });
     ctx.restore();
   });
 }
@@ -12269,7 +12305,7 @@ function gtRenderOrder(){
           <select data-gtp="${f.id}">${gtTextOptions()}</select>
           <button type="button" class="btn-outline btn-sm" data-gtsave="${f.id}">Save phrase</button>
         </div>
-        <div class="grid4" style="margin-bottom:6px;">
+        <div class="grid5" style="margin-bottom:6px;">
           <label class="field"><span>FONT</span>
             <select data-gtf="${f.id}|font">${gtFontOptions(v.font)}</select></label>
           <label class="field"><span>ALIGN</span>
@@ -12280,6 +12316,8 @@ function gtRenderOrder(){
             <input type="number" step="0.1" min="0.5" value="${v.size}" data-gtf="${f.id}|size"/></label>
           <label class="field"><span>ROT °</span>
             <input type="number" step="1" value="${v.rot}" data-gtf="${f.id}|rot"/></label>
+          <label class="field"><span>CURVE °</span>
+            <input type="number" step="5" value="${v.curve}" data-gtf="${f.id}|curve"/></label>
         </div>
         <div class="grid4">
           <label class="field"><span>NUDGE X</span>
@@ -13147,11 +13185,14 @@ function gtRenderFields(){
         <label class="field"><span>SIZE (mm)</span>
           <input type="number" step="0.1" min="0.5" value="${f.size}" data-gtd="size"/></label>
       </div>
-      <div class="grid2" style="margin-bottom:7px;">
+      <div class="grid3e" style="margin-bottom:7px;">
         <label class="field"><span>COLOUR</span>
           <input type="text" value="${escapeHtml(f.color)}" data-gtd="color" placeholder="#232323"/></label>
         <label class="field"><span>ROTATION (°)</span>
           <input type="number" step="1" value="${round(f.rot)}" data-gtd="rot"/></label>
+        <label class="field"><span>CURVE (°)</span>
+          <input type="number" step="5" value="${round(f.curve)}" data-gtd="curve"
+                 title="How far the line bends: over the middle above zero, under it below"/></label>
       </div>
       <div class="slot-label">Align</div>
       <div class="seg" data-gt-align style="margin-bottom:7px;">
@@ -13187,6 +13228,7 @@ document.getElementById('gtFieldList').addEventListener('input',e=>{
   if(k==='name'||k==='def'||k==='color'||k==='font') f[k]=e.target.value;
   else if(k==='size') f.size=Math.max(0.5,Number(e.target.value)||f.size);
   else if(k==='rot') f.rot=Number(e.target.value)||0;
+  else if(k==='curve') f.curve=Math.max(-350,Math.min(350,Number(e.target.value)||0));
   else{
     const A=gtEditGeom().art;
     const span=(k==='x'||k==='w')?A.w:A.h;
