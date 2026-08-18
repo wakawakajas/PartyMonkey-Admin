@@ -13851,23 +13851,50 @@ function undoApply(key,text){
   finally{ UNDO.busy=false; }
   syncUndoBtns();
 }
+// A step back rebuilds the form, so the box being typed in is a different box
+// afterwards. It is found again by what it is rather than by being the same
+// element, so a run of Ctrl+Z walks back without the caret being lost at the
+// first one.
+function undoWhere(){
+  const el=document.activeElement;
+  if(!el||!el.closest) return null;
+  const line=el.closest('[data-gt-line]');
+  return {line:line?line.dataset.gtLine:null,
+    f:(el.dataset&&el.dataset.gtf)||null, l:(el.dataset&&el.dataset.gtl)||null,
+    id:el.id||null};
+}
+function undoBack(where){
+  if(!where) return;
+  let el=null;
+  if(where.line){
+    const card=document.querySelector('#gtOrderList [data-gt-line="'+where.line+'"]');
+    if(card) el=where.f?card.querySelector('[data-gtf="'+where.f+'"]')
+            :(where.l?card.querySelector('[data-gtl="'+where.l+'"]'):null);
+  }
+  if(!el&&where.id) el=document.getElementById(where.id);
+  if(el&&el.focus){ try{ el.focus(); if(el.select) el.select(); }catch(e){} }
+}
 function undoStep(){
   const key=undoKeyNow(); if(!key) return;
   clearTimeout(UNDO.timer);
   undoKeep(key);                                       // whatever is on screen counts as a step
   const past=UNDO.past[key]||[];
   if(past.length<2) return;
+  const where=undoWhere();
   UNDO.future[key]=UNDO.future[key]||[];
   UNDO.future[key].push(past.pop());
   undoApply(key,past[past.length-1]);
+  undoBack(where);
 }
 function redoStep(){
   const key=undoKeyNow(); if(!key) return;
   const ahead=UNDO.future[key]||[];
   if(!ahead.length) return;
+  const where=undoWhere();
   const text=ahead.pop();
   (UNDO.past[key]||(UNDO.past[key]=[])).push(text);
   undoApply(key,text);
+  undoBack(where);
 }
 function syncUndoBtns(){
   const key=undoKeyNow();
@@ -13878,15 +13905,19 @@ function syncUndoBtns(){
 }
 document.getElementById('undoBtn').addEventListener('click',undoStep);
 document.getElementById('redoBtn').addEventListener('click',redoStep);
-// Ctrl+Z is the keyboard's own inside a box being typed in — it undoes the
-// typing, which is what anybody pressing it there means — so this stays out of
-// the way until the caret is somewhere else.
+// On these two screens Ctrl+Z is the app's, whether the caret is in a box or
+// not. Leaving it to the browser inside a box looked right until it was used:
+// the box's own history is a few keystrokes long, so the second press did
+// nothing and the step people actually wanted back — the size they changed, the
+// box they dragged — was unreachable from where they were typing. What is typed
+// is part of the step anyway, so a step back takes it with it. A textarea keeps
+// the browser's, being prose rather than a figure.
 document.addEventListener('keydown',e=>{
   if(!(e.ctrlKey||e.metaKey)) return;
   const k=(e.key||'').toLowerCase();
   if(k!=='z'&&k!=='y') return;
   const el=e.target;
-  if(el&&/^(INPUT|TEXTAREA)$/.test(el.tagName)&&!/^(checkbox|radio|button|submit)$/.test(el.type||'')) return;
+  if(el&&el.tagName==='TEXTAREA') return;
   if(!undoKeyNow()) return;
   e.preventDefault();
   if(k==='y'||e.shiftKey) redoStep(); else undoStep();
