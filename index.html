@@ -2074,7 +2074,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="card has-combo" data-card>
       <div class="card-head"><span class="num">2</span><h3>Order</h3><span class="chev">▾</span></div>
       <div class="card-body">
-        <p class="hint">One row per design the customer asked for. The words start from the design's own default and are yours to change, as are the font and its size. Nudge X and Y move that line's text box; long words wrap inside it. Curve bends the words round an arc — over the middle above zero, under it below. An outline stands that many millimetres outside the letters, in whatever colour is keyed beside it. Hold a line and drag it to move it up or down the run — the first line fills the first placeholder.</p>
+        <p class="hint">One row per design the customer asked for. The words start from the design's own default and are yours to change, as are the font and its size. Nudge X and Y move that line's text box; long words wrap inside it. Curve bends the words round an arc — over the middle above zero, under it below. Text on this line only adds a box to these tags alone, leaving the design as it is for every other line. An outline stands that many millimetres outside the letters, in whatever colour is keyed beside it. Hold a line and drag it to move it up or down the run — the first line fills the first placeholder.</p>
         <div id="gtOrderList"></div>
         <div class="grid2" style="margin-top:10px;">
           <button class="btn-outline" id="gtAddDesignBtn">+ Upload a design</button>
@@ -12116,6 +12116,18 @@ function gtDrawCurved(ctx,text,cx,y,deg,paint){
   ctx.restore();
   ctx.textAlign=was;
 }
+// The text on a tag is the design's, plus whatever this one line was given.
+// A design is set up once for the run it is printed for, and then one customer
+// wants a date under the name on hers alone — that line carries its own field
+// rather than the design growing one every tag would have to leave empty.
+const gtFieldsOf=(d,line)=>!d?[]
+  :((line&&line.extra&&line.extra.length)?d.fields.concat(line.extra):d.fields);
+function gtNewLineField(line){
+  const n=(line.extra||[]).length+1;
+  return {id:gtId('f'),name:'This line '+n,def:'',font:'',size:5,color:'#232323',
+    align:'center',rot:0,curve:0,oc:'#FFFFFF',ow:0,group:'',
+    x:0.12,y:Math.min(0.78,0.55+n*0.12),w:0.76,h:0.16};
+}
 // A field's live values: what the order line says, falling back to what the
 // design says. Nothing here writes to the design.
 function gtVal(line,f){
@@ -12138,7 +12150,7 @@ function gtVal(line,f){
 // is what comes out on the other — with `line` left out, the design's own
 // defaults are what get drawn.
 function gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc){
-  d.fields.forEach(f=>{
+  gtFieldsOf(d,line).forEach(f=>{
     const v=gtVal(line,f);
     if(!v.text) return;
     const bx=ax+f.x*aw+v.dx, by=ay+f.y*ah+v.dy;
@@ -12228,7 +12240,7 @@ function gtRenderPage(canvas,page,maxDim,forExport,view){
     const line=q[start+i]; if(!line||line.id!==gtSelLine) return;
     const d=gtDesign(line.designId); if(!d) return;
     const art=gtTagArt(line,slot);
-    d.fields.forEach(f=>{
+    gtFieldsOf(d,line).forEach(f=>{
       const b=gtFieldRect(line,f,art);
       ctx.save();
       if(b.rot){
@@ -12418,8 +12430,9 @@ function gtDraw(){
       const d=gtDesign(line.designId); if(!d) return {line};
       const art=gtTagArt(line,slot);
       // topmost first, so a box drawn over another takes the tap
-      for(let k=d.fields.length-1;k>=0;k--){
-        const f=d.fields[k], b=gtFieldRect(line,f,art);
+      const fs=gtFieldsOf(d,line);
+      for(let k=fs.length-1;k>=0;k--){
+        const f=fs[k], b=gtFieldRect(line,f,art);
         let dx=p.mx-(b.x+b.w/2), dy=p.my-(b.y+b.h/2);
         if(b.rot){
           const a=-b.rot*Math.PI/180, cs=Math.cos(a), sn=Math.sin(a);
@@ -12612,12 +12625,16 @@ function gtRenderOrder(){
   wrap.innerHTML='<div class="ph-list list-full">'+gtOrder.map((l,i)=>{
     const d=gtDesign(l.designId);
     const A=gtArtBox(l.designId);
-    const first=d&&d.fields.length?d.fields[0]:null;
-    const fields=d?d.fields.map((f,fi)=>{
+    const own=gtFieldsOf(d,l);
+    const first=own.length?own[0]:null;
+    const mine=new Set((l.extra||[]).map(f=>f.id));
+    const fields=d?own.map((f,fi)=>{
       const v=gtVal(l,f);
       // the first field's words sit up beside the design, where the eye is
       // already looking; a design with more than one field keeps the rest here
-      return `<div class="sect-label" style="margin:10px 0 5px;">${escapeHtml(f.name)}</div>
+      return `<div class="sect-label" style="margin:10px 0 5px;">${escapeHtml(f.name)}${
+        mine.has(f.id)?` <button type="button" class="del-btn" data-gt-del-lfield="${f.id}"
+          title="Take this text off this line">×</button>`:''}</div>
         <div class="gt-words" style="margin-bottom:6px;">
           ${fi===0?'':`<label class="field words"><span>WORDS</span>
             <input type="text" value="${escapeHtml(v.text)}" data-gtf="${f.id}|text"/></label>`}
@@ -12671,6 +12688,8 @@ function gtRenderOrder(){
           <select data-gtp="${first.id}">${gtTextOptions()}</select></label>`:''}
       </div>
       ${fields}
+      ${d?`<button type="button" class="btn-outline btn-sm" data-gt-add-lfield
+        style="width:100%;margin-top:8px;">+ Text on this line only</button>`:''}
     </div>`;
   }).join('')+'</div>';
 }
@@ -12760,6 +12779,20 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
 });
 document.getElementById('gtOrderList').addEventListener('click',async e=>{
   const card=e.target.closest('[data-gt-line]'); if(!card) return;
+  const line=gtOrder.find(l=>l.id===card.dataset.gtLine);
+  if(line&&e.target.closest('[data-gt-add-lfield]')){
+    (line.extra||(line.extra=[])).push(gtNewLineField(line));
+    gtRenderOrder(); gtDraw();
+    return;
+  }
+  const off=e.target.closest('[data-gt-del-lfield]');
+  if(line&&off){
+    const id=off.dataset.gtDelLfield;
+    line.extra=(line.extra||[]).filter(f=>f.id!==id);
+    if(line.vals) delete line.vals[id];
+    gtRenderOrder(); gtDraw();
+    return;
+  }
   if(e.target.closest('[data-gt-del-line]')){
     gtOrder=gtOrder.filter(l=>l.id!==card.dataset.gtLine);
     gtRenderOrder(); gtDraw();
