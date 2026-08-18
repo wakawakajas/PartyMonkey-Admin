@@ -2165,7 +2165,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         <div class="calc" id="gtFolderState" style="margin-bottom:14px;"></div>
 
         <div class="sect-label" style="margin-top:0;">Designs</div>
+        <p class="hint">Artwork in the <strong>designs</strong> folder is taken on as a design of its own. A folder of exports therefore arrives as a hundred of them — take out what you do not want and it stays out; the files themselves are left where they are.</p>
         <div class="ph-list list-full" id="gtDesignList"><p class="hint" style="margin:4px 0 0;">— none yet —</p></div>
+        <button class="btn-outline" id="gtDropDesignsBtn" style="width:100%;margin-top:8px;">Clear the ones not on this order</button>
 
         <!-- both of these grow without limit — a folder can hold fifty fonts —
              so they stay shut and are searched rather than scrolled -->
@@ -11204,6 +11206,10 @@ const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   // in this session alone: a folder holding last month's cutting file beside
   // this month's must not put the old one back every time the app is opened
   shapeSeen:[],
+  // and every file designs/ and fonts/ have offered. A design taken out of the
+  // library was taken out on purpose: without this the next look at the folder
+  // would find the file again, know nothing of that, and put it straight back.
+  libSeen:[],
   baseFile:'',guideOver:false,slots:[]};
 let gtLayout=null;                 // {vb,mm,shapes:[{path,bbox}]} read off the SVG
 let gtBaseImg=null;                // the sheet's base layer, printed under everything
@@ -11390,8 +11396,10 @@ const GT_ART=/\.(png|jpe?g|webp)$/i, GT_FACE=/\.(ttf|otf|woff2)$/i;
 const GT_CUT=/\.svg$/i;
 async function gtScanFolder(){
   if(!gtDir||!await gtDirOk(gtDir)) return 0;
+  if(!Array.isArray(gtSheet.libSeen)) gtSheet.libSeen=[];
   const known=new Set([...gtLib.designs.map(d=>d.file),...gtLib.fonts.map(f=>f.file),
-    gtSheet.layoutFile,gtSheet.baseFile,...(gtSheet.shapeSeen||[])]);
+    gtSheet.layoutFile,gtSheet.baseFile,
+    ...(gtSheet.shapeSeen||[]),...gtSheet.libSeen]);
   const jobs=[
     ['designs',GT_ART,(name,file)=>gtLib.designs.push(gtNormalizeDesign({
       id:gtId('d'),name,file,
@@ -11412,7 +11420,7 @@ async function gtScanFolder(){
       if(known.has(path)) continue;
       try{ gtAssets.set(path,await entry.getFile()); }catch(e){ continue; }
       take(entry.name.replace(/\.[^.]+$/,''),path);
-      known.add(path); added++;
+      known.add(path); gtSheet.libSeen.push(path); added++;
     }
   }
   added+=await gtScanShape(known);
@@ -12644,6 +12652,8 @@ function gtRenderDesignList(){
   el.innerHTML=gtLib.designs.map(d=>{
     const img=gtImgs.get(d.id);
     return `<div class="ph-card row-link" data-gt-design="${d.id}" data-id="${d.id}">
+      <button class="del-btn" data-gt-del-design title="Take out of the library"
+              style="float:right;">×</button>
       <div class="item-main" style="margin-bottom:0;align-items:center;">
         <div class="item-photo-wrap">
           <span class="item-photo${img?' has':''}">${img?`<img src="${img.src}" alt=""/>`:'🏷'}</span>
@@ -12670,10 +12680,46 @@ function gtRefreshLibraryUi(){
   gtSyncFolderState(); gtRenderDesignList(); gtRenderFontList();
   gtRenderTextList(); gtSyncShapeSlots(); gtRenderSlots();
 }
-document.getElementById('gtDesignList').addEventListener('click',e=>{
+document.getElementById('gtDesignList').addEventListener('click',async e=>{
   const card=e.target.closest('[data-gt-design]'); if(!card) return;
-  gtCurrentDesign=gtDesign(card.dataset.gtDesign);
-  if(gtCurrentDesign) showScreen('tool-gift-tag-design');
+  const d=gtDesign(card.dataset.gtDesign); if(!d) return;
+  // Taking one out leaves the file in the folder — it is the library this is
+  // about, not the artwork — and the file is remembered as offered, so the
+  // next look at the folder does not hand it back.
+  if(e.target.closest('[data-gt-del-design]')){
+    if(!confirm('Take "'+d.name+'" out of the library?\n\nThe file stays in the designs folder; it is only dropped from the library and from any order line using it.')) return;
+    await gtDropDesigns([d]);
+    return;
+  }
+  gtCurrentDesign=d;
+  showScreen('tool-gift-tag-design');
+});
+async function gtDropDesigns(list){
+  const ids=new Set(list.map(d=>d.id));
+  if(!Array.isArray(gtSheet.libSeen)) gtSheet.libSeen=[];
+  list.forEach(d=>{
+    gtImgs.delete(d.id);
+    if(d.file&&!gtSheet.libSeen.includes(d.file)) gtSheet.libSeen.push(d.file);
+  });
+  gtLib.designs=gtLib.designs.filter(d=>!ids.has(d.id));
+  gtOrder=gtOrder.filter(l=>!ids.has(l.designId));
+  if(gtCurrentDesign&&ids.has(gtCurrentDesign.id)) gtCurrentDesign=null;
+  await gtSaveLib();
+  gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+}
+// A folder of exports read as a hundred designs is the usual way this list
+// runs away, and taking them out one at a time is not an answer.
+document.getElementById('gtDropDesignsBtn').addEventListener('click',async()=>{
+  const n=gtLib.designs.length;
+  if(!n) return;
+  const used=new Set(gtOrder.map(l=>l.designId));
+  const spare=gtLib.designs.filter(d=>!used.has(d.id));
+  if(!spare.length){ showMsg(document.getElementById('gtLibMsg'),
+    'Every design here is on the order — nothing to clear.',false); return; }
+  if(!confirm('Take '+spare.length+' design(s) out of the library?\n\nThe '
+    +(n-spare.length)+' on this order stay. Every file stays in the designs folder; they are only dropped from the library, and are not picked up again unless you upload them.')) return;
+  await gtDropDesigns(spare);
+  showMsg(document.getElementById('gtLibMsg'),'✓ '+spare.length+' design(s) taken out.',true);
 });
 document.getElementById('gtFontPanel').addEventListener('click',async e=>{
   const row=e.target.closest('[data-gt-font]'); if(!row) return;
