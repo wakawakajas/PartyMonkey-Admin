@@ -11262,10 +11262,21 @@ async function gtHydrate(){
 // into fonts/ a font — so the folder can be filled from Explorer, or from
 // whatever put the files there, and the app catches up on its own. A file it
 // wrote itself is already in the manifest and is passed over.
+//
+// shape/ is not a library but the sheet itself: one cutting file and one base
+// layer. A cutting file dropped in there is the sheet the tags are cut to from
+// now on, and a picture is what prints under them. Each is taken up once, when
+// it first appears, so coming back to the window does not keep undoing a sheet
+// that was set up by hand afterwards.
 const GT_ART=/\.(png|jpe?g|webp)$/i, GT_FACE=/\.(ttf|otf|woff2)$/i;
+const GT_CUT=/\.svg$/i;
+// what shape/ has already offered, so a sheet changed by hand after a file was
+// taken up is not quietly changed back on the next look
+const gtSeenInShape=new Set();
 async function gtScanFolder(){
   if(!gtDir||!await gtDirOk(gtDir)) return 0;
-  const known=new Set([...gtLib.designs.map(d=>d.file),...gtLib.fonts.map(f=>f.file)]);
+  const known=new Set([...gtLib.designs.map(d=>d.file),...gtLib.fonts.map(f=>f.file),
+    gtSheet.layoutFile,gtSheet.baseFile,...gtSeenInShape]);
   const jobs=[
     ['designs',GT_ART,(name,file)=>gtLib.designs.push(gtNormalizeDesign({
       id:gtId('d'),name,file,
@@ -11289,15 +11300,58 @@ async function gtScanFolder(){
       known.add(path); added++;
     }
   }
+  added+=await gtScanShape(known);
   if(added){ await gtHydrate(); await gtSaveLib(); }
   return added;
+}
+async function gtScanShape(known){
+  let dh=null;
+  try{ dh=await gtDir.getDirectoryHandle('shape'); }catch(e){ return 0; }
+  const fresh=[];
+  try{ for await (const entry of dh.values()){
+    if(entry.kind!=='file'||known.has('shape/'+entry.name)) continue;
+    if(GT_CUT.test(entry.name)||GT_ART.test(entry.name)) fresh.push(entry);
+  } }catch(e){ return 0; }
+  // the most recently written of them is the one that was just dropped in
+  const dated=[];
+  for(const entry of fresh){
+    let at=0;
+    try{ at=(await entry.getFile()).lastModified||0; }catch(e){}
+    dated.push({entry,at,name:entry.name});
+  }
+  dated.sort((a,b)=>b.at-a.at);
+  dated.forEach(d=>gtSeenInShape.add('shape/'+d.name));
+  const cut=dated.find(d=>GT_CUT.test(d.name)), art=dated.find(d=>GT_ART.test(d.name));
+  let took=0;
+  if(cut) try{
+    const file=await cut.entry.getFile();
+    const built=gtBuildLayout(await file.text());
+    if(built){
+      const path='shape/'+cut.name;
+      gtAssets.set(path,file);
+      gtSheet.layoutFile=path; gtLayout=built; gtLayoutFrom=path;
+      // a fresh file starts at its own size, as one chosen through the button does
+      gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
+      if(built.mm){ gtSheet.paperW=built.mm.w; gtSheet.paperH=built.mm.h; }
+      gtRebuildSlots(); took++;
+    }
+  }catch(e){}
+  if(art) try{
+    const file=await art.entry.getFile();
+    const path='shape/'+art.name;
+    gtAssets.set(path,file);
+    gtSheet.baseFile=path; gtBaseFrom=path;
+    gtBaseImg=await loadImage(await fileToDataURL(file));
+    took++;
+  }catch(e){ gtBaseImg=null; }
+  return took;
 }
 // Files are dropped in with the app sitting in another window, so the folder is
 // read again whenever the window is picked back up.
 async function gtPickUpNew(quiet){
   const n=await gtScanFolder().catch(()=>0);
   if(!n) return 0;
-  gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+  gtWriteSheetInputs(); gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
   if(!quiet) showMsg(document.getElementById('gtLibMsg'),
     `✓ ${n} file(s) picked up from the folder.`,true);
   return n;
@@ -12171,21 +12225,37 @@ function gtPickFile(accept,multiple){
 // What a file is called once it is in the folder: the name it arrived with.
 // A library is meant to be opened and read by whoever is handed it, and a name
 // ground down to a slug and an id is a file nobody can match to the tag it
-// draws. Only what a file system will not hold is taken out, and a name
-// already spoken for is numbered rather than written over — on disk as well as
-// in this session, since the folder outlives it.
-async function gtAssetPath(folder,name){
-  const clean=(String(name||'').split(/[\u005C/]/).pop()||'')
+// draws. Only what a file system will not hold is taken out of the name.
+//
+// A file already there under that name is either the same file coming back —
+// artwork dropped into the folder by hand and then picked through the button,
+// or a design saved a second time — or a different file wanting the same name.
+// The bytes say which. The same file is used where it lies rather than copied
+// in beside itself, and only a genuinely different one is numbered, so saving
+// never quietly leaves the folder holding two of anything.
+async function gtDirFile(path){
+  if(!gtDir||!await gtDirOk(gtDir)) return null;
+  try{ return await gtDirRead(gtDir,path); }catch(e){ return null; }
+}
+async function gtSameBytes(a,b){
+  if(!a||!b||a.size!==b.size) return false;
+  if(a.size>32*1024*1024) return true;     // too big to read twice over a name
+  const x=new Uint8Array(await a.arrayBuffer());
+  const y=new Uint8Array(await b.arrayBuffer());
+  for(let i=0;i<x.length;i++) if(x[i]!==y[i]) return false;
+  return true;
+}
+async function gtAssetPath(folder,file){
+  const clean=(String((file&&file.name)||'').split(/[\u005C/]/).pop()||'')
     .replace(/[<>:"|?*\x00-\x1f]/g,'').replace(/^\.+/,'').trim()||'file';
   const dot=clean.lastIndexOf('.');
   const stem=dot>0?clean.slice(0,dot):clean, ext=dot>0?clean.slice(dot):'';
-  const taken=async p=>{
-    if(gtAssets.has(p)) return true;
-    if(gtDir&&await gtDirOk(gtDir)){ try{ await gtDirRead(gtDir,p); return true; }catch(e){} }
-    return false;
-  };
   let path=folder+'/'+clean;
-  for(let n=2;n<500&&await taken(path);n++) path=folder+'/'+stem+' ('+n+')'+ext;
+  for(let n=2;n<500;n++){
+    const here=gtAssets.get(path)||await gtDirFile(path);
+    if(!here||await gtSameBytes(here,file)) return path;
+    path=folder+'/'+stem+' ('+n+')'+ext;
+  }
   return path;
 }
 document.getElementById('gtPickFolderBtn').addEventListener('click',async()=>{
@@ -12235,7 +12305,7 @@ document.getElementById('gtCutBtn').addEventListener('click',async()=>{
       'No shapes found in that SVG — it needs at least one path, rectangle, circle, ellipse or polygon.',false);
     return;
   }
-  const path=await gtAssetPath('shape',file.name);
+  const path=await gtAssetPath('shape',file);
   gtAssets.set(path,file);
   gtSheet.layoutFile=path; gtLayout=built; gtLayoutFrom=path;
   // a fresh file starts at its own size, and the size boxes are there to argue
@@ -12254,7 +12324,7 @@ document.getElementById('gtCutDelBtn').addEventListener('click',async()=>{
 document.getElementById('gtBaseBtn').addEventListener('click',async()=>{
   const file=await gtPickFile('image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp');
   if(!file) return;
-  const path=await gtAssetPath('shape',file.name);
+  const path=await gtAssetPath('shape',file);
   gtAssets.set(path,file);
   gtSheet.baseFile=path; gtBaseFrom=path;
   try{ gtBaseImg=await loadImage(await fileToDataURL(file)); }catch(e){ gtBaseImg=null; }
@@ -12270,7 +12340,7 @@ document.getElementById('gtAddDesignBtn').addEventListener('click',async()=>{
   if(!file) return;
   const id=gtId('d');
   const name=(file.name||'Design').replace(/\.[^.]+$/,'');
-  const path=await gtAssetPath('designs',file.name);
+  const path=await gtAssetPath('designs',file);
   gtAssets.set(path,file);
   const d=gtNormalizeDesign({id,name,file:path,
     fields:[{id:gtId('f'),name:'Text',def:'Thank you',size:6,align:'center',
@@ -12287,7 +12357,7 @@ document.getElementById('gtAddFontBtn').addEventListener('click',async()=>{
   for(const file of files){
     const id=gtId('t');
     const name=(file.name||'Font').replace(/\.[^.]+$/,'');
-    const path=await gtAssetPath('fonts',file.name);
+    const path=await gtAssetPath('fonts',file);
     gtAssets.set(path,file);
     gtLib.fonts.push({id,name,file:path});
   }
@@ -12689,10 +12759,11 @@ document.getElementById('gtReplaceArtBtn').addEventListener('click',async()=>{
   const d=gtCurrentDesign; if(!d) return;
   const file=await gtPickFile('image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp');
   if(!file) return;
-  // artwork replaced by a file of the same name is numbered rather than
-  // written over, so the folder keeps the old one and no browser serves a
-  // stale picture from cache under a path that has changed underneath it
-  const path=await gtAssetPath('designs',file.name);
+  // artwork replaced by a different file of the same name is numbered rather
+  // than written over, so the folder keeps the old one and no browser serves a
+  // stale picture from cache under a path that changed underneath it. The same
+  // file chosen again is the file already there, and nothing is written
+  const path=await gtAssetPath('designs',file);
   gtAssets.set(path,file);
   d.file=path;
   try{ gtImgs.set(d.id,await loadImage(await fileToDataURL(file))); }catch(e){}
