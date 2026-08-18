@@ -73,6 +73,8 @@ input:focus,select:focus{outline:2px solid var(--blueprint);outline-offset:1px;b
 .combo-panel.open{display:block;}
 .combo-opt{display:flex;align-items:center;gap:4px;padding:8px 10px;border-radius:10px;cursor:pointer;}
 .combo-opt:hover,.combo-opt.active{background:var(--nest);}
+/* where the arrow keys have got to, which is what Enter will take */
+.combo-opt.kb{background:var(--nest);outline:1px solid var(--blueprint);outline-offset:-1px;}
 .combo-opt .nm{flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .combo-opt .icon-btn{min-height:26px;padding:0 7px;font-size:10px;}
 .combo-empty{padding:10px;color:var(--faint);font-size:12px;}
@@ -1117,6 +1119,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="app-topbar">
     <button class="menu-btn" id="menuBtn" title="Menu" aria-label="Menu">☰</button>
     <span class="who" id="signedInAs" hidden></span>
+    <button class="menu-btn" id="undoBtn" title="Undo the last change (Ctrl+Z)"
+            aria-label="Undo" hidden>↶</button>
+    <button class="menu-btn" id="redoBtn" title="Do it again (Ctrl+Shift+Z)"
+            aria-label="Redo" hidden>↷</button>
   </div>
 
   <!-- always within thumb reach, on every screen, so there is one way out that
@@ -3013,6 +3019,7 @@ function drawAll(){
   const dim=Math.max(140,cardW*Math.max(p.w,p.h)/p.w);
   renderSide('front',document.getElementById('canvasFront'),dim);
   renderSide('back',document.getElementById('canvasBack'),dim);
+  undoNote('print');
 }
 
 // ---------- layout controls ----------
@@ -3636,6 +3643,7 @@ function showScreen(name,viaBack){
   // and a shop has to be chosen before any of its screens mean anything
   if(!currentStore&&['adhoc-list','adhoc-detail','adhoc-trash','skus'].includes(name)) name='adhoc';
   const moving=currentScreen!==name;   // a refresh is not a journey
+  setTimeout(syncUndoBtns,0);          // whether a step back is on offer here
   const leavingEl=(moving&&currentScreen)?document.getElementById(SCREEN_EL[currentScreen]):null;
   currentScreen=name;
   // clearing the inline value rather than forcing "block" lets the stylesheet
@@ -10975,15 +10983,11 @@ async function saveTemplate(){
     showMsg(msgEl,'Could not save: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false;btn.textContent='Save template'; }
 }
-async function loadTemplate(id){
-  if(!sb){showMsg(msgEl,'Template sync unavailable — check your connection.',false);return;}
-  if(!id){showMsg(msgEl,'No template selected.',false);return;}
-  const row=templateById(id);
-  const name=row?row.name:'';
-  // by id: the list is shared, and two people may each have saved this name
-  const {data,error}=await sb.from('templates').select('data').eq('id',id).single();
-  if(error||!data){showMsg(msgEl,'Could not find that template.',false);return;}
-  const meta=data.data;
+// Everything a saved template holds, put back into the tool and onto its form.
+// Undo hands back the same shape, so a step back and a template being loaded
+// are one act with one place to get it wrong.
+function applyPrintState(meta,name){
+  if(!meta) return;
   state.paper=meta.paper||state.paper;
   document.getElementById('paperW').value=state.paper.w;
   document.getElementById('paperH').value=state.paper.h;
@@ -11001,10 +11005,21 @@ async function loadTemplate(id){
   document.getElementById('refMarkToggle').checked=state.refMark.enabled;
   if(meta.foldLine) state.foldLine=Object.assign(state.foldLine,meta.foldLine);
   document.getElementById('foldLineToggle').checked=state.foldLine.enabled;
+  if(meta.bleed) state.bleed=Object.assign(state.bleed,meta.bleed);
   if(meta.shift){ state.shift.front=Object.assign(state.shift.front,meta.shift.front); state.shift.back=Object.assign(state.shift.back,meta.shift.back); }
   if(meta.rotate){ state.rotate.front=meta.rotate.front||0; state.rotate.back=meta.rotate.back||0; }
-  document.getElementById('templateName').value=meta.name||name;
+  if(name!==undefined) document.getElementById('templateName').value=meta.name||name;
   renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();drawAll();
+}
+async function loadTemplate(id){
+  if(!sb){showMsg(msgEl,'Template sync unavailable — check your connection.',false);return;}
+  if(!id){showMsg(msgEl,'No template selected.',false);return;}
+  const row=templateById(id);
+  const name=row?row.name:'';
+  // by id: the list is shared, and two people may each have saved this name
+  const {data,error}=await sb.from('templates').select('data').eq('id',id).single();
+  if(error||!data){showMsg(msgEl,'Could not find that template.',false);return;}
+  applyPrintState(data.data,name);
   showMsg(msgEl,'✓ Loaded "'+name+'"',true);
 }
 async function deleteTemplate(id){
@@ -12110,6 +12125,7 @@ function gtDraw(){
     : '⚠ no placeholders — upload a layout SVG, or set a tag size that fits the sheet';
   sc.style.borderColor=per?'var(--border)':'var(--rust)';
   sc.style.color=per?'var(--muted)':'var(--rust)';
+  undoNote('gift');
 }
 
 // ---------- moving the words on the sheet ----------
@@ -13433,6 +13449,133 @@ makeReorderable('gtFontPanel',{selecting:()=>true,row:'.combo-opt',hold:true,sli
 makeReorderable('gtTextPanel',{selecting:()=>true,row:'.combo-opt',hold:true,slide:320,
   rows:()=>gtLib.texts,setRows:v=>{gtLib.texts=v;},
   render:()=>{ gtRenderTextList(); gtRenderOrder(); },save:()=>gtSaveLib()});
+
+// ---------- a step back, on the screens where work is made ----------
+// The tools are fiddled with: a placeholder dragged somewhere wrong, a size
+// keyed in by mistake, a design's boxes shuffled. Rather than teach every one
+// of those to reverse itself, the state of the screen is kept as it stood a
+// moment ago and put back whole. A snapshot is taken once things have stopped
+// moving, so a drag is one step rather than sixty, and an unchanged screen
+// files nothing.
+//
+// The lists that live on the server — orders, pick ups, requests — are not
+// covered: a step back there means writing rows again, and deleting has its own
+// way back through Recently deleted.
+const UNDO={defs:{},past:{},future:{},busy:false,timer:null};
+const UNDO_KEY={tool:'print','tool-custom':'print',
+  'tool-gift-tag':'gift','tool-gift-tag-design':'gift'};
+function undoDef(key,def){ UNDO.defs[key]=def; }
+function undoKeyNow(){ return UNDO_KEY[currentScreen]||null; }
+function undoNote(key){
+  if(UNDO.busy||!UNDO.defs[key]) return;
+  clearTimeout(UNDO.timer);
+  UNDO.timer=setTimeout(()=>undoKeep(key),400);
+}
+function undoKeep(key){
+  const def=UNDO.defs[key]; if(!def) return;
+  let s='';
+  try{ s=JSON.stringify(def.snap()); }catch(e){ return; }
+  const past=UNDO.past[key]||(UNDO.past[key]=[]);
+  if(past.length&&past[past.length-1]===s) return;      // nothing actually moved
+  past.push(s);
+  if(past.length>40) past.shift();
+  UNDO.future[key]=[];
+  syncUndoBtns();
+}
+function undoApply(key,text){
+  UNDO.busy=true;
+  try{ UNDO.defs[key].put(JSON.parse(text)); }
+  catch(e){}
+  finally{ UNDO.busy=false; }
+  syncUndoBtns();
+}
+function undoStep(){
+  const key=undoKeyNow(); if(!key) return;
+  clearTimeout(UNDO.timer);
+  undoKeep(key);                                       // whatever is on screen counts as a step
+  const past=UNDO.past[key]||[];
+  if(past.length<2) return;
+  UNDO.future[key]=UNDO.future[key]||[];
+  UNDO.future[key].push(past.pop());
+  undoApply(key,past[past.length-1]);
+}
+function redoStep(){
+  const key=undoKeyNow(); if(!key) return;
+  const ahead=UNDO.future[key]||[];
+  if(!ahead.length) return;
+  const text=ahead.pop();
+  (UNDO.past[key]||(UNDO.past[key]=[])).push(text);
+  undoApply(key,text);
+}
+function syncUndoBtns(){
+  const key=undoKeyNow();
+  const u=document.getElementById('undoBtn'), r=document.getElementById('redoBtn');
+  if(!u||!r) return;
+  u.hidden=!key||((UNDO.past[key]||[]).length<2);
+  r.hidden=!key||!((UNDO.future[key]||[]).length);
+}
+document.getElementById('undoBtn').addEventListener('click',undoStep);
+document.getElementById('redoBtn').addEventListener('click',redoStep);
+// Ctrl+Z is the keyboard's own inside a box being typed in — it undoes the
+// typing, which is what anybody pressing it there means — so this stays out of
+// the way until the caret is somewhere else.
+document.addEventListener('keydown',e=>{
+  if(!(e.ctrlKey||e.metaKey)) return;
+  const k=(e.key||'').toLowerCase();
+  if(k!=='z'&&k!=='y') return;
+  const el=e.target;
+  if(el&&/^(INPUT|TEXTAREA)$/.test(el.tagName)&&!/^(checkbox|radio|button|submit)$/.test(el.type||'')) return;
+  if(!undoKeyNow()) return;
+  e.preventDefault();
+  if(k==='y'||e.shiftKey) redoStep(); else undoStep();
+});
+
+// what each of the two tools counts as its state
+undoDef('print',{
+  snap:()=>({paper:state.paper,layout:state.layout,placeholders:state.placeholders,
+    showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
+    refMark:state.refMark,foldLine:state.foldLine,bleed:state.bleed,
+    rotate:state.rotate,shift:state.shift}),
+  put:v=>applyPrintState(v)});
+undoDef('gift',{
+  snap:()=>({order:gtOrder,sheet:{...gtSheet},designs:gtLib.designs,
+    fonts:gtLib.fonts,texts:gtLib.texts}),
+  put:v=>{
+    gtOrder=v.order||[];
+    Object.assign(gtSheet,v.sheet||{});
+    gtLib.designs=(v.designs||[]).map(gtNormalizeDesign);
+    gtLib.fonts=v.fonts||[]; gtLib.texts=v.texts||[];
+    // the design being edited is one of those objects, and they have just been
+    // built again, so it is found by name of id rather than kept by reference
+    if(gtCurrentDesign) gtCurrentDesign=gtDesign(gtCurrentDesign.id)||null;
+    gtWriteSheetInputs(); gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+    if(currentScreen==='tool-gift-tag-design'&&gtCurrentDesign){ gtRenderFields(); gtDrawDesign(); }
+    gtSaveSoon();
+  }});
+
+// ---------- a dropdown answers to the keyboard ----------
+// A list opened by typing into it should be finished from the same keys: the
+// arrows walk it and Enter takes what they are on, or the first of what is left
+// where they have not been used. Enter is otherwise the app's "next field", so
+// this runs first and stops there when a list is open under the caret.
+function comboPanelOpenFor(el){
+  if(!(el instanceof HTMLInputElement)) return null;
+  const box=el.closest('.combo'); if(!box) return null;
+  return box.querySelector('.combo-panel.open');
+}
+document.addEventListener('keydown',e=>{
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  if(e.key!=='Enter'&&e.key!=='ArrowDown'&&e.key!=='ArrowUp') return;
+  const panel=comboPanelOpenFor(e.target); if(!panel) return;
+  const opts=[...panel.querySelectorAll('.combo-opt')];
+  if(!opts.length) return;
+  const at=opts.findIndex(o=>o.classList.contains('kb'));
+  e.preventDefault(); e.stopPropagation();
+  if(e.key==='Enter'){ (opts[at<0?0:at]).click(); return; }
+  const to=e.key==='ArrowDown'?Math.min(opts.length-1,at+1):Math.max(0,at<0?0:at-1);
+  opts.forEach(o=>o.classList.toggle('kb',o===opts[to]));
+  opts[to].scrollIntoView({block:'nearest'});
+},true);
 
 // ---------- arriving on the screen ----------
 async function gtOpen(){
