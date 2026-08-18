@@ -11256,6 +11256,57 @@ async function gtHydrate(){
   }
 }
 
+// ---------- what the folder itself brings in ----------
+// Artwork does not have to come through the upload button. A file dropped into
+// designs/ is a design the library has simply not heard of yet, and one dropped
+// into fonts/ a font — so the folder can be filled from Explorer, or from
+// whatever put the files there, and the app catches up on its own. A file it
+// wrote itself is already in the manifest and is passed over.
+const GT_ART=/\.(png|jpe?g|webp)$/i, GT_FACE=/\.(ttf|otf|woff2)$/i;
+async function gtScanFolder(){
+  if(!gtDir||!await gtDirOk(gtDir)) return 0;
+  const known=new Set([...gtLib.designs.map(d=>d.file),...gtLib.fonts.map(f=>f.file)]);
+  const jobs=[
+    ['designs',GT_ART,(name,file)=>gtLib.designs.push(gtNormalizeDesign({
+      id:gtId('d'),name,file,
+      fields:[{id:gtId('f'),name:'Text',def:'Thank you',size:6,align:'center',
+               x:0.12,y:0.4,w:0.76,h:0.2}]}))],
+    ['fonts',GT_FACE,(name,file)=>gtLib.fonts.push({id:gtId('t'),name,file})]];
+  let added=0;
+  for(const [folder,wanted,take] of jobs){
+    let dh=null;
+    try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; }
+    const found=[];
+    try{ for await (const entry of dh.values())
+      if(entry.kind==='file'&&wanted.test(entry.name)) found.push(entry); }catch(e){ continue; }
+    // in the order the folder reads them, so a numbered set lands in its order
+    found.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
+    for(const entry of found){
+      const path=folder+'/'+entry.name;
+      if(known.has(path)) continue;
+      try{ gtAssets.set(path,await entry.getFile()); }catch(e){ continue; }
+      take(entry.name.replace(/\.[^.]+$/,''),path);
+      known.add(path); added++;
+    }
+  }
+  if(added){ await gtHydrate(); await gtSaveLib(); }
+  return added;
+}
+// Files are dropped in with the app sitting in another window, so the folder is
+// read again whenever the window is picked back up.
+async function gtPickUpNew(quiet){
+  const n=await gtScanFolder().catch(()=>0);
+  if(!n) return 0;
+  gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+  if(!quiet) showMsg(document.getElementById('gtLibMsg'),
+    `✓ ${n} file(s) picked up from the folder.`,true);
+  return n;
+}
+window.addEventListener('focus',()=>{
+  if(currentScreen!=='tool-gift-tag'&&currentScreen!=='tool-gift-tag-design') return;
+  gtPickUpNew();
+});
+
 // ---------- reading the cutting file ----------
 // Every element the shape could be drawn with, written back out as path data.
 // Nothing here reads a transform: the browser has already applied those by the
@@ -12157,7 +12208,11 @@ document.getElementById('gtPickFolderBtn').addEventListener('click',async()=>{
         await gtHydrate(); await gtSaveLib();
         showMsg(msg,'✓ Folder chosen — what was in this browser has been written into it.',true);
       }else showMsg(msg,'✓ Folder chosen.',true);
-    }else showMsg(msg,`✓ Folder chosen — ${gtLib.designs.length} design(s) loaded.`,true);
+    }else{
+      const extra=await gtScanFolder().catch(()=>0);
+      showMsg(msg,`✓ Folder chosen — ${gtLib.designs.length} design(s) loaded`
+        +(extra?`, ${extra} of them found loose in it.`:'.'),true);
+    }
     gtRefreshLibraryUi(); gtRenderOrder(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
   }catch(err){
     if(err&&err.name==='AbortError') return;   // they closed the picker, which is not a failure
@@ -12768,6 +12823,9 @@ async function gtOpen(){
     gtWriteSheetInputs();
   }
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+  // anything dropped into the folder since the last look is taken on quietly —
+  // arriving on the screen is not the moment to be told about housekeeping
+  await gtPickUpNew(true);
 }
 
 // ==================== One filter, for every list that has one ====================
