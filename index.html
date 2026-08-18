@@ -2124,7 +2124,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="card collapsed has-combo" data-card>
       <div class="card-head"><span class="num">4</span><h3>Design Library</h3><span class="chev">▾</span></div>
       <div class="card-body">
-        <p class="hint">Designs, fonts and saved phrases live in a folder on this computer. Pick it once and the app remembers it; copy the folder to a colleague and she has the whole library. Chrome and Edge on a computer only — elsewhere, use the library file below.</p>
+        <p class="hint">Designs, fonts and saved phrases live in a folder on this computer or on the network. Pick it once and the app remembers it; copy the folder to a colleague and she has the whole library. Chrome and Edge on a computer only — elsewhere, use the library file below.</p>
+        <p class="hint">Artwork dropped into <strong>designs</strong>, font files into <strong>fonts</strong>, and the cutting file and base layer into <strong>shape</strong> are picked up on their own the next time you come back to this window — no upload, and no second copy written beside them. Choosing the folder that holds those three is what makes it work; choosing a folder of cutting files on its own works too, and they are read as the sheet.</p>
         <div class="grid2" style="margin-bottom:10px;">
           <button class="btn-outline" id="gtPickFolderBtn">📁 Choose folder</button>
           <button class="btn-outline" id="gtForgetFolderBtn">Forget folder</button>
@@ -11158,6 +11159,10 @@ const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   // which corner the tags start from; a library saved before they started at
   // the bottom left has its placeholders worked out again on the way in
   slotOrder:'bottom',
+  // every file shape/ has already offered, kept with the library rather than
+  // in this session alone: a folder holding last month's cutting file beside
+  // this month's must not put the old one back every time the app is opened
+  shapeSeen:[],
   baseFile:'',guideOver:false,slots:[]};
 let gtLayout=null;                 // {vb,mm,shapes:[{path,bbox}]} read off the SVG
 let gtBaseImg=null;                // the sheet's base layer, printed under everything
@@ -11342,13 +11347,10 @@ async function gtHydrate(){
 // that was set up by hand afterwards.
 const GT_ART=/\.(png|jpe?g|webp)$/i, GT_FACE=/\.(ttf|otf|woff2)$/i;
 const GT_CUT=/\.svg$/i;
-// what shape/ has already offered, so a sheet changed by hand after a file was
-// taken up is not quietly changed back on the next look
-const gtSeenInShape=new Set();
 async function gtScanFolder(){
   if(!gtDir||!await gtDirOk(gtDir)) return 0;
   const known=new Set([...gtLib.designs.map(d=>d.file),...gtLib.fonts.map(f=>f.file),
-    gtSheet.layoutFile,gtSheet.baseFile,...gtSeenInShape]);
+    gtSheet.layoutFile,gtSheet.baseFile,...(gtSheet.shapeSeen||[])]);
   const jobs=[
     ['designs',GT_ART,(name,file)=>gtLib.designs.push(gtNormalizeDesign({
       id:gtId('d'),name,file,
@@ -11377,11 +11379,15 @@ async function gtScanFolder(){
   return added;
 }
 async function gtScanShape(known){
-  let dh=null;
-  try{ dh=await gtDir.getDirectoryHandle('shape'); }catch(e){ return 0; }
+  // shape/ where the folder keeps one, and the folder itself where it does
+  // not — pointing the app straight at a folder of cutting files should work
+  // as well as pointing it at the library above them
+  let dh=null, prefix='shape/';
+  try{ dh=await gtDir.getDirectoryHandle('shape'); }
+  catch(e){ dh=gtDir; prefix=''; }
   const fresh=[];
   try{ for await (const entry of dh.values()){
-    if(entry.kind!=='file'||known.has('shape/'+entry.name)) continue;
+    if(entry.kind!=='file'||known.has(prefix+entry.name)) continue;
     if(GT_CUT.test(entry.name)||GT_ART.test(entry.name)) fresh.push(entry);
   } }catch(e){ return 0; }
   // the most recently written of them is the one that was just dropped in
@@ -11392,14 +11398,18 @@ async function gtScanShape(known){
     dated.push({entry,at,name:entry.name});
   }
   dated.sort((a,b)=>b.at-a.at);
-  dated.forEach(d=>gtSeenInShape.add('shape/'+d.name));
+  if(!Array.isArray(gtSheet.shapeSeen)) gtSheet.shapeSeen=[];
+  dated.forEach(d=>{
+    const at=prefix+d.name;
+    if(!gtSheet.shapeSeen.includes(at)) gtSheet.shapeSeen.push(at);
+  });
   const cut=dated.find(d=>GT_CUT.test(d.name)), art=dated.find(d=>GT_ART.test(d.name));
   let took=0;
   if(cut) try{
     const file=await cut.entry.getFile();
     const built=gtBuildLayout(await file.text());
     if(built){
-      const path='shape/'+cut.name;
+      const path=prefix+cut.name;
       gtAssets.set(path,file);
       gtSheet.layoutFile=path; gtLayout=built; gtLayoutFrom=path;
       // a fresh file starts at its own size, as one chosen through the button does
@@ -11410,7 +11420,7 @@ async function gtScanShape(known){
   }catch(e){}
   if(art) try{
     const file=await art.entry.getFile();
-    const path='shape/'+art.name;
+    const path=prefix+art.name;
     gtAssets.set(path,file);
     gtSheet.baseFile=path; gtBaseFrom=path;
     gtBaseImg=await loadImage(await fileToDataURL(file));
