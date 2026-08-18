@@ -2157,7 +2157,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <div class="card-head"><span class="num">4</span><h3>Design Library</h3><span class="chev">▾</span></div>
       <div class="card-body">
         <p class="hint">Designs, fonts and saved phrases live in a folder on this computer or on the network. Pick it once and the app remembers it; copy the folder to a colleague and she has the whole library. Chrome and Edge on a computer only — elsewhere, use the library file below.</p>
-        <p class="hint">Artwork dropped into <strong>designs</strong>, font files into <strong>fonts</strong>, and the cutting file and base layer into <strong>shape</strong> are picked up on their own the next time you come back to this window — no upload, and no second copy written beside them. Choosing the folder that holds those three is what makes it work; choosing a folder of cutting files on its own works too, and they are read as the sheet.</p>
+        <p class="hint">The cutting file and base layer dropped into <strong>shape</strong> are picked up on their own the next time you come back to this window. Artwork and fonts are kept in <strong>designs</strong> and <strong>fonts</strong> and are listed to be picked from — they never join the library uninvited. Nothing is ever copied: a file already in the folder is used where it lies.</p>
         <div class="grid2" style="margin-bottom:10px;">
           <button class="btn-outline" id="gtPickFolderBtn">📁 Choose folder</button>
           <button class="btn-outline" id="gtForgetFolderBtn">Forget folder</button>
@@ -2165,9 +2165,16 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         <div class="calc" id="gtFolderState" style="margin-bottom:14px;"></div>
 
         <div class="sect-label" style="margin-top:0;">Designs</div>
-        <p class="hint">Artwork in the <strong>designs</strong> folder is taken on as a design of its own. A folder of exports therefore arrives as a hundred of them — take out what you do not want and it stays out; the files themselves are left where they are.</p>
+        <p class="hint">Only what you add is here. Artwork sitting in the <strong>designs</strong> folder is listed below to be picked from — nothing joins the library until you choose it, so a folder of exports stays a folder of exports.</p>
         <div class="ph-list list-full" id="gtDesignList"><p class="hint" style="margin:4px 0 0;">— none yet —</p></div>
-        <button class="btn-outline" id="gtDropDesignsBtn" style="width:100%;margin-top:8px;">Clear the ones not on this order</button>
+        <div class="combo" id="gtDesignFolderCombo" style="margin-top:10px;">
+          <label class="field"><span>ADD ONE FROM THE DESIGNS FOLDER</span>
+            <input type="text" id="gtDesignFolderSearch" placeholder="Search the designs folder…" autocomplete="off"
+                   role="combobox" aria-expanded="false" aria-controls="gtDesignFolderPanel"/>
+          </label>
+          <button class="combo-caret" id="gtDesignFolderCaret" type="button" aria-label="Show the designs folder">▾</button>
+          <div class="combo-panel" id="gtDesignFolderPanel" role="listbox"></div>
+        </div>
 
         <!-- both of these grow without limit — a folder can hold fifty fonts —
              so they stay shut and are searched rather than scrolled -->
@@ -2182,6 +2189,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
           <div class="combo-panel" id="gtFontPanel" role="listbox"></div>
         </div>
         <button class="btn-outline" id="gtAddFontBtn" style="width:100%;margin-top:10px;">+ Add fonts</button>
+        <div class="combo" id="gtFontFolderCombo" style="margin-top:10px;">
+          <label class="field"><span>OR ONE FROM THE FONTS FOLDER</span>
+            <input type="text" id="gtFontFolderSearch" placeholder="Search the fonts folder…" autocomplete="off"
+                   role="combobox" aria-expanded="false" aria-controls="gtFontFolderPanel"/>
+          </label>
+          <button class="combo-caret" id="gtFontFolderCaret" type="button" aria-label="Show the fonts folder">▾</button>
+          <div class="combo-panel" id="gtFontFolderPanel" role="listbox"></div>
+        </div>
 
         <div class="sect-label">Saved phrases</div>
         <p class="hint">Wording you use again and again. Save it once from any text box, then pick it back into any field on any design.</p>
@@ -11396,38 +11411,83 @@ const GT_ART=/\.(png|jpe?g|webp)$/i, GT_FACE=/\.(ttf|otf|woff2)$/i;
 const GT_CUT=/\.svg$/i;
 async function gtScanFolder(){
   if(!gtDir||!await gtDirOk(gtDir)) return 0;
-  if(!Array.isArray(gtSheet.libSeen)) gtSheet.libSeen=[];
-  const known=new Set([...gtLib.designs.map(d=>d.file),...gtLib.fonts.map(f=>f.file),
-    gtSheet.layoutFile,gtSheet.baseFile,
-    ...(gtSheet.shapeSeen||[]),...gtSheet.libSeen]);
-  const jobs=[
-    ['designs',GT_ART,(name,file)=>gtLib.designs.push(gtNormalizeDesign({
-      id:gtId('d'),name,file,
-      fields:[{id:gtId('f'),name:'Text',def:'Thank you',size:6,align:'center',
-               x:0.12,y:0.4,w:0.76,h:0.2}]}))],
-    ['fonts',GT_FACE,(name,file)=>gtLib.fonts.push({id:gtId('t'),name,file})]];
-  let added=0;
-  for(const [folder,wanted,take] of jobs){
-    let dh=null;
-    try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; }
-    const found=[];
-    try{ for await (const entry of dh.values())
-      if(entry.kind==='file'&&wanted.test(entry.name)) found.push(entry); }catch(e){ continue; }
-    // in the order the folder reads them, so a numbered set lands in its order
-    found.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
-    for(const entry of found){
-      const path=folder+'/'+entry.name;
-      if(known.has(path)) continue;
-      try{ gtAssets.set(path,await entry.getFile()); }catch(e){ continue; }
-      take(entry.name.replace(/\.[^.]+$/,''),path);
-      known.add(path); gtSheet.libSeen.push(path); added++;
-    }
-  }
-  added+=await gtScanShape(known);
-  await gtShapeList();
+  const known=new Set([gtSheet.layoutFile,gtSheet.baseFile,...(gtSheet.shapeSeen||[])]);
+  let added=await gtScanShape(known);
+  // what designs/ and fonts/ hold is listed, not taken on: the folder is where
+  // artwork is kept, and a folder of exports is not a hundred designs anybody
+  // asked for. They are added from the pickers, one chosen at a time.
+  await Promise.all([gtShapeList(),gtLibList()]);
   if(added){ await gtHydrate(); await gtSaveLib(); }
   return added;
 }
+// ---------- what is in the folder, waiting to be asked for ----------
+let gtLibFiles={designs:[],fonts:[]};
+async function gtLibList(){
+  if(!gtDir||!await gtDirOk(gtDir)) return gtLibFiles;
+  const out={designs:[],fonts:[]};
+  for(const [folder,wanted] of [['designs',GT_ART],['fonts',GT_FACE]]){
+    let dh=null;
+    try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; }
+    try{ for await (const entry of dh.values())
+      if(entry.kind==='file'&&wanted.test(entry.name))
+        out[folder].push({name:entry.name,path:folder+'/'+entry.name}); }catch(e){}
+    out[folder].sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
+  }
+  gtLibFiles=out;
+  return out;
+}
+// already in the library, so the picker can say so rather than adding it twice
+const gtHasFile=path=>gtLib.designs.some(d=>d.file===path)||gtLib.fonts.some(f=>f.file===path);
+function gtFolderPanel(kind,q,){
+  const s=(q||'').trim().toLowerCase();
+  const hits=(gtLibFiles[kind]||[]).filter(f=>!s||f.name.toLowerCase().includes(s));
+  if(!hits.length) return `<div class="combo-empty">${gtDir
+    ?((gtLibFiles[kind]||[]).length?'nothing matches':'nothing in the '+kind+' folder')
+    :'no folder chosen'}</div>`;
+  return hits.map(f=>`<div class="combo-opt${gtHasFile(f.path)?' active':''}" data-gt-take="${escapeHtml(f.path)}">
+    <span class="nm">${escapeHtml(f.name)}</span>${gtHasFile(f.path)?'<span class="hint" style="margin:0;">in the library</span>':''}
+  </div>`).join('');
+}
+function gtRenderDesignPick(){
+  document.getElementById('gtDesignFolderPanel').innerHTML=
+    gtFolderPanel('designs',document.getElementById('gtDesignFolderSearch').value);
+}
+function gtRenderFontPick(){
+  document.getElementById('gtFontFolderPanel').innerHTML=
+    gtFolderPanel('fonts',document.getElementById('gtFontFolderSearch').value);
+}
+gtWireCombo('gtDesignFolderSearch','gtDesignFolderCaret','gtDesignFolderPanel',
+  ()=>{ gtLibList().then(gtRenderDesignPick); gtRenderDesignPick(); });
+gtWireCombo('gtFontFolderSearch','gtFontFolderCaret','gtFontFolderPanel',
+  ()=>{ gtLibList().then(gtRenderFontPick); gtRenderFontPick(); });
+async function gtTakeFromFolder(path){
+  if(gtHasFile(path)) return false;
+  const file=await gtShapeFile(path);
+  if(!file) return false;
+  const name=(path.split('/').pop()||'file').replace(/\.[^.]+$/,'');
+  gtAssets.set(path,file);
+  if(path.startsWith('fonts/')) gtLib.fonts.push({id:gtId('t'),name,file:path});
+  else gtLib.designs.push(gtNormalizeDesign({id:gtId('d'),name,file:path,
+    fields:[{id:gtId('f'),name:'Text',def:'Thank you',size:6,align:'center',
+             x:0.12,y:0.4,w:0.76,h:0.2}]}));
+  // taken on purpose, so it is no longer one of the files being kept out
+  if(Array.isArray(gtSheet.libSeen))
+    gtSheet.libSeen=gtSheet.libSeen.filter(x=>x!==path);
+  await gtHydrate(); await gtSaveLib();
+  gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+  return true;
+}
+['gtDesignFolderPanel','gtFontFolderPanel'].forEach(id=>{
+  document.getElementById(id).addEventListener('click',async e=>{
+    const row=e.target.closest('[data-gt-take]'); if(!row) return;
+    const path=row.dataset.gtTake;
+    document.getElementById(id).classList.remove('open');
+    const took=await gtTakeFromFolder(path);
+    showMsg(document.getElementById('gtLibMsg'),
+      took?'\u2713 Added '+(path.split('/').pop()||path)+'.'
+          :'That one is in the library already.',took);
+  });
+});
 // What the shape folder holds, so it can be picked from rather than only
 // dropped in: the sheet is changed often enough — a different die, last
 // season's template — that the newest file is not always the one wanted.
@@ -11559,7 +11619,7 @@ async function gtPickUpNew(quiet){
   if(!n) return 0;
   gtWriteSheetInputs(); gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
   if(!quiet) showMsg(document.getElementById('gtLibMsg'),
-    `✓ ${n} file(s) picked up from the folder.`,true);
+    `✓ ${n} file(s) picked up from the shape folder.`,true);
   return n;
 }
 window.addEventListener('focus',()=>{
@@ -12707,20 +12767,7 @@ async function gtDropDesigns(list){
   await gtSaveLib();
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
 }
-// A folder of exports read as a hundred designs is the usual way this list
-// runs away, and taking them out one at a time is not an answer.
-document.getElementById('gtDropDesignsBtn').addEventListener('click',async()=>{
-  const n=gtLib.designs.length;
-  if(!n) return;
-  const used=new Set(gtOrder.map(l=>l.designId));
-  const spare=gtLib.designs.filter(d=>!used.has(d.id));
-  if(!spare.length){ showMsg(document.getElementById('gtLibMsg'),
-    'Every design here is on the order — nothing to clear.',false); return; }
-  if(!confirm('Take '+spare.length+' design(s) out of the library?\n\nThe '
-    +(n-spare.length)+' on this order stay. Every file stays in the designs folder; they are only dropped from the library, and are not picked up again unless you upload them.')) return;
-  await gtDropDesigns(spare);
-  showMsg(document.getElementById('gtLibMsg'),'✓ '+spare.length+' design(s) taken out.',true);
-});
+
 document.getElementById('gtFontPanel').addEventListener('click',async e=>{
   const row=e.target.closest('[data-gt-font]'); if(!row) return;
   const f=gtFont(row.dataset.gtFont); if(!f) return;
