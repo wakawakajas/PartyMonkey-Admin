@@ -122,9 +122,12 @@ alter table public.shipments
 create index if not exists shipments_consolidation_idx on public.shipments(consolidation_id);
 
 -- ---- per-order percentage charges -------------------------------------
--- both are charged on goods + China fee, before freight
-alter table public.shipments add column if not exists service_fee_pct numeric not null default 1;
-alter table public.shipments add column if not exists gst_pct         numeric not null default 9;
+-- Charged in this order, each on what the one before it left, and all three
+-- before freight: platform on goods + China fee, World First on that plus the
+-- platform fee, GST on the lot.
+alter table public.shipments add column if not exists platform_fee_pct numeric not null default 0.2;
+alter table public.shipments add column if not exists service_fee_pct  numeric not null default 0.8;
+alter table public.shipments add column if not exists gst_pct          numeric not null default 9;
 
 -- ---- imported supplier image ------------------------------------------
 -- 1688 exports carry an image URL. Where the host allows it we copy the

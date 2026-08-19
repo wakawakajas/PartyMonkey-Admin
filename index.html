@@ -1863,9 +1863,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <label class="field"><span>DESCRIPTION</span><input type="text" id="detailDescInput" placeholder="e.g. 200 name cards"/></label>
     </div>
 
-    <div class="grid2" style="margin-bottom:10px;">
-      <label class="field"><span>WORLD FIRST SERVICE FEE (%)</span>
-        <input type="number" min="0" step="0.01" id="detailServicePct" value="1"/></label>
+    <div class="grid3e" style="margin-bottom:10px;">
+      <label class="field"><span>PLATFORM FEE (%)</span>
+        <input type="number" min="0" step="0.01" id="detailPlatformPct" value="0.2"/></label>
+      <label class="field"><span>WORLD FIRST FEE (%)</span>
+        <input type="number" min="0" step="0.01" id="detailServicePct" value="0.8"/></label>
       <label class="field"><span>GST (%)</span>
         <input type="number" min="0" step="0.01" id="detailGstPct" value="9"/></label>
     </div>
@@ -5298,7 +5300,7 @@ async function refreshShipmentList(){
   const el=document.getElementById('shipmentList');
   if(!sb){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable — check your connection.</p>'; return; }
   const [res,meta]=await Promise.all([
-    sb.from('shipments').select('id,order_id,description,rmb_rate,china_fee_rmb,china_basis,freight_mode,service_fee_pct,gst_pct,sort_order,consolidation_id,created_at').is('deleted_at',null).order('sort_order',{ascending:true}),
+    sb.from('shipments').select('id,order_id,description,rmb_rate,china_fee_rmb,china_basis,freight_mode,platform_fee_pct,service_fee_pct,gst_pct,sort_order,consolidation_id,created_at').is('deleted_at',null).order('sort_order',{ascending:true}),
     loadShipmentMeta()
   ]);
   if(res.error){ shipmentRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load shipments.</p>'; return; }
@@ -5584,7 +5586,7 @@ async function poRowsForOrders(ids){
     const missing=ids.filter(id=>!shipmentRows.some(r=>r.id===id));
     if(missing.length){
       const {data,error}=await sb.from('shipments')
-        .select('id,order_id,rmb_rate,china_fee_rmb,china_basis,freight_mode,service_fee_pct,gst_pct')
+        .select('id,order_id,rmb_rate,china_fee_rmb,china_basis,freight_mode,platform_fee_pct,service_fee_pct,gst_pct')
         .in('id',missing);
       if(error) throw error;
       (data||[]).forEach(r=>shipmentRows.push(r));
@@ -5920,16 +5922,25 @@ function chinaPerUnitRmb(){ const q=chinaBasisQty(); return q>0?chinaFeeRmb()/q:
 function chinaQtyFor(item){ return chinaBasis()==='arrived'?arrivedUnitsOf(item):itemUnits(item); }
 function itemChinaRmb(item){ return chinaPerUnitRmb()*chinaQtyFor(item); }
 
-// Both are charged before freight, which the forwarder bills separately — but
-// they are not charged on the same figure. The World First service fee is a
-// cut of what was bought and moved: goods plus the China fee. GST is charged
-// on that plus the service fee itself, because the fee is part of what is
-// being supplied, not something outside the taxable amount.
+// Three charges, and each is charged on what the one before it left. The base
+// is what was bought and moved on the China side: goods plus the China fee.
+// The platform takes its cut of that; World First takes its cut of the base
+// with the platform fee already on it, because that is the sum actually being
+// paid through them; GST is charged on all of it, both fees included, because
+// they are part of what is being supplied rather than something outside the
+// taxable amount. Freight is not in any of it — the forwarder bills it
+// separately and it lands on the line after the three have been worked out.
+function platformPct(){ const sh=currentShipment(); return sh?(Number(sh.platform_fee_pct)||0):0; }
 function servicePct(){ const sh=currentShipment(); return sh?(Number(sh.service_fee_pct)||0):0; }
 function gstPct(){ const sh=currentShipment(); return sh?(Number(sh.gst_pct)||0):0; }
 function itemTaxableRmb(i){ return (Number(i.unit_price_rmb)||0)*(Number(i.qty)||0)+itemChinaRmb(i); }
-function itemServiceRmb(i){ return itemTaxableRmb(i)*servicePct()/100; }
-function itemGstRmb(i){ return (itemTaxableRmb(i)+itemServiceRmb(i))*gstPct()/100; }
+function itemPlatformRmb(i){ return itemTaxableRmb(i)*platformPct()/100; }
+function itemServiceRmb(i){ return (itemTaxableRmb(i)+itemPlatformRmb(i))*servicePct()/100; }
+function itemGstRmb(i){
+  return (itemTaxableRmb(i)+itemPlatformRmb(i)+itemServiceRmb(i))*gstPct()/100;
+}
+// everything but freight, which is added where the line is totalled
+function itemChargesRmb(i){ return itemPlatformRmb(i)+itemServiceRmb(i)+itemGstRmb(i); }
 
 // Freight: either each box's cost stays with what is inside it, or every
 // box's cost is pooled and averaged over the whole order. Either way the
@@ -5959,6 +5970,7 @@ async function refreshOrderDetail(){
   document.getElementById('detailDescInput').value=s?(s.description||''):'';
   if(s&&s.rmb_rate) document.getElementById('detailRmbRate').value=s.rmb_rate;
   if(s){
+    document.getElementById('detailPlatformPct').value=Number(s.platform_fee_pct)||0;
     document.getElementById('detailServicePct').value=Number(s.service_fee_pct)||0;
     document.getElementById('detailGstPct').value=Number(s.gst_pct)||0;
   }
@@ -6033,10 +6045,8 @@ function renderItems(){
     const per=perUnitOf(r), base=baseOf(r);
     const arr=arrivedQtyOf(r), out=outstandingOf(r);
     const goods=unit*qty, ship=itemFreightRmb(r), china=itemChinaRmb(r);
-    const svc=itemServiceRmb(r), gst=itemGstRmb(r);
-    const lineTotal=goods+china+ship+svc+gst;
-    const shipPU=qty>0?ship/qty:0, chinaPU=qty>0?china/qty:0;
-    const svcPU=qty>0?svc/qty:0, gstPU=qty>0?gst/qty:0;
+    const plat=itemPlatformRmb(r), svc=itemServiceRmb(r), gst=itemGstRmb(r);
+    const lineTotal=goods+china+plat+svc+gst+ship;
     const inBoxes=allocsForItem(r.id).map(a=>{
       const b=boxRows.find(x=>x.id===a.box_id);
       return `${a.qty} pcs in ${escapeHtml(b?(b.label||'box'):'box')}`;
@@ -6082,16 +6092,20 @@ function renderItems(){
       ${mqBlock(r,per,qty,unit)}
       <div class="calc calc-split" style="margin-top:0;">
         <div class="calc-left">
-          Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China Shipping Fee ${fmtFromRmb(china)} &nbsp;·&nbsp; Freight ${fmtFromRmb(ship)}<br/>
-          Service ${servicePct()}% ${fmtFromRmb(svc)}
+          Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China Shipping Fee ${fmtFromRmb(china)}<br/>
+          Platform ${platformPct()}% ${fmtFromRmb(plat)}
           <span style="opacity:.65;">(Goods + China Shipping Fee)</span><br/>
+          World First ${servicePct()}% ${fmtFromRmb(svc)}
+          <span style="opacity:.65;">(Goods + China Shipping Fee + Platform)</span><br/>
           GST ${gstPct()}% ${fmtFromRmb(gst)}
-          <span style="opacity:.65;">(Goods + China Shipping Fee + Service)</span><br/>
+          <span style="opacity:.65;">(Total Above)</span><br/>
+          Freight ${fmtFromRmb(ship)}<br/>
           Line total ${fmtFromRmb(lineTotal)}
         </div>
         <div class="calc-right">
           <span class="hint" style="margin:0;">Final price per piece all-in</span><br/>
-          <strong style="color:var(--blueprint);font-size:15px;">${fmtCeilFromRmb(unit+chinaPU+shipPU+svcPU+gstPU)}</strong><br/>
+          <span class="hint" style="margin:0;opacity:.65;">line total ÷ ${qty||0} pcs</span><br/>
+          <strong style="color:var(--blueprint);font-size:15px;">${fmtCeilFromRmb(allInPerUnitRmb(r))}</strong><br/>
           ${inBoxes||'not yet in a box'}${out>0?`<br/><strong>${out} not arrived</strong>`:''}
         </div>
       </div>
@@ -6105,12 +6119,13 @@ function renderItems(){
   syncItemBulk();
 }
 function renderTotals(){
-  let goods=0, ship=0, china=0, svc=0, gst=0, pieces=0;
+  let goods=0, ship=0, china=0, plat=0, svc=0, gst=0, pieces=0;
   itemRows.forEach(r=>{
     const qty=Number(r.qty)||0;
     goods+=(Number(r.unit_price_rmb)||0)*qty;
     ship+=itemFreightRmb(r);
     china+=itemChinaRmb(r);
+    plat+=itemPlatformRmb(r);
     svc+=itemServiceRmb(r);
     gst+=itemGstRmb(r);
     pieces+=qty;
@@ -6119,8 +6134,9 @@ function renderTotals(){
   document.getElementById('itemsTotals').innerHTML=
     `${itemRows.length} line(s) · ${pieces} piece(s) · ${arrivedPcs}/${pieces} pcs arrived<br/>`+
     `Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China Shipping Fee ${fmtFromRmb(china)} &nbsp;·&nbsp; Freight ${fmtFromRmb(ship)}<br/>`+
-    `Service ${servicePct()}% ${fmtFromRmb(svc)} &nbsp;·&nbsp; GST ${gstPct()}% ${fmtFromRmb(gst)}<br/>`+
-    `<strong>Grand total ${fmtFromRmb(goods+china+ship+svc+gst)}</strong><br/>`+
+    `Platform ${platformPct()}% ${fmtFromRmb(plat)} &nbsp;·&nbsp; World First ${servicePct()}% ${fmtFromRmb(svc)} `+
+    `&nbsp;·&nbsp; GST ${gstPct()}% ${fmtFromRmb(gst)}<br/>`+
+    `<strong>Grand total ${fmtFromRmb(goods+china+plat+svc+gst+ship)}</strong><br/>`+
     `<span style="opacity:.7">China: ${chinaBasis()==='arrived'?'arrived pcs only':'all ordered pcs'} · Freight: ${freightMode()==='shared'?'shared across all':'own box'}</span>`;
 }
 // multi-select delete for SKU lines
@@ -6849,7 +6865,8 @@ document.getElementById('detailDescInput').addEventListener('input',e=>{
   sh.description=e.target.value;
   markDirty('detail');
 });
-[['detailServicePct','service_fee_pct'],['detailGstPct','gst_pct']].forEach(([id,field])=>{
+[['detailPlatformPct','platform_fee_pct'],['detailServicePct','service_fee_pct'],
+  ['detailGstPct','gst_pct']].forEach(([id,field])=>{
   document.getElementById(id).addEventListener('input',e=>{
     const v=Math.max(0,parseFloat(e.target.value)||0);
     const sh=currentShipment(); if(!sh) return;
@@ -6900,7 +6917,7 @@ function allInPerUnitRmb(i){
   const qty=Number(i.qty)||0;
   if(!qty) return Number(i.unit_price_rmb)||0;
   return (Number(i.unit_price_rmb)||0)
-    + (itemChinaRmb(i)+itemFreightRmb(i)+itemServiceRmb(i)+itemGstRmb(i))/qty;
+    + (itemChinaRmb(i)+itemChargesRmb(i)+itemFreightRmb(i))/qty;
 }
 function buildSkuSheetRows(rows){
   const sh=currentShipment();
@@ -7987,6 +8004,7 @@ onSubmit('detailSubmitBtn',()=>
       if(!name) throw new Error('Order ID cannot be empty');
       await sb.from('shipments').update({order_id:name,description:sh.description||'',
         rmb_rate:sh.rmb_rate,
+        platform_fee_pct:Number(sh.platform_fee_pct)||0,
         service_fee_pct:Number(sh.service_fee_pct)||0,
         gst_pct:Number(sh.gst_pct)||0}).eq('id',currentShipmentId);
     }
