@@ -1017,6 +1017,19 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   .wrap,.home-wrap,#fabDock .add-row{max-width:900px;}
   .grid4{gap:9px;}
 }
+/* Procurement & Shipping: the order list is what this screen is for, and each
+   card is short — an id, a status, a line of description. Once there is room
+   beside it, the list runs in columns instead of one long scroll, so a working
+   queue is taken in at a glance rather than thumbed through. */
+@media (min-width:560px){
+  #shipmentList{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
+  #shipmentList>.ph-card{margin-bottom:0;}
+  /* the empty state and the "no matches" note are sentences, not cards */
+  #shipmentList>.hint{grid-column:1 / -1;}
+}
+@media (min-width:900px){
+  #shipmentList{grid-template-columns:repeat(3,minmax(0,1fr));}
+}
 /* Laptop: settings on the left, both sheets stacked in one sticky rail.
    Three columns here would squeeze the settings below a usable width. */
 @media (min-width:1100px){
@@ -5649,7 +5662,7 @@ function makeReorderable(listId,opts){
   // a row is a card in the lists, a line in a dropdown; the slide is how long
   // the rows being passed take to close the gap behind the one being dragged
   const ROW=opts.row||'.ph-card', SLIDE=opts.slide||180;
-  let card=null,startY=0,armed=false,moved=false,holdTimer=null,autoTimer=null,didDrag=false,lastY=null;
+  let card=null,startX=0,startY=0,armed=false,moved=false,holdTimer=null,autoTimer=null,didDrag=false,lastY=null;
   const cards=()=>[...list.querySelectorAll(ROW)];
   function cleanup(){
     clearTimeout(holdTimer); clearInterval(autoTimer); autoTimer=null;
@@ -5680,13 +5693,14 @@ function makeReorderable(listId,opts){
   // and each is put back where it was and released.
   function slideOthers(move){
     const others=cards().filter(c=>c!==card);
-    const was=new Map(others.map(c=>[c,c.getBoundingClientRect().top]));
+    const was=new Map(others.map(c=>{ const r=c.getBoundingClientRect(); return [c,[r.left,r.top]]; }));
     move();
     others.forEach(c=>{
-      const dy=was.get(c)-c.getBoundingClientRect().top;
-      if(!dy) return;
+      const r=c.getBoundingClientRect();
+      const dx=was.get(c)[0]-r.left, dy=was.get(c)[1]-r.top;
+      if(!dx&&!dy) return;
       c.style.transition='none';
-      c.style.transform='translateY('+dy+'px)';
+      c.style.transform='translate('+dx+'px,'+dy+'px)';
       // eslint-disable-next-line no-unused-expressions
       c.offsetHeight;                     // let that position take effect first
       c.style.transition='transform '+SLIDE+'ms cubic-bezier(.22,.61,.36,1)';
@@ -5698,7 +5712,7 @@ function makeReorderable(listId,opts){
     if(!opts.selecting()) return;
     if(e.target.closest('button,input,a,[data-copy]')) return;
     const c=e.target.closest(ROW); if(!c) return;
-    card=c; startY=e.clientY; lastY=e.clientY; moved=false; armed=false; didDrag=false;
+    card=c; startX=e.clientX; startY=e.clientY; lastY=e.clientY; moved=false; armed=false; didDrag=false;
     // A row that is also the way into the thing it names is picked up by
     // holding it, whatever is doing the holding — a list where the pointer
     // starts a drag the moment it slips is one you rearrange by accident.
@@ -5708,31 +5722,35 @@ function makeReorderable(listId,opts){
   list.addEventListener('pointermove',e=>{
     if(!card) return;
     lastY=e.clientY;
-    const dy=e.clientY-startY;
+    const dx=e.clientX-startX, dy=e.clientY-startY;
     if(!armed){
-      if(Math.abs(dy)>SLOP){
+      if(Math.hypot(dx,dy)>SLOP){
         if(e.pointerType==='mouse'&&!opts.hold) engage();
         else { moved=true; cleanup(); }
       }
       return;
     }
     e.preventDefault();
-    card.style.transform='translateY('+dy+'px)';
-    const mid=card.getBoundingClientRect().top+card.offsetHeight/2;
+    card.style.transform='translate('+dx+'px,'+dy+'px)';
+    const cr=card.getBoundingClientRect();
+    const midX=cr.left+cr.width/2, midY=cr.top+cr.height/2;
     for(const other of cards()){
       if(other===card) continue;
       const r=other.getBoundingClientRect();
-      const om=r.top+r.height/2;
+      const oy=r.top+r.height/2, ox=r.left+r.width/2;
+      // side by side when they overlap vertically by more than half a card
+      const sameRow=Math.abs(midY-oy)<r.height/2;
+      const mid=sameRow?midX:midY, om=sameRow?ox:oy;
       if(mid<om&&(other.compareDocumentPosition(card)&Node.DOCUMENT_POSITION_FOLLOWING)){
         // put back beside the row it passed, not into the list element: an
         // order line sits inside a wrapper of its own, and the list is only
         // where the rows are looked for
         slideOthers(()=>other.parentNode.insertBefore(card,other));
-        startY=e.clientY; card.style.transform=''; break;
+        startX=e.clientX; startY=e.clientY; card.style.transform=''; break;
       }
       if(mid>om&&(other.compareDocumentPosition(card)&Node.DOCUMENT_POSITION_PRECEDING)){
         slideOthers(()=>other.parentNode.insertBefore(card,other.nextSibling));
-        startY=e.clientY; card.style.transform=''; break;
+        startX=e.clientX; startY=e.clientY; card.style.transform=''; break;
       }
     }
   },{passive:false});
