@@ -1837,7 +1837,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <i>Custom Gift Tag-Glossy</i>. They are still there under <b>Hidden only</b> and
       <b>All items</b>.<br/>
       A list each, because the two shops stock different things. Which one applies to a sheet
-      is its file name: <b>PT</b> in the name is Plant Talks, anything else is PartyMonkey.</p>
+      is its file name: <b>PT</b> in the name is Plant Talks, anything else is PartyMonkey.<br/>
+      <b>Upload list</b> takes a spreadsheet (.xlsx, .csv) or a text file, one word to a row —
+      the column headed SKU if there is one, otherwise the first. Words already on that shop's
+      list are left alone, so a longer version of the same file tops it up.</p>
 
     <div class="pl-shops">
       <div class="pl-shop" data-shop="partymonkey">
@@ -1847,6 +1850,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
             <input type="text" data-hidden-new placeholder="e.g. Custom" maxlength="60" required/></label>
           <button class="btn-outline btn-sm" type="submit" style="width:100%;">Add</button>
         </form>
+        <div class="chips chips-left" style="margin-bottom:8px;">
+          <button type="button" class="btn-outline btn-sm" data-hidden-upload="partymonkey"
+                  title="Add a spreadsheet or text file of words to hide for PartyMonkey — one per row">⬆ Upload list</button>
+        </div>
         <div class="ph-list list-full" data-hidden-list="partymonkey">
           <p class="hint" style="margin:4px 0 0;">Loading…</p>
         </div>
@@ -1858,6 +1865,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
             <input type="text" data-hidden-new placeholder="e.g. Custom" maxlength="60" required/></label>
           <button class="btn-outline btn-sm" type="submit" style="width:100%;">Add</button>
         </form>
+        <div class="chips chips-left" style="margin-bottom:8px;">
+          <button type="button" class="btn-outline btn-sm" data-hidden-upload="planttalks"
+                  title="Add a spreadsheet or text file of words to hide for Plant Talks — one per row">⬆ Upload list</button>
+        </div>
         <div class="ph-list list-full" data-hidden-list="planttalks">
           <p class="hint" style="margin:4px 0 0;">Loading…</p>
         </div>
@@ -15258,6 +15269,82 @@ document.querySelectorAll('[data-hidden-add]').forEach(form=>{
 document.getElementById('plUnspokenAddForm').addEventListener('submit',e=>{
   e.preventDefault();
   plAddTerm('unspoken',null,document.getElementById('plUnspokenNew'));
+});
+
+// ---- a whole list at once ----
+// Typing three hundred words in one at a time is not a job anybody should be
+// asked to do. A spreadsheet or a text file, one word to a row, and the
+// column called SKU if there is one — otherwise the first column, which is
+// what a list exported from anywhere else looks like.
+function plTermsFromFile(text,rows){
+  let out=[];
+  if(rows){
+    // a header naming the column wins; a sheet with no header starts at the top
+    const head=(rows[0]||[]).map(v=>String(v).trim().toLowerCase());
+    const named=head.findIndex(h=>/^(sku|sku name|item|product|word|term|hide|hidden)/.test(h));
+    const col=named>=0?named:0, start=named>=0?1:0;
+    for(let r=start;r<rows.length;r++) out.push(String((rows[r]||[])[col]??''));
+  }else{
+    // a plain text file: one to a line, or several to a line separated by
+    // commas or tabs, which is how these get pasted together
+    out=String(text||'').split(/[\r\n,\t]+/);
+  }
+  return out.map(v=>v.trim()).filter(Boolean);
+}
+async function plUploadTerms(kind,store,btn){
+  const msg=plMsgOf(kind);
+  const inp=document.createElement('input');
+  inp.type='file'; inp.accept='.xlsx,.xls,.csv,.txt';
+  inp.onchange=async()=>{
+    const file=inp.files&&inp.files[0]; if(!file) return;
+    const label=btn.textContent;
+    btn.disabled=true; btn.textContent='Reading…';
+    try{
+      const session=await requireSession(msg); if(!session) return;
+      let found;
+      if(/\.txt$/i.test(file.name)) found=plTermsFromFile(await file.text(),null);
+      else{
+        if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
+        const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
+        const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
+        found=plTermsFromFile(null,rows);
+      }
+      if(!found.length) throw new Error('nothing was found in the first sheet');
+      // The ones already on this list are left alone rather than refused: a
+      // longer version of the same file should top it up, not fail on row two.
+      const have=new Set(plTermsOf(kind,store));
+      const add=[];
+      found.forEach(t=>{
+        const k=t.toLowerCase();
+        if(have.has(k)) return;
+        have.add(k);                    // and no word twice from inside one file
+        const row={user_id:session.user.id,term:t.slice(0,60)};
+        if(kind==='hidden') row.store=store;
+        add.push(row);
+      });
+      if(!add.length){
+        showMsg(msg,`All ${found.length} of those are already on the list.`,true);
+        return;
+      }
+      for(let i=0;i<add.length;i+=200){
+        const {error}=await sb.from(PL_LIST_TABLE[kind]).insert(add.slice(i,i+200));
+        if(error) throw error;
+        btn.textContent=`Adding… ${Math.min(i+200,add.length)}/${add.length}`;
+      }
+      const already=found.length-add.length;
+      showMsg(msg,`✓ ${add.length} added`
+        +(already?`, ${already} already there`:'')
+        +(kind==='hidden'?` — ${store==='planttalks'?'Plant Talks':'PartyMonkey'}.`:'.'),true);
+      await refreshPlHidden();
+    }catch(err){
+      showMsg(msg,'Could not read that file: '+((err&&err.message)||'unknown error'),false);
+    }finally{ btn.disabled=false; btn.textContent=label; }
+  };
+  inp.click();
+}
+document.querySelectorAll('[data-hidden-upload]').forEach(btn=>{
+  btn.addEventListener('click',()=>
+    plUploadTerms('hidden',btn.getAttribute('data-hidden-upload'),btn));
 });
 
 // one handler for every row on the screen, whichever list it belongs to
