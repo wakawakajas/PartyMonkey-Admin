@@ -3044,9 +3044,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <button class="req-x" id="pickListAdhocClose" title="Close" aria-label="Close">×</button>
     <div class="sheet-title" id="pickListAdhocTitle">Ad-hoc list</div>
     <p class="hint" style="margin:0 0 4px;">Everything raised on this sheet. Each one is also
-      a line on <b>Ad-Hoc Picking</b>, under a list named after this sheet — one-off work, so
-      the name and picture travel with the job and the SKU is never added to the warehouse
-      catalogue. Undo an item's Ad-hoc on the list itself and it goes from both.</p>
+      a line on <b>Ad-Hoc Picking</b> under <b id="pickListAdhocShop">PartyMonkey</b>, on a list
+      named after this sheet — one-off work, so the name and picture travel with the job and
+      the SKU is never added to the warehouse catalogue. Undo an item's Ad-hoc on the list
+      itself and it goes from both.</p>
     <div id="pickListAdhocBody">
       <p class="hint" style="margin:4px 0 0;">— nothing raised yet —</p>
     </div>
@@ -15486,7 +15487,7 @@ async function plUploadThumb(uid,blob){
 
 // ---------- one list ----------
 async function openPickList(){
-  plStartOn=false; plActiveId=null; plAdhocOrderId=null;
+  plStartOn=false; plActiveId=null; plAdhocOrderId=null; plAdhocOrderStore=null;
   document.getElementById('pickListStickyBar').hidden=true;
   if(!sb||!plCurrentId){ showScreen('pick-lists'); return; }
   document.getElementById('pickListTitle').textContent='Loading…';
@@ -15653,24 +15654,45 @@ async function plHydrateIn(scope,attr){
 // no business being added to it. The name, quantity, remark and picture
 // travel on the job itself instead.
 let plAdhocOrderId=null;                 // this sheet's ad-hoc list, once known
-const plStore=()=>currentStore||'partymonkey';
+let plAdhocOrderStore=null;              // and which shop it went to
+
+// Which shop the sheet is for is written on the sheet: a file with PT in its
+// name is Plant Talks, and everything else is PartyMonkey. Read off the name
+// rather than off whichever shop the person happens to have open in Ad-Hoc
+// Picking, because the sheet is the sheet whoever is holding the phone.
+//
+// PT has to stand on its own — beside a space, a dash, a dot or a digit, but
+// never beside another letter, or September, Receipt, Script and Empty would
+// all quietly become Plant Talks.
+const PL_PT=/(^|[^a-z])pt([^a-z]|$)/i;
+const plTitleStore=t=>PL_PT.test(String(t||''))?'planttalks':'partymonkey';
+const plStore=()=>plTitleStore(plList&&plList.title);
+
 async function plAdhocOrder(session){
   if(plAdhocOrderId) return plAdhocOrderId;
-  const {data:found,error}=await sb.from('adhoc_orders').select('id')
+  const {data:found,error}=await sb.from('adhoc_orders').select('id,store')
     .eq('pick_list_id',plList.id).is('deleted_at',null)
     .order('created_at',{ascending:true}).limit(1);
   if(error) throw error;
-  if(found&&found.length) return (plAdhocOrderId=found[0].id);
+  // A list this sheet already has keeps the shop it was made under, and its
+  // lines follow it there — a line filed under one shop on a list belonging
+  // to another is invisible from both.
+  if(found&&found.length){
+    plAdhocOrderStore=found[0].store||plStore();
+    return (plAdhocOrderId=found[0].id);
+  }
+  const store=plStore();
   // new lists go to the top of the Ad-Hoc Picking page, the same as one added
   // by hand there
   const {data:top}=await sb.from('adhoc_orders').select('sort_order')
-    .eq('store',plStore()).is('deleted_at',null)
+    .eq('store',store).is('deleted_at',null)
     .order('sort_order',{ascending:true}).limit(1);
   const sort=(top&&top.length)?(Number(top[0].sort_order)||0)-1:0;
   const {data,error:e2}=await sb.from('adhoc_orders').insert({
     user_id:session.user.id,order_id:plList.title,sort_order:sort,
-    store:plStore(),pick_list_id:plList.id}).select().single();
+    store,pick_list_id:plList.id}).select().single();
   if(e2) throw e2;
+  plAdhocOrderStore=store;
   return (plAdhocOrderId=data.id);
 }
 async function plRaiseAdhoc(it){
@@ -15685,7 +15707,7 @@ async function plRaiseAdhoc(it){
   const {count}=await sb.from('adhoc_items')
     .select('id',{count:'exact',head:true}).eq('order_ref',order);
   const {error}=await sb.from('adhoc_items').insert({
-    user_id:session.user.id,order_ref:order,store:plStore(),
+    user_id:session.user.id,order_ref:order,store:plAdhocOrderStore||plStore(),
     sku:it.sku,qty:Math.max(1,Number(it.qty)||1),sort_order:count||0,
     location_remarks:it.remarks||'',photo_path:it.image_path||null,
     pick_item_id:it.id});
@@ -15972,6 +15994,10 @@ function plRenderAdhocSheet(){
   const rows=plItems.filter(it=>it.status==='adhoc');
   document.getElementById('pickListAdhocTitle').textContent=
     'Ad-hoc — '+((plList&&plList.title)||'this list');
+  // which shop the sheet's name puts this work under, said outright rather
+  // than left to be discovered on the wrong page
+  const shop=plAdhocOrderStore||plStore();
+  document.getElementById('pickListAdhocShop').textContent=STORES[shop]||shop;
   // The picture comes across with the name, because "the brown one" is how a
   // line gets recognised on a shelf. It is the sheet's own thumbnail shown
   // again rather than a copy, both here and on the job this raised over on
