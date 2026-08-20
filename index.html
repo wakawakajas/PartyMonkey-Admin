@@ -1792,12 +1792,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <!-- Dropping the file on the page is the quick way; the button is there
          for a phone, which has nothing to drop from. -->
     <div class="pl-drop" id="pickListDrop" tabindex="0" role="button"
-         title="Drop the picking PDF here, or tap to choose one. The file's own name becomes the list's name.">
+         title="Drop the picking PDFs here, or tap to choose them. Each file's own name becomes its list's name, and more can be added while these are still being read.">
       <span class="pl-drop-ico">⬆</span>
-      <span class="pl-drop-main">Drop the picking PDF here</span>
-      <span class="pl-drop-sub">or tap to choose a file — its name becomes the list's name</span>
+      <span class="pl-drop-main">Drop the picking PDFs here</span>
+      <span class="pl-drop-sub">as many as you like, together or one at a time — each file's
+        name becomes its list's name</span>
     </div>
-    <input type="file" id="pickListFile" accept="application/pdf,.pdf" hidden/>
+    <input type="file" id="pickListFile" accept="application/pdf,.pdf" multiple hidden/>
     <div id="pickListUploadMsg"></div>
 
     <div class="seg" id="pickListTabs" style="margin-bottom:12px;">
@@ -15194,13 +15195,12 @@ plDrop.addEventListener('keydown',e=>{
   e.preventDefault(); plDrop.classList.remove('over');
 }));
 plDrop.addEventListener('drop',e=>{
-  const f=(e.dataTransfer&&e.dataTransfer.files||[])[0];
-  if(f) plIngest(f);
+  plQueueFiles((e.dataTransfer&&e.dataTransfer.files)||[]);
 });
 plFileInput.addEventListener('change',e=>{
-  const f=e.target.files&&e.target.files[0];
+  const files=e.target.files;
+  plQueueFiles(files||[]);
   e.target.value='';                       // so the same file can be dropped twice
-  if(f) plIngest(f);
 });
 
 // ---------------------------------------------------------------
@@ -15410,25 +15410,75 @@ async function plParsePdf(file,onProgress){
   return rows;
 }
 
-let plIngesting=false;
-async function plIngest(file){
+// A morning is several sheets, and they arrive together or one at a time as
+// somebody remembers them. They queue rather than compete: one PDF is read
+// and saved before the next is started, so eighty pictures are not uploading
+// against another eighty, and anything dropped mid-way joins the back of the
+// queue instead of being turned away.
+let plQueue=[], plIngesting=false, plBatch={done:0,ok:0,failed:0,lines:0};
+const plIsPdf=f=>!!f&&(f.type==='application/pdf'||/\.pdf$/i.test(f.name));
+
+function plQueueFiles(files){
   const msg=document.getElementById('pickListUploadMsg');
-  if(plIngesting) return;
-  if(!file||!(file.type==='application/pdf'||/\.pdf$/i.test(file.name))){
-    showMsg(msg,'That is not a PDF.',false); return;
+  const all=[...(files||[])];
+  if(!all.length) return;
+  const pdfs=all.filter(plIsPdf);
+  if(!pdfs.length){
+    showMsg(msg,all.length===1?'That is not a PDF.':'None of those are PDFs.',false);
+    return;
   }
-  const session=await requireSession(msg); if(!session) return;
+  plQueue.push(...pdfs);
+  const skipped=all.length-pdfs.length;
+  if(skipped) showMsg(msg,`${skipped} file${skipped===1?'':'s'} ignored — only PDFs are read.`,false);
+  plDrainQueue();
+}
+
+async function plDrainQueue(){
+  if(plIngesting) return;                  // it will pick these up on its way round
+  const msg=document.getElementById('pickListUploadMsg');
+  const session=await requireSession(msg);
+  if(!session){ plQueue=[]; return; }
   plIngesting=true; plDrop.classList.add('busy');
-  showMsg(msg,'Reading '+escapeHtml(file.name)+'…',true);
+  plBatch={done:0,ok:0,failed:0,lines:0};
+  const trouble=[];
+  try{
+    while(plQueue.length){
+      const file=plQueue.shift();
+      // counted rather than fixed: more can be dropped while this is running
+      const n=plBatch.done+1, of=n+plQueue.length;
+      const where=of>1?` (${n} of ${of})`:'';
+      const r=await plIngestOne(file,session,where);
+      plBatch.done++;
+      if(r.ok){ plBatch.ok++; plBatch.lines+=r.lines; }
+      else{ plBatch.failed++; trouble.push(`${file.name}: ${r.why}`); }
+      // each sheet appears as it lands rather than all of them at the end
+      await refreshPickLists();
+    }
+  }finally{
+    plIngesting=false; plDrop.classList.remove('busy');
+  }
+  const {ok,failed,lines}=plBatch;
+  if(ok&&!failed)
+    showMsg(msg,ok===1?plBatch.last:`✓ ${ok} sheets — ${lines} lines in all.`,true);
+  else if(ok&&failed)
+    showMsg(msg,`✓ ${ok} of ${ok+failed} sheets — ${lines} lines. `
+      +`Not taken in: ${escapeHtml(trouble.join(' · '))}`,false);
+  else if(failed)
+    showMsg(msg,`Nothing was taken in. ${escapeHtml(trouble.join(' · '))}`,false);
+}
+
+// One PDF, start to finish. Hands back what happened rather than putting it on
+// screen itself, because with several in the queue the running commentary and
+// the verdict are two different messages.
+async function plIngestOne(file,session,where){
+  const msg=document.getElementById('pickListUploadMsg');
+  showMsg(msg,`Reading ${escapeHtml(file.name)}${where}…`,true);
   let listId=null;
   try{
     const rows=await plParsePdf(file,(p,n)=>
-      showMsg(msg,`Reading ${escapeHtml(file.name)} — page ${p} of ${n}…`,true));
+      showMsg(msg,`Reading ${escapeHtml(file.name)}${where} — page ${p} of ${n}…`,true));
     if(!rows||!rows.length){
-      showMsg(msg,'No picking lines could be read off that PDF. It needs the '
-        +'Item / SKU / Shelf / Qty heading row and a picture on each line. '
-        +'Nothing was saved.',false);
-      return;
+      return {ok:false,why:'no picking lines could be read off it'};
     }
     // The list first, so every line has something to hang off, and so a
     // failure halfway through leaves one obviously-short list rather than a
@@ -15453,7 +15503,7 @@ async function plIngest(file){
       items[i]={user_id:session.user.id,list_id:list.id,sort_order:i,
         sku:String(r.sku||'').trim(),shelf:String(r.shelf||'').trim(),
         qty:Math.max(1,Number(r.qty)||1),image_path:path};
-      showMsg(msg,`Saving line ${++done} of ${rows.length}…`,true);
+      showMsg(msg,`${escapeHtml(file.name)}${where} — saving line ${++done} of ${rows.length}…`,true);
     };
     let next=0;
     await Promise.all(Array.from({length:Math.min(6,rows.length)},async()=>{
@@ -15465,24 +15515,22 @@ async function plIngest(file){
       const {error:e2}=await sb.from('pick_list_items').insert(items.slice(i,i+50));
       if(e2) throw e2;
     }
+    plTab='pending';
+    document.querySelectorAll('#pickListTabs [data-pl-tab]')
+      .forEach(x=>x.classList.toggle('on',x.dataset.plTab==='pending'));
     // The sheet prints its own line count in the summary at the top. If what
     // was read back disagrees with it the list is still made — a picker would
     // rather have 82 of 83 lines than nothing — but it says so, because the
     // missing one is a line nobody would otherwise know to look for.
     const off=rows.expected&&rows.expected!==items.length;
-    showMsg(msg,`✓ ${escapeHtml(file.name)} — ${items.length} line${items.length===1?'':'s'}.`
-      +(off?` The sheet says it has ${rows.expected} — check it against the PDF.`:''),!off);
-    plTab='pending';
-    document.querySelectorAll('#pickListTabs [data-pl-tab]')
-      .forEach(x=>x.classList.toggle('on',x.dataset.plTab==='pending'));
-    await refreshPickLists();
+    plBatch.last=`✓ ${escapeHtml(file.name)} — ${items.length} line${items.length===1?'':'s'}.`
+      +(off?` The sheet says it has ${rows.expected} — check it against the PDF.`:'');
+    return {ok:true,lines:items.length,off};
   }catch(err){
     // a half-written list is worse than none: it would be picked from and
     // signed off as complete while the rest of the sheet was never on it
     if(listId){ try{ await sb.from('pick_lists').delete().eq('id',listId); }catch(e){} }
-    showMsg(msg,'Could not take that PDF in: '+((err&&err.message)||'unknown error'),false);
-  }finally{
-    plIngesting=false; plDrop.classList.remove('busy');
+    return {ok:false,why:(err&&err.message)||'unknown error'};
   }
 }
 // Row pictures go in the same bucket as everything else, under a folder of
