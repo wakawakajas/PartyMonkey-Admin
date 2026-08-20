@@ -14936,7 +14936,7 @@ function syncConsolChips(){ filterLabel('consol'); renderConsolList(); }
 function syncPickupChips(){ filterLabel('pickup'); renderPickups(); }
 function syncAdhocChips(){ filterLabel('adhoc'); renderAdhoc(); }
 function syncRequestChips(){ filterLabel('request'); renderRequests(); }
-function syncPickListChips(){ filterLabel('pickList'); plRender(); }
+function syncPickListChips(){ filterLabel('pickList'); plShown=PL_CHUNK; plRender(); }
 let filterOpenKey=null;
 function openFilterSheet(key){
   const f=FILTERS[key]; if(!f) return;
@@ -15041,6 +15041,15 @@ let plReqItem=null;
 let plReqTo=new Set();
 let plChannel=null;
 let plBusy=new Set();          // ids with a write in flight, so realtime does not fight it
+// What a sheet is allowed to be. Five thousand lines is a day's picking for a
+// warehouse rather than a morning's, and past that something has gone wrong
+// with the PDF rather than with the warehouse.
+const PL_MAX_LINES=5000;
+// Five thousand lines is fifty thousand elements and five thousand pictures,
+// which is a browser giving up. They go on in blocks as the page is scrolled,
+// which is also the order they are picked in.
+const PL_CHUNK=150;
+let plShown=PL_CHUNK;
 let plBubbleMoved=false;       // the bubble has been dragged, so leave it where it was put
 
 // Some lines are somebody else's job — anything printed to order rather than
@@ -15121,8 +15130,11 @@ async function refreshPickLists(){
     // file name is what decides
     const shopOf={};
     pickLists.forEach(l=>{ shopOf[l.id]=plTitleStore(l.title); });
-    const {data:rows}=await sb.from('pick_list_items')
-      .select('list_id,sku,status').in('list_id',ids);
+    let rows=[];
+    try{
+      rows=await plFetchAll(()=>sb.from('pick_list_items')
+        .select('list_id,sku,status').in('list_id',ids).order('id',{ascending:true}));
+    }catch(e){ rows=[]; }
     (rows||[]).forEach(r=>{
       if(plSkuHidden(r.sku,shopOf[r.list_id])) return;
       const m=plMeta[r.list_id]||(plMeta[r.list_id]={total:0,done:0});
@@ -15718,6 +15730,9 @@ async function plParsePdf(file,onProgress){
     // stop halfway until somebody looked at it again. Nothing on this sheet
     // draws differently between the two.
     await page.render({canvasContext:ctx,viewport,intent:'print'}).promise;
+    // pdf.js keeps what it decoded for a page until it is told not to, which
+    // over two hundred pages is most of a gigabyte held for no reason
+    try{ page.cleanup(); }catch(e){}
     for(const band of bands){
       for(const box of band.boxes){
         // whichever block this picture belongs to, and where that block ends
@@ -15808,6 +15823,11 @@ async function plIngestOne(file,session,where){
     if(!rows||!rows.length){
       return {ok:false,why:'no picking lines could be read off it'};
     }
+    // Past this, something has gone wrong with the PDF rather than with the
+    // warehouse, and taking it in would only make a sheet nobody can work.
+    if(rows.length>PL_MAX_LINES){
+      return {ok:false,why:`${rows.length} lines — more than the ${PL_MAX_LINES} a sheet may hold`};
+    }
     // The list first, so every line has something to hang off, and so a
     // failure halfway through leaves one obviously-short list rather than a
     // hundred orphaned rows.
@@ -15815,11 +15835,11 @@ async function plIngestOne(file,session,where){
       .insert({user_id:session.user.id,title:file.name}).select().single();
     if(error) throw error;
     listId=list.id;
-    // A morning's sheet is eighty-odd pictures. One at a time that is eighty
-    // round trips waited out end to end; six at a time it is a few seconds,
-    // and six is well short of what the browser or the bucket will throttle.
-    // A picture that will not upload costs its own line its thumbnail and
-    // nothing else — the line is still pickable by name and shelf.
+    // A long sheet is thousands of pictures. One at a time is an afternoon;
+    // eight at a time is minutes, and eight is well short of what the browser
+    // or the bucket will throttle. A picture that will not upload costs its
+    // own line its thumbnail and nothing else — the line is still pickable
+    // by name and shelf.
     const items=new Array(rows.length);
     let done=0;
     const upload=async i=>{
@@ -15834,14 +15854,17 @@ async function plIngestOne(file,session,where){
       showMsg(msg,`${escapeHtml(file.name)}${where} — saving line ${++done} of ${rows.length}…`,true);
     };
     let next=0;
-    await Promise.all(Array.from({length:Math.min(6,rows.length)},async()=>{
+    await Promise.all(Array.from({length:Math.min(8,rows.length)},async()=>{
       while(next<rows.length) await upload(next++);
     }));
-    // in blocks rather than one statement per line: a hundred round trips is
-    // most of a minute on a warehouse connection
-    for(let i=0;i<items.length;i+=50){
-      const {error:e2}=await sb.from('pick_list_items').insert(items.slice(i,i+50));
+    // In blocks rather than one statement per line: five thousand round trips
+    // is an afternoon on a warehouse connection, and five hundred at a time is
+    // ten. Five hundred is also what the SKU import has always sent.
+    for(let i=0;i<items.length;i+=500){
+      const {error:e2}=await sb.from('pick_list_items').insert(items.slice(i,i+500));
       if(e2) throw e2;
+      showMsg(msg,`${escapeHtml(file.name)}${where} — saving line `
+        +`${Math.min(i+500,items.length)} of ${items.length}…`,true);
     }
     plTab='pending';
     document.querySelectorAll('#pickListTabs [data-pl-tab]')
@@ -15889,10 +15912,32 @@ async function openPickList(){
   plWatch();
   document.getElementById('pickListBubble').hidden=false;
 }
+// A read hands back a thousand rows and stops, whatever it was asked for —
+// that is the server's ceiling, not the query's. A five thousand line sheet
+// asked for in one go comes back as its first fifth with no error to say so,
+// which is the worst way for a sheet to be wrong: it looks complete. So every
+// read of the lines is made a page at a time until a short page says that was
+// the end of them.
+const PL_PAGE_ROWS=1000;
+async function plFetchAll(build){
+  const all=[];
+  for(let from=0;;from+=PL_PAGE_ROWS){
+    const {data,error}=await build().range(from,from+PL_PAGE_ROWS-1);
+    if(error) throw error;
+    const got=data||[];
+    all.push(...got);
+    if(got.length<PL_PAGE_ROWS) return all;
+    // a sheet longer than this is not a sheet, and a runaway loop against a
+    // database is worse than a truncated list
+    if(all.length>=PL_MAX_LINES) return all;
+  }
+}
 async function plLoadItems(){
-  const {data,error}=await sb.from('pick_list_items').select('*')
-    .eq('list_id',plCurrentId).order('sort_order',{ascending:true});
-  plItems=error?[]:(data||[]);
+  try{
+    plItems=await plFetchAll(()=>sb.from('pick_list_items').select('*')
+      .eq('list_id',plCurrentId).order('sort_order',{ascending:true}));
+  }catch(e){ plItems=[]; }
+  plShown=PL_CHUNK;                  // a fresh sheet starts at the top again
   plRender();
 }
 function plRender(){
@@ -15907,8 +15952,17 @@ function plRender(){
   document.getElementById('pickListBar').style.width=p.pct+'%';
   document.getElementById('pickListPct').textContent=p.pct+'%';
 
-  const rows=plVisibleItems();
-  if(!rows.length){
+  const all=plVisibleItems();
+  // Browsing, the sheet grows downward from the top as it is scrolled. Step
+  // by step picking is a different thing: it walks one line at a time and can
+  // be four thousand lines down, where redrawing everything above it would
+  // cost half a second on every tap. So that mode draws a window around the
+  // line being picked instead, and stays the same size however long the sheet.
+  const startAt=(plStartOn&&plActiveId)?all.findIndex(x=>x.id===plActiveId):-1;
+  const from=startAt>=0?Math.max(0,startAt-20):0;
+  const rows=startAt>=0?all.slice(from,from+PL_CHUNK):all.slice(0,plShown);
+  const moreBelow=startAt<0&&all.length>rows.length;
+  if(!all.length){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">— '
       +(plSearch.trim()?'nothing on this sheet matches “'+escapeHtml(plSearch.trim())+'”'
                        :'nothing matches that filter')+' —</p>';
@@ -15927,7 +15981,8 @@ function plRender(){
       return `<div class="ph-card pl-card-line${cls}${active}${locked?' pl-locked':''}" data-pl-line="${it.id}">
         <div class="pl-line">
           <span class="pl-thumb">${it.image_path
-            ? `<img alt="" data-pl-thumb="${escapeHtml(it.image_path)}"/>`
+            ? `<img alt="" loading="lazy" decoding="async" width="96" height="96"
+                   data-pl-thumb="${escapeHtml(it.image_path)}"/>`
             : '<span>no image</span>'}</span>
           <span class="pl-line-main">
             <span class="pl-line-sku">${escapeHtml(it.sku||'—')}</span>
@@ -15962,6 +16017,18 @@ function plRender(){
         try{ back.setSelectionRange(keepAt,keepAt); }catch(e){}
       }
     }
+    // the line that says how much of a long sheet is on the page, and asks
+    // for the rest of it
+    if(moreBelow){
+      const more=document.createElement('button');
+      more.className='btn-outline';
+      more.style.cssText='width:100%;margin-top:8px;';
+      more.id='pickListMore';
+      more.textContent=`Show more — ${rows.length} of ${all.length}`;
+      more.addEventListener('click',()=>{ plShown+=PL_CHUNK; plRender(); });
+      el.appendChild(more);
+      plWatchMore(more);
+    }
     plHydrateThumbs();
   }
 
@@ -15982,6 +16049,22 @@ function plRender(){
   document.getElementById('pickListStart').style.display=locked?'none':'';
   plSyncBubble();
   plSyncBar();
+}
+// Scrolling to the end of what is on the page asks for the next block without
+// anybody pressing the button, which is what makes a long sheet feel like one
+// list rather than a series of pages. The button stays, for a browser without
+// an observer and for a thumb that would rather press something.
+let plMoreWatcher=null;
+function plWatchMore(btn){
+  if(!('IntersectionObserver' in window)) return;
+  if(plMoreWatcher) plMoreWatcher.disconnect();
+  plMoreWatcher=new IntersectionObserver(entries=>{
+    if(!entries.some(e=>e.isIntersecting)) return;
+    plMoreWatcher.disconnect(); plMoreWatcher=null;
+    plShown+=PL_CHUNK;
+    plRender();
+  },{rootMargin:'400px'});
+  plMoreWatcher.observe(btn);
 }
 function plVisibleItems(){
   const q=plSearch.trim().toLowerCase();
@@ -16013,20 +16096,30 @@ document.getElementById('pickListSearchBtn').addEventListener('click',()=>{
 });
 document.getElementById('pickListSearch').addEventListener('input',e=>{
   plSearch=e.target.value;
+  plShown=PL_CHUNK;                  // a new search starts at its own top
   plRender();
 });
 const plHydrateAdhocThumbs=()=>plHydrateIn('#pickListAdhocBody','data-pl-ah-thumb');
 const plHydrateThumbs=()=>plHydrateIn('#pickListLines','data-pl-thumb');
+// One request per picture is a hundred and fifty round trips for one block of
+// a long sheet, and five thousand for the whole of it. The addresses are asked
+// for in batches instead, and only for the pictures actually on the page.
 async function plHydrateIn(scope,attr){
   if(!sb) return;
-  for(const img of document.querySelectorAll(scope+' img['+attr+']')){
-    const path=img.getAttribute(attr);
-    if(!photoUrlCache[path]){
-      const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(path,3600);
-      if(data&&data.signedUrl) photoUrlCache[path]=data.signedUrl;
-    }
-    if(photoUrlCache[path]) img.src=photoUrlCache[path];
+  const imgs=[...document.querySelectorAll(scope+' img['+attr+']')];
+  const want=[...new Set(imgs.map(i=>i.getAttribute(attr))
+    .filter(p=>p&&!photoUrlCache[p]))];
+  for(let i=0;i<want.length;i+=100){
+    const batch=want.slice(i,i+100);
+    try{
+      const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrls(batch,3600);
+      (data||[]).forEach(r=>{ if(r&&r.signedUrl&&r.path) photoUrlCache[r.path]=r.signedUrl; });
+    }catch(e){ /* the line is still pickable by name and shelf */ }
   }
+  imgs.forEach(img=>{
+    const path=img.getAttribute(attr);
+    if(photoUrlCache[path]) img.src=photoUrlCache[path];
+  });
 }
 
 // ---------- raising a line as ad-hoc work ----------
