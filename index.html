@@ -331,6 +331,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .nav-storage .prog{margin-top:0;}
 .nav-storage .prog i.warn-fill{background:var(--amber);}
 .nav-storage .prog i.full-fill{background:var(--rust);}
+/* stray files, under the gauge that counts them among the rest */
+.nav-orphan{display:flex;align-items:center;gap:8px;padding:8px 16px 4px;}
+.nav-orphan .hint{margin:0;flex:1;min-width:0;}
+.nav-orphan button{white-space:nowrap;flex:none;}
 /* ---- mobile-app-style back button on sub-screens ---- */
 .back-btn{display:flex;align-items:center;gap:2px;background:none;border:none;color:var(--blueprint);
   font-family:'IBM Plex Sans',sans-serif;font-weight:600;font-size:14px;cursor:pointer;padding:0;
@@ -1442,6 +1446,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       </div>
       <div class="prog"><i id="navStorageBar" style="width:0"></i></div>
       <p class="hint" id="navStorageSub" style="margin:5px 0 0;"></p>
+    </div>
+    <!-- Photos nothing points at any more. Not there at all when there are
+         none, which is what it should say most days. -->
+    <div class="nav-orphan" id="navOrphan" hidden>
+      <span class="hint" id="navOrphanTxt">—</span>
+      <button class="btn-outline btn-sm" id="navOrphanBtn"
+              title="Delete files nothing points at any more">Clear</button>
     </div>
     <button class="nav-item danger" id="navSignOutBtn">↪ Sign out</button>
   </nav>
@@ -3949,6 +3960,10 @@ function setAuthedUI(signedIn,email){
     document.getElementById('homeWho').textContent=String(email||'').split('@')[0]||'there';
     loadAccess();
     refreshStorage(true);   // the drawer is always open on a wide screen
+    refreshOrphans(true);
+    // Once on the way in. Whether it actually runs is the database's decision,
+    // not this device's — see sweep_orphan_photos.
+    sweepOrphanPhotos();
     checkAnnouncements();
     watchAnnouncements();
     // loaded at sign-in rather than when the screen is opened, so a request
@@ -4461,8 +4476,74 @@ async function refreshStorage(force){
   document.getElementById('navStorageSub').textContent=
     `${humanBytes(bytes)} of 1 GB · ${files} photo${files===1?'':'s'}`;
 }
+// ---------- photos nothing points at any more ----------
+// A photo is deleted in two halves — the row that names it, then the file —
+// and they cannot be one transaction, so anything that interrupts the pair
+// leaves a file no screen will ever show again. The database is what finds
+// them (supabase-migration-ORPHAN-SWEEP.sql); only the storage API can
+// actually remove them, so the removing is done from here.
+let orphanCheckedAt=0, orphanFiles=0, orphanBytes=0;
+async function refreshOrphans(force){
+  if(!sb) return;
+  const box=document.getElementById('navOrphan');
+  // another scan of every object, so the same few minutes as the gauge
+  if(!force&&Date.now()-orphanCheckedAt<300000) return;
+  const {data,error}=await sb.rpc('orphan_photo_usage');
+  if(error||!data){ box.hidden=true; return; }        // migration not run
+  orphanCheckedAt=Date.now();
+  const row=Array.isArray(data)?data[0]:data;
+  orphanFiles=Number((row&&row.files)||0);
+  orphanBytes=Number((row&&row.bytes)||0);
+  box.hidden=!orphanFiles;
+  document.getElementById('navOrphanTxt').textContent=
+    `${orphanFiles} stray file${orphanFiles===1?'':'s'} · ${humanBytes(orphanBytes)}`;
+}
+// in blocks: the storage API takes a list, not a thousand of them
+async function removePhotoFiles(paths){
+  let gone=0;
+  for(let i=0;i<paths.length;i+=100){
+    const slice=paths.slice(i,i+100);
+    const {error}=await sb.storage.from(PHOTO_BUCKET).remove(slice);
+    if(!error) gone+=slice.length;
+  }
+  return gone;
+}
+// The twice-a-day sweep. The twelve-hour clock is the database's rather than
+// this browser's, so every phone may ask and only the first one is given
+// anything — which is why it is safe to ask on opening and again while the app
+// is left open, and why one person clearing it clears it for everybody.
+let orphanSweeping=false;
+async function sweepOrphanPhotos(force){
+  if(!sb||orphanSweeping) return 0;
+  orphanSweeping=true;
+  try{
+    const {data,error}=await sb.rpc('sweep_orphan_photos',{force:!!force});
+    if(error||!data||!data.length) return 0;
+    const gone=await removePhotoFiles(data.map(r=>r.path).filter(Boolean));
+    orphanCheckedAt=0; storageCheckedAt=0;   // both gauges have just moved
+    return gone;
+  }catch(e){ return 0; }                     // a stranded file is not a banner
+  finally{ orphanSweeping=false; }
+}
+document.getElementById('navOrphanBtn').addEventListener('click',async e=>{
+  const btn=e.currentTarget;
+  if(!confirm(`Delete ${orphanFiles} stray file${orphanFiles===1?'':'s'}`
+    +` (${humanBytes(orphanBytes)})?\n\nThese are photos that no order, box, `
+    +'pick up, SKU, announcement, request or pick list line points at any '
+    +'more. Nothing on screen uses them, and there is no way back.')) return;
+  btn.disabled=true; btn.textContent='Clearing…';
+  const gone=await sweepOrphanPhotos(true);
+  btn.disabled=false; btn.textContent='Clear';
+  await refreshOrphans(true);
+  await refreshStorage(true);
+  // The row disappearing is the answer when it worked; when it did not, it is
+  // still sitting there saying the same number, which needs a word.
+  if(!gone) alert('Nothing was removed — they may already be gone. '
+    +'If the number has not changed, the sweep could not delete them.');
+});
 function openDrawer(){
-  refreshStorage(); document.getElementById('navDrawer').classList.add('open'); document.getElementById('navBackdrop').classList.add('open'); }
+  refreshStorage(); refreshOrphans();
+  document.getElementById('navDrawer').classList.add('open'); document.getElementById('navBackdrop').classList.add('open'); }
 function closeDrawer(){ document.getElementById('navDrawer').classList.remove('open'); document.getElementById('navBackdrop').classList.remove('open'); }
 document.getElementById('menuBtn').addEventListener('click',openDrawer);
 document.getElementById('navBackdrop').addEventListener('click',closeDrawer);
@@ -16890,6 +16971,11 @@ if(sb){
   purgeExpired();
   purgeExpiredAdhoc();
   purgeOldPickLists();
+  // The other half of "twice a day": a phone on the packing bench is opened
+  // once in the morning and left open, so asking again every few hours is what
+  // makes the second sweep happen at all. The twelve-hour clock is in the
+  // database, so this costs one small query when it is not due.
+  setInterval(()=>sweepOrphanPhotos(),6*60*60*1000);
   sb.auth.getSession().then(({data:{session}})=>{
     if(session){ setAuthedUI(true,session.user.email); refreshTemplateList(); }
     else{ setAuthedUI(false); }
