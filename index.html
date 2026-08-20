@@ -3011,10 +3011,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="sheet">
     <button class="req-x" id="pickListAdhocClose" title="Close" aria-label="Close">×</button>
     <div class="sheet-title" id="pickListAdhocTitle">Ad-hoc list</div>
-    <p class="hint" style="margin:0 0 4px;">Everything raised on this sheet, one-off — the
-      picture and name are carried over from the line, not filed in the SKU library, and both
-      go when the list is cleared out. Undo an item's Ad-hoc on the list itself and it
-      disappears from here too.</p>
+    <p class="hint" style="margin:0 0 4px;">Everything raised on this sheet. Each one is also
+      a line on <b>Ad-Hoc Picking</b>, under a list named after this sheet — one-off work, so
+      the name and picture travel with the job and the SKU is never added to the warehouse
+      catalogue. Undo an item's Ad-hoc on the list itself and it goes from both.</p>
     <div id="pickListAdhocBody">
       <p class="hint" style="margin:4px 0 0;">— nothing raised yet —</p>
     </div>
@@ -4802,7 +4802,11 @@ function renderAdhocLines(){
     // needs no column of its own — a count with picked still false says it.
     const partial=!l.picked&&l.qty_picked!=null;
     const got=l.qty_picked==null?want:Number(l.qty_picked);
-    const photo=skuPhotos[l.sku];
+    // A line raised off a daily pick list brings its own picture — that job's
+    // picture of that item, not the catalogue's picture of the SKU, which is
+    // the whole point of it being one-off. Everything else falls back to the
+    // catalogue as it always has.
+    const photo=l.photo_path||skuPhotos[l.sku];
     return `<div class="ph-card${l.picked?' line-done':partial?' line-part':''}" data-line="${l.id}">
       <div class="adhoc-head">
         <button class="sku-thumb${photo?' has':''}" data-sku-photo="${escapeHtml(l.sku)}"
@@ -4902,7 +4906,10 @@ document.getElementById('adhocLines').addEventListener('click',async e=>{
   const shot=e.target.closest('[data-sku-photo]');
   if(shot){
     const sku=shot.getAttribute('data-sku-photo');
-    if(skuPhotos[sku]) openPhotoModal(skuPhotos[sku],sku);
+    // the line's own picture wins over the catalogue's, the same way it does
+    // when the line is drawn
+    const photo=l.photo_path||skuPhotos[sku];
+    if(photo) openPhotoModal(photo,sku);
     else{ const f=await pickImageFile(); if(f) attachSkuPhoto(sku,f); }
     return;
   }
@@ -15275,7 +15282,7 @@ async function plUploadThumb(uid,blob){
 
 // ---------- one list ----------
 async function openPickList(){
-  plStartOn=false; plActiveId=null;
+  plStartOn=false; plActiveId=null; plAdhocOrderId=null;
   document.getElementById('pickListStickyBar').hidden=true;
   if(!sb||!plCurrentId){ showScreen('pick-lists'); return; }
   document.getElementById('pickListTitle').textContent='Loading…';
@@ -15344,7 +15351,7 @@ function plRender(){
           <button class="pk-state${it.status==='ok'?' on':''}" data-pl-ok
                   title="${it.status==='ok'?'Tap again to undo this':'Picked exactly as printed'}">OK</button>
           <button class="pk-state${it.status==='adhoc'?' on':''}" data-pl-adhoc
-                  title="${it.status==='adhoc'?'Tap again to undo this':'Something is wrong with it — say what in Remarks first'}">Ad-hoc</button>
+                  title="${it.status==='adhoc'?'Tap again to undo this, here and on Ad-Hoc Picking':'Something is wrong with it — say what in Remarks first. It becomes a job on Ad-Hoc Picking.'}">Ad-hoc</button>
           <button class="pk-state${it.status==='request'?' on':''}" data-pl-req
                   title="${it.status==='request'?'Tap again to undo this':'Ask somebody on the team for this item'}">Request</button>
         </div>
@@ -15420,6 +15427,69 @@ document.getElementById('pickListCustomFilter').addEventListener('click',e=>{
   plRender();
 });
 
+// ---------- raising a line as ad-hoc work ----------
+// An ad-hoc line is a job for somebody, so it goes where every other ad-hoc
+// job already lives rather than only onto this sheet's own bubble. The sheet
+// gets one pick list on the Ad-Hoc Picking page, made the first time a line
+// is raised off it and reused by every line after that.
+//
+// The SKU is deliberately not written to the warehouse catalogue. That is the
+// list of what the shop stocks; something that came up short one morning has
+// no business being added to it. The name, quantity, remark and picture
+// travel on the job itself instead.
+let plAdhocOrderId=null;                 // this sheet's ad-hoc list, once known
+const plStore=()=>currentStore||'partymonkey';
+async function plAdhocOrder(session){
+  if(plAdhocOrderId) return plAdhocOrderId;
+  const {data:found,error}=await sb.from('adhoc_orders').select('id')
+    .eq('pick_list_id',plList.id).is('deleted_at',null)
+    .order('created_at',{ascending:true}).limit(1);
+  if(error) throw error;
+  if(found&&found.length) return (plAdhocOrderId=found[0].id);
+  // new lists go to the top of the Ad-Hoc Picking page, the same as one added
+  // by hand there
+  const {data:top}=await sb.from('adhoc_orders').select('sort_order')
+    .eq('store',plStore()).is('deleted_at',null)
+    .order('sort_order',{ascending:true}).limit(1);
+  const sort=(top&&top.length)?(Number(top[0].sort_order)||0)-1:0;
+  const {data,error:e2}=await sb.from('adhoc_orders').insert({
+    user_id:session.user.id,order_id:plList.title,sort_order:sort,
+    store:plStore(),pick_list_id:plList.id}).select().single();
+  if(e2) throw e2;
+  return (plAdhocOrderId=data.id);
+}
+async function plRaiseAdhoc(it){
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session) return;
+  const order=await plAdhocOrder(session);
+  // already there, because two people raised the same line at once or a
+  // realtime echo arrived between the write and this
+  const {data:dup}=await sb.from('adhoc_items').select('id')
+    .eq('pick_item_id',it.id).limit(1);
+  if(dup&&dup.length) return;
+  const {count}=await sb.from('adhoc_items')
+    .select('id',{count:'exact',head:true}).eq('order_ref',order);
+  const {error}=await sb.from('adhoc_items').insert({
+    user_id:session.user.id,order_ref:order,store:plStore(),
+    sku:it.sku,qty:Math.max(1,Number(it.qty)||1),sort_order:count||0,
+    location_remarks:it.remarks||'',photo_path:it.image_path||null,
+    pick_item_id:it.id});
+  if(error) throw error;
+}
+const plDropAdhoc=id=>sb.from('adhoc_items').delete().eq('pick_item_id',id);
+// The status itself has already been written and is right either way, so a
+// failure here is said rather than undone — and the one thing worth saying is
+// which migration has not been run.
+function plAdhocTrouble(err){
+  const m=String((err&&err.message)||err||'');
+  showMsg(document.getElementById('pickListDetailMsg'),
+    /column|schema cache|does not exist/i.test(m)
+      ? 'Marked ad-hoc here, but it could not be put on the Ad-Hoc Picking page — '
+        +'run supabase-migration-ADHOC-FROM-PICK-LIST.sql in Supabase.'
+      : 'Marked ad-hoc here, but it could not be put on the Ad-Hoc Picking page: '+m,
+    false);
+}
+
 // ---------- a line's status ----------
 const plItem=id=>plItems.find(x=>x.id===id);
 // Every tap is a write. There is no Save on this screen and no draft state:
@@ -15451,6 +15521,14 @@ async function plSetStatus(id,status,remarks){
     return false;
   }
   msg.innerHTML='';
+  // and the job that goes with it, raised or withdrawn to match. After the
+  // status is saved rather than alongside it: the sheet is the record, and a
+  // line must never end up ticked here and not there because the Ad-Hoc page
+  // was the half that failed.
+  try{
+    if(status==='adhoc') await plRaiseAdhoc(it);
+    else if(before.status==='adhoc') await plDropAdhoc(id);
+  }catch(err){ plAdhocTrouble(err); }
   return true;
 }
 // Remarks save themselves as they are typed, a beat after the typing stops —
@@ -15465,9 +15543,17 @@ function plSaveRemarks(id,text){
     plBusy.add(id);
     const {error}=await sb.from('pick_list_items').update({remarks:text}).eq('id',id);
     plBusy.delete(id);
-    if(error) showMsg(document.getElementById('pickListDetailMsg'),
-      'Could not save that remark: '+error.message,false);
-    else if(it.status==='adhoc') plRenderAdhocSheet();
+    if(error){
+      showMsg(document.getElementById('pickListDetailMsg'),
+        'Could not save that remark: '+error.message,false);
+      return;
+    }
+    if(it.status!=='adhoc') return;
+    plRenderAdhocSheet();
+    // the remark is what the job is about, so a correction made here has to
+    // reach the copy of it on the Ad-Hoc Picking page
+    try{ await sb.from('adhoc_items').update({location_remarks:text}).eq('pick_item_id',id); }
+    catch(e){ /* the remark on the sheet is saved; the copy catches up next time */ }
   },500);
 }
 document.getElementById('pickListLines').addEventListener('input',e=>{
@@ -15532,6 +15618,9 @@ document.getElementById('pickListUndoYes').addEventListener('click',async()=>{
     showMsg(document.getElementById('pickListDetailMsg'),'Could not undo that: '+error.message,false);
     return;
   }
+  // taking Ad-hoc back takes the job away with it, which is the whole reason
+  // the undo is asked about rather than simply done
+  if(before==='adhoc'){ try{ await plDropAdhoc(id); }catch(err){ plAdhocTrouble(err); } }
   plRenderAdhocSheet();
 });
 
@@ -15640,9 +15729,9 @@ function plRenderAdhocSheet(){
   document.getElementById('pickListAdhocTitle').textContent=
     'Ad-hoc — '+((plList&&plList.title)||'this list');
   // The picture comes across with the name, because "the brown one" is how a
-  // line gets recognised on a shelf. It is the pick list's own thumbnail
-  // shown again, not a copy filed anywhere — an ad-hoc line is one morning's
-  // problem and is deleted with the list.
+  // line gets recognised on a shelf. It is the sheet's own thumbnail shown
+  // again rather than a copy, both here and on the job this raised over on
+  // Ad-Hoc Picking.
   document.getElementById('pickListAdhocBody').innerHTML=rows.length
     ? rows.map(it=>`<div class="pl-adhoc-row pl-line">
         <span class="pl-thumb">${it.image_path
