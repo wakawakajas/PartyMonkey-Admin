@@ -1,10 +1,8 @@
 -- ============================================================
 -- ORPHANED PHOTO SWEEP
--- Run in the Supabase SQL Editor AFTER supabase-migration-STORAGE.sql,
--- supabase-migration-ADHOC.sql (which is where public.on_team comes from),
--- supabase-migration-REQUESTS2.sql and supabase-migration-DAILY-PICK-LIST.sql
--- — it reads every table that names a file in the bucket, so all of them have
--- to exist first. Safe to run more than once, and safe to run as one batch.
+-- Run in the Supabase SQL Editor AFTER supabase-migration-STORAGE.sql and
+-- supabase-migration-ADHOC.sql (which is where public.on_team comes from).
+-- Safe to run more than once, and safe to run as one batch.
 --
 -- A photo is deleted in two steps: the row that names it, and the file itself.
 -- Everywhere in the app those two are done together, but they cannot be one
@@ -12,10 +10,15 @@
 -- postgrest — so a failure between them leaves a file nothing points at.
 -- Nothing reads it, nothing lists it, and it counts against the 1 GB for ever.
 -- This is the sweep that finds those and hands them back to be deleted.
+--
+-- Nothing here names a table. What counts as "still in use" is read out of the
+-- catalogue every time it is asked, so a page built next year is covered by
+-- the sweep the day it is written rather than the day somebody remembers this
+-- file exists — see PART 2, which is the whole safety of it.
 -- ============================================================
 
 
--- ---------- PART 1 of 5 : how long a file is left alone ----------
+-- ---------- PART 1 of 7 : how long a file is left alone ----------
 -- A file is uploaded before the row that names it is written, and on a long
 -- pick list the two can be minutes apart — a sweep with no grace period would
 -- delete the thumbnails of a sheet that is still being taken in. A day is far
@@ -25,66 +28,117 @@ returns interval language sql immutable
 as $func$ select interval '1 day' $func$;
 
 
--- ---------- PART 2 of 5 : is anything still pointing at it ----------
--- Every column in the schema that holds a path in this bucket. A file is an
--- orphan only if none of them names it — miss one out and the sweep deletes
--- pictures that are still on screen, so this list is the whole safety of it.
+-- ---------- PART 2 of 7 : which columns name a file ----------
+-- The dangerous mistake this sweep can make is not knowing about a column, so
+-- it is never told: it asks the catalogue for every text column in public
+-- whose name is `path` or ends in `_path`, which is what every one of them has
+-- been called since the first — photo_path, image_path, path. A page added
+-- later that follows the same habit is covered without touching this file.
 --
---   shipment_items.photo_path   order line photos
---   shipment_boxes.photo_path   packed box photos
---   pickups.photo_path          store pick up photos
---   warehouse_skus.photo_path   the catalogue's picture of a SKU
---   adhoc_items.photo_path      points at a pick list thumbnail, not a copy
---   announcements.photo_path    the picture on an announcement
---   pick_list_items.image_path  the row thumbnails read off the PDF
---   request_photos.path         what somebody attached to a request
+-- Guessing wide is the safe direction. A column caught here that holds
+-- something other than a file name only makes the sweep more cautious: the
+-- worst it can do is leave a stray file alone. A column missed does the
+-- opposite, and deletes a picture somebody is still looking at.
+--
+-- For a future column that breaks the habit — `cover_image`, say — add a row:
+--   insert into public.photo_path_extra(tbl, col) values ('posters','cover_image');
+create table if not exists public.photo_path_extra (
+  tbl text not null,
+  col text not null,
+  primary key (tbl, col)
+);
+alter table public.photo_path_extra enable row level security;
+drop policy if exists "team_select" on public.photo_path_extra;
+create policy "team_select" on public.photo_path_extra
+  for select using (public.on_team(auth.uid()));
+
+-- Tables only, not views: a view over a table would have the sweep read the
+-- same column twice and call it two different places.
+create or replace function public.photo_columns()
+returns table(tbl text, col text)
+language sql
+security definer
+stable
+set search_path = public
+as $func$
+  select c.relname::text, a.attname::text
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    join pg_attribute a on a.attrelid = c.oid
+   where n.nspname = 'public'
+     and c.relkind in ('r','p')
+     and a.attnum > 0
+     and not a.attisdropped
+     and a.atttypid in ('text'::regtype, 'varchar'::regtype)
+     and (a.attname = 'path' or a.attname like '%\_path')
+     and c.relname <> 'photo_path_extra'
+  union
+  -- joined through the catalogue rather than trusted: a registry row naming a
+  -- table or column that is not there would otherwise break every sweep
+  select e.tbl, e.col
+    from public.photo_path_extra e
+    join pg_class     c2 on c2.relname = e.tbl and c2.relkind in ('r','p')
+    join pg_namespace n2 on n2.oid = c2.relnamespace and n2.nspname = 'public'
+    join pg_attribute a2 on a2.attrelid = c2.oid and a2.attname = e.col
+                        and a2.attnum > 0 and not a2.attisdropped;
+$func$;
+
+
+-- ---------- PART 3 of 7 : is anything still pointing at it ----------
+-- One question, asked of one file, which is what the delete rule in PART 7
+-- needs. Built from PART 2 each time rather than written out, so it cannot
+-- fall behind the schema.
 create or replace function public.photo_in_use(p text)
 returns boolean
-language sql
+language plpgsql
 security definer
 stable
 set search_path = public
 as $func$
-  select exists (select 1 from public.shipment_items   where photo_path = p)
-      or exists (select 1 from public.shipment_boxes   where photo_path = p)
-      or exists (select 1 from public.pickups          where photo_path = p)
-      or exists (select 1 from public.warehouse_skus   where photo_path = p)
-      or exists (select 1 from public.adhoc_items      where photo_path = p)
-      or exists (select 1 from public.announcements    where photo_path = p)
-      or exists (select 1 from public.pick_list_items  where image_path = p)
-      or exists (select 1 from public.request_photos   where path       = p);
-$func$;
+declare q text; hit boolean;
+begin
+  if p is null then return false; end if;
+  select string_agg(format('select 1 from public.%I where %I = $1', c.tbl, c.col),
+                    ' union all ')
+    into q from public.photo_columns() c;
+  -- no columns at all is a broken catalogue read, not a bucket of orphans:
+  -- say everything is in use, so the sweep deletes nothing
+  if q is null then return true; end if;
+  execute 'select exists (' || q || ')' into hit using p;
+  return coalesce(hit, false);
+end $func$;
 
 
--- ---------- PART 3 of 5 : what is orphaned ----------
--- One anti-join rather than photo_in_use once per file: a bucket holding tens
--- of thousands of pick list thumbnails would otherwise be tens of thousands of
--- lookups through eight subqueries each. photo_in_use is still what the delete
--- rule in PART 5 asks, because that is asked of one file at a time.
+-- ---------- PART 4 of 7 : what is orphaned ----------
+-- The same question asked of the whole bucket at once. An anti-join rather
+-- than photo_in_use once per file: a bucket holding tens of thousands of pick
+-- list thumbnails would otherwise be tens of thousands of round trips.
 create or replace function public.orphan_photos()
 returns table(path text, bytes bigint)
-language sql
+language plpgsql
 security definer
 stable
 set search_path = public
 as $func$
-  with used as (
-             select photo_path as p from public.shipment_items  where photo_path is not null
-    union all select photo_path      from public.shipment_boxes where photo_path is not null
-    union all select photo_path      from public.pickups        where photo_path is not null
-    union all select photo_path      from public.warehouse_skus where photo_path is not null
-    union all select photo_path      from public.adhoc_items    where photo_path is not null
-    union all select photo_path      from public.announcements  where photo_path is not null
-    union all select image_path      from public.pick_list_items where image_path is not null
-    union all select path            from public.request_photos  where path       is not null
-  )
-  select o.name, coalesce((o.metadata->>'size')::bigint, 0)::bigint
-    from storage.objects o
-   where public.on_team(auth.uid())          -- an anonymous caller sweeps nothing
-     and o.bucket_id = 'shipment-photos'
-     and o.created_at < now() - public.photo_grace()
-     and not exists (select 1 from used u where u.p = o.name);
-$func$;
+declare used text;
+begin
+  if not public.on_team(auth.uid()) then return; end if;   -- a stranger sweeps nothing
+
+  select string_agg(format('select %I::text as p from public.%I where %I is not null',
+                           c.col, c.tbl, c.col), ' union all ')
+    into used from public.photo_columns() c;
+  -- as above: nothing known means nothing swept, never everything swept
+  if used is null then return; end if;
+
+  return query execute format($q$
+    with used as (%s)
+    select o.name, coalesce((o.metadata->>'size')::bigint, 0)::bigint
+      from storage.objects o
+     where o.bucket_id = 'shipment-photos'
+       and o.created_at < now() - public.photo_grace()
+       and not exists (select 1 from used u where u.p = o.name)
+  $q$, used);
+end $func$;
 
 -- The same thing counted rather than listed, for the gauge in the menu. Kept
 -- apart so opening the drawer does not send a list of every stray file to a
@@ -101,7 +155,7 @@ as $func$
 $func$;
 
 
--- ---------- PART 4 of 5 : twice a day, once between everybody ----------
+-- ---------- PART 5 of 7 : twice a day, once between everybody ----------
 -- The app has no server to run a cron on, so the sweep goes off when somebody
 -- opens it. Whoever gets there first should be the only one who runs it, or
 -- twenty phones would each scan the bucket every morning — so the clock lives
@@ -147,26 +201,30 @@ begin
   return query select o.path, o.bytes from public.orphan_photos() o;
 end $func$;
 
+
+-- ---------- PART 6 of 7 : who may ask ----------
 revoke all on function public.photo_grace()                from public;
+revoke all on function public.photo_columns()              from public;
 revoke all on function public.photo_in_use(text)           from public;
 revoke all on function public.orphan_photos()              from public;
 revoke all on function public.orphan_photo_usage()         from public;
 revoke all on function public.sweep_orphan_photos(boolean) from public;
 grant execute on function public.photo_grace()                to authenticated;
+grant execute on function public.photo_columns()              to authenticated;
 grant execute on function public.photo_in_use(text)           to authenticated;
 grant execute on function public.orphan_photos()              to authenticated;
 grant execute on function public.orphan_photo_usage()         to authenticated;
 grant execute on function public.sweep_orphan_photos(boolean) to authenticated;
 
 
--- ---------- PART 5 of 5 : being allowed to delete it ----------
+-- ---------- PART 7 of 7 : being allowed to delete it ----------
 -- The bucket's standing rule is "your own folder only", and an orphan is
 -- usually somebody else's — left over from a box packed by whoever was on that
 -- morning. This is the narrowest rule that lets the sweep work: it permits a
 -- delete only of a file in this bucket, old enough to be past the grace
--- period, that no row anywhere names. A file still in use is not deletable
--- through it however it is asked for, so the worst a mistaken sweep can do is
--- be refused.
+-- period, that no column found in PART 2 names. A file still in use is not
+-- deletable through it however it is asked for, so the worst a mistaken sweep
+-- can do is be refused.
 drop policy if exists "orphan_photos_team_delete" on storage.objects;
 create policy "orphan_photos_team_delete" on storage.objects
   for delete using (
@@ -175,3 +233,7 @@ create policy "orphan_photos_team_delete" on storage.objects
     and created_at < now() - public.photo_grace()
     and not public.photo_in_use(name)
   );
+
+
+-- ---------- what it is watching, if you ever want to look ----------
+--   select * from public.photo_columns() order by tbl, col;
