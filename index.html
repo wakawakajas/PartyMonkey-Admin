@@ -503,6 +503,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* the quick bleeds sit beside the field, dropping under it when there is no room */
 .bleed-row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;}
 .bleed-row .field{flex:1 1 170px;margin-bottom:0;}
+/* order ID and Reset share a line: the ID names the files the two Download
+   buttons write, so it sits with the artwork it names */
+.art-reset-row{display:flex;gap:10px;align-items:flex-end;}
+.art-reset-row .field{margin-bottom:0;}
+.art-reset-row .btn-outline{flex:0 0 auto;height:44px;}
 .bleed-row .chips{flex:0 0 auto;margin-bottom:0;padding-bottom:5px;}
 /* a 19-digit order ID has nowhere to break, so it wraps rather than pushing
    the date off the row */
@@ -2459,7 +2464,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
             <label class="field"><span>HEIGHT</span><input type="number" step="0.1" id="artHBack" placeholder="—"/></label>
           </div></div>
       </div>
-      <button class="btn-outline" id="refitArtBtn" style="width:100%;">Reset</button>
+      <div class="art-reset-row">
+        <label class="field" style="flex:1;"><span>ORDER ID</span>
+          <input type="text" id="artOrderId" placeholder="e.g. 250820-01" autocomplete="off"/></label>
+        <button class="btn-outline" id="refitArtBtn">Reset</button>
+      </div>
 
       <div class="sect-label">Bleed</div>
       <div class="toggle-row" style="margin-bottom:10px;">
@@ -2481,6 +2490,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="grid2" style="margin-bottom:12px;">
     <button class="btn-primary" id="exportFrontBtn" style="height:54px;font-size:14px;">Download front</button>
     <button class="btn-primary" id="exportBackBtn" style="height:54px;font-size:14px;">Download back</button>
+  </div>
+  <div class="chips" style="margin-bottom:10px;align-items:center;">
+    <button type="button" class="btn-outline btn-sm" id="exportFolderBtn">📁 Save folder…</button>
+    <span class="hint" id="exportFolderLbl" style="margin:0;"></span>
   </div>
   <div id="exportMsg"></div>
 
@@ -2840,7 +2853,7 @@ const state={
   art:{front:{wMm:0,hMm:0},back:{wMm:0,hMm:0}},
   bleed:{enabled:true,mm:2.5},
   rotate:{front:0,back:0},
-  orderId:'',   // no longer entered in the tool; kept so saved templates still load
+  orderId:'',   // per job, not part of a saved template — names the exported files
 
   // per-side registration offset — nudges reference marks, placeholders and
   // artwork together as one unit, to correct printer feed drift front vs back
@@ -3299,6 +3312,10 @@ function syncBleedChips(){
     state.art[side].hMm=toMm(v,state.paper.unit);
     drawAll();
   });
+});
+// what the sheet is stamped with and what the exported files are named after
+document.getElementById('artOrderId').addEventListener('input',e=>{
+  state.orderId=e.target.value.trim(); drawAll();
 });
 document.getElementById('refitArtBtn').addEventListener('click',()=>{
   fitArtToCard('front');fitArtToCard('back');refreshArtInputs();drawAll();
@@ -11247,6 +11264,7 @@ function applyPrintState(meta,name){
   if(meta.shift){ state.shift.front=Object.assign(state.shift.front,meta.shift.front); state.shift.back=Object.assign(state.shift.back,meta.shift.back); }
   if(meta.rotate){ state.rotate.front=meta.rotate.front||0; state.rotate.back=meta.rotate.back||0; }
   if(name!==undefined) document.getElementById('templateName').value=meta.name||name;
+  document.getElementById('artOrderId').value=state.orderId||'';
   renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();drawAll();
 }
 async function loadTemplate(id){
@@ -11379,10 +11397,66 @@ function downloadBlob(blob,filename){
 }
 function safeName(s){return (s||'template').replace(/[^a-z0-9_\-]+/gi,'_');}
 
+// ---------- where the exported PDFs land ----------
+// A browser cannot be told to write to a path, so the folder is chosen once
+// and the handle kept; every later download goes straight into it without
+// asking again. Where the browser has no folder picker at all, or the choice
+// is declined, the files fall back to the ordinary downloads folder.
+const EXPORT_FOLDER_HINT=String.raw`C:\NAS Folders\Partymonkey NAS\Working Folder`;
+let exportDir=null, exportDirRead=false;
+const canPickFolder=()=>typeof window.showDirectoryPicker==='function';
+async function exportDirGet(){
+  if(!exportDirRead){ exportDir=await gtIdbGet('printDir').catch(()=>null)||null; exportDirRead=true; }
+  return exportDir;
+}
+async function exportDirSet(dir){ exportDir=dir; exportDirRead=true; await gtIdbPut('printDir',dir); }
+function exportFolderLbl(){
+  const el=document.getElementById('exportFolderLbl');
+  if(!el) return;
+  if(!canPickFolder()){ el.textContent='This browser cannot write to a folder — files go to Downloads.'; return; }
+  el.textContent=exportDir?`Saving into ${exportDir.name}`:`Not chosen yet — pick ${EXPORT_FOLDER_HINT}`;
+}
+// Asking for permission has to come off a tap, so this runs first thing in the
+// click, before the minute of rendering that would otherwise spend the gesture.
+async function exportFolderReady(ask){
+  if(!canPickFolder()) return null;
+  const dir=await exportDirGet();
+  if(await gtDirOk(dir,ask)) return dir;
+  if(!ask) return null;
+  try{
+    const picked=await window.showDirectoryPicker({mode:'readwrite'});
+    if(!await gtDirOk(picked,true)) return null;
+    await exportDirSet(picked); exportFolderLbl();
+    return picked;
+  }catch(e){ return null; }   // cancelled — fall back to Downloads
+}
+async function writeIntoFolder(dir,filename,blob){
+  const fh=await dir.getFileHandle(filename,{create:true});
+  const w=await fh.createWritable();
+  await w.write(blob); await w.close();
+}
+document.getElementById('exportFolderBtn').addEventListener('click',async()=>{
+  const out=document.getElementById('exportMsg');
+  if(!canPickFolder()){ showMsg(out,'This browser cannot write into a folder — use Chrome or Edge on a PC.',false); return; }
+  try{
+    const dir=await window.showDirectoryPicker({mode:'readwrite'});
+    if(!await gtDirOk(dir,true)){ showMsg(out,'Permission to that folder was not given.',false); return; }
+    await exportDirSet(dir); exportFolderLbl();
+    showMsg(out,`✓ Downloads now go into ${dir.name}.`,true);
+  }catch(e){ /* cancelled */ }
+});
+exportDirGet().then(exportFolderLbl);
+
 async function exportSide(side){
   const out=document.getElementById('exportMsg');
   const btn=document.getElementById(side==='front'?'exportFrontBtn':'exportBackBtn');
   const other=document.getElementById(side==='front'?'exportBackBtn':'exportFrontBtn');
+  if(!state.orderId){
+    showMsg(out,'Enter an Order ID first — the file is named after it.',false);
+    document.getElementById('artOrderId').focus();
+    return;
+  }
+  const dir=await exportFolderReady(true);
   btn.disabled=true; other.disabled=true;
   showMsg(out,'Rendering full-resolution, uncompressed PDF…',true);
   try{
@@ -11397,9 +11471,16 @@ async function exportSide(side){
     const ctx=c.getContext('2d');
     const imgData=ctx.getImageData(0,0,c.width,c.height);
     const pdfBytes=await buildPdfBytes(imgData,p.w,p.h);
-    const filename=`${oid}_${side}.pdf`;
-    downloadBlob(new Blob([pdfBytes],{type:'application/pdf'}),filename);
-    showMsg(out,'✓ Downloaded '+filename+(hasArt?'':' (blank — no artwork uploaded for this side)'),true);
+    const filename=`${oid}_${side==='front'?'Front':'Back'}.pdf`;
+    const blob=new Blob([pdfBytes],{type:'application/pdf'});
+    const blank=hasArt?'':' (blank — no artwork uploaded for this side)';
+    if(dir){
+      await writeIntoFolder(dir,filename,blob);
+      showMsg(out,`✓ Saved ${filename} into ${dir.name}`+blank,true);
+    }else{
+      downloadBlob(blob,filename);
+      showMsg(out,'✓ Downloaded '+filename+blank,true);
+    }
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
   }finally{
