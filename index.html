@@ -791,7 +791,15 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* held rather than tapped, so it says so under the finger before it asks */
 .pl-card{user-select:none;-webkit-user-select:none;}
 
-/* a word on the hidden list: the word itself is the row, and the × ends it */
+/* A column per shop, side by side where there is room to read them as a pair
+   — which is the point of them being two lists — and stacked under their own
+   headings on a phone, where two columns of type-in boxes is neither. */
+.pl-shops{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:6px;}
+@media (max-width:560px){ .pl-shops{grid-template-columns:1fr;gap:16px;} }
+.pl-shop{min-width:0;}
+.pl-shop .slot-label{margin-bottom:6px;}
+
+/* a word on one of the lists: the word itself is the row, and the × ends it */
 .pl-hidden-row{display:flex;gap:9px;align-items:center;}
 .pl-hidden-row input{flex:1;min-width:0;height:44px;font-size:16px;}
 .pl-hidden-row .del-btn{flex:0 0 auto;}
@@ -1827,18 +1835,52 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <b>Complete List</b> — anything printed to order rather than picked belongs here. The
       match is anywhere in the name and ignores capitals, so <b>custom</b> catches
       <i>Custom Gift Tag-Glossy</i>. They are still there under <b>Hidden only</b> and
-      <b>All items</b>.</p>
+      <b>All items</b>.<br/>
+      A list each, because the two shops stock different things. Which one applies to a sheet
+      is its file name: <b>PT</b> in the name is Plant Talks, anything else is PartyMonkey.</p>
 
-    <form id="plHiddenAddForm" class="pk-add" autocomplete="off" style="margin-bottom:10px;">
-      <label class="field" style="margin-bottom:8px;"><span>ADD A WORD TO HIDE</span>
-        <input type="text" id="plHiddenNew" placeholder="e.g. Custom" maxlength="60" required/></label>
-      <button class="btn-primary" type="submit" style="width:100%;">Add</button>
-    </form>
-
-    <div class="ph-list list-full" id="plHiddenList">
-      <p class="hint" style="margin:4px 0 0;">Loading…</p>
+    <div class="pl-shops">
+      <div class="pl-shop" data-shop="partymonkey">
+        <div class="slot-label">PartyMonkey</div>
+        <form class="pk-add" data-hidden-add="partymonkey" autocomplete="off" style="margin-bottom:8px;">
+          <label class="field" style="margin-bottom:6px;"><span>ADD A WORD TO HIDE</span>
+            <input type="text" data-hidden-new placeholder="e.g. Custom" maxlength="60" required/></label>
+          <button class="btn-outline btn-sm" type="submit" style="width:100%;">Add</button>
+        </form>
+        <div class="ph-list list-full" data-hidden-list="partymonkey">
+          <p class="hint" style="margin:4px 0 0;">Loading…</p>
+        </div>
+      </div>
+      <div class="pl-shop" data-shop="planttalks">
+        <div class="slot-label">Plant Talks</div>
+        <form class="pk-add" data-hidden-add="planttalks" autocomplete="off" style="margin-bottom:8px;">
+          <label class="field" style="margin-bottom:6px;"><span>ADD A WORD TO HIDE</span>
+            <input type="text" data-hidden-new placeholder="e.g. Custom" maxlength="60" required/></label>
+          <button class="btn-outline btn-sm" type="submit" style="width:100%;">Add</button>
+        </form>
+        <div class="ph-list list-full" data-hidden-list="planttalks">
+          <p class="hint" style="margin:4px 0 0;">Loading…</p>
+        </div>
+      </div>
     </div>
     <div id="plHiddenMsg"></div>
+
+    <div class="sect-label">Words the voice leaves out</div>
+    <p class="hint" style="margin:0 0 10px;">Taken out of the SKU name and the shelf before
+      they are read aloud, and left alone everywhere else — the line on screen still says what
+      it says. For packaging noise worth seeing and not worth hearing on every line:
+      <b>1pc</b> turns <i>Latex-Cobalt-12Inch-(1pc)</i> into “Latex-Cobalt-12Inch”. One list
+      for both shops, since this is about how a name sounds rather than what is stocked.</p>
+
+    <form id="plUnspokenAddForm" class="pk-add" autocomplete="off" style="margin-bottom:10px;">
+      <label class="field" style="margin-bottom:8px;"><span>ADD A WORD TO LEAVE UNSAID</span>
+        <input type="text" id="plUnspokenNew" placeholder="e.g. 1pc" maxlength="60" required/></label>
+      <button class="btn-primary" type="submit" style="width:100%;">Add</button>
+    </form>
+    <div class="ph-list list-full" id="plUnspokenList">
+      <p class="hint" style="margin:4px 0 0;">Loading…</p>
+    </div>
+    <div id="plUnspokenMsg"></div>
   </div>
 
   <!-- DAILY PICK LIST — one list -->
@@ -14953,23 +14995,41 @@ let plBubbleMoved=false;       // the bubble has been dragged, so leave it where
 // Which ones those are used to be the word "Custom" written in here. It is a
 // list on Settings now, so the floor can change it without waiting for a
 // release — and until that table exists this is still exactly what it was.
-let plHidden=[{id:null,term:'Custom'}];
+// One list per shop, because the two of them stock different things and print
+// different things to order — a single list between them was always going to
+// hide the wrong lines on one of the two sheets. Which list applies is
+// decided by the sheet's own file name, the same PT rule that decides where
+// its ad-hoc work is filed.
+let plHidden={partymonkey:[{id:null,term:'Custom'}],planttalks:[{id:null,term:'Custom'}]};
+// And the words the voice leaves out — packaging noise worth seeing on the
+// screen and not worth hearing on every line of a hundred-line sheet. Not per
+// shop: this is about how a name sounds rather than about what is stocked.
+let plUnspoken=[];
 let plHiddenReady=false;
 async function loadPlHidden(){
   if(!sb) return;
-  const {data,error}=await sb.from('pick_list_hidden_skus').select('*')
-    .order('term',{ascending:true});
-  if(error) return;                  // not set up yet — keep the built-in word
-  plHidden=data||[];
-  plHiddenReady=true;
+  const [h,u]=await Promise.all([
+    sb.from('pick_list_hidden_skus').select('*').order('term',{ascending:true}),
+    sb.from('pick_list_unspoken').select('*').order('term',{ascending:true})
+  ]);
+  // each list stands on its own: the second table may not be there yet on a
+  // project where only the first migration has been run
+  if(!h.error){
+    const next={partymonkey:[],planttalks:[]};
+    (h.data||[]).forEach(r=>{ (next[r.store]||next.partymonkey).push(r); });
+    plHidden=next;
+    plHiddenReady=true;
+  }
+  if(!u.error) plUnspoken=u.data||[];
 }
-const plHiddenTerms=()=>plHidden
-  .map(h=>String(h.term||'').trim().toLowerCase()).filter(Boolean);
-const plSkuHidden=sku=>{
+const plTerms=rows=>(rows||[])
+  .map(r=>String(r.term||'').trim().toLowerCase()).filter(Boolean);
+const plHiddenTerms=store=>plTerms(plHidden[store]||plHidden.partymonkey);
+const plSkuHidden=(sku,store)=>{
   const s=String(sku||'').toLowerCase();
-  return plHiddenTerms().some(t=>s.includes(t));
+  return plHiddenTerms(store).some(t=>s.includes(t));
 };
-const plIsHidden=it=>plSkuHidden(it&&it.sku);
+const plIsHidden=it=>plSkuHidden(it&&it.sku,plStore());
 const plCounted=()=>plItems.filter(it=>!plIsHidden(it));
 function plProgress(){
   const rows=plCounted();
@@ -15000,10 +15060,14 @@ async function refreshPickLists(){
   const ids=pickLists.filter(l=>l.status===plTab).map(l=>l.id);
   plMeta={};
   if(ids.length){
+    // each sheet is counted against its own shop's hidden list, which its
+    // file name is what decides
+    const shopOf={};
+    pickLists.forEach(l=>{ shopOf[l.id]=plTitleStore(l.title); });
     const {data:rows}=await sb.from('pick_list_items')
       .select('list_id,sku,status').in('list_id',ids);
     (rows||[]).forEach(r=>{
-      if(plSkuHidden(r.sku)) return;
+      if(plSkuHidden(r.sku,shopOf[r.list_id])) return;
       const m=plMeta[r.list_id]||(plMeta[r.list_id]={total:0,done:0});
       m.total++; if(r.status) m.done++;
     });
@@ -15116,82 +15180,127 @@ async function plDeleteList(id){
 document.getElementById('pickListSettingsBtn')
   .addEventListener('click',()=>showScreen('pick-list-settings'));
 
-// ---------- settings: the SKUs left off the sheet ----------
+// ---------- settings: the SKUs left off the sheet, and the words left unsaid ----------
+// Three lists, two of them a shop each and one shared, all edited the same
+// way: type to add, correct in place, x to drop.
+const PL_LIST_TABLE={hidden:'pick_list_hidden_skus',unspoken:'pick_list_unspoken'};
+
 async function refreshPlHidden(){
-  const el=document.getElementById('plHiddenList');
-  if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
-  const {error}=await sb.from('pick_list_hidden_skus').select('id').limit(1);
-  if(error){
-    el.innerHTML='<p class="hint" style="margin:4px 0 0;">Not set up yet — run '
-      +'supabase-migration-PICK-LIST-HIDDEN.sql in Supabase. Until then, SKUs with '
-      +'“Custom” in them are the ones hidden.</p>';
+  const shops=[...document.querySelectorAll('[data-hidden-list]')];
+  const spoken=document.getElementById('plUnspokenList');
+  if(!sb){
+    shops.forEach(el=>{ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; });
+    spoken.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>';
     return;
   }
+  const [h,u]=await Promise.all([
+    sb.from('pick_list_hidden_skus').select('id,store').limit(1),
+    sb.from('pick_list_unspoken').select('id').limit(1)
+  ]);
+  const missing=m=>'<p class="hint" style="margin:4px 0 0;">Not set up yet — run '+m
+    +' in Supabase.</p>';
+  if(h.error){
+    shops.forEach(el=>{ el.innerHTML=missing('supabase-migration-PICK-LIST-HIDDEN.sql, then '
+      +'supabase-migration-PICK-LIST-HIDDEN2.sql'); });
+  }
+  if(u.error) spoken.innerHTML=missing('supabase-migration-PICK-LIST-HIDDEN2.sql');
   await loadPlHidden();
-  renderPlHidden();
+  if(!h.error) renderPlHidden();
+  if(!u.error) renderPlUnspoken();
 }
-function renderPlHidden(){
-  const el=document.getElementById('plHiddenList');
-  if(!plHidden.length){
-    el.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing is hidden, so every '
-      +'line on every sheet is counted and waited for —</p>';
-    return;
-  }
-  el.innerHTML=plHidden.map(h=>`<div class="ph-card pl-hidden-row" data-hidden="${escapeHtml(h.id)}">
-      <input type="text" data-hidden-term value="${escapeHtml(h.term||'')}" maxlength="60"
-             aria-label="Word to hide"/>
-      <button class="del-btn" data-hidden-del title="Stop hiding this" aria-label="Remove">×</button>
+function plRowsHtml(rows,kind,empty){
+  if(!rows.length) return '<p class="hint" style="margin:4px 0 0;">— '+empty+' —</p>';
+  return rows.map(r=>`<div class="ph-card pl-hidden-row" data-term-id="${escapeHtml(r.id)}"
+      data-term-kind="${kind}">
+      <input type="text" data-term-box value="${escapeHtml(r.term||'')}" maxlength="60"
+             aria-label="Word"/>
+      <button class="del-btn" data-term-del title="Remove" aria-label="Remove">×</button>
     </div>`).join('');
 }
-document.getElementById('plHiddenAddForm').addEventListener('submit',async e=>{
-  e.preventDefault();
-  const box=document.getElementById('plHiddenNew');
-  const msg=document.getElementById('plHiddenMsg');
+function renderPlHidden(){
+  document.querySelectorAll('[data-hidden-list]').forEach(el=>{
+    const store=el.getAttribute('data-hidden-list');
+    el.innerHTML=plRowsHtml(plHidden[store]||[],'hidden',
+      'nothing hidden for this shop, so every line on its sheets is counted');
+  });
+}
+function renderPlUnspoken(){
+  document.getElementById('plUnspokenList').innerHTML=
+    plRowsHtml(plUnspoken,'unspoken','every word is read out as written');
+}
+// where a row lives, so one set of handlers can serve all three lists
+const plRowsOf=(kind,store)=>kind==='unspoken'?plUnspoken:(plHidden[store]||[]);
+const plTermsOf=(kind,store)=>plTerms(plRowsOf(kind,store));
+const plMsgOf=kind=>document.getElementById(kind==='unspoken'?'plUnspokenMsg':'plHiddenMsg');
+
+async function plAddTerm(kind,store,box){
+  const msg=plMsgOf(kind);
   const term=box.value.trim();
   if(!term) return;
   const session=await requireSession(msg); if(!session) return;
-  if(plHiddenTerms().includes(term.toLowerCase())){
+  if(plTermsOf(kind,store).includes(term.toLowerCase())){
     showMsg(msg,'That one is already on the list.',false); return;
   }
-  const {error}=await sb.from('pick_list_hidden_skus')
-    .insert({user_id:session.user.id,term});
+  const row={user_id:session.user.id,term};
+  if(kind==='hidden') row.store=store;
+  const {error}=await sb.from(PL_LIST_TABLE[kind]).insert(row);
   if(error){ showMsg(msg,'Could not add it: '+error.message,false); return; }
   box.value='';
   msg.innerHTML='';
   await refreshPlHidden();
+}
+document.querySelectorAll('[data-hidden-add]').forEach(form=>{
+  form.addEventListener('submit',e=>{
+    e.preventDefault();
+    plAddTerm('hidden',form.getAttribute('data-hidden-add'),form.querySelector('[data-hidden-new]'));
+  });
 });
-document.getElementById('plHiddenList').addEventListener('click',async e=>{
-  const row=e.target.closest('[data-hidden]'); if(!row) return;
-  if(!e.target.closest('[data-hidden-del]')) return;
-  const id=row.dataset.hidden;
-  const h=plHidden.find(x=>String(x.id)===id); if(!h) return;
-  if(!confirm('Are you sure?\n\nStop hiding SKUs containing “'+h.term+'”?'
-    +'\n\nThey will be counted, waited for by Complete List, and shown by default '
-    +'on every sheet from now on.')) return;
-  const {error}=await sb.from('pick_list_hidden_skus').delete().eq('id',id);
-  if(error){ showMsg(document.getElementById('plHiddenMsg'),'Could not remove it: '+error.message,false); return; }
+document.getElementById('plUnspokenAddForm').addEventListener('submit',e=>{
+  e.preventDefault();
+  plAddTerm('unspoken',null,document.getElementById('plUnspokenNew'));
+});
+
+// one handler for every row on the screen, whichever list it belongs to
+const plSettings=document.getElementById('pickListSettingsScreen');
+plSettings.addEventListener('click',async e=>{
+  const row=e.target.closest('[data-term-id]'); if(!row) return;
+  if(!e.target.closest('[data-term-del]')) return;
+  const kind=row.getAttribute('data-term-kind');
+  const store=(row.closest('[data-hidden-list]')||{getAttribute:()=>null}).getAttribute('data-hidden-list');
+  const id=row.getAttribute('data-term-id');
+  const r=plRowsOf(kind,store).find(x=>String(x.id)===id); if(!r) return;
+  const what=kind==='unspoken'
+    ? 'Read “'+r.term+'” out again from now on?'
+    : 'Stop hiding SKUs containing “'+r.term+'”?'
+      +'\n\nThey will be counted, waited for by Complete List, and shown by default on '
+      +(store==='planttalks'?'Plant Talks':'PartyMonkey')+' sheets from now on.';
+  if(!confirm('Are you sure?\n\n'+what)) return;
+  const {error}=await sb.from(PL_LIST_TABLE[kind]).delete().eq('id',id);
+  if(error){ showMsg(plMsgOf(kind),'Could not remove it: '+error.message,false); return; }
   await refreshPlHidden();
 });
 // saved when the box is left rather than on every keystroke: half a word is
 // not a rule, and a rule is what every open sheet is being measured against
-document.getElementById('plHiddenList').addEventListener('focusout',async e=>{
-  const box=e.target.closest('[data-hidden-term]'); if(!box) return;
-  const row=box.closest('[data-hidden]');
-  const id=row.dataset.hidden;
-  const h=plHidden.find(x=>String(x.id)===id); if(!h) return;
+plSettings.addEventListener('focusout',async e=>{
+  const box=e.target.closest('[data-term-box]'); if(!box) return;
+  const row=box.closest('[data-term-id]');
+  const kind=row.getAttribute('data-term-kind');
+  const store=(row.closest('[data-hidden-list]')||{getAttribute:()=>null}).getAttribute('data-hidden-list');
+  const id=row.getAttribute('data-term-id');
+  const r=plRowsOf(kind,store).find(x=>String(x.id)===id); if(!r) return;
   const term=box.value.trim();
-  const msg=document.getElementById('plHiddenMsg');
-  if(!term||term===h.term){ box.value=h.term||''; return; }
-  if(plHiddenTerms().includes(term.toLowerCase())){
+  const msg=plMsgOf(kind);
+  if(!term||term===r.term){ box.value=r.term||''; return; }
+  if(plTermsOf(kind,store).includes(term.toLowerCase())){
     showMsg(msg,'That one is already on the list.',false);
-    box.value=h.term||''; return;
+    box.value=r.term||''; return;
   }
-  const {error}=await sb.from('pick_list_hidden_skus').update({term}).eq('id',id);
+  const {error}=await sb.from(PL_LIST_TABLE[kind]).update({term}).eq('id',id);
   if(error){
     showMsg(msg,'Could not save that: '+error.message,false);
-    box.value=h.term||''; return;
+    box.value=r.term||''; return;
   }
-  h.term=term;
+  r.term=term;
   msg.innerHTML='';
 });
 
@@ -16033,10 +16142,20 @@ if(window.speechSynthesis){
 // The second replace clears up after the first: taking the bracket out of
 // "12Inch-(1pc)" leaves a hyphen with nothing on one side of it, which some
 // voices then read as "dash". A hyphen still joining two words is left alone.
-const plSpoken=s=>String(s||'')
-  .replace(/[,./()]/g,' ')
-  .replace(/\s+-+\s*|\s*-+\s+/g,' ')
-  .replace(/\s+/g,' ').trim();
+const plReEscape=s=>String(s).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+function plSpoken(s){
+  let out=String(s||'');
+  // The words nobody wants to hear go first, while the punctuation they were
+  // written with is still around them: "(1pc)" is on the list as it is read
+  // on the screen, not as whatever it becomes once the brackets have gone.
+  plTerms(plUnspoken).forEach(t=>{
+    out=out.replace(new RegExp(plReEscape(t),'gi'),' ');
+  });
+  return out
+    .replace(/[,./()]/g,' ')
+    .replace(/\s+-+\s*|\s*-+\s+/g,' ')
+    .replace(/\s+/g,' ').trim();
+}
 // A quantity is a count of something, so it is said as one: "twelve pieces"
 // rather than a bare number nobody is sure is a quantity at all.
 const plQtyWords=q=>{ const n=Math.max(1,Number(q)||1); return n+' '+(n===1?'piece':'pieces'); };
