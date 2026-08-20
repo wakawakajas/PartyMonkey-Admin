@@ -225,6 +225,19 @@ grant execute on function public.sweep_orphan_photos(boolean) to authenticated;
 -- period, that no column found in PART 2 names. A file still in use is not
 -- deletable through it however it is asked for, so the worst a mistaken sweep
 -- can do is be refused.
+-- Being allowed to delete it is not enough on its own. The storage API looks a
+-- file up before it removes it, so a file the rules will not show is skipped
+-- in silence — no error, nothing deleted, the count unchanged. That is why
+-- there are two rules here and not one.
+drop policy if exists "orphan_photos_team_select" on storage.objects;
+create policy "orphan_photos_team_select" on storage.objects
+  for select using (
+    bucket_id = 'shipment-photos'
+    and public.on_team(auth.uid())
+    and created_at < now() - public.photo_grace()
+    and not public.photo_in_use(name)
+  );
+
 drop policy if exists "orphan_photos_team_delete" on storage.objects;
 create policy "orphan_photos_team_delete" on storage.objects
   for delete using (
