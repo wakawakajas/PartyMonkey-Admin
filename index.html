@@ -1860,7 +1860,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button type="button" class="btn-primary btn-sm" id="pickListStart"
               title="Work down the list one item at a time — it highlights the next item and reads its quantity out.">▶ Start</button>
       <button type="button" class="btn-outline btn-sm" id="pickListSpeak"
-              title="Turn the spoken quantity on or off">🔊 Voice on</button>
+              title="Choose what is read out for each line">🔊 Qty</button>
       <button type="button" class="btn-outline btn-sm" id="pickListSearchBtn"
               title="Find a SKU on this sheet">🔍 Search</button>
     </div>
@@ -3046,6 +3046,30 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button class="btn-outline" id="filterSheetNone">None</button>
     </div>
     <button class="btn-primary" id="filterSheetDone">Done</button>
+  </div>
+</div>
+
+<!-- ---- Daily Pick List: what the voice reads ---- -->
+<div class="sheet-bg" id="pickListVoiceSheet">
+  <div class="sheet">
+    <button class="req-x" id="pickListVoiceClose" title="Close" aria-label="Close">×</button>
+    <div class="sheet-title">What the voice reads</div>
+    <p class="hint" style="margin:0 0 4px;">For each line as you reach it, in this order. Any of
+      them, all of them, or none — with none switched on, nothing is read out at all. Commas,
+      full stops, slashes and brackets are never spoken.</p>
+    <div class="toggle-row filter-opt" data-voice-row>
+      <span>SKU name</span>
+      <label class="switch"><input type="checkbox" data-voice="sku"/><span class="slider"></span></label>
+    </div>
+    <div class="toggle-row filter-opt" data-voice-row>
+      <span>Shelf</span>
+      <label class="switch"><input type="checkbox" data-voice="shelf"/><span class="slider"></span></label>
+    </div>
+    <div class="toggle-row filter-opt" data-voice-row>
+      <span>Quantity <span class="hint" style="margin:0;">— said as “12 pieces”</span></span>
+      <label class="switch"><input type="checkbox" data-voice="qty"/><span class="slider"></span></label>
+    </div>
+    <button class="btn-primary" id="pickListVoiceDone">Done</button>
   </div>
 </div>
 
@@ -14903,7 +14927,16 @@ let plFilter='all';
 let plSearch='';
 let plStartOn=false;
 let plActiveId=null;           // the line Start mode is on
-let plSpeakOn=true;
+// What the voice reads out for each line: any of the three, all of them, or
+// none — none being what "voice off" means, rather than a fourth switch that
+// could disagree with the other three. Kept on this device, because it is a
+// picker's own preference and not the sheet's.
+let plVoiceParts={sku:false,shelf:false,qty:true};
+try{
+  const saved=JSON.parse(localStorage.getItem('pigu.plVoice')||'null');
+  if(saved&&typeof saved==='object') plVoiceParts=Object.assign(plVoiceParts,saved);
+}catch(e){}                                // storage switched off is not a crash
+const plVoiceOn=()=>!!(plVoiceParts.sku||plVoiceParts.shelf||plVoiceParts.qty);
 let plUndoId=null;
 let plReqItem=null;
 let plReqTo=new Set();
@@ -15947,7 +15980,7 @@ function plGoTo(id){
   // line of a hundred-line sheet, and the picker already knows what the
   // number is — hearing it said is the whole of what the voice is for
   const it=plItem(id);
-  if(it) plSay(String(Number(it.qty)||1));
+  if(it) plSay(plLineSpeech(it));
 }
 // After a line is settled, the next one that still needs doing — which is the
 // next one *on the sheet*, not the next one on screen, so a filter that hides
@@ -15992,8 +16025,34 @@ if(window.speechSynthesis){
   try{ window.speechSynthesis.addEventListener('voiceschanged',()=>{ plVoice=plFindVoice(); }); }
   catch(e){ window.speechSynthesis.onvoiceschanged=()=>{ plVoice=plFindVoice(); }; }
 }
+// Punctuation a warehouse never says out loud. Commas, full stops, slashes
+// and brackets are there to be looked at — read aloud they come out as
+// "Latex dash Cobalt dash twelve Inch dash open bracket one p c close
+// bracket" on some voices, and as a stumble on the rest. Replaced with a
+// space rather than deleted, so "Blue/White" stays two words.
+// The second replace clears up after the first: taking the bracket out of
+// "12Inch-(1pc)" leaves a hyphen with nothing on one side of it, which some
+// voices then read as "dash". A hyphen still joining two words is left alone.
+const plSpoken=s=>String(s||'')
+  .replace(/[,./()]/g,' ')
+  .replace(/\s+-+\s*|\s*-+\s+/g,' ')
+  .replace(/\s+/g,' ').trim();
+// A quantity is a count of something, so it is said as one: "twelve pieces"
+// rather than a bare number nobody is sure is a quantity at all.
+const plQtyWords=q=>{ const n=Math.max(1,Number(q)||1); return n+' '+(n===1?'piece':'pieces'); };
+// One line, in the order it is read on the screen: what it is, where it is,
+// how many. Whichever of the three are switched on.
+function plLineSpeech(it){
+  if(!it) return '';
+  const said=[];
+  if(plVoiceParts.sku)   said.push(plSpoken(it.sku));
+  if(plVoiceParts.shelf) said.push(plSpoken(it.shelf));
+  if(plVoiceParts.qty)   said.push(plQtyWords(it.qty));
+  // full stops between them, which is how a voice is asked for a pause
+  return said.filter(Boolean).join('. ');
+}
 function plSay(text){
-  if(!plSpeakOn) return;
+  if(!plVoiceOn()||!String(text||'').trim()) return;
   try{
     if(!window.speechSynthesis) return;
     if(!plVoice&&!plVoiceTried) plVoice=plFindVoice();
@@ -16009,11 +16068,59 @@ document.getElementById('pickListStart').addEventListener('click',()=>{
   if(plStartOn) plStop(); else plStart();
 });
 document.getElementById('pickListStop').addEventListener('click',plStop);
-document.getElementById('pickListSpeak').addEventListener('click',e=>{
-  plSpeakOn=!plSpeakOn;
-  e.currentTarget.textContent=plSpeakOn?'🔊 Voice on':'🔇 Voice off';
-  if(!plSpeakOn){ try{ window.speechSynthesis&&window.speechSynthesis.cancel(); }catch(e2){} }
+// The button says what is being read rather than merely that something is,
+// because "voice on" tells a picker nothing about what they are about to
+// hear. Tapping it opens the three switches.
+function plSyncVoiceBtn(){
+  const on=[];
+  if(plVoiceParts.sku) on.push('SKU');
+  if(plVoiceParts.shelf) on.push('Shelf');
+  if(plVoiceParts.qty) on.push('Qty');
+  const btn=document.getElementById('pickListSpeak');
+  btn.textContent=on.length?'🔊 '+on.join(' + '):'🔇 Voice off';
+  btn.classList.toggle('on',!!on.length);
+  btn.title=on.length
+    ? 'Read out '+on.join(', ').toLowerCase()+' for each line — tap to change'
+    : 'Nothing is read out — tap to choose what should be';
+}
+function plSyncVoiceSheet(){
+  document.querySelectorAll('#pickListVoiceSheet [data-voice]').forEach(cb=>{
+    cb.checked=!!plVoiceParts[cb.getAttribute('data-voice')];
+  });
+}
+function plSaveVoiceParts(){
+  try{ localStorage.setItem('pigu.plVoice',JSON.stringify(plVoiceParts)); }catch(e){}
+  plSyncVoiceBtn();
+  if(!plVoiceOn()){ try{ window.speechSynthesis&&window.speechSynthesis.cancel(); }catch(e){} return; }
+  // read the line it would read, so the choice is heard rather than imagined
+  const it=(plActiveId&&plItem(plActiveId))||plVisibleItems()[0];
+  if(it) plSay(plLineSpeech(it));
+}
+document.getElementById('pickListSpeak').addEventListener('click',()=>{
+  plSyncVoiceSheet();
+  document.getElementById('pickListVoiceSheet').classList.add('open');
 });
+const plCloseVoice=()=>document.getElementById('pickListVoiceSheet').classList.remove('open');
+document.getElementById('pickListVoiceDone').addEventListener('click',plCloseVoice);
+document.getElementById('pickListVoiceClose').addEventListener('click',plCloseVoice);
+document.getElementById('pickListVoiceSheet').addEventListener('click',e=>{
+  if(e.target.id==='pickListVoiceSheet') plCloseVoice();
+});
+document.getElementById('pickListVoiceSheet').addEventListener('change',e=>{
+  const cb=e.target.closest('[data-voice]'); if(!cb) return;
+  plVoiceParts[cb.getAttribute('data-voice')]=cb.checked;
+  plSaveVoiceParts();
+});
+// the whole row answers, not only the switch on the end of it
+document.getElementById('pickListVoiceSheet').addEventListener('click',e=>{
+  if(e.target.closest('.switch')) return;
+  const row=e.target.closest('[data-voice-row]'); if(!row) return;
+  const cb=row.querySelector('[data-voice]'); if(!cb) return;
+  cb.checked=!cb.checked;
+  plVoiceParts[cb.getAttribute('data-voice')]=cb.checked;
+  plSaveVoiceParts();
+});
+plSyncVoiceBtn();
 // the floating bar mirrors whichever line Start mode is on
 function plSyncBar(){
   const bar=document.getElementById('pickListStickyBar');
