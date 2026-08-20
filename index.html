@@ -848,6 +848,18 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .pl-fold .ph-list{border:none;border-top:1px solid var(--border);border-radius:0;
   max-height:340px;overflow-y:auto;padding:8px 10px 10px;}
 
+/* One trigger to a row: what was tapped on the left, what it should say on
+   the right. The three answers stay side by side at every width — they are a
+   choice of one, and a choice of one wrapped over two lines stops looking
+   like a choice. */
+.pl-voice{display:flex; flex-direction:column;}
+.pl-voice .slot-label{margin:12px 0 6px;}
+.pl-voice .slot-label:first-child{margin-top:0;}
+.pl-voice-when{display:flex;flex-direction:column;gap:8px;}
+.pl-when-row{display:flex;flex-direction:column;gap:5px;}
+.pl-when-what{font-size:12.5px;color:var(--muted);}
+.pl-when-row .seg button{font-size:11.5px;padding:0 4px;min-height:38px;}
+
 /* a word on one of the lists: the word itself is the row, and the × ends it */
 .pl-hidden-row{display:flex;gap:9px;align-items:center;}
 .pl-hidden-row input{flex:1;min-width:0;height:44px;font-size:16px;}
@@ -1952,6 +1964,22 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       </div>
     </div>
     <div id="plHiddenMsg"></div>
+
+    <div class="sect-label">Voice</div>
+    <p class="hint" style="margin:0 0 10px;">How fast it talks, what it says, and which taps make
+      it say anything &mdash; a set each, because the two floors are picked differently. Changing
+      these changes them for everyone picking that shop's sheets.</p>
+    <div class="pl-shops">
+      <div class="pl-shop">
+        <div class="pl-shop-head"><span class="slot-label">PartyMonkey</span></div>
+        <div data-voice-mount="partymonkey"></div>
+      </div>
+      <div class="pl-shop">
+        <div class="pl-shop-head"><span class="slot-label">Plant Talks</span></div>
+        <div data-voice-mount="planttalks"></div>
+      </div>
+    </div>
+    <div id="plVoiceMsg"></div>
 
     <div class="sect-label">Words the voice leaves out</div>
     <p class="hint" style="margin:0 0 10px;">Taken out of the SKU name and the shelf before
@@ -3194,22 +3222,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 <div class="sheet-bg" id="pickListVoiceSheet">
   <div class="sheet">
     <button class="req-x" id="pickListVoiceClose" title="Close" aria-label="Close">×</button>
-    <div class="sheet-title">What the voice reads</div>
-    <p class="hint" style="margin:0 0 4px;">For each line as you reach it, in this order. Any of
-      them, all of them, or none — with none switched on, nothing is read out at all. Commas,
-      full stops, slashes and brackets are never spoken.</p>
-    <div class="toggle-row filter-opt" data-voice-row>
-      <span>SKU name</span>
-      <label class="switch"><input type="checkbox" data-voice="sku"/><span class="slider"></span></label>
-    </div>
-    <div class="toggle-row filter-opt" data-voice-row>
-      <span>Shelf</span>
-      <label class="switch"><input type="checkbox" data-voice="shelf"/><span class="slider"></span></label>
-    </div>
-    <div class="toggle-row filter-opt" data-voice-row>
-      <span>Quantity <span class="hint" style="margin:0;">— said as “12 pieces”</span></span>
-      <label class="switch"><input type="checkbox" data-voice="qty"/><span class="slider"></span></label>
-    </div>
+    <div class="sheet-title">Voice &mdash; <span id="pickListVoiceShop">PartyMonkey</span></div>
+    <p class="hint" style="margin:0 0 4px;">These are this shop's settings, and they hold for
+      every sheet of its. Commas, full stops, slashes and brackets are never spoken.</p>
+    <div id="pickListVoiceBody"></div>
+    <div id="plVoiceMsg"></div>
     <button class="btn-primary" id="pickListVoiceDone">Done</button>
   </div>
 </div>
@@ -15142,12 +15159,54 @@ let plActiveId=null;           // the line Start mode is on
 // none — none being what "voice off" means, rather than a fourth switch that
 // could disagree with the other three. Kept on this device, because it is a
 // picker's own preference and not the sheet's.
-let plVoiceParts={sku:false,shelf:false,qty:true};
-try{
-  const saved=JSON.parse(localStorage.getItem('pigu.plVoice')||'null');
-  if(saved&&typeof saved==='object') plVoiceParts=Object.assign(plVoiceParts,saved);
-}catch(e){}                                // storage switched off is not a crash
-const plVoiceOn=()=>!!(plVoiceParts.sku||plVoiceParts.shelf||plVoiceParts.qty);
+// How the voice behaves, a set per shop, because the two floors are picked
+// differently. Three questions: how fast, what it reads out, and when it
+// speaks at all — the last answered separately for each thing a picker taps.
+// These are the app's own answers, used until the table has been read and
+// whenever it cannot be.
+const PL_VOICE_DEFAULT={rate:0.92,say_sku:false,say_shelf:false,say_qty:true,
+  on_line:'this',on_ok:'off',on_adhoc:'off',on_request:'off',on_start:'this'};
+let plVoiceCfg={partymonkey:Object.assign({},PL_VOICE_DEFAULT),
+                planttalks:Object.assign({},PL_VOICE_DEFAULT)};
+// the settings that apply to the sheet in hand, which its file name decides
+const plVoiceFor=store=>plVoiceCfg[store||plStore()]||plVoiceCfg.partymonkey;
+const plVoiceOn=v=>{ const c=v||plVoiceFor(); return !!(c.say_sku||c.say_shelf||c.say_qty); };
+async function loadPlVoice(){
+  if(!sb) return;
+  const {data,error}=await sb.from('pick_list_voice').select('*');
+  if(error) return;                    // not set up yet — the defaults stand
+  (data||[]).forEach(r=>{
+    if(!plVoiceCfg[r.store]) return;
+    plVoiceCfg[r.store]=Object.assign({},PL_VOICE_DEFAULT,r,
+      {rate:Number(r.rate)||PL_VOICE_DEFAULT.rate});
+  });
+}
+// Written back whole rather than a field at a time: it is one small row, and
+// a screen saving switch by switch would leave the shop half-changed if the
+// connection went in the middle of it.
+async function savePlVoice(store){
+  const c=plVoiceFor(store);
+  const {error}=await sb.from('pick_list_voice').upsert({store,rate:c.rate,
+    say_sku:c.say_sku,say_shelf:c.say_shelf,say_qty:c.say_qty,
+    on_line:c.on_line,on_ok:c.on_ok,on_adhoc:c.on_adhoc,on_request:c.on_request,
+    on_start:c.on_start,updated_at:new Date().toISOString()},{onConflict:'store'});
+  return error||null;
+}
+// The line a picker is about to walk to — the next one still needing doing,
+// which is what makes a sheet workable without looking at the screen.
+function plNextAfter(it){
+  const order=plCounted();
+  const at=order.findIndex(x=>x.id===(it&&it.id));
+  if(at<0) return null;
+  return order.slice(at+1).find(x=>!x.status)||order[at+1]||null;
+}
+// Says whatever this shop has asked to hear when that thing is tapped.
+function plSpeakFor(when,it){
+  const mode=plVoiceFor()[when]||'off';
+  if(mode==='off') return;
+  const target=mode==='next'?plNextAfter(it):it;
+  if(target) plSay(plLineSpeech(target));
+}
 let plUndoId=null;
 let plReqItem=null;
 let plReqTo=new Set();
@@ -15223,7 +15282,7 @@ async function refreshPickLists(){
   // read afresh here rather than once a session: this screen is on the way to
   // every list, so a word added on Settings is in force by the time anybody
   // opens a sheet
-  await loadPlHidden();
+  await Promise.all([loadPlHidden(),loadPlVoice()]);
   const {data,error}=await sb.from('pick_lists').select('*')
     .order('created_at',{ascending:false}).limit(200);
   if(error){
@@ -15388,9 +15447,16 @@ async function refreshPlHidden(){
       +'supabase-migration-PICK-LIST-HIDDEN2.sql'); });
   }
   if(u.error) spoken.innerHTML=missing('supabase-migration-PICK-LIST-HIDDEN2.sql');
-  await loadPlHidden();
+  await Promise.all([loadPlHidden(),loadPlVoice()]);
   if(!h.error) renderPlHidden();
   if(!u.error) renderPlUnspoken();
+  renderPlVoice();
+}
+// both shops' editors, drawn into the mounts Settings keeps for them
+function renderPlVoice(){
+  document.querySelectorAll('[data-voice-mount]').forEach(el=>{
+    el.innerHTML=plVoiceEditorHtml(el.getAttribute('data-voice-mount'));
+  });
 }
 // What is typed in the box at the top of the screen, narrowing all three
 // lists at once rather than one of them
@@ -16424,12 +16490,20 @@ document.getElementById('pickListLines').addEventListener('click',async e=>{
 
   if(e.target.closest('[data-pl-ok]')){
     if(it.status==='ok'){ plAskUndo(id); return; }
-    if(await plSetStatus(id,'ok',remarks)) plAdvance(id);
+    if(await plSetStatus(id,'ok',remarks)){
+      // in step-by-step, moving on is what speaks; two voices over one tap
+      // would talk across each other
+      if(!plStartOn) plSpeakFor('on_ok',it);
+      plAdvance(id);
+    }
     return;
   }
   if(e.target.closest('[data-pl-adhoc]')){
     if(it.status==='adhoc'){ plAskUndo(id); return; }
-    if(await plSetStatus(id,'adhoc',remarks)) plAdvance(id);
+    if(await plSetStatus(id,'adhoc',remarks)){
+      if(!plStartOn) plSpeakFor('on_adhoc',it);
+      plAdvance(id);
+    }
     return;
   }
   if(e.target.closest('[data-pl-req]')){
@@ -16439,9 +16513,15 @@ document.getElementById('pickListLines').addEventListener('click',async e=>{
   }
   // the picture, big enough to actually check against what is in your hand
   const thumb=e.target.closest('.pl-thumb');
-  if(thumb&&it.image_path&&photoUrlCache[it.image_path]){
-    openPhotoModal(null,it.sku||'Item',photoUrlCache[it.image_path]);
+  if(thumb){
+    if(it.image_path&&photoUrlCache[it.image_path])
+      openPhotoModal(null,it.sku||'Item',photoUrlCache[it.image_path]);
+    return;
   }
+  // and anywhere else on the line reads it out, for a picker holding a box
+  // in the other hand who wants it said again
+  if(e.target.closest('input,textarea,button')) return;
+  plSpeakFor('on_line',it);
 });
 
 // ---------- taking a status back ----------
@@ -16508,7 +16588,7 @@ function plGoTo(id){
   // line of a hundred-line sheet, and the picker already knows what the
   // number is — hearing it said is the whole of what the voice is for
   const it=plItem(id);
-  if(it) plSay(plLineSpeech(it));
+  if(it) plSpeakFor('on_start',it);
 }
 // After a line is settled, the next one that still needs doing — which is the
 // next one *on the sheet*, not the next one on screen, so a filter that hides
@@ -16582,10 +16662,11 @@ const plQtyWords=q=>{ const n=Math.max(1,Number(q)||1); return n+' '+(n===1?'pie
 // how many. Whichever of the three are switched on.
 function plLineSpeech(it){
   if(!it) return '';
+  const c=plVoiceFor();
   const said=[];
-  if(plVoiceParts.sku)   said.push(plSpoken(it.sku));
-  if(plVoiceParts.shelf) said.push(plSpoken(it.shelf));
-  if(plVoiceParts.qty)   said.push(plQtyWords(it.qty));
+  if(c.say_sku)   said.push(plSpoken(it.sku));
+  if(c.say_shelf) said.push(plSpoken(it.shelf));
+  if(c.say_qty)   said.push(plQtyWords(it.qty));
   // full stops between them, which is how a voice is asked for a pause
   return said.filter(Boolean).join('. ');
 }
@@ -16598,7 +16679,7 @@ function plSay(text){
     const u=new SpeechSynthesisUtterance(text);
     if(plVoice){ u.voice=plVoice; u.lang=plVoice.lang||'en-GB'; }
     else u.lang='en-GB';
-    u.rate=0.92; u.pitch=1.15; u.volume=1;
+    u.rate=Number(plVoiceFor().rate)||0.92; u.pitch=1.15; u.volume=1;
     window.speechSynthesis.speak(u);
   }catch(e){ /* a phone with no voice installed still picks perfectly well */ }
 }
@@ -16609,33 +16690,118 @@ document.getElementById('pickListStop').addEventListener('click',plStop);
 // The button says what is being read rather than merely that something is,
 // because "voice on" tells a picker nothing about what they are about to
 // hear. Tapping it opens the three switches.
-function plSyncVoiceBtn(){
-  const on=[];
-  if(plVoiceParts.sku) on.push('SKU');
-  if(plVoiceParts.shelf) on.push('Shelf');
-  if(plVoiceParts.qty) on.push('Qty');
-  const btn=document.getElementById('pickListSpeak');
-  btn.textContent=on.length?'🔊 '+on.join(' + '):'🔇 Voice off';
-  btn.classList.toggle('on',!!on.length);
-  btn.title=on.length
-    ? 'Read out '+on.join(', ').toLowerCase()+' for each line — tap to change'
-    : 'Nothing is read out — tap to choose what should be';
+// ---------- the voice editor ----------
+// One editor in three places: a shop each on Settings, and the shop of the
+// sheet in hand behind the speaker button while picking. Built by the same
+// function every time, so the copies cannot drift apart.
+const PL_WHEN=[['off','Silent'],['this','This line'],['next','Next line']];
+const PL_TRIGGERS=[['on_line','Tapping a line'],['on_ok','After OK'],
+  ['on_adhoc','After Ad-hoc'],['on_request','After Request'],
+  ['on_start','Step-by-step']];
+const PL_SAYS=[['say_sku','SKU name'],['say_shelf','Shelf'],['say_qty','Quantity']];
+const PL_RATES=[[0.7,'Slow'],[0.92,'Steady'],[1.12,'Quick'],[1.35,'Fast']];
+
+function plVoiceEditorHtml(store){
+  const c=plVoiceFor(store);
+  const near=(a,b)=>Math.abs(Number(a)-Number(b))<0.03;
+  return `<div class="pl-voice" data-voice-store="${store}">
+    <div class="slot-label">Speed</div>
+    <div class="seg">${PL_RATES.map(([v,label])=>
+      `<button type="button" data-voice-rate="${v}"${near(c.rate,v)?' class="on"':''}>${label}</button>`).join('')}</div>
+    <div class="slot-label">What it reads, in this order</div>
+    <div>${PL_SAYS.map(([k,label])=>
+      `<div class="toggle-row filter-opt" data-voice-row>
+         <span>${label}</span>
+         <label class="switch"><input type="checkbox" data-voice-say="${k}"${c[k]?' checked':''}/>
+           <span class="slider"></span></label>
+       </div>`).join('')}</div>
+    <div class="slot-label">When it speaks</div>
+    <p class="hint" style="margin:0 0 8px;">Reading <b>the next line</b> is what lets a sheet be
+      worked without looking at the screen &mdash; you hear what to fetch as you finish the one
+      in your hand.</p>
+    <div class="pl-voice-when">${PL_TRIGGERS.map(([k,label])=>
+      `<div class="pl-when-row">
+         <span class="pl-when-what">${label}</span>
+         <div class="seg">${PL_WHEN.map(([v,w])=>
+           `<button type="button" data-voice-when="${k}" data-v="${v}"${c[k]===v?' class="on"':''}>${w}</button>`).join('')}</div>
+       </div>`).join('')}</div>
+  </div>`;
 }
-function plSyncVoiceSheet(){
-  document.querySelectorAll('#pickListVoiceSheet [data-voice]').forEach(cb=>{
-    cb.checked=!!plVoiceParts[cb.getAttribute('data-voice')];
+
+// Everything on it saves the same way: change the copy in hand, redraw every
+// control that shares the shop, write the row, and read a line back so the
+// choice is heard rather than imagined.
+let plVoiceSaveTimer=null;
+function plVoiceChanged(store,speak){
+  document.querySelectorAll('[data-voice-store="'+store+'"]').forEach(el=>{
+    el.outerHTML=plVoiceEditorHtml(store);
   });
-}
-function plSaveVoiceParts(){
-  try{ localStorage.setItem('pigu.plVoice',JSON.stringify(plVoiceParts)); }catch(e){}
   plSyncVoiceBtn();
-  if(!plVoiceOn()){ try{ window.speechSynthesis&&window.speechSynthesis.cancel(); }catch(e){} return; }
-  // read the line it would read, so the choice is heard rather than imagined
+  clearTimeout(plVoiceSaveTimer);
+  plVoiceSaveTimer=setTimeout(async()=>{
+    const err=await savePlVoice(store);
+    const msg=document.getElementById('plVoiceMsg');
+    if(!msg) return;
+    if(!err){ msg.innerHTML=''; return; }
+    showMsg(msg,/column|schema cache|does not exist|relation/i.test(err.message||'')
+      ? 'Set for this session only — run supabase-migration-PICK-LIST-VOICE.sql in Supabase to keep it.'
+      : 'Could not save that: '+err.message,false);
+  },400);
+  if(!speak) return;
+  if(!plVoiceOn(plVoiceFor(store))){
+    try{ window.speechSynthesis&&window.speechSynthesis.cancel(); }catch(e){}
+    return;
+  }
+  // only the sheet in hand can be heard back; a shop being set up from
+  // Settings has no line of its own to read
+  if(store!==plStore()) return;
   const it=(plActiveId&&plItem(plActiveId))||plVisibleItems()[0];
   if(it) plSay(plLineSpeech(it));
 }
+// one set of handlers for every copy of the editor on the page
+document.addEventListener('click',e=>{
+  const box=e.target.closest('[data-voice-store]'); if(!box) return;
+  const store=box.getAttribute('data-voice-store');
+  const c=plVoiceFor(store);
+  const rate=e.target.closest('[data-voice-rate]');
+  if(rate){ c.rate=Number(rate.getAttribute('data-voice-rate')); plVoiceChanged(store,true); return; }
+  const when=e.target.closest('[data-voice-when]');
+  if(when){ c[when.getAttribute('data-voice-when')]=when.getAttribute('data-v'); plVoiceChanged(store,false); return; }
+  if(e.target.closest('.switch')) return;        // the change event has that one
+  const row=e.target.closest('[data-voice-row]'); if(!row) return;
+  const cb=row.querySelector('[data-voice-say]'); if(!cb) return;
+  c[cb.getAttribute('data-voice-say')]=!cb.checked;
+  plVoiceChanged(store,true);
+});
+document.addEventListener('change',e=>{
+  const cb=e.target.closest('[data-voice-say]'); if(!cb) return;
+  const box=cb.closest('[data-voice-store]'); if(!box) return;
+  const store=box.getAttribute('data-voice-store');
+  plVoiceFor(store)[cb.getAttribute('data-voice-say')]=cb.checked;
+  plVoiceChanged(store,true);
+});
+
+// The button says what is being read rather than merely that something is,
+// because "voice on" tells a picker nothing about what they are about to
+// hear. Tapping it opens the whole editor for this sheet's shop.
+function plSyncVoiceBtn(){
+  const c=plVoiceFor();
+  const on=[];
+  if(c.say_sku) on.push('SKU');
+  if(c.say_shelf) on.push('Shelf');
+  if(c.say_qty) on.push('Qty');
+  const btn=document.getElementById('pickListSpeak');
+  if(!btn) return;
+  btn.textContent=on.length?'🔊 '+on.join(' + '):'🔇 Voice off';
+  btn.classList.toggle('on',!!on.length);
+  btn.title=on.length
+    ? 'Reads '+on.join(', ').toLowerCase()+' — tap to change what, when and how fast'
+    : 'Nothing is read out — tap to choose what should be';
+}
 document.getElementById('pickListSpeak').addEventListener('click',()=>{
-  plSyncVoiceSheet();
+  const store=plStore();
+  document.getElementById('pickListVoiceShop').textContent=STORES[store]||store;
+  document.getElementById('pickListVoiceBody').innerHTML=plVoiceEditorHtml(store);
   document.getElementById('pickListVoiceSheet').classList.add('open');
 });
 const plCloseVoice=()=>document.getElementById('pickListVoiceSheet').classList.remove('open');
@@ -16643,20 +16809,6 @@ document.getElementById('pickListVoiceDone').addEventListener('click',plCloseVoi
 document.getElementById('pickListVoiceClose').addEventListener('click',plCloseVoice);
 document.getElementById('pickListVoiceSheet').addEventListener('click',e=>{
   if(e.target.id==='pickListVoiceSheet') plCloseVoice();
-});
-document.getElementById('pickListVoiceSheet').addEventListener('change',e=>{
-  const cb=e.target.closest('[data-voice]'); if(!cb) return;
-  plVoiceParts[cb.getAttribute('data-voice')]=cb.checked;
-  plSaveVoiceParts();
-});
-// the whole row answers, not only the switch on the end of it
-document.getElementById('pickListVoiceSheet').addEventListener('click',e=>{
-  if(e.target.closest('.switch')) return;
-  const row=e.target.closest('[data-voice-row]'); if(!row) return;
-  const cb=row.querySelector('[data-voice]'); if(!cb) return;
-  cb.checked=!cb.checked;
-  plVoiceParts[cb.getAttribute('data-voice')]=cb.checked;
-  plSaveVoiceParts();
 });
 plSyncVoiceBtn();
 // the floating bar mirrors whichever line Start mode is on
@@ -16865,7 +17017,11 @@ document.getElementById('pickListReqSend').addEventListener('click',async()=>{
     const said=to.map(nameOf);
     showMsg(msg,`✓ Sent to ${escapeHtml(said.length<=2?said.join(' and '):said.length+' people')}.`
       +(failed?` Could not reach ${failed} of them.`:''),!failed);
-    setTimeout(()=>{ plCloseReq(); plAdvance(it.id); },700);
+    setTimeout(()=>{
+      plCloseReq();
+      if(!plStartOn) plSpeakFor('on_request',it);
+      plAdvance(it.id);
+    },700);
   }catch(err){
     showMsg(msg,'Could not send it: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false; btn.textContent='Send Request'; }
