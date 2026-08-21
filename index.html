@@ -4498,6 +4498,7 @@ async function loadAccess(){
   // a column that is not there yet means that section was never gated, so it
   // stays open rather than vanishing for everyone
   const flag=(v,dflt)=>v===undefined?dflt:!!v;
+  plMyVoice=(data&&data.pl_voice)||'';
   access=data
     ? {admin:flag(data.is_admin,false),print:flag(data.can_print,false),
        shipping:flag(data.can_shipping,false),pickup:flag(data.can_pickup,false),
@@ -4988,6 +4989,14 @@ function renderUsers(){
         ${ACCESS_COLS.map(([col,label])=>`
           <button class="pk-state${u[col]?' on':''}" data-acc="${col}">${label}</button>`).join('')}
       </div>
+      <!-- Whose voice this person hears on a pick list. The shop's own unless
+           somebody has been given a reason not to — a floor they cannot hear
+           it on, or simply picking better with a different one. -->
+      <label class="field" style="margin:10px 0 0;"><span>PICK LIST VOICE</span>
+        <select data-user-voice>
+          <option value=""${u.pl_voice?'':' selected'}>The shop's own setting</option>
+          ${plVoiceOptsHtml(u.pl_voice||'',false)}
+        </select></label>
       <div class="row" style="margin:9px 0 0;">
         <button class="btn-outline btn-sm" data-acc-all>${SECTION_COLS.every(c=>u[c])?'Remove all access':'Give all access'}</button>
         <button class="btn-danger btn-sm" data-signout>Force sign out</button>
@@ -5044,6 +5053,31 @@ document.getElementById('usersList').addEventListener('click',async e=>{
   if(error){ u[col]=!u[col]; renderUsers(); showMsg(msg,'Could not save: '+error.message,false); return; }
   // changing your own access takes effect straight away
   if(me&&me.user.id===u.user_id) await loadAccess();
+});
+document.getElementById('usersList').addEventListener('change',async e=>{
+  const sel=e.target.closest('[data-user-voice]'); if(!sel) return;
+  const card=sel.closest('[data-uid]'); if(!card) return;
+  const u=userRows.find(x=>x.user_id===card.dataset.uid); if(!u) return;
+  const msg=document.getElementById('usersMsg');
+  const before=u.pl_voice||'';
+  u.pl_voice=sel.value||null;
+  const {error}=await sb.from('profiles')
+    .update({pl_voice:u.pl_voice}).eq('user_id',u.user_id);
+  if(error){
+    u.pl_voice=before||null;
+    renderUsers();
+    showMsg(msg,/column|schema cache|does not exist/i.test(error.message||'')
+      ? 'Not set up yet — run supabase-migration-PICK-LIST-USER-VOICE.sql in Supabase.'
+      : 'Could not save that: '+error.message,false);
+    return;
+  }
+  // choosing your own takes effect on this phone without a reload
+  const me=(await sb.auth.getSession()).data.session;
+  if(me&&me.user.id===u.user_id){
+    plMyVoice=u.pl_voice||'';
+    plSyncVoiceBtn();
+  }
+  showMsg(msg,'✓ Saved.',true);
 });
 document.getElementById('goToPickupBtn').addEventListener('click',()=>showScreen('pickup'));
 document.getElementById('goToAdhocBtn').addEventListener('click',()=>showScreen('adhoc'));
@@ -15667,6 +15701,17 @@ let plVoiceCfg={partymonkey:Object.assign({},PL_VOICE_DEFAULT),
                 planttalks:Object.assign({},PL_VOICE_DEFAULT)};
 // the settings that apply to the sheet in hand, which its file name decides
 const plVoiceFor=store=>plVoiceCfg[store||plStore()]||plVoiceCfg.partymonkey;
+// The voice is a setting of the shop, and everybody picking that shop's
+// sheets hears the same one. This is the exception: a voice an admin has
+// chosen for one person, which wins over the shop's for them alone. What is
+// read out and when it is read stays the shop's call — this is only who says
+// it, how high and how fast.
+let plMyVoice='';
+function plVoiceNow(){
+  const c=plVoiceFor();
+  if(!plMyVoice) return c;
+  return Object.assign({},c,plVoiceParts(plMyVoice));
+}
 const plVoiceOn=v=>{ const c=v||plVoiceFor(); return !!(c.say_sku||c.say_shelf||c.say_qty); };
 async function loadPlVoice(){
   if(!sb) return;
@@ -17966,7 +18011,7 @@ function plSay(text){
   if(!plVoiceOn()||!String(text||'').trim()) return;
   try{
     if(!window.speechSynthesis) return;
-    const c=plVoiceFor();
+    const c=plVoiceNow();
     const voice=plPickVoice(c);
     window.speechSynthesis.cancel();
     const u=new SpeechSynthesisUtterance(text);
@@ -18074,39 +18119,66 @@ const PL_PITCHES=[[0.85,'Low'],[1,'Natural'],[1.15,'Higher'],[1.45,'High']];
 // does not have falls through to any woman's voice in that language, then to
 // any voice in it, and finally to the best English one — so every choice does
 // something everywhere, they just do not all do something different.
-// Four accents, and nothing else. Two of them are English voices; the other
-// two are a Korean and a Japanese voice handed English words, which is what
-// makes them English spoken in that accent. Nothing is ever translated — the
-// SKU names go to the voice exactly as they are printed on the sheet.
-const PL_VOICE_PICKS=[
+// Who is speaking. Four things make a voice and all four travel together:
+// the accent, the voice's own name, the pitch and the speed. They are one
+// choice, so they are one value — accent|name|pitch|speed — and the whole of
+// it moves when a picker chooses from this list.
+//
+// English only. A Japanese or Korean voice handed an English SKU name reads
+// it as Japanese or Korean, which is a different thing from English spoken in
+// that accent, and no browser offers the second. What can be varied is which
+// English voice, how high it sits and how fast it goes — and that is enough
+// for eight that are told apart at once on the same phone.
+const PL_PRESETS=[
   ['Singapore',[
-    ['en-SG','','Singapore — any voice'],
-    ['en-SG','Luna','Singapore — Luna'],
-    ['en-SG','Wayne','Singapore — Wayne']]],
+    ['en-SG','',1.15,0.92,'Singapore — any voice'],
+    ['en-SG','Luna',1.15,0.92,'Singapore — Luna']]],
   ['America',[
-    ['en-US','','America — any voice'],
-    ['en-US','Samantha','America — Samantha'],
-    ['en-US','Ava','America — Ava'],
-    ['en-US','Zira','America — Zira'],
-    ['en-US','Aria','America — Aria']]],
-  ['Korean accent, English words',[
-    ['ko-KR','','Korean — any voice'],
-    ['ko-KR','Yuna','Korean — Yuna'],
-    ['ko-KR','SunHi','Korean — SunHi'],
-    ['ko-KR','Heami','Korean — Heami'],
-    ['ko-KR','Google 한국의','Korean — Google']]],
-  ['Japanese accent, English words',[
-    ['ja-JP','','Japanese — any voice'],
-    ['ja-JP','Kyoko','Japanese — Kyoko'],
-    ['ja-JP','Nanami','Japanese — Nanami'],
-    ['ja-JP','Ayumi','Japanese — Ayumi'],
-    ['ja-JP','Haruka','Japanese — Haruka'],
-    ['ja-JP','Google 日本語','Japanese — Google']]]];
-// Which languages the four groups are about. The list of what this phone
-// actually has is narrowed to these as well: a dropdown offering four accents
-// and then thirty other voices underneath is offering thirty-four.
-const PL_VOICE_LANGS=/^(en-sg|en-us|ko|ja)/;
-const plVoicePick=c=>String(c.voice_lang||'')+'|'+String(c.voice_name||'');
+    ['en-US','',1.15,0.92,'America — any voice'],
+    ['en-US','Samantha',1.15,0.92,'America — Samantha'],
+    ['en-US','Ava',1.15,0.92,'America — Ava'],
+    ['en-US','Zira',1.15,0.92,'America — Zira'],
+    ['en-US','Aria',1.15,0.92,'America — Aria']]],
+  // Eight warm ones. Each asks for a different voice by name and sits at a
+  // different pitch and speed, so a phone with only one English voice still
+  // gives eight that can be told apart — which is what the five Japanese ones
+  // could not do, all of them landing on the same installed voice.
+  ['Warm',[
+    ['en-US','Samantha',0.85,0.86,'Velvet'],
+    ['en-US','Ava',0.75,0.82,'Smoke'],
+    ['en-GB','Serena',0.95,0.84,'Silk'],
+    ['en-US','Aria',0.90,0.96,'Amber'],
+    ['en-AU','Karen',0.70,0.90,'Dusk'],
+    ['en-US','Jenny',1.05,0.80,'Honey'],
+    ['en-US','Michelle',0.80,1.00,'Ember'],
+    ['en-GB','Fiona',0.65,0.88,'Midnight']]]];
+// English, because the words are English. The list of what this phone has,
+// shown under the presets, is narrowed to the same.
+const PL_VOICE_LANGS=/^en/;
+// the whole choice as one string, and back again
+const plVoiceVal=c=>[c.voice_lang||'',c.voice_name||'',
+  Number(c.pitch)||1.15,Number(c.rate)||0.92].join('|');
+function plVoiceParts(v){
+  const p=String(v||'').split('|');
+  return {voice_lang:p[0]||'en-SG',voice_name:p[1]||'',
+    pitch:Number(p[2])||1.15,rate:Number(p[3])||0.92};
+}
+// One list of options, drawn the same way on Settings and on Users & access.
+function plVoiceOptsHtml(cur,withInstalled){
+  const groups=PL_PRESETS.map(([group,picks])=>
+    `<optgroup label="${group}">${picks.map(([lang,name,pitch,rate,label])=>{
+      const v=[lang,name,pitch,rate].join('|');
+      return `<option value="${escapeHtml(v)}"${cur===v?' selected':''}>${label}</option>`;
+    }).join('')}</optgroup>`).join('');
+  if(!withInstalled) return groups;
+  const installed=plVoiceList().filter(v=>PL_VOICE_LANGS.test(plLangOf(v)));
+  if(!installed.length) return groups;
+  const at=plVoiceParts(cur);
+  return groups+`<optgroup label="Installed on this phone">${installed.map(v=>{
+    const val=[v.lang||'',v.name,at.pitch,at.rate].join('|');
+    return `<option value="${escapeHtml(val)}"${cur===val?' selected':''}>${escapeHtml(v.name)} — ${escapeHtml(v.lang||'')}</option>`;
+  }).join('')}</optgroup>`;
+}
 
 function plVoiceEditorHtml(store){
   const c=plVoiceFor(store);
@@ -18120,33 +18192,24 @@ function plVoiceEditorHtml(store){
   const installed=plVoiceList().filter(v=>PL_VOICE_LANGS.test(plLangOf(v)));
   return `<div class="pl-voice" data-voice-store="${store}">
     <div class="slot-label">Speed</div>
+    <p class="hint" style="margin:0 0 7px;">Set by the voice above, and yours to change after.</p>
     <div class="seg">${PL_RATES.map(([v,label])=>
       `<button type="button" data-voice-rate="${v}"${near(c.rate,v)?' class="on"':''}>${label}</button>`).join('')}</div>
     <div class="slot-label">Pitch</div>
     <div class="seg">${PL_PITCHES.map(([v,label])=>
       `<button type="button" data-voice-pitch="${v}"${near(c.pitch,v)?' class="on"':''}>${label}</button>`).join('')}</div>
     <div class="slot-label">Voice</div>
-    <p class="hint" style="margin:0 0 7px;">The words stay English &mdash; only the mouth saying
-      them changes. A phone without the one asked for uses the closest it has.</p>
+    <p class="hint" style="margin:0 0 7px;">Each one carries its own pitch and speed, so the
+      eight warm ones are told apart even on a phone with a single English voice installed.
+      A phone without the voice asked for uses the closest it has.</p>
     <label class="field" style="margin-bottom:8px;">
-      <select data-voice-pick>${PL_VOICE_PICKS.map(([group,picks])=>
-        `<optgroup label="${group}">${picks.map(([lang,name,label])=>{
-          const v=lang+'|'+name;
-          return `<option value="${escapeHtml(v)}"${plVoicePick(c)===v?' selected':''}>${label}</option>`;
-        }).join('')}</optgroup>`).join('')}
-        ${installed.length?`<optgroup label="Installed on this phone">
-          ${installed.map(v=>{
-            const val=(v.lang||'')+'|'+v.name;
-            return `<option value="${escapeHtml(val)}"${plVoicePick(c)===val?' selected':''}>${escapeHtml(v.name)} — ${escapeHtml(v.lang||'')}</option>`;
-          }).join('')}
-        </optgroup>`:''}
-      </select>
+      <select data-voice-pick>${plVoiceOptsHtml(plVoiceVal(c),true)}</select>
     </label>
     <p class="hint" style="margin:0 0 4px;">${plVoiceList().length
       ? 'On this phone that is <b>'+escapeHtml((heard&&heard.name)||'nothing installed')+'</b>'
         +(heard&&heard.lang?' ('+escapeHtml(heard.lang)+')':'')+'. '
-        +(installed.length?'':'It has none of these four installed, so it uses the closest '
-          +'English voice it has. ')
+        +(installed.length?'':'It has no English voice installed, so it uses the closest '
+          +'it has. ')
         +'Another phone will use the closest it has.'
       : 'This phone has not handed over its list of voices yet — it fills in on its own.'}</p>
     <div class="slot-label">What it reads, in this order</div>
@@ -18221,10 +18284,8 @@ document.addEventListener('change',e=>{
   const box=e.target.closest('[data-voice-store]'); if(!box) return;
   const store=box.getAttribute('data-voice-store');
   if(e.target.matches('[data-voice-pick]')){
-    const c=plVoiceFor(store);
-    const at=String(e.target.value||'').indexOf('|');
-    c.voice_lang=at<0?e.target.value:e.target.value.slice(0,at);
-    c.voice_name=at<0?'':e.target.value.slice(at+1);
+    // all four at once: a voice is not a name on its own
+    Object.assign(plVoiceFor(store),plVoiceParts(e.target.value));
     plVoiceChanged(store,true);
     return;
   }
