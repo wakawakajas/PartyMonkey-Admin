@@ -710,7 +710,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   border-radius:11px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;font-weight:600;
   border:1px solid var(--border-strong);background:transparent;color:var(--muted);}
 .pl-card-admin button[data-pl-done]{color:var(--blueprint);border-color:var(--blueprint);}
-.pl-card-admin button[data-pl-clear]{color:var(--rust);border-color:var(--rust);}
+/* Amber rather than rust: this puts a sheet back to the start of the morning,
+   which is a big thing to do and not a destructive one. Rust is for the hold,
+   which is the only thing on this screen that deletes anything. */
+.pl-card-admin button[data-pl-clear]{color:var(--amber);border-color:var(--amber);}
 .pl-card:active{background:var(--blueprint-soft);border-color:var(--blueprint);}
 .pl-card-main{flex:1;min-width:0;}
 /* Which shop a sheet is for is decided by its file name, and its name is
@@ -15908,7 +15911,7 @@ function renderPickLists(){
             :`<button type="button" data-pl-done="${l.id}"
                 title="Mark it complete from here, finished or not">✓ Complete</button>`}
           <button type="button" data-pl-clear="${l.id}"
-            title="Delete this sheet and its pictures now">Clear</button>
+            title="Take every tick off this sheet so it can be picked again. It is not deleted — hold the card for that.">Clear</button>
         </div>` : '';
     return `<div class="pl-card-wrap">
       <button class="pl-card${l.status==='completed'?' done':''}" data-pl-open="${l.id}"
@@ -15948,12 +15951,56 @@ document.getElementById('pickListRoll').addEventListener('click',async e=>{
   const done=e.target.closest('[data-pl-done]');
   if(done){ await plCompleteFromRoll(done.getAttribute('data-pl-done')); return; }
   const clear=e.target.closest('[data-pl-clear]');
-  if(clear){ await plDeleteList(clear.getAttribute('data-pl-clear')); return; }
+  if(clear){ await plClearList(clear.getAttribute('data-pl-clear')); return; }
   const b=e.target.closest('[data-pl-open]'); if(!b) return;
   if(plHeld){ plHeld=false; return; }        // that tap was the end of a hold
   plCurrentId=b.dataset.plOpen;
   showScreen('pick-list');
 });
+// Putting a sheet back to the start of the morning. Every tick comes off, and
+// a sheet that was finished is open again — which is what somebody means when
+// they say a sheet was picked against the wrong day, or that the floor started
+// on it before the order was right.
+//
+// It deletes nothing. The sheet, its lines and its pictures all stay, and so
+// does any ad-hoc or refill work already raised off it: that work is somebody
+// else's job on another page and is not undone by this sheet being picked
+// again. Deleting is the hold on the card, and stays there.
+async function plClearList(id){
+  if(!may('admin')) return;
+  const list=pickLists.find(l=>l.id===id); if(!list) return;
+  const msg=document.getElementById('pickListMsg');
+  const m=plMeta[id]||{total:0,done:0};
+  if(!confirm('Are you sure?\n\nClear every tick off "'+list.title+'"'
+    +(m.done?' — '+m.done+' line'+(m.done===1?'':'s')+' already done':'')+'?'
+    +'\n\nIt goes back to how it arrived: no statuses, no remarks, no refills '
+    +'asked for'+(list.status==='completed'?', and it is open for picking again':'')+'.'
+    +'\n\nNothing is deleted. Ad-hoc work already raised off it stays on the '
+    +'Ad-Hoc Picking page, and the sheet itself only goes if you hold the card.')) return;
+  const wipe={status:null,acted_at:null,acted_by:null,remarks:'',
+    top_up:false,top_up_done:false};
+  let {error}=await sb.from('pick_list_items').update(wipe).eq('list_id',id);
+  // a project without the Top Up migration has neither column to clear
+  if(error&&/column|schema cache|does not exist/i.test(error.message||'')){
+    ({error}=await sb.from('pick_list_items')
+      .update({status:null,acted_at:null,acted_by:null,remarks:''}).eq('list_id',id));
+  }
+  if(error){ showMsg(msg,'Could not clear it: '+error.message,false); return; }
+  // and a finished sheet is a sheet again
+  if(list.status==='completed'){
+    const {error:e2}=await sb.from('pick_lists')
+      .update({status:'pending',completed_at:null,completed_by:null}).eq('id',id);
+    if(e2){ showMsg(msg,'Cleared, but it could not be reopened: '+e2.message,false); return; }
+    plTab='pending';
+    document.querySelectorAll('#pickListTabs [data-pl-tab]')
+      .forEach(x=>x.classList.toggle('on',x.dataset.plTab==='pending'));
+  }
+  showMsg(msg,'✓ '+escapeHtml(list.title)+' is back to the start.',true);
+  // the sheet in hand, if it happens to be this one
+  if(plCurrentId===id&&currentScreen==='pick-list') await plSyncItems();
+  await refreshPickLists();
+}
+
 // Finishing a sheet without opening it. Inside the sheet, Complete List waits
 // for every line to have a status; here it does not, because the reason an
 // admin is doing it from the overview is usually that the floor has moved on
