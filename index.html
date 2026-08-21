@@ -17766,7 +17766,10 @@ function plChipTap(id,text,box){
   plSaveRemarks(id,next);
   plRender();
 }
-function plGoTo(id){
+// `lead` is said before the line, in the same breath. It has to be the same
+// breath: asking the voice for a second thing cancels the first, so a shelf
+// announced on its own would talk over the line it was announcing.
+function plGoTo(id,lead){
   plActiveId=id;
   plRender();
   const row=document.querySelector(`#pickListLines [data-pl-line="${id}"]`);
@@ -17775,7 +17778,12 @@ function plGoTo(id){
   // line of a hundred-line sheet, and the picker already knows what the
   // number is — hearing it said is the whole of what the voice is for
   const it=plItem(id);
-  if(it) plSpeakFor('on_start',it);
+  if(!it) return;
+  if(!lead){ plSpeakFor('on_start',it); return; }
+  const mode=plVoiceFor().on_start||'off';
+  const target=mode==='next'?plNextAfter(it):it;
+  const line=mode==='off'?'':plLineSpeech(target);
+  plSay([lead,line].filter(Boolean).join('. '));
 }
 // After a line is settled, the next one that still needs doing — which is the
 // next one *on the sheet*, not the next one on screen, so a filter that hides
@@ -17805,10 +17813,12 @@ function plAdvance(fromId){
     return;
   }
   // A new drawer is worth saying out loud: the picker is walking, not looking
-  // at the screen, and the shelf is what tells them where to stop.
+  // at the screen, and the shelf is what tells them where to stop. The number
+  // on its own, the same as the quantity — "shelf" is a word the picker
+  // already knows, said a hundred times a morning to no purpose — and said in
+  // the same breath as the line, or it would cancel it.
   const moved=plFocusOn&&from&&plShelfKey(next)!==plShelfKey(from);
-  plGoTo(next.id);
-  if(moved&&plVoiceOn()) plSay('Shelf '+plSpoken(next.shelf||'—'));
+  plGoTo(next.id,moved?plSpoken(next.shelf||''):'');
 }
 // A warehouse is a loud room and the voice is speaking over it all morning, so
 // it wants to be easy rather than urgent: a female voice a shade under normal
@@ -18347,20 +18357,33 @@ document.getElementById('pickListAdhocSheet').addEventListener('click',e=>{
 //
 // One helper for both of the things that float over this sheet, so the Start
 // button and the ad-hoc bubble behave identically under the same thumb.
+//
+// The pointer events here do one job only: move the thing. What counts as a
+// tap is left to the browser's own click, because every platform decides that
+// differently and all of them decide it better than a rule written here. An
+// Android thumb on a 52px disc travels ten or fifteen pixels between touching
+// down and lifting off, which a hand-written threshold reads as a drag and a
+// phone reads — correctly — as somebody pressing a button.
 function plDraggable(el,tap,onMove){
   let from=null,moved=false;
+  // far enough that a thumb pressing a button is never mistaken for a drag,
+  // near enough that dragging one still feels immediate
+  const DRAG=14;
   el.addEventListener('pointerdown',e=>{
+    if(e.button>0) return;                    // a right or middle click is not a drag
     const r=el.getBoundingClientRect();
     from={x:e.clientX,y:e.clientY,dx:e.clientX-r.left,dy:e.clientY-r.top,w:r.width,h:r.height};
     moved=false;
     try{ el.setPointerCapture(e.pointerId); }catch(e2){}
-    el.classList.add('dragging');
   });
   el.addEventListener('pointermove',e=>{
     if(!from) return;
-    if(!moved&&Math.hypot(e.clientX-from.x,e.clientY-from.y)<6) return;
-    if(!moved&&onMove) onMove();
-    moved=true;
+    if(!moved&&Math.hypot(e.clientX-from.x,e.clientY-from.y)<DRAG) return;
+    if(!moved){
+      moved=true;
+      el.classList.add('dragging');           // said once it is actually a drag
+      if(onMove) onMove();
+    }
     const x=Math.min(Math.max(4,e.clientX-from.dx),window.innerWidth-from.w-4);
     const y=Math.min(Math.max(4,e.clientY-from.dy),window.innerHeight-from.h-4);
     el.style.left=x+'px'; el.style.top=y+'px';
@@ -18371,16 +18394,15 @@ function plDraggable(el,tap,onMove){
     from=null;
     el.classList.remove('dragging');
     try{ el.releasePointerCapture(e.pointerId); }catch(e2){}
-    if(!moved) tap();
   };
   el.addEventListener('pointerup',end);
   el.addEventListener('pointercancel',end);
-  // A <button> fires its own click on top of the tap above, so that one is
-  // swallowed — except the one a keyboard sends, which has no pointer behind
-  // it and is the only way in without a thumb.
+  el.addEventListener('lostpointercapture',end);
+  // A finger, a mouse or a keyboard: they all arrive here, and a drag is the
+  // only thing that does not count.
   el.addEventListener('click',e=>{
-    if(e.detail===0){ tap(); return; }
-    e.preventDefault(); e.stopPropagation();
+    if(moved){ moved=false; e.preventDefault(); e.stopPropagation(); return; }
+    tap();
   });
 }
 plDraggable(document.getElementById('pickListBubble'),plOpenAdhocSheet,()=>{
