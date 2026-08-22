@@ -84,6 +84,11 @@ itself uses, no API key, no per-run cost, nothing leaving the machine.
 - Steps mix freely with UIA steps -- one macro can drive File Explorer and a
   web page in sequence
 
+To open that Chrome yourself -- to sign in, to look up a selector with F12, or
+to watch a macro run -- double-click [`open-cdp-chrome.bat`](open-cdp-chrome.bat),
+optionally with a URL. It reuses the debugging Chrome if one is already up, and
+never touches your normal Chrome, which keeps its own separate profile.
+
 Since Chrome 136 the debugging port is refused on the default user-data-dir,
 so these steps run against a Chrome with its own profile folder (default
 `%LocalAppData%\MacroStudio\ChromeProfile`). That profile starts signed out:
