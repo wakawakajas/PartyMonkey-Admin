@@ -2132,9 +2132,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 
     <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
       <div class="sect-label">Today's orders</div>
-      <p class="hint" style="margin:0 0 10px;">The day's order export. Only the lines that
-        are combinations are kept -- what they hold, and how many of each, so packing knows
-        what to put in the box. It is not saved: upload it again whenever the day moves on.</p>
+      <p class="hint" style="margin:0 0 10px;">The day's order export, PDF or spreadsheet.
+        Only the lines that are combinations are kept -- what they hold, and how many of each,
+        so packing knows what to put in the box. It is not saved: upload it again whenever the
+        day moves on.</p>
       <button class="btn-primary" id="bundleOrdersBtn" style="width:100%;">⬆ Upload today's orders</button>
       <div id="bundleOrdersMsg"></div>
       <div id="bundleOrdersOut"></div>
@@ -5392,40 +5393,109 @@ function bundleOrderSheet(wb){
   return best;
 }
 
+// A spreadsheet, turned into the same plain list of name and count that the
+// PDF reader hands back.
+async function bundleWorkbook(file){
+  if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
+  const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
+  const sheet=bundleOrderSheet(wb);
+  if(!sheet){
+    const heads=(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''})[0]||[])
+      .map(h=>String(h).trim()).filter(Boolean).slice(0,12).join(', ');
+    throw new Error('no rows with a SKU in them -- the first tab reads: '+escapeHtml(heads));
+  }
+  return sheet;
+}
+function bundleReadOrderSheet(sheet){
+  return sheet.grid.slice(sheet.start).map(row=>({
+    name:String(row[sheet.sku]==null?'':row[sheet.sku]).trim(),
+    qty:sheet.qty===undefined?1:numOf(row[sheet.qty])||1
+  })).filter(r=>r.name);
+}
+
+// A PDF has no columns to speak of, only text at coordinates, and the order
+// sheet's layout is not ours to rely on. So it is read the other way round:
+// the text of each line is put back together, and a line is a combination if
+// a combination's name is written on it. The catalogue is what does the
+// recognising, which means the reading survives the sheet being redesigned.
+function bundlePdfLines(items){
+  // Grouped by how far apart the baselines are, not by which side of a
+  // rounding boundary they fall: two runs a single point apart belong to the
+  // same line, and rounding put them either side of it about a third of the
+  // time -- which split a quantity off from the name it belonged to.
+  const sorted=[...items].sort((a,b)=>b.y-a.y);
+  const lines=[];
+  let cur=null;
+  sorted.forEach(it=>{
+    if(!cur||Math.abs(cur.y-it.y)>3){ cur={y:it.y,its:[it]}; lines.push(cur); }
+    else cur.its.push(it);
+  });
+  return lines
+    .map(l=>l.its.sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ').replace(/\s+/g,' ').trim())
+    .filter(Boolean);
+}
+// The count on a line is the last plain number on it -- an order sheet puts it
+// in the right-hand column, and a combination's own name may carry digits
+// ("10pc") that are no part of it.
+function bundleLineQty(line,name){
+  const after=line.slice(line.toLowerCase().lastIndexOf(name.toLowerCase())+name.length);
+  const m=(after.match(/(?:^|\s)[x\u00d7*]?\s*(\d{1,4})(?:\s|$)/gi)||[]).pop();
+  return m?Math.max(1,parseInt(m.replace(/[^\d]/g,''),10)||1):1;
+}
+async function bundleReadOrderPdf(file,onProgress){
+  if(!window.pdfjsLib) throw new Error('PDF reader unavailable');
+  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+  // longest first, so "Aircraft-Bundle (B)" is not read as "Aircraft-Bundle"
+  const names=bundleRows.map(b=>b.name.trim()).filter(Boolean)
+    .sort((a,b)=>b.length-a.length);
+  const out=[];
+  for(let pn=1;pn<=pdf.numPages;pn++){
+    if(onProgress) onProgress(pn,pdf.numPages);
+    const page=await pdf.getPage(pn);
+    const items=(await page.getTextContent()).items
+      .filter(i=>i.str&&i.str.trim())
+      .map(i=>({s:i.str.trim(),x:i.transform[4],y:i.transform[5]}));
+    bundlePdfLines(items).forEach(line=>{
+      const low=line.toLowerCase();
+      const hit=names.find(n=>low.includes(n.toLowerCase()));
+      out.push(hit?{name:hit,qty:bundleLineQty(line,hit)}:{name:line,qty:1});
+    });
+    page.cleanup();
+  }
+  return out;
+}
+
 document.getElementById('bundleOrdersBtn').addEventListener('click',()=>{
   const msg=document.getElementById('bundleOrdersMsg');
   const inp=document.createElement('input');
-  inp.type='file'; inp.accept='.xlsx,.xls,.csv';
+  inp.type='file'; inp.accept='.pdf,.xlsx,.xls,.csv';
   inp.onchange=async()=>{
     const file=inp.files[0]; if(!file) return;
     const btn=document.getElementById('bundleOrdersBtn');
     btn.disabled=true; const label=btn.textContent; btn.textContent='Reading...';
     try{
-      if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
       const session=await requireSession(msg); if(!session) return;
-      const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
-      const sheet=bundleOrderSheet(wb);
-      if(!sheet){
-        const heads=(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''})[0]||[])
-          .map(h=>String(h).trim()).filter(Boolean).slice(0,12).join(', ');
-        throw new Error('no rows with a SKU in them -- the first tab reads: '+escapeHtml(heads));
-      }
       // the catalogue has to be in hand before a line can be told apart
       if(!bundleRows.length) await refreshBundles();
       if(!bundleRows.length) throw new Error('no combinations are on file yet -- '
         +'upload the combination list first');
 
+      const isPdf=/\.pdf$/i.test(file.name)||file.type==='application/pdf';
+      showMsg(msg,`Reading ${escapeHtml(file.name)}...`,true);
+      const read=isPdf
+        ? await bundleReadOrderPdf(file,(n,of)=>
+            showMsg(msg,`Reading ${escapeHtml(file.name)} -- page ${n} of ${of}...`,true))
+        : bundleReadOrderSheet(await bundleWorkbook(file));
+
       const known=new Map(bundleRows.map(b=>[b.name.trim().toLowerCase(),b]));
       const counts=new Map();          // combination -> how many of it today
       let lines=0,plain=0;
-      for(const row of sheet.grid.slice(sheet.start)){
-        const name=String(row[sheet.sku]==null?'':row[sheet.sku]).trim();
+      for(const {name,qty} of read){
         if(!name) continue;
         lines++;
-        const combo=known.get(name.toLowerCase());
+        const combo=known.get(name.trim().toLowerCase());
         if(!combo){ plain++; continue; }
-        const qty=sheet.qty===undefined?1:Math.max(1,Math.round(numOf(row[sheet.qty])||1));
-        counts.set(combo.id,(counts.get(combo.id)||0)+qty);
+        counts.set(combo.id,(counts.get(combo.id)||0)+Math.max(1,Math.round(qty||1)));
       }
       bundleToday=[...counts.entries()]
         .map(([id,qty])=>({combo:bundleRows.find(b=>b.id===id),qty}))
