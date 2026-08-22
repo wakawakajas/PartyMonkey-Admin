@@ -244,13 +244,23 @@ const __ms = {
   // still works on its own terms.
   find(selector, text, exact) {
     if (!selector) return __ms.byText(text, exact);
-    let els = [...document.querySelectorAll(selector)].filter(__ms.visible);
+    let els = [];
+    try {
+      els = [...document.querySelectorAll(selector)].filter(__ms.visible);
+    } catch (err) { /* invalid selector: fall through to the label */ }
     if (text) {
       const want = String(text).trim().toLowerCase();
-      els = els.filter((el) => {
+      const matches = els.filter((el) => {
         const own = String(el.innerText || el.value || el.getAttribute("aria-label") || "").trim().toLowerCase();
         return exact ? own === want : own.includes(want);
       });
+      // A recorded selector describes the page as it looked that day:
+      // class names change, a panel re-renders somewhere else in the tree,
+      // a menu is open now that wasn't then. The label is the durable half
+      // of the pair, so when the selector no longer finds anything, fall
+      // back to it rather than failing a step the user can plainly see.
+      if (matches.length) return matches;
+      return __ms.byText(text, exact);
     }
     return els;
   },

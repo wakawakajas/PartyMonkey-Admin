@@ -40,11 +40,20 @@ _LISTENER_JS = r"""
 
   const cssEscape = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/[^\w-]/g, "\\$&"));
 
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    const st = getComputedStyle(el);
+    return st.visibility !== "hidden" && st.display !== "none" && st.opacity !== "0";
+  };
+
   // A selector is only worth recording if it is short enough to read and
-  // stable enough to survive a page reload. An id wins outright; failing
-  // that we walk up building a class path, and give up on anything that
-  // needs more than four levels -- past that, matching on the visible
-  // label is the more reliable half of the pair anyway.
+  // stable enough to survive a reload. An id wins outright; failing that we
+  // walk up building a class path, and give up past four levels -- beyond
+  // that, matching on the visible label is the more reliable half anyway.
+  // Classes a framework toggles as you interact are dropped: recording the
+  // hover state of a menu item would bake "only while the mouse is on it"
+  // into the selector.
   const selectorFor = (el) => {
     if (el.id && document.querySelectorAll("#" + cssEscape(el.id)).length === 1) {
       return "#" + cssEscape(el.id);
@@ -55,7 +64,7 @@ _LISTENER_JS = r"""
       let part = node.tagName.toLowerCase();
       const classes = String(node.className || "")
         .split(/\s+/)
-        .filter((c) => c && !/^(ng-|is-|active$|hover$|selected$)/.test(c))
+        .filter((c) => c && !/(^ng-|^is-|active|hover|focus|open$|checked|selected|highlight)/.test(c))
         .slice(0, 2);
       if (classes.length) part += "." + classes.map(cssEscape).join(".");
       parts.unshift(part);
@@ -68,21 +77,52 @@ _LISTENER_JS = r"""
     return parts.join(" ");
   };
 
+  const POPUP_SELECTOR = '[role="menu"], [role="listbox"], .dropdown-menu, .submenu,'
+    + ' [class*="dropdown"], [class*="popup"], [class*="menu_content"], li ul, [aria-expanded="true"]';
+
+  // Ant-design and friends render dropdowns at the end of <body>, not inside
+  // whatever opens them, so no amount of walking up from the clicked item
+  // finds its trigger. What does find it is remembering where the pointer
+  // had just been: the thing hovered right before a click landed in a popup
+  // is, in practice, the thing that opened it.
+  const HOVER_TRAIL = [];
+  document.addEventListener("mouseover", (event) => {
+    const el = event.target instanceof Element
+      ? event.target.closest("a, button, [role='button'], li, span, div")
+      : null;
+    if (!el) return;
+    HOVER_TRAIL.push({ el: el, at: Date.now() });
+    if (HOVER_TRAIL.length > 40) HOVER_TRAIL.shift();
+  }, true);
+
+  const triggerFromTrail = (el, panel) => {
+    const now = Date.now();
+    for (let i = HOVER_TRAIL.length - 1; i >= 0; i--) {
+      const seen = HOVER_TRAIL[i];
+      if (now - seen.at > 8000) break;
+      if (!seen.el.isConnected || panel.contains(seen.el) || seen.el.contains(el)) continue;
+      if (!visible(seen.el)) continue;
+      const label = String(seen.el.innerText || "").trim().split("\n")[0];
+      if (!label || label.length > 40) continue;
+      return { selector: selectorFor(seen.el), text: label.slice(0, 60) };
+    }
+    return null;
+  };
+
   // Menus are the case that breaks naive recording: the item clicked here
   // will not exist on replay unless something opens the menu first. If the
-  // click happened inside a submenu, we hand back the label of whatever
-  // opens it so a hover step can be recorded ahead of the click.
+  // click happened inside one, hand back whatever opens it so a hover step
+  // can be recorded ahead of the click.
   const menuOpenerFor = (el) => {
-    const panel = el.closest('[role="menu"], .dropdown-menu, .submenu, li ul, [aria-expanded="true"]');
+    const panel = el.closest(POPUP_SELECTOR);
     if (!panel) return null;
-    const host = panel.closest("li, .dropdown, .menu-item, .nav-item") || panel.parentElement;
-    if (!host) return null;
-    const opener = host.querySelector("a, button");
-    if (!opener || opener === el || opener.contains(el)) return null;
-    return {
-      selector: selectorFor(opener),
-      text: String(opener.innerText || "").trim().split("\n")[0].slice(0, 60),
-    };
+    const host = panel.closest("li, .dropdown, .menu-item, .nav-item");
+    const nested = host ? host.querySelector("a, button") : null;
+    if (nested && nested !== el && !nested.contains(el)) {
+      const label = String(nested.innerText || "").trim().split("\n")[0];
+      if (label) return { selector: selectorFor(nested), text: label.slice(0, 60) };
+    }
+    return triggerFromTrail(el, panel);
   };
 
   document.addEventListener("click", (event) => {
