@@ -12467,7 +12467,12 @@ const REQUEST_PHOTO_MAX_PX=900;
 let requestRows=[];                      // every row this account can read
 let requestPhotos={};                    // request id -> rows, both people's
 let newRequestShots=[];                  // files picked before the request exists
-let requestFilter='open';
+// Four statuses rather than the two views this started as. Open and Completed
+// were enough while the only question was "what is on my plate", but an admin
+// reading everybody's asks the narrower one — who has acknowledged and not
+// finished, what is still untouched — and that is a status at a time. The
+// default is what Open used to mean.
+let requestFilter=new Set(['pending','acknowledged']);
 // An admin may read every request on the team — the policy in
 // supabase-migration-REQUESTS-ADMIN.sql. Reading is all it is: the third list
 // has no buttons on it, because acknowledging and completing belong to the two
@@ -12497,9 +12502,11 @@ async function loadTeamMembers(){
     btn.textContent='Could not load the team — run supabase-migration-REQUESTS.sql';
     return;
   }
-  // asking yourself for something is a note, not a request, and it would ring
-  // your own phone — so you are not in your own list
-  teamMembers=data.filter(m=>m.user_id!==myUserId);
+  // Yourself included. A request sent to yourself is the same machinery doing
+  // something slightly different — a thing you must not forget, that keeps
+  // ringing on whatever snooze you choose until you say it is done. There was
+  // no reason to be the one person on the team you cannot ask.
+  teamMembers=data;
   // anyone picked before a reload who is still on the team is kept; anyone
   // who has left is quietly dropped rather than sent to nobody
   const keep=new Set([...requestTo].filter(id=>teamMembers.some(m=>m.user_id===id)));
@@ -12509,7 +12516,8 @@ async function loadTeamMembers(){
 // ---- who a request is for: one or several ----
 const requestTo=new Set();
 function requestAudience(){
-  const names=[...requestTo].map(id=>who(teamMembers.find(m=>m.user_id===id)||{}));
+  const names=[...requestTo].map(id=>id===myUserId
+    ? 'yourself' : who(teamMembers.find(m=>m.user_id===id)||{}));
   if(!names.length) return {n:0,word:'Choose someone…'};
   if(names.length===1) return {n:1,word:names[0]};
   if(names.length===2) return {n:2,word:names.join(' and ')};
@@ -12524,7 +12532,8 @@ function renderRequestTo(){
 function renderRequestToOpts(){
   document.getElementById('requestToOpts').innerHTML=teamMembers.length
     ? teamMembers.map(m=>`<div class="toggle-row filter-opt" data-to-row>
-        <span style="overflow-wrap:anywhere;">${escapeHtml(who(m))}</span>
+        <span style="overflow-wrap:anywhere;">${escapeHtml(who(m))}${
+          m.user_id===myUserId?' <span class="hint" style="margin:0;">(you)</span>':''}</span>
         <label class="switch"><input type="checkbox" data-to="${escapeHtml(m.user_id)}"
           ${requestTo.has(m.user_id)?'checked':''}/><span class="slider"></span></label>
       </div>`).join('')
@@ -12548,7 +12557,9 @@ document.getElementById('requestToOpts').addEventListener('click',e=>{
   renderRequestTo();
 });
 document.getElementById('requestToAll').addEventListener('click',()=>{
-  teamMembers.forEach(m=>requestTo.add(m.user_id));
+  // everyone means the other people; asking yourself is a deliberate tick
+  // rather than something a shortcut decides for you
+  teamMembers.forEach(m=>{ if(m.user_id!==myUserId) requestTo.add(m.user_id); });
   renderRequestTo(); renderRequestToOpts();
 });
 document.getElementById('requestToDone').addEventListener('click',closeRequestTo);
@@ -12592,7 +12603,10 @@ async function refreshRequests(){
   const rows=data||[];
   requestRows=rows;
   requestInbox=rows.filter(r=>r.assignee_id===myUserId);
-  requestOutbox=rows.filter(r=>r.requester_id===myUserId);
+  // One row sent to yourself is both halves at once. It belongs under "waiting
+  // on you", where the buttons that finish it are — listing it twice would
+  // only be the same job asking to be done in two places.
+  requestOutbox=rows.filter(r=>r.requester_id===myUserId&&r.assignee_id!==myUserId);
   // whatever is left over. An admin's own requests stay in their own two
   // lists rather than being shown twice.
   requestOthers=requestAll
@@ -12647,32 +12661,31 @@ function renderRequests(){
   // still waiting to be done, which is the whole reason for the two chips.
   // Claimed — somebody else on the same ask took it — moves with it: neither
   // is this person's to do anything more about.
+  // "how many are not finished with", for the counts beside each heading
   const done=r=>r.status==='completed'||r.status==='claimed';
-  // On your own list a claimed request is not finished, only spoken for. It
-  // stays in front of you, where it can be read and taken on anyway — being
-  // second to answer is not a reason to be shut out of what was asked. On the
-  // asker's list it belongs with the closed ones: that ask is being dealt with.
-  const doneForMe=r=>r.status==='completed';
-  const keep=r=>requestFilter==='completed'?done(r):!done(r);
-  const keepMine=r=>requestFilter==='completed'?doneForMe(r):!doneForMe(r);
-  const inRows=requestInbox.filter(keepMine), outRows=requestOutbox.filter(keep);
+  // and the filter is now simply the status itself, on all three lists
+  const keep=r=>requestFilter.has(r.status);
+  const inRows=requestInbox.filter(keep), outRows=requestOutbox.filter(keep);
   const open=openInbox();
   document.getElementById('requestInboxCount').textContent=open.length?`· ${open.length} open`:'';
   document.getElementById('requestOutboxCount').textContent=
     requestOutbox.length?`· ${requestOutbox.filter(r=>!done(r)).length} open`:'';
-  document.getElementById('requestPurgeNote').hidden=requestFilter!=='completed';
+  // only worth saying while finished ones are what is being looked at
+  document.getElementById('requestPurgeNote').hidden=!requestFilter.has('completed');
 
-  const empty=requestFilter==='completed'?'— nothing finished yet —':'— nothing right now —';
+  // Which of the four is being shown is on the Filter button, so an empty list
+  // says the plain thing rather than guessing at which filter did it.
+  const empty='— nothing here —';
   inbox.innerHTML=inRows.length
     ? inRows.map(r=>requestCard(r,true)).join('')
     : `<p class="hint" style="margin:4px 0 0;">${empty}</p>`;
   outbox.innerHTML=outRows.length
     ? outRows.map(r=>requestCard(r,false)).join('')
-    : `<p class="hint" style="margin:4px 0 0;">${requestFilter==='completed'?'— nothing finished yet —':'— nothing yet —'}</p>`;
+    : `<p class="hint" style="margin:4px 0 0;">${empty}</p>`;
   if(requestAll){
     const otherRows=requestOthers.filter(keep);
     document.getElementById('requestOthersCount').textContent=
-      requestOthers.length?`· ${requestOthers.filter(r=>!done(r)).length} open`:'';
+      requestOthers.length?'· '+requestTally(requestOthers):'';
     document.getElementById('requestOthers').innerHTML=otherRows.length
       ? otherRows.map(r=>requestCard(r,false,true)).join('')
       : `<p class="hint" style="margin:4px 0 0;">${empty}</p>`;
@@ -12682,6 +12695,13 @@ function renderRequests(){
   // same way a pickup's remarks box is
   setTimeout(()=>inbox.querySelectorAll('[data-req-remarks]').forEach(growNote),0);
 }
+// How the whole team's asks stand, in one line: only the statuses actually
+// there, so a quiet day says "4 completed" rather than three zeroes.
+const TALLY=[['pending','pending'],['acknowledged','acknowledged'],
+             ['claimed','taken'],['completed','completed']];
+const requestTally=rows=>TALLY
+  .map(([st,word])=>[rows.filter(r=>r.status===st).length,word])
+  .filter(([n])=>n).map(([n,word])=>`${n} ${word}`).join(' · ');
 // Open and Completed moved into the shared Filter sheet at the foot of this file
 // The person who asked may withdraw their own, which is the ordinary case and
 // the only one most accounts ever see. An admin may remove anybody's, from any
@@ -12955,7 +12975,9 @@ function nextRequestAlert(){
   // request comes from a colleague, not from a system. Who it is actually from
   // is on the line underneath, where it can be checked.
   document.getElementById('requestHello').textContent=
-    `Hello ${myName()}, I need your help!`;
+    r.requester_id===myUserId
+      ? `${myName()}, you asked yourself for this.`
+      : `Hello ${myName()}, I need your help!`;
   const t=document.getElementById('requestSheetTitle');
   t.textContent=r.title||'Request';
   t.classList.toggle('req-urgent-title',!!r.urgent);
@@ -16923,9 +16945,10 @@ const FILTERS={
   adhoc:{title:'Show pick lists',
     opts:[['pending','Pending'],['completed','History']],
     get:()=>adhocFilter, set:s=>{ adhocFilter=s; syncAdhocChips(); }},
-  request:{title:'Show requests', single:true,
-    opts:[['open','Open'],['completed','Completed']],
-    get:()=>requestFilter, set:v=>{ requestFilter=v; syncRequestChips(); }},
+  request:{title:'Show requests', chips:true,
+    opts:[['pending','Pending'],['acknowledged','Acknowledged'],
+          ['completed','Completed'],['claimed','Taken']],
+    get:()=>requestFilter, set:s=>{ requestFilter=s; syncRequestChips(); }},
 };
 // The button says what it is currently doing, because a filter you cannot see
 // the state of is how a list ends up looking empty for no reason. One status

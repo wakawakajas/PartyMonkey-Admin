@@ -303,8 +303,12 @@ Deno.serve(async (req) => {
            .eq("user_id", user.id).maybeSingle()).data?.is_admin === true;
       if (!admin) return json({ error: "not yours to send" }, 403);
     }
-    // nobody needs telling about their own tap
-    if (target === user.id) return json({ sent: 0, note: "that is you" });
+    // Nobody needs telling they cancelled something themselves — an admin
+    // deleting a request that was addressed to them is the case. A request
+    // sent to yourself is not that: the sending device is skipped by
+    // body.from, and the phone in the other pocket is the whole point of it.
+    if (kind === "cancelled" && target === user.id)
+      return json({ sent: 0, note: "that is you" });
 
     let out;
     try {
