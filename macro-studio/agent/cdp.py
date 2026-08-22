@@ -728,6 +728,97 @@ PAPER_SIZES = {
 }
 
 
+def wait_loaded(page: dict, quiet_ms: int = 800, timeout_ms: int = 30000,
+                min_ms: int = 0) -> dict:
+    """Waits for the page to stop loading, not merely to exist.
+
+    readyState alone answers "did the HTML arrive", which for anything that
+    assembles itself from XHR is the wrong question -- a print view is
+    "complete" while its table is still empty. So this also watches the
+    resource list and waits for it to stop growing for a quiet stretch,
+    which is what a person means by "wait for it to finish".
+
+    Quiet has one blind spot it cannot reason its way out of: a page that
+    has not started yet looks exactly like one that has finished. If the
+    content arrives on a timer rather than a request, set `min_ms` to hold
+    for at least that long first -- or better, wait for the content itself
+    with a wait-for step, which is the only check that knows the
+    difference."""
+    args = json.dumps({"quiet": max(100, quiet_ms), "timeout": max(500, timeout_ms),
+                       "min": max(0, min_ms)})
+    result = evaluate(page, _js(
+        "const a = " + args + ";"
+        "const started = Date.now();"
+        # Resources alone miss content that arrives on a timer -- a print
+        # view that swaps "Loading..." for its table fetches nothing. So
+        # watch the DOM as well and call it settled only when both have
+        # been still for the quiet stretch.
+        "let mutations = 0;"
+        "const observer = new MutationObserver((records) => { mutations += records.length; });"
+        "observer.observe(document.documentElement, { childList: true, subtree: true,"
+        "                                             characterData: true, attributes: true });"
+        "let count = -1, seenMutations = -1, since = Date.now();"
+        "try {"
+        "  while (Date.now() - started < a.timeout) {"
+        "    const now = performance.getEntriesByType('resource').length;"
+        "    if (now !== count || mutations !== seenMutations) {"
+        "      count = now; seenMutations = mutations; since = Date.now();"
+        "    }"
+        "    const held = Date.now() - started >= a.min;"
+        "    if (held && document.readyState === 'complete' && Date.now() - since >= a.quiet) {"
+        "      return { ok: true, resources: now, mutations: mutations, waited: Date.now() - started };"
+        "    }"
+        "    await new Promise((r) => setTimeout(r, 150));"
+        "  }"
+        "  return { ok: false, resources: count, waited: Date.now() - started,"
+        "           state: document.readyState };"
+        "} finally { observer.disconnect(); }"
+    ), timeout=max(_WS_TIMEOUT, timeout_ms / 1000.0 + 10))
+    if not result or not result.get("ok"):
+        state = (result or {}).get("state", "unknown")
+        raise RuntimeError(
+            f"The page was still loading after {timeout_ms}ms (readyState {state}). "
+            "Give it a longer timeout, or wait for something on it instead."
+        )
+    return result
+
+
+def is_pdf_document(page: dict) -> bool:
+    """Chrome shows a PDF inside a viewer of its own. Printing that tab
+    prints the viewer, which is not the document anyone wanted."""
+    url = str(page.get("url", "")).lower().split("?")[0]
+    if url.endswith(".pdf"):
+        return True
+    try:
+        return bool(evaluate(page, "document.contentType === 'application/pdf'", timeout=5))
+    except RuntimeError:
+        return False
+
+
+def save_pdf_document(page: dict, output_path: str, timeout: float = 120.0) -> str:
+    """Downloads the PDF a tab is displaying, bytes intact.
+
+    Fetched from inside the page so it carries the session that was allowed
+    to open it in the first place -- a login-gated report fetched any other
+    way comes back as a login page."""
+    data = evaluate(page, _js(
+        "const res = await fetch(location.href, { credentials: 'include' });"
+        "if (!res.ok) return { ok: false, status: res.status };"
+        "const buf = new Uint8Array(await res.arrayBuffer());"
+        "let bin = '';"
+        "for (let i = 0; i < buf.length; i += 8192) {"
+        "  bin += String.fromCharCode.apply(null, buf.subarray(i, i + 8192));"
+        "}"
+        "return { ok: true, b64: btoa(bin), bytes: buf.length };"
+    ), timeout=timeout)
+    if not data or not data.get("ok"):
+        raise RuntimeError(f"Couldn't download that PDF (HTTP {(data or {}).get('status', '?')}).")
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(base64.b64decode(data["b64"]))
+    return str(target)
+
+
 def print_to_pdf(page: dict, output_path: str, landscape: bool = False, paper: str = "A4",
                  scale: float = 1.0, background: bool = True, margin_inches: float = 0.4,
                  timeout: float = 90.0) -> str:
@@ -740,6 +831,9 @@ def print_to_pdf(page: dict, output_path: str, landscape: bool = False, paper: s
     pick a folder" becomes arguments instead of five clicks nobody can
     automate. It also means the file lands where the macro says rather
     than wherever the last download went."""
+    if is_pdf_document(page):
+        return save_pdf_document(page, output_path)
+
     width, height = PAPER_SIZES.get(str(paper), PAPER_SIZES["A4"])
     margin = max(0.0, float(margin_inches))
     params = {

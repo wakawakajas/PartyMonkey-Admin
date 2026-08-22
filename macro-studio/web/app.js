@@ -124,6 +124,7 @@ function typeLabel(type) {
     web_hover: "Web: hover",
     web_wait_for: "Web: wait for", web_type: "Web: type", web_read: "Web: read",
     web_print_pdf: "Web: save PDF", web_switch_tab: "Web: follow tab", web_close_tab: "Web: close tab",
+    web_wait_loaded: "Web: wait until loaded",
   };
   return labels[type] || type;
 }
@@ -814,6 +815,10 @@ const STEP_TEMPLATES = {
     label: "Web: close tab",
     make: () => ({ type: "web_close_tab", port: 9222, tab_match: "", timeout_ms: 8000, delay_ms: 0 }),
   },
+  web_wait_loaded: {
+    label: "Web: wait until loaded",
+    make: () => ({ type: "web_wait_loaded", port: 9222, tab_match: "", quiet_ms: 800, min_ms: 0, timeout_ms: 30000, delay_ms: 0 }),
+  },
   web_print_pdf: {
     label: "Web: save page as PDF",
     make: () => ({ type: "web_print_pdf", port: 9222, tab_match: "",
@@ -866,7 +871,8 @@ const STEP_HELP = {
   web_type: "Types a value into a form field, optionally pressing Enter after.",
   web_switch_tab: "Waits for a tab that opened because of the previous step, and points the rest of the macro at it. Put it after a click that opens a PDF or a print preview.",
   web_close_tab: "Closes the tab the macro is on and hands the run back to the previous one.",
-  web_print_pdf: "Saves the page as a PDF straight to a folder you name, portrait or landscape. Replaces Ctrl+P entirely -- Chrome's print dialog is browser UI that no click can reach.",
+  web_wait_loaded: "Waits until the page stops changing -- document finished, nothing fetched and no DOM edits for a quiet stretch. A page that hasn't started looks the same as one that finished, so set \"wait at least\" for content on a timer, or use Web: wait for on the content itself.",
+  web_print_pdf: "Saves the page as a PDF straight to a folder you name, portrait or landscape. Replaces Ctrl+P entirely. If the tab is already a PDF, the real file is downloaded instead of a picture of Chrome's viewer.",
   web_read: "Reads text off the page into a variable, and prints it in the run report.",
 };
 
@@ -1198,6 +1204,12 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("CSS selector", editorInput("text", step.selector, (v) => (step.selector = v), "160px"));
     addField("value", editorInput("text", step.value, (v) => (step.value = v), "140px"));
     addField("press Enter after", editorCheckbox(step.submit, (v) => (step.submit = v)));
+  } else if (step.type === "web_wait_loaded") {
+    addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
+    addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));
+    addField("quiet for (ms)", editorInput("number", step.quiet_ms, (v) => (step.quiet_ms = v), "80px"));
+    addField("wait at least (ms)", editorInput("number", step.min_ms, (v) => (step.min_ms = v), "80px"));
+    addField("timeout (ms)", editorInput("number", step.timeout_ms, (v) => (step.timeout_ms = v), "80px"));
   } else if (step.type === "web_switch_tab") {
     addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
     addField("which", editorSelect(step.mode || "new", ["new", "match"], (v) => (step.mode = v)));

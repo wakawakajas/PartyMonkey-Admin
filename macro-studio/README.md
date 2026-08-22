@@ -165,6 +165,19 @@ The path takes the same tokens as everything else, including the bare form
 `{{DD.MM}}`, so
 `C:\Orders\Picklist {{date:DD-MM-YYYY}}.pdf` names itself.
 
+**Web: wait until loaded** goes before it for a page that assembles itself: it
+waits for the document to finish, then for nothing to be fetched and nothing in
+the DOM to change for a quiet stretch. Quiet has one blind spot it cannot reason
+its way out of -- a page that has not started looks exactly like one that has
+finished -- so there is a "wait at least" for content that arrives on a timer. The
+check that actually knows the difference is **Web: wait for** on the content
+itself, and it is the better habit.
+
+If the tab is already a PDF rather than a printable page, the step downloads the
+real file instead, fetched from inside the page so it carries the session that was
+allowed to open it. Printing that tab would otherwise capture Chrome's PDF viewer,
+which is not the document anyone wanted.
+
 What comes out is whatever the page prints. An app screen that renders nothing
 under print CSS produces a blank PDF -- correctly, and silently. Point the step at
 the print-preview tab a site opens for that purpose, not at the list you clicked

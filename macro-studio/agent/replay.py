@@ -428,7 +428,8 @@ class ReplayEngine:
                 outcome = self._run_read_control_value(step, context)
             elif step_type in ("cdp_launch", "web_goto", "web_click", "web_hover",
                                "web_wait_for", "web_type", "web_read", "web_print_pdf",
-                               "web_switch_tab", "web_close_tab", "cdp_close"):
+                               "web_switch_tab", "web_close_tab", "cdp_close",
+                               "web_wait_loaded"):
                 outcome = self._run_web_step(step_type, step, context)
             else:
                 outcome = {"status": "skipped", "tier": None, "reason": f"Unknown step type '{step_type}'."}
@@ -674,8 +675,18 @@ class ReplayEngine:
                 if store_as:
                     context["variables"][store_as] = saved
                 layout = "landscape" if step.get("landscape") else "portrait"
+                if str(saved).lower().endswith(".pdf") and cdp.is_pdf_document(page):
+                    return {"status": "success", "tier": "cdp",
+                            "reason": f'That tab was already a PDF -- saved it as-is to "{saved}".'}
                 return {"status": "success", "tier": "cdp",
                         "reason": f'Saved {layout} PDF to "{saved}".'}
+
+            if step_type == "web_wait_loaded":
+                info = cdp.through_navigation(port, page, timeout_ms or 30000, lambda p: cdp.wait_loaded(
+                    p, quiet_ms=int(step.get("quiet_ms") or 800), timeout_ms=timeout_ms or 30000,
+                    min_ms=int(step.get("min_ms") or 0)))
+                return {"status": "success", "tier": "cdp",
+                        "reason": f'Page settled after {info.get("waited")}ms ({info.get("resources")} resources).'}
 
             if step_type == "web_hover":
                 result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.hover(
