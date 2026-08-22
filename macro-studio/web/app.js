@@ -740,7 +740,7 @@ const STEP_TEMPLATES = {
   open_url: { label: "Open URL in Chrome", make: () => ({ type: "open_url", url: "https://", new_window: false, delay_ms: 0 }) },
   file_search: {
     label: "File Explorer search",
-    make: () => ({ type: "file_search", folder: "", pattern: "*", recursive: false, store_as: "matches", delay_ms: 0 }),
+    make: () => ({ type: "file_search", folder: "", pattern: "*", recursive: false, newest_first: true, limit: 1, store_as: "file", delay_ms: 0 }),
   },
   file_op: {
     label: "File operation",
@@ -806,8 +806,8 @@ const STEP_HELP = {
   wait_for_text: "Waits until a desktop control's text matches what you expect.",
   find_click_text: "Clicks a desktop app control by its visible label instead of coordinates.",
   open_url: "Opens a page in your normal Chrome. Nothing after it can click inside that page -- use the Web steps for that.",
-  file_search: "Lists files in a folder matching a pattern, saved as a variable.",
-  file_op: "Copies, moves, renames, or deletes one file.",
+  file_search: "Finds files in a folder and saves the paths as a variable. Newest first + keep 1 = the file that just downloaded.",
+  file_op: "Copies, moves, renames, or deletes one file. Destination accepts {{file}} and {{date:DD-MM-YYYY}}.",
   clipboard: "Writes text to the clipboard, or reads it into a variable.",
   get_cursor_position: "Saves where the mouse currently is, as a variable.",
   read_control_value: "Reads a desktop control's value into a variable.",
@@ -1152,6 +1152,8 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("folder", editorInput("text", step.folder, (v) => (step.folder = v), "160px"));
     addField("pattern", editorInput("text", step.pattern, (v) => (step.pattern = v), "80px"));
     addField("recursive", editorCheckbox(step.recursive, (v) => (step.recursive = v)));
+    addField("newest first", editorCheckbox(step.newest_first, (v) => (step.newest_first = v)));
+    addField("keep", editorInput("number", step.limit, (v) => (step.limit = v), "60px"));
     addField("store as", editorInput("text", step.store_as, (v) => (step.store_as = v), "80px"));
   } else if (step.type === "file_op") {
     addField("operation", editorSelect(step.operation, ["copy", "move", "rename", "delete"], (v) => (step.operation = v)));

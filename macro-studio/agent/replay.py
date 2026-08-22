@@ -672,7 +672,12 @@ class ReplayEngine:
         folder = actions.substitute(step.get("folder", ""), context["variables"])
         pattern = actions.substitute(step.get("pattern", "*"), context["variables"])
         try:
-            matches = actions.search_files(folder, pattern, recursive=bool(step.get("recursive")))
+            matches = actions.search_files(
+                folder, pattern,
+                recursive=bool(step.get("recursive")),
+                limit=max(0, int(step.get("limit") or 500)),
+                newest_first=bool(step.get("newest_first")),
+            )
         except RuntimeError as exc:
             return {"status": "failed", "tier": None, "reason": str(exc)}
         store_as = step.get("store_as")
