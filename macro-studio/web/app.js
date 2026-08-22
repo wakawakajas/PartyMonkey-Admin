@@ -823,7 +823,7 @@ const STEP_TEMPLATES = {
     label: "Web: save page as PDF",
     make: () => ({ type: "web_print_pdf", port: 9222, tab_match: "",
                    destination: "C:\Users\Admin\Downloads\Page {{date:DD-MM-YYYY}}.pdf",
-                   landscape: false, paper: "A4", scale: 1, background: true,
+                   landscape: false, paper: "A4", scale: 1, background: false,
                    margin_inches: 0.4, store_as: "pdf", timeout_ms: 60000, delay_ms: 0 }),
   },
   web_read: {
@@ -1226,7 +1226,7 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("paper", editorSelect(step.paper || "A4", ["A4", "A3", "A5", "Letter", "Legal", "Tabloid"], (v) => (step.paper = v)));
     addField("scale", editorInput("number", step.scale, (v) => (step.scale = v), "60px"));
     addField("margins (in)", editorInput("number", step.margin_inches, (v) => (step.margin_inches = v), "70px"));
-    addField("backgrounds", editorCheckbox(step.background, (v) => (step.background = v)));
+    addField("backgrounds (off = white paper)", editorCheckbox(step.background, (v) => (step.background = v)));
     addField("store as", editorInput("text", step.store_as, (v) => (step.store_as = v), "80px"));
   } else if (step.type === "web_read") {
     addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));

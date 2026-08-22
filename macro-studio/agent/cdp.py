@@ -820,7 +820,7 @@ def save_pdf_document(page: dict, output_path: str, timeout: float = 120.0) -> s
 
 
 def print_to_pdf(page: dict, output_path: str, landscape: bool = False, paper: str = "A4",
-                 scale: float = 1.0, background: bool = True, margin_inches: float = 0.4,
+                 scale: float = 1.0, background: bool = False, margin_inches: float = 0.4,
                  timeout: float = 90.0) -> str:
     """Saves the page as a PDF, straight to a path we choose.
 
@@ -830,7 +830,13 @@ def print_to_pdf(page: dict, output_path: str, landscape: bool = False, paper: s
     uses, minus the dialog, so "print, save as PDF, switch to landscape,
     pick a folder" becomes arguments instead of five clicks nobody can
     automate. It also means the file lands where the macro says rather
-    than wherever the last download went."""
+    than wherever the last download went.
+
+    `background` is off by default, matching the tick Chrome's own dialog
+    leaves clear. An app screen usually paints its page grey; with
+    backgrounds on, every inch of paper the content doesn't cover comes out
+    as a grey slab. Images and inline colour print either way -- this only
+    governs CSS backgrounds."""
     if is_pdf_document(page):
         return save_pdf_document(page, output_path)
 

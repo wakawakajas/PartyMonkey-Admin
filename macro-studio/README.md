@@ -177,6 +177,11 @@ The path takes the same tokens as everything else, including the bare form
 `{{DD.MM}}`, so
 `C:\Orders\Picklist {{date:DD-MM-YYYY}}.pdf` names itself.
 
+Backgrounds are off by default, the same tick Chrome's own dialog leaves clear. An
+app screen paints its page a colour; with backgrounds on, every inch of paper the
+content doesn't cover comes out as a slab of it. Images and inline colour print
+either way -- the setting only governs CSS backgrounds.
+
 **Web: wait until loaded** goes before it for a page that assembles itself: it
 waits for the document to finish, then for nothing to be fetched and nothing in
 the DOM to change for a quiet stretch. Quiet has one blind spot it cannot reason
