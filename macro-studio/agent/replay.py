@@ -593,7 +593,7 @@ class ReplayEngine:
                 # A window the user minimised can't render, and a page that
                 # can't render can't open a menu. Park it off-screen instead,
                 # which is just as out of the way and still alive.
-                parked = cdp.park_offscreen(port)
+                parked = cdp.park_offscreen(port, only_minimized=True)
                 if parked:
                     message += f" Un-minimised {parked} window(s) -- parked off-screen so they keep rendering."
                 return {"status": "success", "tier": "cdp", "reason": message}

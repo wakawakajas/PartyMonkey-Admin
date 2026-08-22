@@ -247,7 +247,8 @@ def cdp_hide(body: CdpLaunchRequest) -> JSONResponse:
     except RuntimeError as exc:
         return JSONResponse(status_code=502, content={"error": "cdp_hide_failed", "detail": str(exc)})
     return JSONResponse(content={"detail": f"Parked {moved} window(s) off-screen." if moved
-                                 else "Nothing was minimised; use Show to bring windows back.", "port": body.port})
+                                 else "Nothing to park -- no debugging browser is open, or it's parked already.",
+                                 "port": body.port})
 
 
 @app.post("/api/cdp/show")
@@ -257,7 +258,8 @@ def cdp_show(body: CdpLaunchRequest) -> JSONResponse:
     except RuntimeError as exc:
         return JSONResponse(status_code=502, content={"error": "cdp_show_failed", "detail": str(exc)})
     return JSONResponse(content={"detail": f"Brought {shown} window(s) back on screen." if shown
-                                 else "Those windows are already on screen.", "port": body.port})
+                                 else "Nothing to bring back -- no debugging browser is open, or it's on screen already.",
+                                 "port": body.port})
 
 
 class WebRecordingRequest(BaseModel):

@@ -168,14 +168,19 @@ def browser_window_handles(port: int = DEFAULT_PORT) -> list:
     return handles
 
 
-def park_offscreen(port: int = DEFAULT_PORT) -> int:
+def park_offscreen(port: int = DEFAULT_PORT, only_minimized: bool = False) -> int:
     """Un-minimises the browser's windows and parks them off the desktop.
 
     Minimised is the one state a macro cannot work in: Chrome marks the
     page hidden, rAF stops, and menus that mount through it never open --
     which reads as "the macro only works when I'm watching it". Off-screen
     keeps the window rendering in every sense that matters while staying
-    just as far out of the way. Returns how many windows were moved."""
+    just as far out of the way. Returns how many windows were moved.
+
+    `only_minimized` is for the automatic pass at the start of a run: get
+    the unusable state out of the way, but don't yank a window off-screen
+    that the user deliberately left where they could watch it. The button
+    parks everything, because that's what pressing it asks for."""
     from agent import winapi
 
     # Done through Win32 rather than Browser.setWindowBounds: a plain
@@ -184,9 +189,13 @@ def park_offscreen(port: int = DEFAULT_PORT) -> int:
     # entirely, so parking it would silently do nothing.
     moved = 0
     for hwnd in browser_window_handles(port):
-        if not winapi.is_minimized(hwnd):
+        minimized = winapi.is_minimized(hwnd)
+        if only_minimized and not minimized:
             continue
-        winapi.restore_without_focus(hwnd)
+        if not minimized and winapi.window_rect(hwnd)[0] <= -1000:
+            continue  # already parked
+        if minimized:
+            winapi.restore_without_focus(hwnd)
         winapi.move_window(hwnd, OFFSCREEN_LEFT, 0, 1400, 950, to_back=True)
         moved += 1
     return moved
