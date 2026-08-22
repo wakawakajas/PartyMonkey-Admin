@@ -223,6 +223,21 @@ under print CSS produces a blank PDF -- correctly, and silently. Point the step 
 the print-preview tab a site opens for that purpose, not at the list you clicked
 Print from, and check the file the first time.
 
+## Sharing a macro
+
+Macros are JSON files under `macros/`; copying one to someone else's
+`macro-studio/macros/` folder is the whole install. They keep their id, so a
+later version of the same macro overwrites rather than duplicating.
+
+Two things don't travel with the file. A path under one person's user folder is
+a fact about one machine, so write `%USERPROFILE%\Desktop\...` instead -- Windows
+environment variables are expanded in every folder and file field. And the CDP
+profile starts signed out on each machine: whoever runs it signs in once.
+
+Don't copy `.venv/` when handing the folder over. A virtualenv records absolute
+paths to the interpreter that made it and breaks quietly elsewhere; `start.bat`
+builds a fresh one in a few seconds.
+
 ## Naming a file after today
 
 Any text field takes `{{variable}}`, and `{{date}}`, `{{time}}` and `{{now}}` are

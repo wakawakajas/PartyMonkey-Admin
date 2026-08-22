@@ -109,6 +109,19 @@ def substitute(value, variables: dict):
     return VAR_PATTERN.sub(_sub, value)
 
 
+def expand_path(value):
+    """Expands %USERPROFILE% and friends in a path.
+
+    A macro's folders are the one part that can't survive being handed
+    to a colleague: a path under one person's user folder is a fact about
+    one machine. Writing %USERPROFILE% instead makes the same macro file
+    work on any of them, which matters because macros are shared by
+    copying the JSON."""
+    if not isinstance(value, str) or "%" not in value:
+        return value
+    return os.path.expandvars(value)
+
+
 # -- Chrome ------------------------------------------------------------------
 _CHROME_CANDIDATES = [
     r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",

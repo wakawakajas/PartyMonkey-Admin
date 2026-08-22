@@ -585,7 +585,7 @@ class ReplayEngine:
             if step_type == "cdp_launch":
                 message = cdp.launch(
                     port=port,
-                    user_data_dir=sub("user_data_dir"),
+                    user_data_dir=actions.expand_path(sub("user_data_dir")),
                     url=sub("url"),
                     wait_seconds=min(max(1, int(step.get("timeout_ms", 20000))) / 1000.0, 60.0),
                 )
@@ -676,7 +676,7 @@ class ReplayEngine:
                         "reason": f'{verb} <{result.get("tag")}> "{label}".'}
 
             if step_type == "web_print_pdf":
-                destination = sub("destination")
+                destination = actions.expand_path(sub("destination"))
                 if not destination:
                     return {"status": "failed", "tier": None,
                             "reason": "No file path given to save the PDF as."}
@@ -762,7 +762,7 @@ class ReplayEngine:
             return {"status": "failed", "tier": None, "reason": str(exc)}
 
     def _run_file_search(self, step: dict, context: dict) -> dict:
-        folder = actions.substitute(step.get("folder", ""), context["variables"])
+        folder = actions.expand_path(actions.substitute(step.get("folder", ""), context["variables"]))
         pattern = actions.substitute(step.get("pattern", "*"), context["variables"])
         try:
             matches = actions.search_files(
@@ -779,9 +779,9 @@ class ReplayEngine:
         return {"status": "success", "tier": None, "reason": f"Found {len(matches)} match(es)."}
 
     def _run_file_op(self, step: dict, context: dict) -> dict:
-        source = actions.substitute(step.get("source", ""), context["variables"])
+        source = actions.expand_path(actions.substitute(step.get("source", ""), context["variables"]))
         destination = step.get("destination")
-        destination = actions.substitute(destination, context["variables"]) if destination else None
+        destination = actions.expand_path(actions.substitute(destination, context["variables"])) if destination else None
         try:
             message = actions.file_op(step.get("operation", ""), source, destination, overwrite=bool(step.get("overwrite")))
             return {"status": "success", "tier": None, "reason": message}
