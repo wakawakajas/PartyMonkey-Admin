@@ -5156,44 +5156,49 @@ document.getElementById('goToBundleSkuBtn').addEventListener('click',()=>showScr
 // picture and its link, and then the numbered pairs, wherever they sit and in
 // whatever order.
 const BUNDLE_MAX_SUBS=50;
-// what each heading is called, allowing for the wording drifting a little
+// A heading that reads as "Single SKU 1" on screen is not always that string:
+// exports carry non-breaking spaces, zero-width joiners, stray punctuation and
+// trailing blanks, none of which show up in a spreadsheet and all of which
+// stop a match dead. Everything that is not a letter or a digit is flattened
+// to one space before any of these are tried.
+function bundleHead(raw){
+  return String(raw==null?'':raw).replace(/[^a-z0-9]+/gi,' ').trim().toLowerCase();
+}
 const BUNDLE_HEAD={
-  name:/^sku\s*name$/i,
-  image:/^sku\s*image$/i,
-  url:/^image\s*url$/i
+  name:/^sku name$/,
+  image:/^sku image$/,
+  url:/^image url$/
 };
-// "Single SKU 7" and "SKU 7 qty" / "Single SKU 7 qty" -- the number is what
+// "Single SKU 7" and "SKU 7 Qty" / "Single SKU 7 Qty" -- the number is what
 // pairs a name with its quantity, not the distance between their columns
-const BUNDLE_SUB_HEAD=/^single\s*sku\s*(\d+)$/i;
-const BUNDLE_SUB_QTY_HEAD=/^(?:single\s*)?sku\s*(\d+)\s*qty$/i;
+const BUNDLE_SUB_HEAD=/^(?:single )?sku (\d+)$/;
+const BUNDLE_SUB_QTY_HEAD=/^(?:single )?sku (\d+) (?:qty|quantity)(?: .*)?$/;
 
 // Reads the header row into column numbers. Anything unrecognised is left
 // alone rather than guessed at.
 function bundleColumns(head){
   const col={subs:new Map()};
+  const slot=n=>{ if(!col.subs.has(n)) col.subs.set(n,{}); return col.subs.get(n); };
   head.forEach((raw,i)=>{
-    const h=String(raw==null?'':raw).trim();
+    const h=bundleHead(raw);
     if(!h) return;
-    for(const k of Object.keys(BUNDLE_HEAD))
-      if(col[k]===undefined&&BUNDLE_HEAD[k].test(h)) col[k]=i;
-    let m=h.match(BUNDLE_SUB_HEAD);
-    if(m){
+    let m=h.match(BUNDLE_SUB_QTY_HEAD);          // qty first: "sku 1 qty" is
+    if(m){                                       // also a "sku 1 ..." heading
       const n=Number(m[1]);
-      if(n>=1&&n<=BUNDLE_MAX_SUBS){
-        if(!col.subs.has(n)) col.subs.set(n,{});
-        col.subs.get(n).sku=i;
-      }
+      if(n>=1&&n<=BUNDLE_MAX_SUBS&&slot(n).qty===undefined) slot(n).qty=i;
       return;
     }
-    m=h.match(BUNDLE_SUB_QTY_HEAD);
+    m=h.match(BUNDLE_SUB_HEAD);
     if(m){
       const n=Number(m[1]);
-      if(n>=1&&n<=BUNDLE_MAX_SUBS){
-        if(!col.subs.has(n)) col.subs.set(n,{});
-        col.subs.get(n).qty=i;
-      }
+      if(n>=1&&n<=BUNDLE_MAX_SUBS&&slot(n).sku===undefined) slot(n).sku=i;
+      return;
     }
+    for(const k of Object.keys(BUNDLE_HEAD))
+      if(col[k]===undefined&&BUNDLE_HEAD[k].test(h)) col[k]=i;
   });
+  // a slot with a quantity and no name is not a sub-SKU at all
+  [...col.subs.keys()].forEach(n=>{ if(col.subs.get(n).sku===undefined) col.subs.delete(n); });
   return col;
 }
 
@@ -5335,7 +5340,7 @@ document.getElementById('bundleCheckBtn').addEventListener('click',()=>{
         if(pair.sku!==undefined) role.set(pair.sku,`sub-SKU ${n}`);
         if(pair.qty!==undefined) role.set(pair.qty,`sub-SKU ${n} qty`);
       });
-      const rows=head.map((h,i)=>({i,h,used:role.get(i)||'',
+      const rows=head.map((h,i)=>({i,h:bundleHead(h)||h,used:role.get(i)||'',
         val:String(first[i]==null?'':first[i]).trim()}))
         .filter(r=>r.h||r.used||r.val);
       const cut=v=>v.length>60?v.slice(0,60)+'\u2026':v;
