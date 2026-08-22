@@ -80,6 +80,9 @@ itself uses, no API key, no per-run cost, nothing leaving the machine.
 - A click or hover takes a "match #" when several things share the same
   selector or label -- 0 is the first, 1 the second, which is how you tick one
   row's checkbox out of a list of identical ones
+- A click can be a right-click (`button: right`), recorded and replayed the same
+  way. It reaches a site's own context menu, which is part of the page; Chrome's
+  grey menu is drawn by the browser and nothing can drive an entry in it
 - Clicks go through CDP's Input domain -- browser-level pointer events, not
   dispatched DOM events, so they carry `isTrusted` and settle hover state
   first. **Web: hover** exists for the same reason: a menu that opens on CSS

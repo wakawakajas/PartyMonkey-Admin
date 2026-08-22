@@ -610,13 +610,15 @@ class ReplayEngine:
             match_index = max(0, int(step.get("match_index") or 0))
 
             if step_type == "web_click":
+                button = str(step.get("button") or "left")
                 result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.click(
                     p, selector=sub("selector"), text=sub("text"),
                     exact=bool(step.get("exact")), timeout_ms=timeout_ms or 8000,
-                    match_index=match_index))
+                    match_index=match_index, button=button))
                 label = result.get("label") or sub("text") or sub("selector")
+                verb = "Right-clicked" if button.lower().startswith("r") else "Clicked"
                 return {"status": "success", "tier": "cdp",
-                        "reason": f'Clicked <{result.get("tag")}> "{label}".'}
+                        "reason": f'{verb} <{result.get("tag")}> "{label}".'}
 
             if step_type == "web_hover":
                 result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.hover(

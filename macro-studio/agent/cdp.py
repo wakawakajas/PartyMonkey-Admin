@@ -397,37 +397,58 @@ def hover(page: dict, selector: str = "", text: str = "", exact: bool = False,
 
 
 def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
-          timeout_ms: int = 8000, match_index: int = 0) -> dict:
+          timeout_ms: int = 8000, match_index: int = 0, button: str = "left") -> dict:
     """Clicks the best match, retrying until timeout -- a page still
     rendering is the normal case right after a navigation, not something
-    worth failing a run over."""
+    worth failing a run over.
+
+    `button` may be "right", which fires the page's own contextmenu
+    handling. Worth knowing what that does and doesn't reach: a site's
+    custom right-click menu is part of the page and works normally, while
+    Chrome's own grey menu (Save image as, Inspect) is drawn by the
+    browser, not the page, and nothing here can click an entry in it."""
     spot = _locate(page, selector, text, exact, timeout_ms, match_index)
     if not spot.get("hit"):
         # The point doesn't resolve back to the element -- something is
         # over it, or it is still moving. Dispatch on the node itself.
-        return _dispatch_click(page, selector, text, exact)
+        return _dispatch_click(page, selector, text, exact, button)
     try:
         # Browser-level input, not a dispatched DOM event: it carries
         # isTrusted, it moves the pointer first (so hover state settles
         # before the press), and sites that gate on either one behave the
         # way they do for a person. No OS cursor is involved.
-        common = {"x": spot["x"], "y": spot["y"], "button": "left", "clickCount": 1}
+        button = "right" if str(button).lower().startswith("r") else "left"
+        pressed = 2 if button == "right" else 1  # CDP's buttons bitmask
+        common = {"x": spot["x"], "y": spot["y"], "button": button, "clickCount": 1}
         _send(page, "Input.dispatchMouseEvent", {"type": "mouseMoved", "buttons": 0, **common})
-        _send(page, "Input.dispatchMouseEvent", {"type": "mousePressed", "buttons": 1, **common})
+        _send(page, "Input.dispatchMouseEvent", {"type": "mousePressed", "buttons": pressed, **common})
         _send(page, "Input.dispatchMouseEvent", {"type": "mouseReleased", "buttons": 0, **common})
+        spot["button"] = button
         return spot
     except RuntimeError:
         # Some pages tear down and rebuild between locate and press; the
         # DOM-event path doesn't depend on coordinates staying valid.
-        return _dispatch_click(page, selector, text, exact)
+        return _dispatch_click(page, selector, text, exact, button)
 
 
-def _dispatch_click(page: dict, selector: str, text: str, exact: bool) -> dict:
-    args = json.dumps({"selector": selector, "text": text, "exact": exact})
+def _dispatch_click(page: dict, selector: str, text: str, exact: bool,
+                    button: str = "left") -> dict:
+    args = json.dumps({"selector": selector, "text": text, "exact": exact,
+                       "right": str(button).lower().startswith("r")})
     result = evaluate(page, _js(
         "const a = " + args + ";"
         "const el = __ms.find(a.selector, a.text, a.exact)[0] || null;"
         "if (!el) return { ok: false };"
+        "if (a.right) {"
+        "  const r = el.getBoundingClientRect();"
+        "  const o = { bubbles: true, cancelable: true, button: 2, buttons: 2,"
+        "              clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, view: window };"
+        "  el.dispatchEvent(new MouseEvent('mousedown', o));"
+        "  el.dispatchEvent(new MouseEvent('mouseup', o));"
+        "  el.dispatchEvent(new MouseEvent('contextmenu', o));"
+        "  return { ok: true, tag: el.tagName.toLowerCase(), button: 'right',"
+        "           label: String(el.innerText || '').trim().slice(0, 60) };"
+        "}"
         # An anchor's own click() follows its href even when a dispatched
         # event chain doesn't, so prefer it when there is one.
         "if (el.tagName === 'A' && el.getAttribute('href')) {"

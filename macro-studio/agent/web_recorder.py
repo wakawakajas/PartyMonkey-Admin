@@ -125,7 +125,7 @@ _LISTENER_JS = r"""
     return triggerFromTrail(el, panel);
   };
 
-  document.addEventListener("click", (event) => {
+  const capture = (event, button) => {
     const el = event.target instanceof Element ? event.target : null;
     if (!el) return;
     // The clickable thing is usually an ancestor of whatever the pointer
@@ -137,10 +137,17 @@ _LISTENER_JS = r"""
       tag: target.tagName.toLowerCase(),
       href: target.getAttribute ? target.getAttribute("href") : null,
       opener: menuOpenerFor(target),
+      button: button,
       url: location.href,
       at: Date.now(),
     });
-  }, true);
+  };
+
+  document.addEventListener("click", (event) => capture(event, "left"), true);
+  // Right-click arrives as contextmenu, not click. Chrome's own grey menu
+  // opens too and nothing can drive that -- but a page with its own
+  // right-click menu is just a page, and replays fine.
+  document.addEventListener("contextmenu", (event) => capture(event, "right"), true);
   return "installed";
 })()
 """
@@ -277,6 +284,7 @@ class WebRecorder:
             selector=entry.get("selector", ""),
             text=text if keep_text else "",
             exact=keep_text,
+            button=entry.get("button", "left"),
             timeout_ms=10000,
             delay_ms=gap_ms,
         ))
