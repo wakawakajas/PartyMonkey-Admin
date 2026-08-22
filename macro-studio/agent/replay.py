@@ -427,7 +427,7 @@ class ReplayEngine:
             elif step_type == "read_control_value":
                 outcome = self._run_read_control_value(step, context)
             elif step_type in ("cdp_launch", "web_goto", "web_click", "web_hover",
-                               "web_wait_for", "web_type", "web_read"):
+                               "web_wait_for", "web_type", "web_read", "web_print_pdf"):
                 outcome = self._run_web_step(step_type, step, context)
             else:
                 outcome = {"status": "skipped", "tier": None, "reason": f"Unknown step type '{step_type}'."}
@@ -619,6 +619,26 @@ class ReplayEngine:
                 verb = "Right-clicked" if button.lower().startswith("r") else "Clicked"
                 return {"status": "success", "tier": "cdp",
                         "reason": f'{verb} <{result.get("tag")}> "{label}".'}
+
+            if step_type == "web_print_pdf":
+                destination = sub("destination")
+                if not destination:
+                    return {"status": "failed", "tier": None,
+                            "reason": "No file path given to save the PDF as."}
+                saved = cdp.through_navigation(port, page, timeout_ms or 10000, lambda p: cdp.print_to_pdf(
+                    p, destination,
+                    landscape=bool(step.get("landscape")),
+                    paper=step.get("paper") or "A4",
+                    scale=step.get("scale") or 1.0,
+                    background=step.get("background", True),
+                    margin_inches=step.get("margin_inches", 0.4),
+                ))
+                store_as = step.get("store_as")
+                if store_as:
+                    context["variables"][store_as] = saved
+                layout = "landscape" if step.get("landscape") else "portrait"
+                return {"status": "success", "tier": "cdp",
+                        "reason": f'Saved {layout} PDF to "{saved}".'}
 
             if step_type == "web_hover":
                 result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.hover(

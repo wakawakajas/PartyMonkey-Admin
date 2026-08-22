@@ -130,6 +130,23 @@ the JS execution context underneath the call. Those errors are retried
 against the re-resolved tab until the step's own timeout rather than failing
 the run, since "the page moved" isn't the same as "this didn't work".
 
+## Printing
+
+Chrome's Ctrl+P dialog -- destination, layout, the folder picker -- is browser UI,
+not page content. No click reaches it, from here or anywhere else. **Web: save page
+as PDF** skips it: `Page.printToPDF` is the same rendering path that dialog uses,
+so destination, orientation, paper size, margins, scale and the folder all become
+arguments, and the file lands exactly where the step says instead of wherever the
+last download went.
+
+The path takes the same tokens as everything else, so
+`C:\Orders\Picklist {{date:DD-MM-YYYY}}.pdf` names itself.
+
+What comes out is whatever the page prints. An app screen that renders nothing
+under print CSS produces a blank PDF -- correctly, and silently. Point the step at
+the print-preview tab a site opens for that purpose, not at the list you clicked
+Print from, and check the file the first time.
+
 ## Naming a file after today
 
 Any text field takes `{{variable}}`, and `{{date}}`, `{{time}}` and `{{now}}` are

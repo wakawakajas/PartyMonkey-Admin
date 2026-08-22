@@ -27,6 +27,7 @@ failure reason.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -34,6 +35,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 from websockets.sync.client import connect as ws_connect
 
@@ -591,6 +593,56 @@ def _same_page(url: str, expect: str) -> bool:
     redirect, so an exact comparison would reject perfectly good loads."""
     url, expect = url.rstrip("/"), expect.rstrip("/")
     return url.startswith(expect) or expect.startswith(url) or expect in url
+
+
+# Paper sizes in inches, the unit Page.printToPDF speaks.
+PAPER_SIZES = {
+    "A4": (8.27, 11.69),
+    "A3": (11.69, 16.54),
+    "A5": (5.83, 8.27),
+    "Letter": (8.5, 11.0),
+    "Legal": (8.5, 14.0),
+    "Tabloid": (11.0, 17.0),
+}
+
+
+def print_to_pdf(page: dict, output_path: str, landscape: bool = False, paper: str = "A4",
+                 scale: float = 1.0, background: bool = True, margin_inches: float = 0.4,
+                 timeout: float = 90.0) -> str:
+    """Saves the page as a PDF, straight to a path we choose.
+
+    Chrome's Ctrl+P dialog -- destination, layout, folder picker -- is
+    browser UI, not page content: no click can reach it, from here or
+    anywhere else. Page.printToPDF is the same rendering path that dialog
+    uses, minus the dialog, so "print, save as PDF, switch to landscape,
+    pick a folder" becomes arguments instead of five clicks nobody can
+    automate. It also means the file lands where the macro says rather
+    than wherever the last download went."""
+    width, height = PAPER_SIZES.get(str(paper), PAPER_SIZES["A4"])
+    margin = max(0.0, float(margin_inches))
+    params = {
+        "landscape": bool(landscape),
+        "printBackground": bool(background),
+        "scale": max(0.1, min(float(scale or 1.0), 2.0)),
+        "paperWidth": width,
+        "paperHeight": height,
+        "marginTop": margin,
+        "marginBottom": margin,
+        "marginLeft": margin,
+        "marginRight": margin,
+        "preferCSSPageSize": False,
+    }
+    result = _send(page, "Page.printToPDF", params, timeout=timeout)
+    data = result.get("data")
+    if not data:
+        raise RuntimeError("Chrome produced no PDF data for that page.")
+
+    target = Path(output_path)
+    if target.is_dir() or output_path.endswith(("\\", "/")):
+        raise RuntimeError(f'"{output_path}" is a folder -- give the full file name to save as.')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(base64.b64decode(data))
+    return str(target)
 
 
 def navigate(page: dict, url: str, settle_ms: int = 1200) -> None:

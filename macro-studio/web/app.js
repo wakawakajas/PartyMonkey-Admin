@@ -121,6 +121,7 @@ function typeLabel(type) {
     cdp_launch: "Launch Chrome (CDP)", web_goto: "Web: go to", web_click: "Web: click",
     web_hover: "Web: hover",
     web_wait_for: "Web: wait for", web_type: "Web: type", web_read: "Web: read",
+    web_print_pdf: "Web: save PDF",
   };
   return labels[type] || type;
 }
@@ -782,6 +783,13 @@ const STEP_TEMPLATES = {
     label: "Web: type into field",
     make: () => ({ type: "web_type", port: 9222, tab_match: "", selector: "", value: "", submit: false, timeout_ms: 10000, delay_ms: 0 }),
   },
+  web_print_pdf: {
+    label: "Web: save page as PDF",
+    make: () => ({ type: "web_print_pdf", port: 9222, tab_match: "",
+                   destination: "C:\Users\Admin\Downloads\Page {{date:DD-MM-YYYY}}.pdf",
+                   landscape: false, paper: "A4", scale: 1, background: true,
+                   margin_inches: 0.4, store_as: "pdf", timeout_ms: 60000, delay_ms: 0 }),
+  },
   web_read: {
     label: "Web: read text",
     make: () => ({ type: "web_read", port: 9222, tab_match: "", selector: "", store_as: "value", timeout_ms: 10000, delay_ms: 0 }),
@@ -824,6 +832,7 @@ const STEP_HELP = {
   web_hover: "Moves the pointer over something without clicking -- what you need before clicking an item in a menu that opens on hover.",
   web_wait_for: "Waits until something appears on the page. Use it at the end to prove the macro actually worked.",
   web_type: "Types a value into a form field, optionally pressing Enter after.",
+  web_print_pdf: "Saves the page as a PDF straight to a folder you name, portrait or landscape. Replaces Ctrl+P entirely -- Chrome's print dialog is browser UI that no click can reach.",
   web_read: "Reads text off the page into a variable, and prints it in the run report.",
 };
 
@@ -1151,6 +1160,16 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("CSS selector", editorInput("text", step.selector, (v) => (step.selector = v), "160px"));
     addField("value", editorInput("text", step.value, (v) => (step.value = v), "140px"));
     addField("press Enter after", editorCheckbox(step.submit, (v) => (step.submit = v)));
+  } else if (step.type === "web_print_pdf") {
+    addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
+    addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));
+    addField("save as", editorInput("text", step.destination, (v) => (step.destination = v), "260px"));
+    addField("landscape", editorCheckbox(step.landscape, (v) => (step.landscape = v)));
+    addField("paper", editorSelect(step.paper || "A4", ["A4", "A3", "A5", "Letter", "Legal", "Tabloid"], (v) => (step.paper = v)));
+    addField("scale", editorInput("number", step.scale, (v) => (step.scale = v), "60px"));
+    addField("margins (in)", editorInput("number", step.margin_inches, (v) => (step.margin_inches = v), "70px"));
+    addField("backgrounds", editorCheckbox(step.background, (v) => (step.background = v)));
+    addField("store as", editorInput("text", step.store_as, (v) => (step.store_as = v), "80px"));
   } else if (step.type === "web_read") {
     addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
     addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));
