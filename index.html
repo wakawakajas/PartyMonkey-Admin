@@ -1577,15 +1577,6 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 #gtOrderList .btn-sm,#gtFieldList .btn-sm{min-height:40px;}
 /* the line being worked on, picked out in the same lime as the headings */
 #gtOrderList .ph-card.is-sel{border-color:var(--blueprint);background:var(--blueprint-soft);}
-/* The name is what is read and the rest are knobs beside it, so they share a
-   line rather than stacking into a column that has to be scrolled past. Narrow,
-   they fall back to two to a row with the words across the top. */
-.gt-words{display:grid;gap:6px;grid-template-columns:repeat(2,minmax(0,1fr));}
-.gt-words .words,.gt-words .phrase{grid-column:1/-1;}
-@media(min-width:600px){
-  .gt-words{grid-template-columns:minmax(140px,2.4fr) repeat(5,minmax(54px,1fr));}
-  .gt-words .words{grid-column:auto;}
-}
 /* two things that belong beside each other once there is room, and under each
    other when there is not: the sheet's size and its base layer, bleed and what
    is drawn only on screen, the fonts and the phrases */
@@ -14240,8 +14231,13 @@ function gtDraw(){
       startPan(e); return;
     }
     const card=document.querySelector('#gtOrderList [data-gt-line="'+h.line.id+'"]');
+    const was=gtSelLine;
     if(card) gtMarkLine(card); else gtSelLine=h.line.id;
     if(!h.f){ startPan(e); gtDraw(); return; }
+    // Words are picked up only off the tag already being worked on. The first
+    // tap on another tag chooses it and moves nothing — a design is clicked
+    // once, and dragged on the click after that.
+    if(was!==h.line.id){ gtDraw(); return; }
     const v=gtVal(h.line,h.f), p=at(e);
     drag={line:h.line,f:h.f,mode:h.corner?'resize':'move',
       px:p.mx,py:p.my,dx:v.dx,dy:v.dy,bw:h.b.w,bh:h.b.h};
@@ -14387,6 +14383,48 @@ function gtFontOptions(sel){
   return `<option value=""${sel?'':' selected'}>Default</option>`
     +gtLib.fonts.map(f=>
       `<option value="${f.id}"${f.id===sel?' selected':''}>${escapeHtml(f.name)}</option>`).join('');
+}
+// The age is the one thing on a tag that is wrong without looking wrong: last
+// week's 5 prints as happily as this week's 7, and nobody reads it again once
+// the design is right. A field whose default words are a number is that field,
+// so picking a design asks for the age there and then. Escape leaves the
+// design's own number where it is.
+const GT_AGE=/^\s*\d{1,2}\s*$/;
+function gtAgeFields(d,line){
+  return gtFieldsOf(d,line).filter(f=>GT_AGE.test(f.def||''));
+}
+// A tag with last week's age on it still looks like a finished tag, so it is
+// never the thing that is spotted in the proof. Every line whose age was left
+// at the design's own number is named on the way out.
+function gtAgeLeft(){
+  const out=[];
+  gtOrder.forEach((l,i)=>{
+    if(!l.qty) return;
+    const d=gtDesign(l.designId); if(!d) return;
+    // an age is only settled once a number was typed for it: the design's own
+    // number was never about this order, and a blank is the age still to come
+    const left=gtAgeFields(d,l).filter(f=>{
+      const v=l.vals&&l.vals[f.id];
+      return !v||v.text===undefined||!String(v.text).trim();
+    });
+    if(!left.length) return;
+    const v=l.vals&&l.vals[left[0].id];
+    out.push('Line '+(i+1)+' — '+d.name+(v&&v.text!==undefined
+      ?' has no age on it'
+      :' still says '+(left[0].def||'').trim()));
+  });
+  return out;
+}
+function gtAskAge(line){
+  const d=gtDesign(line.designId); if(!d) return;
+  const fields=gtAgeFields(d,line); if(!fields.length) return;
+  const typed=prompt('Age for '+d.name+'?\n\nThe tag says '+fields[0].def.trim()+' at the moment.','');
+  // Escape, or nothing typed, leaves the age blank rather than printing the
+  // number the design was drawn with. A gap is read as a gap; last order's
+  // number is read as this order's.
+  const age=typed===null?'':typed.trim();
+  line.vals=line.vals||{};
+  fields.forEach(f=>{ (line.vals[f.id]||(line.vals[f.id]={})).text=age; });
 }
 function gtRenderOrder(){
   const wrap=document.getElementById('gtOrderList');
@@ -14553,6 +14591,8 @@ document.getElementById('gtOrderList').addEventListener('click',e=>{
   }
   line.designId=opt.dataset.gtDesignOpt; line.vals={};
   gtSelLine=line.id;
+  gtCloseDesignPanels(null);
+  gtAskAge(line);
   gtRenderOrder(); gtDraw();
 });
 document.addEventListener('click',e=>{
@@ -15424,6 +15464,9 @@ document.getElementById('gtPickAllBtn').addEventListener('click',()=>{
   if(!all) d.fields.forEach(f=>gtFieldPick.add(f.id));
   gtRenderFields();
 });
+// The library is worked the same way as an order: the words on show, and what
+// they are set in behind the words. One field open at a time here as well.
+let gtOpenLibWord='';
 function gtRenderFields(){
   const d=gtCurrentDesign; if(!d) return;
   const wrap=document.getElementById('gtFieldList');
@@ -15441,46 +15484,98 @@ function gtRenderFields(){
                title="Tick to line this box up with the others"/>
         <span style="flex:1;">Field ${i+1}${f.group?' \u00b7 grouped':''}</span>
         <button class="del-btn" data-gt-del-field title="Remove">×</button></div>
-      <div class="gt-words" style="margin-bottom:6px;">
-        <label class="field words"><span>DEFAULT WORDS</span>
-          <input type="text" value="${escapeHtml(f.def)}" data-gtd="def"/></label>
-        <label class="field"><span>LABEL</span>
-          <input type="text" value="${escapeHtml(f.name)}" data-gtd="name"/></label>
-        <label class="field"><span>FONT</span>
-          <select data-gtd="font">${gtFontOptions(f.font)}</select></label>
-        <label class="field"><span>ALIGN</span>
-          <select data-gtd="align">${['left','center','right'].map(a=>
-            `<option value="${a}"${a===f.align?' selected':''}>${
-              a==='left'?'Left':a==='center'?'Centre':'Right'}</option>`).join('')}</select></label>
-        <label class="field"><span>SIZE mm</span>
-          <input type="number" step="0.1" min="0.5" value="${f.size}" data-gtd="size"/></label>
-        <label class="field phrase"><span>SAVED PHRASE</span>
-          <select data-gtp="${f.id}">${gtTextOptions()}</select></label>
-      </div>
-      <button type="button" class="btn-outline btn-sm" data-gtsave="${f.id}"
-              style="width:100%;margin-bottom:6px;">Save these words as a phrase</button>
-      <div class="grid5" style="margin-bottom:7px;">
-        <label class="field"><span>COLOUR</span>
-          <input type="text" value="${escapeHtml(f.color)}" data-gtd="color" placeholder="#232323"/></label>
-        <label class="field"><span>ROTATE °</span>
-          <input type="number" step="1" value="${round(f.rot)}" data-gtd="rot"/></label>
-        <label class="field"><span>CURVE °</span>
-          <input type="number" step="5" value="${round(f.curve)}" data-gtd="curve"
-                 title="How far the line bends: over the middle above zero, under it below"/></label>
-        <label class="field"><span>OUTLINE</span>
-          <input type="text" value="${escapeHtml(f.oc)}" data-gtd="oc" placeholder="#FFFFFF"/></label>
-        <label class="field"><span>OUTLINE THICKNESS</span>
-          <input type="number" step="0.05" min="0" value="${round(f.ow)}" data-gtd="ow"
-                 title="How far it stands outside the letter. Nothing at zero."/></label>
-      </div>
-      <div class="grid4">
-        <label class="field"><span>X mm</span><input type="number" step="0.1" value="${round(f.x*A.w)}" data-gtd="x"/></label>
-        <label class="field"><span>Y mm</span><input type="number" step="0.1" value="${round(f.y*A.h)}" data-gtd="y"/></label>
-        <label class="field"><span>WIDTH mm</span><input type="number" step="0.1" value="${round(f.w*A.w)}" data-gtd="w"/></label>
-        <label class="field"><span>HEIGHT mm</span><input type="number" step="0.1" value="${round(f.h*A.h)}" data-gtd="h"/></label>
+      <div class="gt-word${gtOpenLibWord===f.id?' open':''}" data-gt-word="${f.id}">
+        <div class="gt-word-row">
+          <input type="text" value="${escapeHtml(f.def)}" placeholder="${escapeHtml(f.name)}"
+                 aria-label="Default words" data-gtd="def" data-gt-word-text/>
+          <button type="button" class="icon-btn" data-gt-word-toggle
+            aria-expanded="${gtOpenLibWord===f.id?'true':'false'}" title="How this text is set">▾</button>
+        </div>
+        <div class="gt-word-body">
+          <div class="grid3e">
+            <label class="field"><span>LABEL</span>
+              <input type="text" value="${escapeHtml(f.name)}" data-gtd="name"/></label>
+            <label class="field"><span>FONT</span>
+              <select data-gtd="font">${gtFontOptions(f.font)}</select></label>
+            <label class="field"><span>SIZE MM</span>
+              <input type="number" step="0.1" min="0.5" value="${f.size}" data-gtd="size"/></label>
+            <label class="field"><span>ALIGN</span>
+              <select data-gtd="align">${['left','center','right'].map(a=>
+                `<option value="${a}"${a===f.align?' selected':''}>${
+                  a==='left'?'Left':a==='center'?'Centre':'Right'}</option>`).join('')}</select></label>
+            <label class="field"><span>COLOUR</span>
+              <input type="text" value="${escapeHtml(f.color)}" data-gtd="color" placeholder="#232323"/></label>
+          </div>
+          <label class="field" style="margin-top:6px;"><span>SAVED PHRASE</span>
+            <select data-gtp="${f.id}">${gtTextOptions()}</select></label>
+          <button type="button" class="btn-outline btn-sm" data-gtsave="${f.id}"
+                  style="width:100%;margin-top:6px;">Save these words as a phrase</button>
+          <div class="gt-set" style="margin-top:6px;">
+            <label class="field"><span>CURVE °</span>
+              <input type="number" step="5" value="${round(f.curve)}" data-gtd="curve"
+                     title="How far the line bends: over the middle above zero, under it below"/></label>
+            <label class="field"><span>ROTATE °</span>
+              <input type="number" step="1" value="${round(f.rot)}" data-gtd="rot"/></label>
+            <label class="field"><span>OUTLINE</span>
+              <input type="text" value="${escapeHtml(f.oc)}" data-gtd="oc" placeholder="#FFFFFF"/></label>
+            <label class="field"><span>WIDTH</span>
+              <input type="number" step="0.1" value="${round(f.w*A.w)}" data-gtd="w"/></label>
+            <label class="field"><span>HEIGHT</span>
+              <input type="number" step="0.1" value="${round(f.h*A.h)}" data-gtd="h"/></label>
+            <label class="field"><span>OUTLINE THICKNESS</span>
+              <input type="number" step="0.05" min="0" value="${round(f.ow)}" data-gtd="ow"
+                     title="How far it stands outside the letter. Nothing at zero."/></label>
+          </div>
+          <div class="grid2" style="margin-top:6px;">
+            <label class="field"><span>X mm</span>
+              <input type="number" step="0.1" value="${round(f.x*A.w)}" data-gtd="x"/></label>
+            <label class="field"><span>Y mm</span>
+              <input type="number" step="0.1" value="${round(f.y*A.h)}" data-gtd="y"/></label>
+          </div>
+        </div>
       </div>
     </div>`).join('')+'</div>';
 }
+function gtSyncLibWords(){
+  document.querySelectorAll('#gtFieldList [data-gt-word]').forEach(w=>{
+    const on=gtOpenLibWord===w.dataset.gtWord;
+    w.classList.toggle('open',on);
+    const t=w.querySelector('[data-gt-word-toggle]');
+    if(t) t.setAttribute('aria-expanded',on?'true':'false');
+  });
+}
+// opening a field marks it on the tag too, by hand rather than by rebuilding
+// the list: the caret is in the box that would be rebuilt
+function gtPickLibField(card){
+  const d=gtCurrentDesign; if(!d) return;
+  const f=d.fields.find(x=>x.id===card.dataset.gtField);
+  if(!f||gtEditSel===f) return;
+  gtEditSel=f;
+  document.querySelectorAll('#gtFieldList .ph-card')
+    .forEach(c=>c.classList.toggle('is-picked',c===card));
+  gtDrawDesign();
+}
+document.getElementById('gtFieldList').addEventListener('click',e=>{
+  const w=e.target.closest('[data-gt-word]'); if(!w) return;
+  const card=w.closest('[data-gt-field]'); if(!card) return;
+  const isOpen=w.classList.contains('open');
+  if(e.target.closest('[data-gt-word-toggle]')){
+    gtOpenLibWord=isOpen?'':w.dataset.gtWord;
+    gtSyncLibWords(); gtPickLibField(card);
+    return;
+  }
+  if(e.target.closest('[data-gt-word-text]')&&!isOpen){
+    gtOpenLibWord=w.dataset.gtWord;
+    gtSyncLibWords(); gtPickLibField(card);
+  }
+});
+document.getElementById('gtFieldList').addEventListener('focusin',e=>{
+  const t=e.target.closest('[data-gt-word-text]'); if(!t) return;
+  const w=t.closest('[data-gt-word]'), card=w&&w.closest('[data-gt-field]');
+  if(!card||w.classList.contains('open')) return;
+  gtOpenLibWord=w.dataset.gtWord;
+  gtSyncLibWords(); gtPickLibField(card);
+});
 document.getElementById('gtFieldList').addEventListener('input',e=>{
   const d=gtCurrentDesign; if(!d) return;
   const card=e.target.closest('[data-gt-field]'); if(!card) return;
@@ -15655,6 +15750,12 @@ document.getElementById('gtExportBtn').addEventListener('click',async()=>{
   const btn=document.getElementById('gtExportBtn');
   const pages=gtPageCount();
   if(!pages||!gtQueue().length){ showMsg(out,'Nothing to print — add a design and a quantity first.',false); return; }
+  const noAge=gtAgeLeft();
+  if(noAge.length&&!confirm('No age filled in:\n\n'+noAge.join('\n')
+      +'\n\nDownload the PDF anyway?')){
+    showMsg(out,'Stopped — fill in the age on '+(noAge.length===1?'that line':'those lines')+'.',false);
+    return;
+  }
   btn.disabled=true;
   showMsg(out,`Rendering ${pages} sheet(s) at print resolution…`,true);
   try{
