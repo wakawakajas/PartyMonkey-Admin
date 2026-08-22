@@ -2109,6 +2109,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 
     <div class="chips" id="requestFilterChips">
       <button type="button" class="chip" data-filter-open="request">Filter</button>
+      <button type="button" class="chip chip-state" id="requestAllPeople" style="display:none;"
+              title="Show every request on the team, not only your own">Everyone</button>
       <button type="button" class="chip chip-xs" data-push-chip>🔕 Notify this phone</button>
     </div>
 
@@ -2120,6 +2122,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="sect-label">You asked for <span class="hint" id="requestOutboxCount"></span></div>
     <div class="ph-list list-full" id="requestOutbox">
       <p class="hint" style="margin:4px 0 0;">— nothing yet —</p>
+    </div>
+    <div id="requestOthersSect" hidden>
+      <div class="sect-label">Everyone else <span class="hint" id="requestOthersCount"></span></div>
+      <p class="hint" style="margin:0 0 6px;">Admin view — what other people have asked each other.
+        Yours to read, theirs to answer.</p>
+      <div class="ph-list list-full" id="requestOthers">
+        <p class="hint" style="margin:4px 0 0;">— nothing right now —</p>
+      </div>
     </div>
     <p class="hint" id="requestPurgeNote" style="margin:10px 0 0;">
       Completed requests are cleared out three days after they are finished.</p>
@@ -12402,9 +12412,30 @@ const REQUEST_PHOTO_MAX=3;
 // not enough to read a label — the pick up screen is where that lives.
 const REQUEST_PHOTO_BUDGET=30*1024;
 const REQUEST_PHOTO_MAX_PX=900;
+let requestRows=[];                      // every row this account can read
 let requestPhotos={};                    // request id -> rows, both people's
 let newRequestShots=[];                  // files picked before the request exists
 let requestFilter='open';
+// An admin may read every request on the team — the policy in
+// supabase-migration-REQUESTS-ADMIN.sql. Reading is all it is: the third list
+// has no buttons on it, because acknowledging and completing belong to the two
+// people on the request or the record of who did it stops meaning anything.
+// Off by default, since the question this screen usually answers is "what is
+// on my plate", not "what is on everyone's".
+let requestAll=false;
+let requestOthers=[];
+function syncRequestScope(){
+  const chip=document.getElementById('requestAllPeople');
+  if(!chip) return;
+  if(!access.admin) requestAll=false;    // access can be taken away mid-session
+  chip.style.display=access.admin?'':'none';
+  chip.classList.toggle('on',requestAll);
+  document.getElementById('requestOthersSect').hidden=!requestAll;
+}
+document.getElementById('requestAllPeople').addEventListener('click',async()=>{
+  requestAll=!requestAll; syncRequestScope();
+  await refreshRequests();
+});
 
 async function loadTeamMembers(){
   if(!sb) return;
@@ -12494,7 +12525,8 @@ async function refreshRequests(){
   myUserId=session.user.id;
   if(!teamMembers.length) await loadTeamMembers();
   // Both directions in one read: row level security already limits it to rows
-  // this account is party to, so there is nothing to filter by here.
+  // this account is party to, so there is nothing to filter by here. An admin
+  // is handed everybody's as well, which is what the third list below shows.
   const {data,error}=await sb.from('requests').select('*')
     .order('created_at',{ascending:false}).limit(200);
   if(error){
@@ -12506,8 +12538,13 @@ async function refreshRequests(){
   }
   requestsReady=true;
   const rows=data||[];
+  requestRows=rows;
   requestInbox=rows.filter(r=>r.assignee_id===myUserId);
   requestOutbox=rows.filter(r=>r.requester_id===myUserId);
+  // whatever is left over. An admin's own requests stay in their own two
+  // lists rather than being shown twice.
+  requestOthers=requestAll
+    ? rows.filter(r=>r.assignee_id!==myUserId&&r.requester_id!==myUserId) : [];
   await loadRequestPhotos(rows.map(r=>r.id));
   renderRequests();
   ringDueRequests();
@@ -12551,6 +12588,7 @@ const REQ_TAG={pending:['no','PENDING'],acknowledged:['part','ACKNOWLEDGED'],
                completed:['yes','COMPLETED'],claimed:['yes','TAKEN']};
 function renderRequests(){
   syncRequestBadge();
+  syncRequestScope();
   const inbox=document.getElementById('requestInbox');
   const outbox=document.getElementById('requestOutbox');
   // Completed work moves out of the way rather than piling up under the thing
@@ -12573,16 +12611,30 @@ function renderRequests(){
   outbox.innerHTML=outRows.length
     ? outRows.map(r=>requestCard(r,false)).join('')
     : `<p class="hint" style="margin:4px 0 0;">${requestFilter==='completed'?'— nothing finished yet —':'— nothing yet —'}</p>`;
+  if(requestAll){
+    const otherRows=requestOthers.filter(keep);
+    document.getElementById('requestOthersCount').textContent=
+      requestOthers.length?`· ${requestOthers.filter(r=>!done(r)).length} open`:'';
+    document.getElementById('requestOthers').innerHTML=otherRows.length
+      ? otherRows.map(r=>requestCard(r,false,true)).join('')
+      : `<p class="hint" style="margin:4px 0 0;">${empty}</p>`;
+  }
   hydrateRequestPhotos();
   // a note box is only as tall as the note — sized after the HTML lands, the
   // same way a pickup's remarks box is
   setTimeout(()=>inbox.querySelectorAll('[data-req-remarks]').forEach(growNote),0);
 }
 // Open and Completed moved into the shared Filter sheet at the foot of this file
-function requestCard(r,mine){
+// watching is the admin's third list: somebody else's request, read only.
+// mine=false already takes the buttons off it — what is left is to say both
+// names rather than "to them", and to stop offering a photo slot on a job
+// that is nothing to do with this account.
+function requestCard(r,mine,watching){
   const [cls,word]=REQ_TAG[r.status]||REQ_TAG.pending;
   const other=mine?nameOf(r.requester_id):nameOf(r.assignee_id);
-  const line=mine?`from ${escapeHtml(other)}`:`to ${escapeHtml(other)}`;
+  const line=watching
+    ? `${escapeHtml(nameOf(r.requester_id))} → ${escapeHtml(nameOf(r.assignee_id))}`
+    : mine?`from ${escapeHtml(other)}`:`to ${escapeHtml(other)}`;
   // a snooze is a promise about when, so say when rather than "snoozed"
   const due=r.status==='pending'||r.status==='acknowledged'
     ? (r.remind_at&&new Date(r.remind_at)>new Date()?` · back at ${clock(r.remind_at)}`:'') : '';
@@ -12602,13 +12654,13 @@ function requestCard(r,mine){
       <span class="req-ask" style="flex:1;min-width:0;overflow-wrap:anywhere;">${escapeHtml(r.title)}</span>
       ${r.urgent&&open?'<span class="tag urgent">URGENT</span>':''}
       <span class="tag ${cls}">${word}</span>
-      ${mine||r.status==='claimed'?'':`<button class="del-btn" data-req-del title="Withdraw">×</button>`}
+      ${mine||watching||r.status==='claimed'?'':`<button class="del-btn" data-req-del title="Withdraw">×</button>`}
     </div>
     ${r.body?`<p class="req-detail" style="margin:0 0 4px;">${escapeHtml(r.body)}</p>`:''}
-    ${shotStrip(r)}
+    ${shotStrip(r,watching)}
     <p class="hint" style="margin:6px 0 0;">${line} · ${stamp(r.created_at)}${snoozed}${due}</p>
+    ${requestTrail(r)}
     ${mine&&r.status==='claimed'?`<p class="hint" style="margin:4px 0 0;">Somebody else on this got there first — nothing left for you to do.</p>`:''}
-    ${!mine&&r.status==='claimed'?`<p class="hint" style="margin:4px 0 0;">Taken by ${escapeHtml(nameOf(r.assignee_id))}.</p>`:''}
     ${!mine&&r.remarks?`<p class="req-detail" style="margin:4px 0 0;">📝 ${escapeHtml(r.remarks)}</p>`:''}
     ${mine&&r.status==='acknowledged'?`<label class="field" style="margin:6px 0 0;"><span>NOTE FOR THEM (OPTIONAL)</span>
       <textarea data-req-remarks rows="1" placeholder="Anything they should know">${escapeHtml(r.remarks||'')}</textarea></label>`:''}
@@ -12621,13 +12673,42 @@ function requestCard(r,mine){
     </div>`:''}
   </div>`;
 }
+// Who actually picked a request up. Sent to several people it is several rows
+// sharing a group_id: the one that moved off pending is the person who took
+// it, and everybody else's row went to 'claimed' — so on a claimed row the
+// answer is not its own assignee but that sibling's. A row read by its own
+// assignee has no sibling to find, because the policy only ever handed them
+// their own; the "somebody got there first" note is what covers that case.
+function requestTaker(r){
+  if(r.status==='claimed')
+    return r.group_id
+      ? requestRows.find(x=>x.group_id===r.group_id&&x.id!==r.id
+          &&(x.status==='acknowledged'||x.status==='completed'))||null
+      : null;
+  return (r.status==='acknowledged'||r.status==='completed')?r:null;
+}
+// Going straight to Completed leaves no acknowledged_at behind, so the moment
+// it was finished is the only moment it was ever taken.
+const requestTakenAt=x=>x.acknowledged_at||x.completed_at||null;
+// The two things the person who asked is left wondering: who has it, and when
+// it actually got done. Both are on the card rather than a tap away, because
+// the card is where the question gets asked.
+function requestTrail(r){
+  const t=requestTaker(r);
+  if(!t) return '';
+  const when=requestTakenAt(t);
+  const lines=[`👤 Taken by ${escapeHtml(nameOf(t.assignee_id))}${when?` · ${stamp(when)}`:''}`];
+  if(t.status==='completed'&&t.completed_at)
+    lines.push(`✓ Completed ${stamp(t.completed_at)}`);
+  return `<p class="hint" style="margin:4px 0 0;">${lines.join('<br/>')}</p>`;
+}
 // Everybody's photos on the request, whoever added them, then a slot to add
 // one — but only your own three, and only while there is still something to
 // say about it.
-function shotStrip(r){
+function shotStrip(r,watching){
   const shots=requestPhotos[r.id]||[];
   const mineCount=shots.filter(p=>p.user_id===myUserId).length;
-  const canAdd=r.status!=='completed'&&mineCount<REQUEST_PHOTO_MAX;
+  const canAdd=!watching&&r.status!=='completed'&&mineCount<REQUEST_PHOTO_MAX;
   const thumbs=shots.map(p=>`<button class="req-shot" data-req-shot="${escapeHtml(p.path)}">
       <img alt="" data-req-thumb="${escapeHtml(p.path)}"/>
       ${p.user_id===myUserId?`<span class="req-shot-x" data-req-shot-del="${escapeHtml(p.id)}" title="Remove">×</span>`:''}
@@ -13168,7 +13249,13 @@ function watchRequests(){
       // compare against, re-read and let that decide what to ring
       if(!myUserId){ refreshRequests(); return; }
       const forMe=row.assignee_id===myUserId, fromMe=row.requester_id===myUserId;
-      if(!forMe&&!fromMe) return;              // not ours; realtime has no row filter
+      if(!forMe&&!fromMe){
+        // not ours; realtime has no row filter. An admin watching everyone
+        // still wants the third list to move — quietly, with no chime: it is
+        // somebody else's phone that should be ringing about it.
+        if(requestAll&&access.admin) refreshRequests();
+        return;
+      }
       refreshRequests().then(()=>{
         if(forMe&&eventType==='INSERT'){
           alertRequest(requestInbox.find(r=>r.id===row.id)||row);
