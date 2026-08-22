@@ -5445,26 +5445,48 @@ document.getElementById('bundleLookup').addEventListener('input',()=>{
 });
 
 // ---- what is on file ----
+// A read answers with a thousand rows at most, whatever it was asked for, and
+// says nothing about the rest. Ordered by sort_order alone, those thousand
+// rows were the first few pieces of every combination in the catalogue --
+// which is how a bundle of eleven appeared here as three, while the file it
+// came from was right all along. Asked for in pages, and ordered by the
+// combination first so a page break falls between whole rows.
+const BUNDLE_PAGE_ROWS=1000;
+const BUNDLE_MAX_ROWS=100000;
+async function bundleFetchAll(build){
+  const all=[];
+  for(let from=0;;from+=BUNDLE_PAGE_ROWS){
+    const {data,error}=await build().range(from,from+BUNDLE_PAGE_ROWS-1);
+    if(error) throw error;
+    const got=data||[];
+    all.push(...got);
+    if(got.length<BUNDLE_PAGE_ROWS) return all;
+    if(all.length>=BUNDLE_MAX_ROWS) return all;   // a catalogue, not a runaway
+  }
+}
 let bundleRows=[];
 async function refreshBundles(){
   const el=document.getElementById('bundleList');
   if(!el) return;
   if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
-  const [combosRes,itemsRes]=await Promise.all([
-    sb.from('bundle_skus').select('*').order('name'),
-    sb.from('bundle_sku_items').select('*').order('sort_order')
-  ]);
-  if(combosRes.error||itemsRes.error){
+  let combos,items;
+  try{
+    [combos,items]=await Promise.all([
+      bundleFetchAll(()=>sb.from('bundle_skus').select('*').order('name')),
+      bundleFetchAll(()=>sb.from('bundle_sku_items').select('*')
+        .order('bundle_id').order('sort_order'))
+    ]);
+  }catch(e){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load them. '
       +'Run supabase-migration-BUNDLE-SKU-TABLES.sql first.</p>';
     return;
   }
   const byBundle=new Map();
-  (itemsRes.data||[]).forEach(it=>{
+  items.forEach(it=>{
     if(!byBundle.has(it.bundle_id)) byBundle.set(it.bundle_id,[]);
     byBundle.get(it.bundle_id).push(it);
   });
-  bundleRows=(combosRes.data||[]).map(c=>({...c,subs:byBundle.get(c.id)||[]}));
+  bundleRows=combos.map(c=>({...c,subs:byBundle.get(c.id)||[]}));
   renderBundles();
 }
 function renderBundles(){
