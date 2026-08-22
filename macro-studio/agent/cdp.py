@@ -340,7 +340,8 @@ def _js(body: str) -> str:
     return "(async () => {" + _JS_HELPERS + body + "})()"
 
 
-def _locate(page: dict, selector: str, text: str, exact: bool, timeout_ms: int) -> dict:
+def _locate(page: dict, selector: str, text: str, exact: bool, timeout_ms: int,
+            match_index: int = 0) -> dict:
     """Scrolls the best match into view and returns where it sits, so the
     caller can aim real browser input at it.
 
@@ -349,10 +350,11 @@ def _locate(page: dict, selector: str, text: str, exact: bool, timeout_ms: int) 
     no -- and a click aimed there would land on whatever is underneath,
     which is worse than not clicking at all. The caller uses it to pick
     the safer path."""
-    args = json.dumps({"selector": selector, "text": text, "exact": exact, "timeout": timeout_ms})
+    args = json.dumps({"selector": selector, "text": text, "exact": exact,
+                       "timeout": timeout_ms, "index": max(0, match_index)})
     result = evaluate(page, _js(
         "const a = " + args + ";"
-        "const el = await __ms.poll(() => __ms.find(a.selector, a.text, a.exact)[0] || null, a.timeout);"
+        "const el = await __ms.poll(() => __ms.find(a.selector, a.text, a.exact)[a.index] || null, a.timeout);"
         "if (!el) return { ok: false };"
         "el.scrollIntoView({ block: 'center', inline: 'center' });"
         "let r = el.getBoundingClientRect(), hit = false;"
@@ -371,12 +373,14 @@ def _locate(page: dict, selector: str, text: str, exact: bool, timeout_ms: int) 
         what = f'selector "{selector}"' if selector else f'text "{text}"'
         if selector and text:
             what = f'selector "{selector}" with text "{text}"'
+        if match_index:
+            what += f" (match #{match_index + 1})"
         raise RuntimeError(f"Nothing matching {what} appeared on the page within {timeout_ms}ms.")
     return result
 
 
 def hover(page: dict, selector: str = "", text: str = "", exact: bool = False,
-          timeout_ms: int = 8000) -> dict:
+          timeout_ms: int = 8000, match_index: int = 0) -> dict:
     """Moves the browser's own pointer over an element.
 
     This is the one thing dispatching DOM events cannot fake: a menu that
@@ -385,7 +389,7 @@ def hover(page: dict, selector: str = "", text: str = "", exact: bool = False,
     drives that same internal pipeline, so the menu opens for real. It is
     still not the OS cursor: nothing moves on screen and the tab need not
     be focused or even frontmost."""
-    spot = _locate(page, selector, text, exact, timeout_ms)
+    spot = _locate(page, selector, text, exact, timeout_ms, match_index)
     _send(page, "Input.dispatchMouseEvent", {
         "type": "mouseMoved", "x": spot["x"], "y": spot["y"], "buttons": 0,
     })
@@ -393,11 +397,11 @@ def hover(page: dict, selector: str = "", text: str = "", exact: bool = False,
 
 
 def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
-          timeout_ms: int = 8000) -> dict:
+          timeout_ms: int = 8000, match_index: int = 0) -> dict:
     """Clicks the best match, retrying until timeout -- a page still
     rendering is the normal case right after a navigation, not something
     worth failing a run over."""
-    spot = _locate(page, selector, text, exact, timeout_ms)
+    spot = _locate(page, selector, text, exact, timeout_ms, match_index)
     if not spot.get("hit"):
         # The point doesn't resolve back to the element -- something is
         # over it, or it is still moving. Dispatch on the node itself.

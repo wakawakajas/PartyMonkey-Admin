@@ -607,10 +607,13 @@ class ReplayEngine:
             context["cdp_port"] = port
             context["cdp_tab"] = page.get("id", context.get("cdp_tab", ""))
 
+            match_index = max(0, int(step.get("match_index") or 0))
+
             if step_type == "web_click":
                 result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.click(
                     p, selector=sub("selector"), text=sub("text"),
-                    exact=bool(step.get("exact")), timeout_ms=timeout_ms or 8000))
+                    exact=bool(step.get("exact")), timeout_ms=timeout_ms or 8000,
+                    match_index=match_index))
                 label = result.get("label") or sub("text") or sub("selector")
                 return {"status": "success", "tier": "cdp",
                         "reason": f'Clicked <{result.get("tag")}> "{label}".'}
@@ -618,7 +621,8 @@ class ReplayEngine:
             if step_type == "web_hover":
                 result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.hover(
                     p, selector=sub("selector"), text=sub("text"),
-                    exact=bool(step.get("exact")), timeout_ms=timeout_ms or 8000))
+                    exact=bool(step.get("exact")), timeout_ms=timeout_ms or 8000,
+                    match_index=match_index))
                 label = result.get("label") or sub("text") or sub("selector")
                 return {"status": "success", "tier": "cdp",
                         "reason": f'Hovering <{result.get("tag")}> "{label}".'}

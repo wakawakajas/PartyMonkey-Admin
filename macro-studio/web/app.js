@@ -763,11 +763,11 @@ const STEP_TEMPLATES = {
   },
   web_click: {
     label: "Web: click",
-    make: () => ({ type: "web_click", port: 9222, tab_match: "", selector: "", text: "", exact: false, timeout_ms: 8000, delay_ms: 0 }),
+    make: () => ({ type: "web_click", port: 9222, tab_match: "", selector: "", text: "", exact: false, match_index: 0, timeout_ms: 8000, delay_ms: 0 }),
   },
   web_hover: {
     label: "Web: hover (opens hover menus)",
-    make: () => ({ type: "web_hover", port: 9222, tab_match: "", selector: "", text: "", exact: false, timeout_ms: 8000, delay_ms: 0 }),
+    make: () => ({ type: "web_hover", port: 9222, tab_match: "", selector: "", text: "", exact: false, match_index: 0, timeout_ms: 8000, delay_ms: 0 }),
   },
   web_wait_for: {
     label: "Web: wait for",
@@ -789,6 +789,37 @@ const STEP_TEMPLATES = {
     label: "Loop",
     make: () => ({ type: "loop", mode: "count", count: 3, variable: "", operator: "equals", value: "", max_iterations: 100, body_steps: [], delay_ms: 0 }),
   },
+};
+
+// One line per step type, in plain language: what it does and when you'd
+// reach for it. Shown under the Add Step picker and as each row's tooltip,
+// since a list of type names alone doesn't tell you which one you want.
+const STEP_HELP = {
+  click: "Clicks a spot in a desktop app window (recorded, not hand-written).",
+  double_click: "Double-clicks a spot in a desktop app window.",
+  scroll: "A recorded scroll wheel movement.",
+  key: "Types a key into the window the last click landed in.",
+  hotkey: "Presses a key combination, e.g. ctrl+c.",
+  keyboard_shortcut: "Presses a key combination you type in yourself.",
+  wait: "Pauses for a fixed number of milliseconds before the next step.",
+  wait_for_element: "Waits until a named control exists in a desktop app. Fails the run if it never shows.",
+  wait_for_text: "Waits until a desktop control's text matches what you expect.",
+  find_click_text: "Clicks a desktop app control by its visible label instead of coordinates.",
+  open_url: "Opens a page in your normal Chrome. Nothing after it can click inside that page -- use the Web steps for that.",
+  file_search: "Lists files in a folder matching a pattern, saved as a variable.",
+  file_op: "Copies, moves, renames, or deletes one file.",
+  clipboard: "Writes text to the clipboard, or reads it into a variable.",
+  get_cursor_position: "Saves where the mouse currently is, as a variable.",
+  read_control_value: "Reads a desktop control's value into a variable.",
+  conditional: "Runs one set of steps if a variable matches, another if it doesn't.",
+  loop: "Repeats its steps a set number of times, or until a variable matches.",
+  cdp_launch: "Opens the separate Chrome the Web steps drive. Put this first in any web macro.",
+  web_goto: "Opens a page in that Chrome, in its own tab, and waits for it to finish loading.",
+  web_click: "Clicks something in the page: a link, button, tab, checkbox. Found by CSS selector, visible text, or both.",
+  web_hover: "Moves the pointer over something without clicking -- what you need before clicking an item in a menu that opens on hover.",
+  web_wait_for: "Waits until something appears on the page. Use it at the end to prove the macro actually worked.",
+  web_type: "Types a value into a form field, optionally pressing Enter after.",
+  web_read: "Reads text off the page into a variable, and prints it in the run report.",
 };
 
 const COMPARE_OPERATORS = ["equals", "not_equals", "contains", "regex", "greater_than", "less_than"];
@@ -942,6 +973,8 @@ function renderEditorSteps() {
   renderStepArrayInto(editingSteps, editorStepList);
 }
 
+let dragSource = null;
+
 function renderStepArrayInto(stepsArray, containerEl) {
   containerEl.innerHTML = "";
   if (stepsArray.length === 0) {
@@ -1013,6 +1046,10 @@ function buildStepRow(step, index, stepsArray, containerEl) {
   const typeSpan = document.createElement("span");
   typeSpan.className = "step-type";
   typeSpan.textContent = typeLabel(step.type);
+  if (STEP_HELP[step.type]) {
+    typeSpan.title = STEP_HELP[step.type];
+    li.title = STEP_HELP[step.type];
+  }
 
   const fields = document.createElement("span");
   fields.className = "step-fields";
@@ -1096,6 +1133,9 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("CSS selector", editorInput("text", step.selector, (v) => (step.selector = v), "160px"));
     addField("and/or visible text", editorInput("text", step.text, (v) => (step.text = v), "140px"));
     addField("exact match", editorCheckbox(step.exact, (v) => (step.exact = v)));
+    if (step.type !== "web_wait_for") {
+      addField("match # (0 = first)", editorInput("number", step.match_index, (v) => (step.match_index = v), "70px"));
+    }
     addField("timeout (ms)", editorInput("number", step.timeout_ms, (v) => (step.timeout_ms = v), "80px"));
   } else if (step.type === "web_type") {
     addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
@@ -1150,7 +1190,51 @@ function buildStepRow(step, index, stepsArray, containerEl) {
   });
 
   actions.append(upBtn, downBtn, delBtn);
-  header.append(seqSpan, typeSpan, fields, actions);
+
+  // Drag to reorder. The handle is its own element rather than the whole
+  // row because every field in that row is an input -- making the row
+  // draggable would fight with selecting text inside them.
+  const grip = document.createElement("span");
+  grip.className = "step-grip";
+  grip.textContent = "⠿";
+  grip.title = "Drag to reorder";
+  grip.draggable = true;
+  grip.addEventListener("dragstart", (event) => {
+    dragSource = { array: stepsArray, container: containerEl, index };
+    li.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(index));  // Firefox needs a payload
+    event.dataTransfer.setDragImage(li, 20, 12);
+  });
+  grip.addEventListener("dragend", () => {
+    li.classList.remove("dragging");
+    dragSource = null;
+  });
+
+  li.addEventListener("dragover", (event) => {
+    // Only within the same list: a step can't be half in a loop body.
+    if (!dragSource || dragSource.array !== stepsArray) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const box = li.getBoundingClientRect();
+    li.classList.toggle("drop-after", event.clientY > box.top + box.height / 2);
+    li.classList.toggle("drop-before", event.clientY <= box.top + box.height / 2);
+  });
+  li.addEventListener("dragleave", () => li.classList.remove("drop-before", "drop-after"));
+  li.addEventListener("drop", (event) => {
+    if (!dragSource || dragSource.array !== stepsArray) return;
+    event.preventDefault();
+    const after = li.classList.contains("drop-after");
+    li.classList.remove("drop-before", "drop-after");
+    let to = index + (after ? 1 : 0);
+    const [moved] = stepsArray.splice(dragSource.index, 1);
+    if (dragSource.index < to) to -= 1;
+    stepsArray.splice(Math.max(0, Math.min(to, stepsArray.length)), 0, moved);
+    dragSource = null;
+    renderStepArrayInto(stepsArray, containerEl);
+  });
+
+  header.append(grip, seqSpan, typeSpan, fields, actions);
   li.appendChild(header);
 
   if (step.type === "conditional") {
@@ -1171,6 +1255,25 @@ function moveInArray(arr, index, dir) {
   if (target < 0 || target >= arr.length) return;
   [arr[index], arr[target]] = [arr[target], arr[index]];
 }
+
+const addStepHelp = document.getElementById("addStepHelp");
+const tallEditor = document.getElementById("tallEditor");
+
+if (tallEditor) {
+  const applyEditorHeight = () => {
+    editorStepList.classList.toggle("compact", !tallEditor.checked);
+  };
+  tallEditor.addEventListener("change", applyEditorHeight);
+  applyEditorHeight();
+}
+
+function updateAddStepHelp() {
+  if (!addStepHelp) return;
+  addStepHelp.textContent = STEP_HELP[addStepType.value] || "";
+}
+
+addStepType.addEventListener("change", updateAddStepHelp);
+updateAddStepHelp();
 
 addStepBtn.addEventListener("click", () => {
   const template = STEP_TEMPLATES[addStepType.value];

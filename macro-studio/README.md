@@ -77,6 +77,9 @@ itself uses, no API key, no per-run cost, nothing leaving the machine.
 - **Launch Chrome (CDP)** starts (or reuses) a Chrome on `--remote-debugging-port`
 - **Web: go to / click / hover / wait for / type / read** act on a tab, matched
   by a URL or title fragment; blank means "the tab this run is already using"
+- A click or hover takes a "match #" when several things share the same
+  selector or label -- 0 is the first, 1 the second, which is how you tick one
+  row's checkbox out of a list of identical ones
 - Clicks go through CDP's Input domain -- browser-level pointer events, not
   dispatched DOM events, so they carry `isTrusted` and settle hover state
   first. **Web: hover** exists for the same reason: a menu that opens on CSS
