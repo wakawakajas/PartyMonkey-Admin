@@ -2063,6 +2063,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <!-- these are not Add, so they stay on the page rather than floating -->
     <div class="chips chips-left">
       <button class="btn-outline btn-sm" id="adhocImportBtn">⬆ Import SKU</button>
+      <button class="btn-outline btn-sm" id="skuCopyPhotosBtn">↻ Copy missing photos</button>
       <button class="btn-danger btn-sm" id="skuWipeBtn">Delete everything</button>
     </div>
     <div id="adhocImportMsg"></div>
@@ -2075,6 +2076,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <input type="text" id="skuSearch" placeholder="Type part of the name"/>
     </label>
     <div class="chips">
+      <button type="button" class="chip chip-xs" id="skuNoPhoto">No photo</button>
       <button type="button" class="chip chip-xs" id="skuSelectOne">Select</button>
       <button type="button" class="chip chip-xs" id="skuSelectAll">Select all</button>
     </div>
@@ -2084,6 +2086,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     </div>
     <div class="ph-list list-full" id="skuList">
       <p class="hint" style="margin:4px 0 0;">Loading…</p>
+    </div>
+    <div class="chips chips-left" id="skuMoreWrap" style="display:none;">
+      <button type="button" class="btn-outline btn-sm" id="skuMoreBtn">Show more</button>
     </div>
     <div id="skuMsg"></div>
   </div>
@@ -3875,6 +3880,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="modal-top">
     <h4 id="photoModalTitle">Photo</h4>
     <span class="zoomlbl" id="photoModalHint">tap image for actual size</span>
+    <button class="btn-outline btn-sm" id="photoModalReplace" style="display:none;">Replace photo</button>
     <button class="close-btn" id="photoModalClose">×</button>
   </div>
   <div class="modal-scroll" id="photoModalBody">
@@ -6037,8 +6043,12 @@ function bundleJobById(id){ return bundleJobs.find(j=>j.id===id)||null; }
 // wrong. So a hidden SKU is marked as one and otherwise treated like any
 // other piece -- shown, read out, and waited for.
 function bundlePieceHidden(piece){ return false; }
+// The whole hidden list was wearing this tag, which made it a label for
+// "something the pick list leaves off" rather than for what it says. Only a
+// piece with Custom in its name is made to order; the rest of that list means
+// other things, and none of them mean go and have this printed.
 function bundlePieceNoted(piece){
-  try{ return plSkuHidden(piece.sku,plStore()); }catch(e){ return false; }
+  return /custom/i.test(String(piece&&piece.sku||''));
 }
 function bundleWanted(j){ return j.pieces.filter(x=>!bundlePieceHidden(x)); }
 // What is packed is one set at a time, so what is read is one set's worth:
@@ -6129,11 +6139,14 @@ function renderBundleFocus(){
   if(!piece){ el.innerHTML='<p class="hint" style="margin:0;">-- nothing in this bundle --</p>'; return; }
   const path=bundleSkuPhoto(piece.sku);
   const cached=path&&photoUrlCache[path]?photoUrlCache[path]:'';
+  // our own copy first, the supplier's address where there is no copy
+  const shot=path?'':bundleSkuUrl(piece.sku);
+  const box=`style="width:76px;height:76px;flex-shrink:0;border-radius:12px;object-fit:cover;
+                 background:rgba(255,255,255,.06);"`;
   el.innerHTML=`<div style="display:flex;gap:12px;align-items:center;">
       ${path?`<img data-sku-thumb="${escapeHtml(path)}" alt=""
-          ${cached?`src="${escapeHtml(cached)}"`:''}
-          style="width:76px;height:76px;flex-shrink:0;border-radius:12px;object-fit:cover;
-                 background:rgba(255,255,255,.06);"/>`:''}
+          ${cached?`src="${escapeHtml(cached)}"`:''} ${box}/>`
+        :shot?`<img alt="" src="${escapeHtml(shot)}" referrerpolicy="no-referrer" ${box}/>`:''}
       <span style="min-width:0;flex:1;">
         <b style="font-size:17px;word-break:break-word;">${escapeHtml(piece.sku)}</b>
         ${bundlePieceNoted(piece)?'<span class="bundle-tag" style="margin-left:6px;">made to order</span>':''}
@@ -6159,16 +6172,27 @@ function renderBundleFocus(){
 // the pictures are the warehouse's own, taken in Ad-Hoc Picking: a SKU has one
 // photo wherever it turns up, and packing is one of the places it turns up
 let bundleSkuPhotos={};
+// and the supplier's own address for the ones whose picture never made it into
+// our bucket, so packing shows what the catalogue shows
+let bundleSkuUrls={};
+const bundleSkuKey=sku=>String(sku||'').trim().toLowerCase();
 function bundleSkuPhoto(sku){
-  return bundleSkuPhotos[String(sku||'').trim().toLowerCase()]||'';
+  return bundleSkuPhotos[bundleSkuKey(sku)]||'';
+}
+function bundleSkuUrl(sku){
+  return bundleSkuUrls[bundleSkuKey(sku)]||'';
 }
 async function loadBundleSkuPhotos(){
   if(!sb) return;
   try{
-    const rows=await bundleFetchAll(()=>sb.from('warehouse_skus').select('sku,photo_path'));
-    const map={};
-    rows.forEach(r=>{ if(r.photo_path) map[String(r.sku||'').trim().toLowerCase()]=r.photo_path; });
-    bundleSkuPhotos=map;
+    const rows=await bundleFetchAll(()=>sb.from('warehouse_skus').select('sku,photo_path,photo_url'));
+    const map={}, urls={};
+    rows.forEach(r=>{
+      const k=bundleSkuKey(r.sku);
+      if(r.photo_path) map[k]=r.photo_path;
+      if(r.photo_url) urls[k]=r.photo_url;
+    });
+    bundleSkuPhotos=map; bundleSkuUrls=urls;
   }catch(e){ /* a bundle without pictures is still packable */ }
 }
 // A photo that arrives after the piece has been read is a photo nobody looked
@@ -6685,9 +6709,12 @@ function setStore(k){
   document.getElementById('adhocTrashTitle').textContent=STORES[k]+' · Recently deleted';
   adhocAllShops=false;
   // nothing from the other shop should linger on screen
-  adhocOrders=[]; adhocLines=[]; skuRows=[]; skuPhotos={};
+  adhocOrders=[]; adhocLines=[]; skuRows=[]; skuPhotos={}; skuPhotoUrls={};
   pickedAdhoc.clear(); adhocSelectMode=false;
   pickedSkus.clear(); skuSelectMode=false;
+  // the other shop's list, and the narrowing that was done to it, both go
+  skuNoPhotoOnly=false;
+  document.getElementById('skuNoPhoto').classList.remove('on');
 }
 document.querySelectorAll('#adhocStoreScreen [data-store]').forEach(b=>{
   b.addEventListener('click',()=>{ setStore(b.dataset.store); showScreen('adhoc-list'); });
@@ -6940,6 +6967,10 @@ async function purgeExpiredAdhoc(){
 const adhocOrder=()=>adhocOrders.find(o=>o.id===adhocCurrentId)||null;
 // SKU name -> storage path, so a line knows whether it has a picture
 let skuPhotos={};
+// and SKU name -> the supplier's own address, for the ones whose picture never
+// made it into our bucket because that host refuses other sites. The catalogue
+// shows those, so a picking line has to show them too.
+let skuPhotoUrls={};
 // the date is only a starting name — a pick list is easier to find later if
 // it says who or what it was for
 function renderAdhocHeader(){
@@ -6962,11 +6993,14 @@ async function refreshAdhocDetail(){
   // one lookup for the whole list rather than one per line
   const names=[...new Set(adhocLines.map(l=>l.sku))];
   if(names.length){
-    const {data:sk}=await sb.from('warehouse_skus').select('sku,photo_path')
+    const {data:sk}=await sb.from('warehouse_skus').select('sku,photo_path,photo_url')
       .eq('store',currentStore).in('sku',names);
-    skuPhotos={};
-    (sk||[]).forEach(r=>{ if(r.photo_path) skuPhotos[r.sku]=r.photo_path; });
-  }else skuPhotos={};
+    skuPhotos={}; skuPhotoUrls={};
+    (sk||[]).forEach(r=>{
+      if(r.photo_path) skuPhotos[r.sku]=r.photo_path;
+      if(r.photo_url) skuPhotoUrls[r.sku]=r.photo_url;
+    });
+  }else{ skuPhotos={}; skuPhotoUrls={}; }
   renderAdhocLines();
 }
 async function hydrateSkuThumbs(){
@@ -7024,11 +7058,17 @@ function renderAdhocLines(){
     // the whole point of it being one-off. Everything else falls back to the
     // catalogue as it always has.
     const photo=l.photo_path||skuPhotos[l.sku];
+    // and where no copy was ever made, the supplier's own address, the same
+    // fallback the SKU list draws
+    const shot=skuPhotoUrls[l.sku];
+    const has=!!(photo||shot);
     return `<div class="ph-card${l.picked?' line-done':partial?' line-part':''}" data-line="${l.id}">
       <div class="adhoc-head">
-        <button class="sku-thumb${photo?' has':''}" data-sku-photo="${escapeHtml(l.sku)}"
-                title="${photo?'Tap to enlarge':'Add a photo of this SKU'}">
-          ${photo?`<img alt="" data-sku-thumb="${escapeHtml(photo)}"/>`:'<span>＋</span>'}
+        <button class="sku-thumb${has?' has':''}" data-sku-photo="${escapeHtml(l.sku)}"
+                title="${has?'Tap to enlarge':'Add a photo of this SKU'}">
+          ${photo?`<img alt="" data-sku-thumb="${escapeHtml(photo)}"/>`
+            :shot?`<img alt="" src="${escapeHtml(shot)}" referrerpolicy="no-referrer"/>`
+            :'<span>＋</span>'}
         </button>
         <span class="sku-name">${escapeHtml(l.sku)}</span>
         <button class="copy-btn" data-copy="${escapeHtml(l.sku)}"
@@ -7193,7 +7233,8 @@ document.getElementById('adhocLines').addEventListener('click',async e=>{
     // the line's own picture wins over the catalogue's, the same way it does
     // when the line is drawn
     const photo=l.photo_path||skuPhotos[sku];
-    if(photo) openPhotoModal(photo,sku);
+    const url=skuPhotoUrls[sku];
+    if(photo||url) openPhotoModal(photo||'',sku,url,f=>attachSkuPhoto(sku,f));
     else{ const f=await pickImageFile(); if(f) attachSkuPhoto(sku,f); }
     return;
   }
@@ -7309,18 +7350,24 @@ document.getElementById('adhocImportBtn').addEventListener('click',()=>{
         list.push({sku:v,url:/^https?:\/\//i.test(url)?url:''});
       }
       if(!list.length) throw new Error('no SKU names found in the first sheet');
-      // upsert on the name, so importing a longer list again just tops it up
+      // Upsert on the name, so importing a longer list again just tops it up.
+      // The rows with a picture and the rows without go up as two runs: every
+      // row in one batch has to carry the same columns, and leaving the photo
+      // out of the others is also what stops a blank cell wiping a picture a
+      // SKU already has.
       let added=0;
-      for(let i=0;i<list.length;i+=500){
-        const chunk=list.slice(i,i+500).map(x=>{
-          const row={user_id:session.user.id,sku:x.sku,store:currentStore};
-          if(x.url) row.photo_url=x.url;     // keep the address even if the copy fails
-          return row;
-        });
-        const {error}=await sb.from('warehouse_skus').upsert(chunk,{onConflict:'store,sku'});
-        if(error) throw error;
-        added+=chunk.length;
-        btn.textContent=`Importing… ${Math.min(i+500,list.length)}/${list.length}`;
+      for(const group of [list.filter(x=>!x.url),list.filter(x=>x.url)]){
+        for(let i=0;i<group.length;i+=500){
+          const chunk=group.slice(i,i+500).map(x=>{
+            const row={user_id:session.user.id,sku:x.sku,store:currentStore};
+            if(x.url) row.photo_url=x.url;   // keep the address even if the copy fails
+            return row;
+          });
+          const {error}=await sb.from('warehouse_skus').upsert(chunk,{onConflict:'store,sku'});
+          if(error) throw error;
+          added+=chunk.length;
+          btn.textContent=`Importing… ${added}/${list.length}`;
+        }
       }
       // Photos are fetched one at a time and shrunk on the way in. Suppliers'
       // image hosts often refuse cross-origin reads, so any that will not come
@@ -7362,6 +7409,40 @@ document.getElementById('adhocImportBtn').addEventListener('click',()=>{
   inp.click();
 });
 
+// The photos an import could not fetch. A browser on our domain is refused by
+// a good many image hosts; the Edge Function is not a browser, so it can read
+// what we cannot. It works in batches and the failures stay where they are, so
+// the offset walks past them until a batch comes back empty.
+document.getElementById('skuCopyPhotosBtn').addEventListener('click',async()=>{
+  if(!sb) return;
+  const btn=document.getElementById('skuCopyPhotosBtn');
+  const msg=document.getElementById('adhocImportMsg');
+  const label=btn.textContent; btn.disabled=true; btn.textContent='Copying…';
+  let copied=0,failed=0,offset=0,trouble=[];
+  try{
+    for(;;){
+      const {data,error}=await invokeFn('copy-sku-photos',
+        {store:currentStore,limit:20,offset});
+      if(error) throw new Error(await functionError(error));
+      if(data&&data.error) throw new Error(data.error);
+      copied+=data.copied||0; failed+=data.failed||0; offset+=data.failed||0;
+      if(data.trouble) trouble=trouble.concat(data.trouble).slice(0,5);
+      btn.textContent=`Copying… ${copied} done`
+        +(data.remaining?` · ${data.remaining} to go`:'');
+      if(!data.scanned) break;
+    }
+    showMsg(msg,copied||failed
+      ? `✓ ${copied} photo(s) copied`
+        +(failed?`. ${failed} still could not be read`
+          +(trouble.length?' — '+escapeHtml(trouble.join('; ')):'')
+          +'. Those show from the supplier and can be replaced by hand.':'.')
+      : 'Nothing to copy — every SKU with an address already has a copy of its own.',true);
+  }catch(err){
+    showMsg(msg,'Could not copy: '+((err&&err.message)||'unknown error'),false);
+  }finally{ btn.disabled=false; btn.textContent=label; }
+  await refreshSkus();
+});
+
 // ---------- the SKU catalogue ----------
 // Deleting SKUs is the one action here that cannot be undone and takes the
 // whole warehouse with it if mis-tapped, so it asks you to copy a code out
@@ -7378,29 +7459,84 @@ const pickedSkus=new Set();
 let skuSelectMode=false;
 document.getElementById('goToSkusBtn').addEventListener('click',()=>showScreen('skus'));
 // A warehouse of ten thousand names cannot be read in one go — the server
-// stops at a thousand rows — and drawing ten thousand cards would lock up the
-// phone anyway. So the count comes from the server, the list shows a page of
-// it, and searching is done server side rather than filtering what happened
-// to be loaded.
+// stops at a thousand rows — so it arrives a page at a time. The first page
+// draws at once and the rest follow as you reach the bottom, so the whole
+// catalogue can be read straight through without waiting for all of it up
+// front. Searching is done server side rather than filtering what happened to
+// be loaded.
 const SKU_PAGE=300;
 let skuTotal=0;
-async function refreshSkus(){
+// the ones still without a picture, so a morning can be spent filling them in
+// rather than hunting for which ones are missing
+let skuNoPhotoOnly=false;
+let skuLoading=false;
+let skuLoadSeq=0;
+async function refreshSkus(){ return loadSkus(false); }
+async function loadSkus(more){
   const el=document.getElementById('skuList');
   if(!sb){ skuRows=[]; el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
+  if(skuLoading&&more) return;                 // one page on the way is enough
   const q=(document.getElementById('skuSearch').value||'').trim();
+  const seq=++skuLoadSeq;
+  skuLoading=true; syncSkuMore();
+  const from=more?skuRows.length:0;
   let sel=sb.from('warehouse_skus').select('*',{count:'exact'})
-    .eq('store',currentStore).order('sku').limit(SKU_PAGE);
+    .eq('store',currentStore).order('sku').range(from,from+SKU_PAGE-1);
   if(q) sel=sel.ilike('sku','%'+q+'%');
+  // no picture means neither a copy of our own nor a supplier's address
+  if(skuNoPhotoOnly) sel=sel.is('photo_path',null).is('photo_url',null);
   const {data,count,error}=await sel;
+  if(seq!==skuLoadSeq) return;                 // a later search has taken over
+  skuLoading=false;
   if(error){
-    skuRows=[]; skuTotal=0;
-    el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load. Run supabase-migration-ADHOC.sql first.</p>';
+    if(!more){ skuRows=[]; skuTotal=0;
+      el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load. Run supabase-migration-ADHOC.sql first.</p>'; }
+    syncSkuMore();
     return;
   }
-  skuRows=data||[];
+  const got=data||[];
+  skuRows=more?skuRows.concat(got):got;
   skuTotal=count==null?skuRows.length:count;
-  renderSkus();
+  // appending draws only the new cards — ten thousand redrawn on every page
+  // would slow to a crawl long before the end of the list
+  if(more&&got.length) appendSkus(got);
+  else renderSkus();
 }
+// the next page arrives as the bottom comes into view, so a ten thousand name
+// warehouse can be scrolled through rather than tapped through
+let skuMoreObserver=null;
+function syncSkuMore(){
+  const wrap=document.getElementById('skuMoreWrap');
+  const btn=document.getElementById('skuMoreBtn');
+  const rest=skuTotal-skuRows.length;
+  wrap.style.display=rest>0?'':'none';
+  btn.disabled=skuLoading;
+  btn.textContent=skuLoading?'Loading…':'Show more ('+rest+' to go)';
+  if(!skuMoreObserver&&'IntersectionObserver' in window){
+    skuMoreObserver=new IntersectionObserver(es=>{
+      if(es.some(e=>e.isIntersecting)) fillSkusToBottom();
+    },{rootMargin:'400px'});
+    skuMoreObserver.observe(wrap);
+  }
+  // the observer only speaks when the bottom crosses into view, and appending
+  // a page can leave it in view still, so a short page pulls the next itself
+  if(rest>0&&!skuLoading&&wrap.offsetParent!==null
+     &&wrap.getBoundingClientRect().top<window.innerHeight+400) fillSkusToBottom();
+}
+function fillSkusToBottom(){
+  if(skuLoading||skuTotal<=skuRows.length) return;
+  const wrap=document.getElementById('skuMoreWrap');
+  if(wrap.offsetParent===null) return;         // the screen is not the one open
+  setTimeout(()=>loadSkus(true),0);
+}
+document.getElementById('skuMoreBtn').addEventListener('click',()=>loadSkus(true));
+document.getElementById('skuNoPhoto').addEventListener('click',async()=>{
+  skuNoPhotoOnly=!skuNoPhotoOnly;
+  document.getElementById('skuNoPhoto').classList.toggle('on',skuNoPhotoOnly);
+  pickedSkus.clear();                  // the selection was of the other list
+  document.getElementById('skuList').scrollIntoView({block:'nearest'});
+  await refreshSkus();
+});
 // the server has already filtered, so everything loaded is on screen
 function visibleSkuIds(){ return new Set(skuRows.map(r=>r.id)); }
 const allSkusPicked=v=>v.size>0&&[...v].every(id=>pickedSkus.has(id));
@@ -7416,20 +7552,8 @@ function syncSkuBulk(){
     skuSelectMode?pickedSkus.size+' of '+visible.size+' selected':visible.size+' shown';
   showDelete('skuBulkDelete',skuSelectMode&&pickedSkus.size>0);
 }
-function renderSkus(){
-  const el=document.getElementById('skuList');
-  const q=(document.getElementById('skuSearch').value||'').trim();
-  setTimeout(()=>{ syncSkuBulk(); hydrateSkuListThumbs(); },0);
-  const capped=skuTotal>skuRows.length;
-  // while searching the figure is how many matched, not how many exist
-  document.getElementById('skusCount').textContent=q
-    ? `${skuTotal} match${skuTotal===1?'':'es'} for “${q}”.`
-      +(capped?` Showing the first ${skuRows.length}.`:'')
-    : `${skuTotal} SKU name(s) in the warehouse.`
-      +(capped?` Showing the first ${skuRows.length} — search to narrow it down.`:'');
-  if(!skuTotal&&!q){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet — import a list or add one.</p>'; return; }
-  if(!skuRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Nothing matches.</p>'; return; }
-  el.innerHTML=skuRows.map(r=>`<div class="ph-card${pickClasses(skuSelectMode,pickedSkus.has(r.id))}" data-sku-id="${r.id}">
+function skuCardHtml(r){
+  return `<div class="ph-card${pickClasses(skuSelectMode,pickedSkus.has(r.id))}" data-sku-id="${r.id}">
       <div class="adhoc-row">
         <input type="checkbox" class="pick" data-sku-pick ${pickedSkus.has(r.id)?'checked':''}
           title="Select" style="${skuSelectMode?'align-self:center;':'visibility:hidden;width:0;margin:0;'}"/>
@@ -7445,7 +7569,34 @@ function renderSkus(){
         </div>
         <button class="del-btn" data-sku-del title="Delete">×</button>
       </div>
-    </div>`).join('');
+    </div>`;
+}
+// while searching the figure is how many matched, not how many exist
+function renderSkuCount(){
+  const q=(document.getElementById('skuSearch').value||'').trim();
+  const rest=skuTotal>skuRows.length;
+  const what=skuNoPhotoOnly?' with no photo':'';
+  document.getElementById('skusCount').textContent=(q
+    ? `${skuTotal} match${skuTotal===1?'':'es'}${what} for “${q}”.`
+    : skuNoPhotoOnly
+      ? `${skuTotal} SKU name(s) with no photo.`
+      : `${skuTotal} SKU name(s) in the warehouse.`)
+    +(rest?` Showing ${skuRows.length} so far — keep scrolling, or search to narrow it down.`:'');
+}
+function renderSkus(){
+  const el=document.getElementById('skuList');
+  const q=(document.getElementById('skuSearch').value||'').trim();
+  setTimeout(()=>{ syncSkuBulk(); syncSkuMore(); hydrateSkuListThumbs(); },0);
+  renderSkuCount();
+  if(!skuTotal&&!q&&!skuNoPhotoOnly){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet — import a list or add one.</p>'; return; }
+  if(!skuRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">'
+    +(skuNoPhotoOnly&&!q?'Every SKU has a photo.':'Nothing matches.')+'</p>'; return; }
+  el.innerHTML=skuRows.map(skuCardHtml).join('');
+}
+function appendSkus(rows){
+  document.getElementById('skuList').insertAdjacentHTML('beforeend',rows.map(skuCardHtml).join(''));
+  renderSkuCount();
+  setTimeout(()=>{ syncSkuBulk(); syncSkuMore(); hydrateSkuListThumbs(); },0);
 }
 // a copied photo where we have one, the supplier's own image where the copy
 // was refused, and an empty square where there is neither
@@ -7459,12 +7610,16 @@ function skuThumbHtml(r){
 }
 async function hydrateSkuListThumbs(){
   if(!sb) return;
-  for(const img of document.querySelectorAll('#skuList img[data-sku-thumb]')){
+  const imgs=[...document.querySelectorAll('#skuList img[data-sku-thumb]')].filter(i=>!i.src);
+  // one round trip per picture is thousands of them over a full warehouse, so
+  // the addresses are asked for a hundred at a time
+  const want=[...new Set(imgs.map(i=>i.getAttribute('data-sku-thumb')).filter(p=>!photoUrlCache[p]))];
+  for(let i=0;i<want.length;i+=100){
+    const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrls(want.slice(i,i+100),3600);
+    (data||[]).forEach(d=>{ if(d&&d.signedUrl&&!d.error) photoUrlCache[d.path]=d.signedUrl; });
+  }
+  for(const img of imgs){
     const path=img.getAttribute('data-sku-thumb');
-    if(!photoUrlCache[path]){
-      const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(path,3600);
-      if(data&&data.signedUrl) photoUrlCache[path]=data.signedUrl;
-    }
     if(photoUrlCache[path]) img.src=photoUrlCache[path];
   }
 }
@@ -7590,9 +7745,10 @@ document.getElementById('skuList').addEventListener('click',async e=>{
     return;
   }
   if(e.target.closest('[data-sku-shot]')){
-    if(r.photo_path) openPhotoModal(r.photo_path,r.sku);
-    else if(r.photo_url) openPhotoModal(null,r.sku,r.photo_url);
-    else{ const f=await pickImageFile(); if(f){ await attachSkuPhoto(r.sku,f); await refreshSkus(); } }
+    const swap=async f=>{ await attachSkuPhoto(r.sku,f); await refreshSkus(); };
+    if(r.photo_path) openPhotoModal(r.photo_path,r.sku,null,swap);
+    else if(r.photo_url) openPhotoModal(null,r.sku,r.photo_url,swap);
+    else{ const f=await pickImageFile(); if(f) await swap(f); }
     return;
   }
   if(e.target.closest('[data-sku-del]')){
@@ -8973,7 +9129,15 @@ async function hydratePhotos(root){
 }
 // Full-size viewer for any attached photo. Signed URLs expire, so a fresh
 // one is minted each time rather than trusting the cached thumbnail URL.
-async function openPhotoModal(path,title,directUrl){
+// A picture that can be replaced says so, and only where replacing it means
+// something — a SKU. Everywhere else the button stays out of the way.
+let photoModalReplacer=null;
+function setPhotoModalReplace(fn){
+  photoModalReplacer=fn||null;
+  document.getElementById('photoModalReplace').style.display=fn?'':'none';
+}
+async function openPhotoModal(path,title,directUrl,onReplace){
+  setPhotoModalReplace(onReplace);
   if(!path&&directUrl){                       // imported image, shown from source
     const img=document.getElementById('photoModalImg');
     img.removeAttribute('src'); img.style.maxWidth='100%'; img.style.width=''; img.style.cursor='zoom-in';
@@ -8981,7 +9145,7 @@ async function openPhotoModal(path,title,directUrl){
     document.getElementById('photoModal').classList.add('open');
     img.src=directUrl; return;
   }
-  if(!sb||!path) return;
+  if(!sb||!path){ setPhotoModalReplace(null); return; }
   const img=document.getElementById('photoModalImg');
   img.removeAttribute('src');
   img.style.maxWidth='100%'; img.style.width=''; img.style.cursor='zoom-in';
@@ -8993,7 +9157,15 @@ async function openPhotoModal(path,title,directUrl){
 function closePhotoModal(){
   document.getElementById('photoModal').classList.remove('open');
   document.getElementById('photoModalImg').removeAttribute('src');
+  setPhotoModalReplace(null);
 }
+// the picker is a screen of its own, so the viewer steps aside for it
+document.getElementById('photoModalReplace').addEventListener('click',async()=>{
+  const fn=photoModalReplacer; if(!fn) return;
+  closePhotoModal();
+  const f=await pickImageFile();
+  if(f) await fn(f);
+});
 document.getElementById('photoModalClose').addEventListener('click',closePhotoModal);
 document.getElementById('photoModalBody').addEventListener('click',e=>{
   const img=document.getElementById('photoModalImg');
