@@ -433,6 +433,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .bundle-row[open] .bundle-chev{transform:rotate(90deg);}
 .bundle-sub{display:flex;justify-content:space-between;gap:10px;padding:4px 0;
   border-top:1px solid rgba(255,255,255,.07);}
+/* A bundle on the order is a row you press and a list you read, so the press
+   is a button and the list beneath it is not. */
+.bundle-job-head{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  padding:11px;background:none;border:0;color:inherit;}
+.bundle-job-pieces{padding:0 11px 10px;}
 .tile-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
 .tile{display:flex;flex-direction:column;align-items:flex-start;gap:3px;
   min-height:150px;padding:16px;border-radius:22px;border:1px solid var(--blueprint);
@@ -1745,9 +1750,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
                 aria-label="Close">×</button>
       </div>
       <div id="bundleFocusNow"></div>
+      <!-- OK on the right, where the thumb that presses it a hundred times a
+           morning already is, and Later out of its way -->
       <div class="chips chips-left" style="margin:12px 0 0;">
-        <button class="btn-primary" id="bundleFocusOk" style="flex:1;">OK</button>
         <button class="btn-outline" id="bundleFocusLater">Later</button>
+        <button class="btn-primary" id="bundleFocusOk" style="flex:1;">OK</button>
       </div>
       <div id="bundleFocusMsg"></div>
     </div>
@@ -5756,6 +5763,12 @@ async function refreshBundleJobs(){
   // a finished job is worth three days and no more; the sweep is asked for
   // whenever the screen is opened rather than being anybody's job to remember
   try{ await sb.rpc('purge_old_bundle_jobs'); }catch(e){}
+  // There is one set of settings for reading work out loud, and it lives on
+  // Daily Pick List: the voice, the words said differently, the words not said
+  // at all, and which SKUs are somebody else's job. Read afresh here for the
+  // same reason the pick list reads them afresh -- a word added on Settings
+  // should be in force by the time anybody picks up a box.
+  try{ await Promise.all([loadPlHidden(),loadPlVoice()]); }catch(e){}
   let orders,jobs,items;
   try{
     [orders,jobs,items]=await Promise.all([
@@ -5844,21 +5857,32 @@ function openBundleOrder(){
   document.getElementById('bundleBubbleN').textContent=leftJobs;
   bub.hidden=!leftJobs;
   loadBundleSkuPhotos();
+  // Every bundle with everything in it, the way a pick list shows every line
+  // of the sheet: what is coming is worth knowing before it arrives, and a
+  // list you have to open one row at a time is a list nobody reads.
   el.innerHTML=o.jobs.map(j=>{
-    const done=j.pieces.filter(x=>x.done).length;
-    return `<button class="ph-card selectable${j.status==='completed'?' is-ticked':''}"
-        data-job="${j.id}"
-        style="display:flex;align-items:center;gap:10px;width:100%;text-align:left;">
-      ${j.image_url?`<img class="bundle-thumb" src="${escapeHtml(j.image_url)}" alt="" loading="lazy"/>`:''}
-      <span style="min-width:0;flex:1;">
-        <b style="word-break:break-word;">${escapeHtml(j.combo_name)}</b>
-        <span class="hint" style="display:block;margin:2px 0 0;">${j.sets} set${j.sets===1?'':'s'}
-          &middot; ${j.status==='completed'
-            ? `packed ${escapeHtml(bundleWhen(j.completed_at))}`
-            : `${done} of ${j.pieces.length} pieces`}</span>
-      </span>
-      <span class="bundle-chev">&rsaquo;</span>
-    </button>`;
+    const wanted=bundleWanted(j);
+    const done=wanted.filter(x=>x.done).length;
+    return `<div class="ph-card${j.status==='completed'?' is-ticked':''}" style="padding:0;">
+      <button class="bundle-job-head" data-job="${j.id}" type="button">
+        ${j.image_url?`<img class="bundle-thumb" src="${escapeHtml(j.image_url)}" alt="" loading="lazy"/>`:''}
+        <span style="min-width:0;flex:1;">
+          <b style="word-break:break-word;">${escapeHtml(j.combo_name)}</b>
+          <span class="hint" style="display:block;margin:2px 0 0;">${j.sets} set${j.sets===1?'':'s'}
+            &middot; ${j.status==='completed'
+              ? `packed ${escapeHtml(bundleWhen(j.completed_at))}`
+              : `${done} of ${wanted.length} pieces`}</span>
+        </span>
+        <span class="bundle-chev">&rsaquo;</span>
+      </button>
+      <div class="bundle-job-pieces">${j.pieces.map(x=>{
+        const hidden=bundlePieceHidden(x);
+        return `<div class="bundle-sub"${hidden?' style="opacity:.35;"':''}>
+          <span>${x.done?'✓ ':''}${escapeHtml(x.sku)}</span>
+          <span class="hint">&times;${x.qty}${j.sets>1?` · ${x.qty*j.sets} in all`:''}</span>
+        </div>`;
+      }).join('')||'<p class="hint" style="margin:0;">-- nothing in this bundle --</p>'}</div>
+    </div>`;
   }).join('');
 }
 // A line is where you would start, not somewhere else to go: tapping one
@@ -5880,8 +5904,21 @@ let bundleFocusAt=0;
 let bundleStartFromId=null;    // which line the start sheet was opened on
 
 function bundleJobById(id){ return bundleJobs.find(j=>j.id===id)||null; }
-function bundlePieceSpeech(piece,sets){
-  return [plSpoken(piece.sku),plQtyWords(piece.qty*sets)].filter(Boolean).join('. ');
+// A SKU on the hidden list is printed to order rather than picked off a
+// shelf, and that is as true inside a bundle as it is on a pick list. Such a
+// piece is still shown -- vanishing would be worse -- but it is dimmed, not
+// read out, and not waited for before the bundle can be finished.
+function bundlePieceHidden(piece){
+  try{ return plSkuHidden(piece.sku,plStore()); }catch(e){ return false; }
+}
+function bundleWanted(j){ return j.pieces.filter(x=>!bundlePieceHidden(x)); }
+// What is packed is one set at a time, so what is read is one set's worth:
+// the name, then how many of it go in each set. The multiplying is on the
+// screen for whoever wants it and out of the voice, which was reading a
+// number nobody counts to in one go.
+function bundlePieceSpeech(piece,sets,last){
+  return [plSpoken(piece.sku),plQtyWords(piece.qty),
+    last?'Last piece to complete this bundle.':''].filter(Boolean).join('. ');
 }
 function bundleOrderJobs(){
   const o=bundleOrderNow();
@@ -5904,12 +5941,15 @@ function bundleFocusOpen(jobId){
   const j=bundleJobById(jobId);
   if(!j) return;
   bundleFocusJob=j.id;
-  const first=j.pieces.findIndex(x=>!x.done);
+  const first=j.pieces.findIndex(x=>!x.done&&!bundlePieceHidden(x));
   bundleFocusAt=first<0?0:first;
   document.getElementById('bundleFocus').classList.add('open');
   renderBundleFocus();
-  plSay(`${plSpoken(j.combo_name)}. ${j.sets} set${j.sets===1?'':'s'}.`);
-  setTimeout(()=>bundleFocusSay(),Math.min(6000,1200+j.combo_name.length*70));
+  bundlePrefetchPhotos(j);
+  // The name of the combination is written at the top of the card and is no
+  // help said out loud -- what is wanted first is how many of it to build.
+  plSay(`Prepare ${j.sets} set${j.sets===1?'':'s'}.`);
+  setTimeout(()=>bundleFocusSay(),1600);
 }
 function bundleFocusClose(){
   document.getElementById('bundleFocus').classList.remove('open');
@@ -5920,32 +5960,48 @@ function bundleFocusClose(){
 function bundleFocusSay(){
   const j=bundleJobById(bundleFocusJob); if(!j) return;
   const piece=j.pieces[bundleFocusAt];
-  if(piece) plSay(bundlePieceSpeech(piece,j.sets));
+  if(!piece) return;
+  const left=bundleWanted(j).filter(x=>!x.done).length;
+  plSay(bundlePieceSpeech(piece,j.sets,left<=1));
 }
 function renderBundleFocus(){
   const j=bundleJobById(bundleFocusJob);
   if(!j){ bundleFocusClose(); return; }
-  const left=j.pieces.filter(x=>!x.done).length;
+  const left=bundleWanted(j).filter(x=>!x.done).length;
   document.getElementById('bundleFocusName').textContent=j.combo_name;
   document.getElementById('bundleFocusLeft').textContent=
-    `${j.sets} set${j.sets===1?'':'s'} \u00b7 ${left} left`;
+    `${j.sets} set${j.sets===1?'':'s'} · ${left} left`;
   document.getElementById('bundleFocusLeft').classList.toggle('clear',!left);
   const piece=j.pieces[bundleFocusAt];
   const el=document.getElementById('bundleFocusNow');
   if(!piece){ el.innerHTML='<p class="hint" style="margin:0;">-- nothing in this bundle --</p>'; return; }
   const path=bundleSkuPhoto(piece.sku);
+  const cached=path&&photoUrlCache[path]?photoUrlCache[path]:'';
   el.innerHTML=`<div style="display:flex;gap:12px;align-items:center;">
       ${path?`<img data-sku-thumb="${escapeHtml(path)}" alt=""
+          ${cached?`src="${escapeHtml(cached)}"`:''}
           style="width:76px;height:76px;flex-shrink:0;border-radius:12px;object-fit:cover;
                  background:rgba(255,255,255,.06);"/>`:''}
       <span style="min-width:0;flex:1;">
         <b style="font-size:17px;word-break:break-word;">${escapeHtml(piece.sku)}</b>
         <span class="hint" style="display:block;margin:4px 0 0;font-size:15px;">
-          &times;${piece.qty*j.sets}${j.sets>1?` (${piece.qty} \u00d7 ${j.sets})`:''}</span>
+          &times;${piece.qty} per set${j.sets>1?` · ${piece.qty*j.sets} in all`:''}</span>
       </span>
     </div>
-    <p class="hint" style="margin:10px 0 0;">Piece ${bundleFocusAt+1} of ${j.pieces.length}
-      ${j.pieces.filter(x=>x.done).length?`\u00b7 ${j.pieces.filter(x=>x.done).length} already ticked`:''}</p>`;
+    <p class="hint" style="margin:10px 0 6px;">Piece ${bundleFocusAt+1} of ${j.pieces.length}
+      ${j.pieces.filter(x=>x.done).length?`· ${j.pieces.filter(x=>x.done).length} already ticked`:''}</p>
+    <!-- the whole bundle at a glance, so what is coming is known before it
+         arrives and a piece already in your hand can be jumped to -->
+    <div class="pl-focus-grid">${j.pieces.map((x,i)=>{
+      const hidden=bundlePieceHidden(x);
+      return `<button type="button" class="pl-focus-cell${i===bundleFocusAt?' on':''}${
+        x.done?' is-ok':''}" data-focus-jump="${i}"${hidden?' style="opacity:.35;"':''}>
+        <span style="min-width:0;">
+          <b style="word-break:break-word;">${escapeHtml(x.sku)}</b>
+          <span class="hint" style="display:block;">${x.done?'✓ ticked':`×${x.qty} per set`}</span>
+        </span>
+      </button>`;
+    }).join('')}</div>`;
   bundleHydrateThumbs();
 }
 // the pictures are the warehouse's own, taken in Ad-Hoc Picking: a SKU has one
@@ -5962,6 +6018,21 @@ async function loadBundleSkuPhotos(){
     rows.forEach(r=>{ if(r.photo_path) map[String(r.sku||'').trim().toLowerCase()]=r.photo_path; });
     bundleSkuPhotos=map;
   }catch(e){ /* a bundle without pictures is still packable */ }
+}
+// A photo that arrives after the piece has been read is a photo nobody looked
+// at. Every picture in the bundle is asked for the moment the bundle opens,
+// and the one on screen is already in hand by the time it is wanted.
+async function bundlePrefetchPhotos(j){
+  if(!sb||!j) return;
+  const paths=[...new Set(j.pieces.map(x=>bundleSkuPhoto(x.sku)).filter(Boolean))]
+    .filter(path=>!photoUrlCache[path]);
+  await Promise.all(paths.map(async path=>{
+    try{
+      const {data}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(path,3600);
+      if(data&&data.signedUrl) photoUrlCache[path]=data.signedUrl;
+    }catch(e){ /* a piece without its picture is still packable */ }
+  }));
+  if(bundleFocusJob===j.id) bundleHydrateThumbs();
 }
 async function bundleHydrateThumbs(){
   if(!sb) return;
@@ -5987,7 +6058,7 @@ document.getElementById('bundleFocusOk').addEventListener('click',async()=>{
       .then(({error})=>{ if(error) showMsg(document.getElementById('bundleFocusMsg'),
         'That tick did not save: '+escapeHtml(error.message||''),false); });
   }
-  const next=j.pieces.findIndex(x=>!x.done);
+  const next=j.pieces.findIndex(x=>!x.done&&!bundlePieceHidden(x));
   if(next>=0){ bundleFocusAt=next; renderBundleFocus(); bundleFocusSay(); return; }
   await bundleFinishJob(j);
 });
@@ -6004,6 +6075,14 @@ document.getElementById('bundleFocusLater').addEventListener('click',()=>{
   bundleFocusOpen(next.id);
 });
 document.getElementById('bundleFocusClose').addEventListener('click',bundleFocusClose);
+// A piece already in your hand is worth ticking now rather than when the list
+// gets round to it, so the grid is not only a view of what is coming.
+document.getElementById('bundleFocusNow').addEventListener('click',e=>{
+  const b=e.target.closest('[data-focus-jump]'); if(!b) return;
+  bundleFocusAt=Number(b.dataset.focusJump)||0;
+  renderBundleFocus();
+  bundleFocusSay();
+});
 
 // A bundle is finished when every piece of it is ticked -- there is no way to
 // call it done with a piece outstanding, because a box with a piece missing is
