@@ -14008,11 +14008,18 @@ function gtRenderPage(canvas,page,maxDim,forExport,view){
         const cx=(b.x+b.w/2)*sc, cy=(b.y+b.h/2)*sc;
         ctx.translate(cx,cy); ctx.rotate(b.rot*Math.PI/180); ctx.translate(-cx,-cy);
       }
-      ctx.strokeStyle='#CCF344'; ctx.setLineDash([3,3]); ctx.lineWidth=1;
+      // the held box is drawn solid and the rest of the line goes faint, so
+      // what the sheet answers to is read off it rather than remembered
+      const held=gtLock&&gtLock.lineId===line.id&&gtLock.fieldId===f.id;
+      ctx.strokeStyle=(gtLock&&!held)?'rgba(204,243,68,0.28)':'#CCF344';
+      if(held){ ctx.setLineDash([]); ctx.lineWidth=2; }
+      else{ ctx.setLineDash([3,3]); ctx.lineWidth=1; }
       ctx.strokeRect(b.x*sc,b.y*sc,b.w*sc,b.h*sc);
-      ctx.setLineDash([]);
-      ctx.fillStyle='#CCF344';
-      ctx.fillRect((b.x+b.w)*sc-6,(b.y+b.h)*sc-6,6,6);   // the corner you drag
+      ctx.setLineDash([]); ctx.lineWidth=1;
+      if(!gtLock||held){
+        ctx.fillStyle='#CCF344';
+        ctx.fillRect((b.x+b.w)*sc-6,(b.y+b.h)*sc-6,6,6); // the corner you drag
+      }
       ctx.restore();
     });
   });
@@ -14132,6 +14139,12 @@ document.getElementById('gtOrderList').addEventListener('click',e=>{
 });
 function gtDraw(){
   const pages=gtPageCount();
+  // a design changed under a lock leaves it holding a box that is not there
+  if(gtLock){
+    const line=gtOrder.find(l=>l.id===gtLock.lineId);
+    const d=line&&gtDesign(line.designId);
+    if(!d||!gtFieldsOf(d,line).some(f=>f.id===gtLock.fieldId)) gtLock=null;
+  }
   if(gtPage>=pages) gtPage=Math.max(0,pages-1);
   const host=document.querySelector('#giftTagScreen .preview-card');
   const avail=host&&host.clientWidth?host.clientWidth-24:320;
@@ -14148,8 +14161,9 @@ function gtDraw(){
   zb.classList.toggle('on',gtZoomOn);
   zb.disabled=!gtSheet.slots.length;
   document.getElementById('gtPageLbl').textContent=
-    pages?(gtZoomOn?`SHEET ${gtPage+1} · ×${gtZoomScale.toFixed(1)}`
-                   :`SHEET ${gtPage+1} OF ${pages}`):'SHEET';
+    (pages?(gtZoomOn?`SHEET ${gtPage+1} · ×${gtZoomScale.toFixed(1)}`
+                    :`SHEET ${gtPage+1} OF ${pages}`):'SHEET')
+    +(gtLock?` · HELD TO ${(gtLock.name||'THAT TEXT').toUpperCase()}`:'');
   document.getElementById('gtPrevPageBtn').disabled=gtPage<=0;
   document.getElementById('gtNextPageBtn').disabled=gtPage>=pages-1;
   const per=S.slots.length, q=gtQueue().length;
@@ -14172,6 +14186,12 @@ function gtDraw(){
 // here writes to the line instead — where its words sit, and how big a box they
 // are given — for that line alone, which is what the nudge and box boxes on the
 // form hold. The corner resizes; anywhere else moves.
+// The words last taken hold of on the sheet, and whether the sheet is held to
+// them. A tag is a couple of centimetres with several boxes stacked on it, and
+// the box being nudged is easily lost to a neighbour under the pointer. Space
+// holds the sheet to the text that was clicked: nothing else on it can be
+// picked up until space is pressed again.
+let gtHeld=null, gtLock=null;
 (function gtSheetDrag(){
   const c=document.getElementById('gtCanvas');
   c.style.touchAction='none';
@@ -14222,8 +14242,23 @@ function gtDraw(){
     c.style.cursor='grabbing';
     return true;
   };
+  const startDrag=(e,h)=>{
+    const v=gtVal(h.line,h.f), p=at(e);
+    drag={line:h.line,f:h.f,mode:h.corner?'resize':'move',
+      px:p.mx,py:p.my,dx:v.dx,dy:v.dy,bw:h.b.w,bh:h.b.h};
+    gtHeld={lineId:h.line.id,fieldId:h.f.id,name:h.f.name||''};
+    try{ c.setPointerCapture(e.pointerId); }catch(err){}
+    gtDraw();
+  };
   c.addEventListener('pointerdown',e=>{
     const h=hit(at(e));
+    // While the sheet is held to one text, that text is the only thing on it
+    // that answers: a press anywhere else moves the view and leaves the lock,
+    // the line and the boxes exactly where they were.
+    if(gtLock){
+      if(h&&h.f&&h.line.id===gtLock.lineId&&h.f.id===gtLock.fieldId){ startDrag(e,h); return; }
+      startPan(e); return;
+    }
     // the bare sheet is not a tag: tapping it puts the boxes away, so the
     // dashed outlines belong to the tag being worked on and nothing else
     if(!h){
@@ -14237,12 +14272,11 @@ function gtDraw(){
     // Words are picked up only off the tag already being worked on. The first
     // tap on another tag chooses it and moves nothing — a design is clicked
     // once, and dragged on the click after that.
-    if(was!==h.line.id){ gtDraw(); return; }
-    const v=gtVal(h.line,h.f), p=at(e);
-    drag={line:h.line,f:h.f,mode:h.corner?'resize':'move',
-      px:p.mx,py:p.my,dx:v.dx,dy:v.dy,bw:h.b.w,bh:h.b.h};
-    try{ c.setPointerCapture(e.pointerId); }catch(err){}
-    gtDraw();
+    if(was!==h.line.id){
+      gtHeld={lineId:h.line.id,fieldId:h.f.id,name:h.f.name||''};
+      gtDraw(); return;
+    }
+    startDrag(e,h);
   });
   c.addEventListener('pointermove',e=>{
     if(pan){
@@ -15291,6 +15325,21 @@ function gtNudgeFields(list,dx,dy){
   });
 }
 const GT_ARROW={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]};
+// Space holds the sheet to the text that was clicked, and lets it go again.
+// Only over the sheet itself: in a box it is a space being typed.
+document.addEventListener('keydown',e=>{
+  if(currentScreen!=='tool-gift-tag') return;
+  if(e.key!==' '&&e.key!=='Spacebar'&&e.code!=='Space') return;
+  const t=e.target;
+  if(t&&(/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(t.tagName)||t.isContentEditable)) return;
+  if(gtLock) gtLock=null;
+  else{
+    if(!gtHeld) return;                 // nothing has been taken hold of yet
+    gtLock={lineId:gtHeld.lineId,fieldId:gtHeld.fieldId,name:gtHeld.name};
+  }
+  e.preventDefault();
+  gtDraw();
+});
 document.addEventListener('keydown',e=>{
   if(currentScreen!=='tool-gift-tag-design') return;
   const typing=e.target&&/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
