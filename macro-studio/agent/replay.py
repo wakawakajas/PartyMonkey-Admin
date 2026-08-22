@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from agent import actions, config, run_reports, self_exclusion, toast, uia, video, winapi
+from agent import actions, cdp, config, run_reports, self_exclusion, toast, uia, video, winapi
 
 _replay_lock = threading.Lock()
 
@@ -414,6 +414,9 @@ class ReplayEngine:
                 outcome = self._run_get_cursor_position(step, context)
             elif step_type == "read_control_value":
                 outcome = self._run_read_control_value(step, context)
+            elif step_type in ("cdp_launch", "web_goto", "web_click", "web_wait_for",
+                               "web_type", "web_read"):
+                outcome = self._run_web_step(step_type, step, context)
             else:
                 outcome = {"status": "skipped", "tier": None, "reason": f"Unknown step type '{step_type}'."}
         except Exception as exc:
@@ -522,12 +525,21 @@ class ReplayEngine:
         if not text:
             return {"status": "failed", "tier": None, "reason": "No text given to search for."}
         root = uia.element_from_handle(hwnd)
-        element = uia.find_by_text(root, text, exact=bool(step.get("exact")))
-        if element is None:
+        candidates = uia.find_all_by_text(root, text, exact=bool(step.get("exact")))
+        if not candidates:
             return {"status": "failed", "tier": None, "reason": f'No element with text "{text}" found in this window.'}
 
-        if not _call_ok(lambda: uia.try_invoke(element) or uia.try_select(element) or uia.try_toggle(element)):
-            return {"status": "failed", "tier": None, "reason": f'Found "{text}" but it has no invokable UIA pattern (no PostMessage fallback for text-based targeting yet).'}
+        # The outermost match is often a wrapper with no patterns on it
+        # (a nav <li> around the real link), so try each match in turn
+        # and click the first one that actually responds.
+        element = None
+        for candidate in candidates:
+            if _call_ok(lambda c=candidate: uia.try_invoke(c) or uia.try_select(c) or uia.try_toggle(c)):
+                element = candidate
+                break
+        if element is None:
+            plural = "match" if len(candidates) == 1 else "matches"
+            return {"status": "failed", "tier": None, "reason": f'Found {len(candidates)} {plural} for "{text}" but none had an invokable UIA pattern (no PostMessage fallback for text-based targeting yet).'}
         if expect_window_title and not self._wait_for_window(expect_window_title):
             return {"status": "failed", "tier": None, "reason": f'Clicked "{text}" without error, but "{expect_window_title}" never appeared.'}
 
@@ -535,13 +547,100 @@ class ReplayEngine:
         context["focus_element"] = element
         return {"status": "success", "tier": "uia"}
 
+    # -- CDP web steps -----------------------------------------------------
+    # UIA can't click a custom web widget that exposes no invokable
+    # pattern, and it can't see a background tab at all. These steps drive
+    # Chrome's own debugging protocol instead, which has neither limit.
+    # The port and the tab match live on each step so a macro can drive
+    # more than one browser or tab without extra machinery.
+    def _run_web_step(self, step_type: str, step: dict, context: dict) -> dict:
+        sub = lambda key, default="": actions.substitute(step.get(key, default), context["variables"])
+        port = int(step.get("port") or cdp.DEFAULT_PORT)
+        try:
+            if step_type == "cdp_launch":
+                message = cdp.launch(
+                    port=port,
+                    user_data_dir=sub("user_data_dir"),
+                    url=sub("url"),
+                    wait_seconds=min(max(1, int(step.get("timeout_ms", 20000))) / 1000.0, 60.0),
+                )
+                context["cdp_port"] = port
+                return {"status": "success", "tier": "cdp", "reason": message}
+
+            timeout_ms = min(max(0, int(step.get("timeout_ms", 10000))), 120_000)
+            match = sub("tab_match")
+
+            if step_type == "web_goto":
+                url = sub("url")
+                if not url:
+                    return {"status": "failed", "tier": None, "reason": "No URL given."}
+                # A brand-new tab is the sane default for "go to a page":
+                # reusing whatever tab happened to be first would clobber
+                # something the user may still be looking at.
+                if step.get("new_tab", True) and not match:
+                    page = cdp.open_tab(port, url)
+                    reason = f"Opened {url} in a new tab."
+                else:
+                    page = cdp.find_page(port, match or context.get("cdp_tab", ""), timeout_ms=timeout_ms)
+                    cdp.navigate(page, url)
+                    reason = f"Navigated that tab to {url}."
+                # Steps after this one act on the tab by id, and they must
+                # not start until the new document is the live one.
+                page = cdp.wait_ready(port, page.get("id", ""), url, timeout_ms=timeout_ms or 20000)
+                context["cdp_tab"] = page.get("id", "")
+                context["cdp_port"] = port
+                return {"status": "success", "tier": "cdp", "reason": reason}
+
+            page = cdp.find_page(port, match or context.get("cdp_tab", ""), timeout_ms=timeout_ms)
+            context["cdp_port"] = port
+            context["cdp_tab"] = page.get("id", context.get("cdp_tab", ""))
+
+            if step_type == "web_click":
+                result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.click(
+                    p, selector=sub("selector"), text=sub("text"),
+                    exact=bool(step.get("exact")), timeout_ms=timeout_ms or 8000))
+                label = result.get("label") or sub("text") or sub("selector")
+                return {"status": "success", "tier": "cdp",
+                        "reason": f'Clicked <{result.get("tag")}> "{label}".'}
+
+            if step_type == "web_wait_for":
+                cdp.through_navigation(port, page, timeout_ms or 10000, lambda p: cdp.wait_for(
+                    p, selector=sub("selector"), text=sub("text"),
+                    exact=bool(step.get("exact")), timeout_ms=timeout_ms or 10000))
+                return {"status": "success", "tier": "cdp", "reason": "Element appeared."}
+
+            if step_type == "web_type":
+                selector = sub("selector")
+                if not selector:
+                    return {"status": "failed", "tier": None, "reason": "No CSS selector given to type into."}
+                cdp.through_navigation(port, page, timeout_ms or 10000, lambda p: cdp.type_text(
+                    p, selector, sub("value"), submit=bool(step.get("submit"))))
+                return {"status": "success", "tier": "cdp", "reason": f'Typed into "{selector}".'}
+
+            # web_read
+            selector = sub("selector")
+            if not selector:
+                return {"status": "failed", "tier": None, "reason": "No CSS selector given to read."}
+            value = cdp.through_navigation(port, page, timeout_ms or 10000,
+                                           lambda p: cdp.read_text(p, selector))
+            store_as = step.get("store_as")
+            if store_as:
+                context["variables"][store_as] = value
+            preview = value if len(value) <= 60 else value[:60] + "..."
+            return {"status": "success", "tier": "cdp",
+                    "reason": f'Read "{preview}"' + (f" into {{{{{store_as}}}}}." if store_as else ".")}
+        except RuntimeError as exc:
+            return {"status": "failed", "tier": None, "reason": str(exc)}
+
     def _run_open_url(self, step: dict, context: dict) -> dict:
         url = actions.substitute(step.get("url", ""), context["variables"])
         if not url:
             return {"status": "failed", "tier": None, "reason": "No URL given."}
         try:
-            actions.open_url_in_chrome(url)
-            return {"status": "success", "tier": None, "reason": f"Opened {url} in Chrome."}
+            new_window = bool(step.get("new_window"))
+            actions.open_url_in_chrome(url, new_window=new_window)
+            where = "in a new Chrome window" if new_window else "in Chrome"
+            return {"status": "success", "tier": None, "reason": f"Opened {url} {where}."}
         except RuntimeError as exc:
             return {"status": "failed", "tier": None, "reason": str(exc)}
 

@@ -52,18 +52,26 @@ def find_chrome() -> Optional[str]:
     return shutil.which("chrome")
 
 
-def open_url_in_chrome(url: str) -> str:
+def open_url_in_chrome(url: str, new_window: bool = False) -> str:
     """Launches Chrome at url. Chrome's own single-instance behavior
     means this opens a new tab in the existing window if one's already
     running -- "launch or reuse a tab" comes for free, no extra
-    detection needed. Returns the chrome.exe path used."""
+    detection needed. Returns the chrome.exe path used.
+
+    That reused window is whichever one was active last, which during a
+    replay is usually the one the user just clicked Run in -- the new tab
+    takes over their view. `new_window` puts the page in its own window
+    instead, leaving whatever they were looking at alone. It still isn't
+    hidden: Chrome only exposes the active tab to UI Automation, so a
+    later click-by-text step needs this tab frontmost in *its* window."""
     chrome = find_chrome()
     if not chrome:
         raise RuntimeError(
             "Chrome wasn't found in its usual install locations. "
             "Install it from https://www.google.com/chrome/, or use a different step for this."
         )
-    subprocess.Popen([chrome, url])
+    args = [chrome, "--new-window", url] if new_window else [chrome, url]
+    subprocess.Popen(args)
     return chrome
 
 

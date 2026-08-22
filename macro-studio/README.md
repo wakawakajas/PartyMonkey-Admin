@@ -55,6 +55,36 @@ Build order (see the project's task list for live status):
 9. **Conditionals and loops** — done
 10. **Video encoding** — done
 
+## Web automation (CDP)
+
+UI Automation is the right engine for desktop apps and the wrong one for
+web pages. Chrome only exposes the *active* tab's accessibility tree, and a
+site built from custom widgets hands back elements with no Invoke, Select,
+Toggle, or DoDefaultAction pattern -- nothing UIA can click. The only way
+out on that side is a physical mouse click, which defeats background replay.
+
+So browser work goes through Chrome's own DevTools Protocol instead
+(`agent/cdp.py`, six `Web:` step types). It clicks the DOM node directly, so
+custom widgets, icon glyphs and wrapper elements all work, in background
+tabs, with no window focus. It's local and free -- the protocol DevTools
+itself uses, no API key, no per-run cost, nothing leaving the machine.
+
+- **Launch Chrome (CDP)** starts (or reuses) a Chrome on `--remote-debugging-port`
+- **Web: go to / click / wait for / type / read** act on a tab, matched by a
+  URL or title fragment; blank means "the tab this run is already using"
+- Steps mix freely with UIA steps -- one macro can drive File Explorer and a
+  web page in sequence
+
+Since Chrome 136 the debugging port is refused on the default user-data-dir,
+so these steps run against a Chrome with its own profile folder (default
+`%LocalAppData%\MacroStudio\ChromeProfile`). That profile starts signed out:
+sign in to a site once in that window and the session persists from then on.
+
+A page that redirects mid-step (a login gate, an SPA route change) destroys
+the JS execution context underneath the call. Those errors are retried
+against the re-resolved tab until the step's own timeout rather than failing
+the run, since "the page moved" isn't the same as "this didn't work".
+
 ## Architecture
 
 Two pieces, per the design brief — a browser tab can't touch the OS directly:

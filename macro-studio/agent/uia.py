@@ -201,18 +201,22 @@ def find_descendant(root, target: dict):
     return best
 
 
-def find_by_text(root, text: str, exact: bool = False):
-    """Breadth-first search under `root` for the first element whose
-    Name matches `text` -- "Find and click by text" locates a button or
-    link by its visible label instead of coordinates. Same depth/node
-    caps as find_descendant, for the same reason."""
+def find_all_by_text(root, text: str, exact: bool = False, limit: int = 12):
+    """Breadth-first search under `root` for every element whose Name
+    matches `text`, nearest-to-root first. "Find and click by text"
+    walks the list rather than taking the first hit: one visible label
+    usually appears several times in the same tree -- a nav item's list
+    wrapper, the link inside it, and the text node inside that all carry
+    the same name, and only one of them actually responds to a click.
+    Same depth/node caps as find_descendant, for the same reason."""
     if root is None or not text:
-        return None
+        return []
     try:
         walker = _automation().RawViewWalker
     except Exception:
-        return None
+        return []
 
+    found = []
     visited = 0
     queue = [(root, 0)]
     while queue and visited < MAX_SEARCH_NODES:
@@ -220,7 +224,9 @@ def find_by_text(root, text: str, exact: bool = False):
         visited += 1
         name = _safe(lambda: node.CurrentName, "")
         if (exact and name == text) or (not exact and text.lower() in name.lower()):
-            return node
+            found.append(node)
+            if len(found) >= limit:
+                return found
         if depth < MAX_SEARCH_DEPTH:
             try:
                 child = walker.GetFirstChildElement(node)
@@ -229,7 +235,7 @@ def find_by_text(root, text: str, exact: bool = False):
                     child = walker.GetNextSiblingElement(child)
             except Exception:
                 pass
-    return None
+    return found
 
 
 def _get_pattern(element, pattern_id: int, iface):

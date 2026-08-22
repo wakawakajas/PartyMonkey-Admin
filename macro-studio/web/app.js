@@ -113,6 +113,8 @@ function typeLabel(type) {
     file_op: "File op", clipboard: "Clipboard", keyboard_shortcut: "Shortcut",
     get_cursor_position: "Cursor pos", read_control_value: "Read value",
     conditional: "If/Else", loop: "Loop",
+    cdp_launch: "Launch Chrome (CDP)", web_goto: "Web: go to", web_click: "Web: click",
+    web_wait_for: "Web: wait for", web_type: "Web: type", web_read: "Web: read",
   };
   return labels[type] || type;
 }
@@ -665,7 +667,7 @@ const STEP_TEMPLATES = {
     label: "Find and click by text",
     make: () => ({ type: "find_click_text", window_title: "", text: "", exact: false, delay_ms: 0 }),
   },
-  open_url: { label: "Open URL in Chrome", make: () => ({ type: "open_url", url: "https://", delay_ms: 0 }) },
+  open_url: { label: "Open URL in Chrome", make: () => ({ type: "open_url", url: "https://", new_window: false, delay_ms: 0 }) },
   file_search: {
     label: "File Explorer search",
     make: () => ({ type: "file_search", folder: "", pattern: "*", recursive: false, store_as: "matches", delay_ms: 0 }),
@@ -680,6 +682,30 @@ const STEP_TEMPLATES = {
   read_control_value: {
     label: "Read control value",
     make: () => ({ type: "read_control_value", window_title: "", target: { name: "", automation_id: "" }, store_as: "value", delay_ms: 0 }),
+  },
+  cdp_launch: {
+    label: "Web: launch Chrome (CDP)",
+    make: () => ({ type: "cdp_launch", port: 9222, user_data_dir: "", url: "", timeout_ms: 20000, delay_ms: 0 }),
+  },
+  web_goto: {
+    label: "Web: go to URL",
+    make: () => ({ type: "web_goto", port: 9222, url: "https://", new_tab: true, tab_match: "", timeout_ms: 10000, delay_ms: 0 }),
+  },
+  web_click: {
+    label: "Web: click",
+    make: () => ({ type: "web_click", port: 9222, tab_match: "", selector: "", text: "", exact: false, timeout_ms: 8000, delay_ms: 0 }),
+  },
+  web_wait_for: {
+    label: "Web: wait for",
+    make: () => ({ type: "web_wait_for", port: 9222, tab_match: "", selector: "", text: "", exact: false, timeout_ms: 10000, delay_ms: 0 }),
+  },
+  web_type: {
+    label: "Web: type into field",
+    make: () => ({ type: "web_type", port: 9222, tab_match: "", selector: "", value: "", submit: false, timeout_ms: 10000, delay_ms: 0 }),
+  },
+  web_read: {
+    label: "Web: read text",
+    make: () => ({ type: "web_read", port: 9222, tab_match: "", selector: "", store_as: "value", timeout_ms: 10000, delay_ms: 0 }),
   },
   conditional: {
     label: "Conditional (if/else)",
@@ -979,6 +1005,35 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("exact match", editorCheckbox(step.exact, (v) => (step.exact = v)));
   } else if (step.type === "open_url") {
     addField("URL", editorInput("text", step.url, (v) => (step.url = v), "220px"));
+    addField("own window", editorCheckbox(step.new_window, (v) => (step.new_window = v)));
+  } else if (step.type === "cdp_launch") {
+    addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
+    addField("URL (optional)", editorInput("text", step.url, (v) => (step.url = v), "200px"));
+    addField("profile folder (blank=default)", editorInput("text", step.user_data_dir, (v) => (step.user_data_dir = v), "180px"));
+    addField("timeout (ms)", editorInput("number", step.timeout_ms, (v) => (step.timeout_ms = v), "80px"));
+  } else if (step.type === "web_goto") {
+    addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
+    addField("URL", editorInput("text", step.url, (v) => (step.url = v), "220px"));
+    addField("new tab", editorCheckbox(step.new_tab, (v) => (step.new_tab = v)));
+    addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));
+  } else if (step.type === "web_click" || step.type === "web_wait_for") {
+    addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
+    addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));
+    addField("CSS selector", editorInput("text", step.selector, (v) => (step.selector = v), "160px"));
+    addField("or visible text", editorInput("text", step.text, (v) => (step.text = v), "140px"));
+    addField("exact match", editorCheckbox(step.exact, (v) => (step.exact = v)));
+    addField("timeout (ms)", editorInput("number", step.timeout_ms, (v) => (step.timeout_ms = v), "80px"));
+  } else if (step.type === "web_type") {
+    addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
+    addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));
+    addField("CSS selector", editorInput("text", step.selector, (v) => (step.selector = v), "160px"));
+    addField("value", editorInput("text", step.value, (v) => (step.value = v), "140px"));
+    addField("press Enter after", editorCheckbox(step.submit, (v) => (step.submit = v)));
+  } else if (step.type === "web_read") {
+    addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
+    addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));
+    addField("CSS selector", editorInput("text", step.selector, (v) => (step.selector = v), "160px"));
+    addField("store as", editorInput("text", step.store_as, (v) => (step.store_as = v), "80px"));
   } else if (step.type === "file_search") {
     addField("folder", editorInput("text", step.folder, (v) => (step.folder = v), "160px"));
     addField("pattern", editorInput("text", step.pattern, (v) => (step.pattern = v), "80px"));
