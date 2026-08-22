@@ -63,7 +63,15 @@ class VideoRecorder:
             ]
         else:
             args += ["-i", "desktop"]
-        args += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast", str(self.output_path)]
+        # H.264 with yuv420p needs even dimensions, and a captured window is
+        # whatever size the user left it -- an odd width made libx264 fail
+        # with "Invalid argument" and write nothing at all. Rounding down to
+        # the nearest even pixel costs a row nobody will miss.
+        args += [
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
+            str(self.output_path),
+        ]
 
         try:
             self._proc = subprocess.Popen(

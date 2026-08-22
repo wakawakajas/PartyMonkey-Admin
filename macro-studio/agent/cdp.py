@@ -164,6 +164,48 @@ def find_page(port: int, match: str = "", timeout_ms: int = 0) -> dict:
         time.sleep(0.3)
 
 
+def browser_window_title(port: int = DEFAULT_PORT) -> str:
+    """The exact OS window title of the Chrome on this debugging port.
+
+    Needed because ffmpeg's gdigrab matches a window by its full title,
+    and this Chrome's title is whatever page it happens to be showing --
+    not something anyone can type in advance, and not something that
+    distinguishes it from a normal Chrome window either. The debugging
+    port does distinguish it: ask Chrome which processes are its own,
+    then find the top-level window belonging to one of them.
+
+    Returns "" when nothing matches, which callers treat as "record the
+    whole screen instead" rather than an error."""
+    from agent import winapi  # local import: video/window concerns, not CDP's core
+
+    pids = set()
+    try:
+        version = _http_json(port, "/json/version") or {}
+        browser_ws = version.get("webSocketDebuggerUrl")
+        if browser_ws:
+            info = _send({"webSocketDebuggerUrl": browser_ws}, "SystemInfo.getProcessInfo", {}, timeout=5)
+            for entry in info.get("processInfo", []) or []:
+                if entry.get("type") in ("browser", "renderer", "gpu"):
+                    pids.add(entry.get("id"))
+    except Exception:
+        pass
+    if not pids:
+        return ""
+
+    best = ""
+    for hwnd in winapi.enum_top_level_windows():
+        if winapi.window_pid(hwnd) not in pids:
+            continue
+        if winapi.window_class_name(hwnd) != "Chrome_WidgetWin_1":
+            continue
+        title = winapi.window_title(hwnd)
+        # Chrome keeps invisible helper windows around with the same
+        # class; the one showing a page is the one with a real title.
+        if title and (not best or len(title) > len(best)):
+            best = title
+    return best
+
+
 # -- one round trip ----------------------------------------------------------
 def _send(page: dict, method: str, params: dict, timeout: float = _WS_TIMEOUT) -> dict:
     """Opens a socket, sends one command, waits for that command's reply.

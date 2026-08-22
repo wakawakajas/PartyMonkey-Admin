@@ -238,12 +238,24 @@ class ReplayEngine:
         if not video_config or not video_config.get("enabled"):
             return None, None
         output_path = config.RUNS_DIR / run_id / "recording.mp4"
+        mode = video_config.get("mode", "fullscreen")
+        window_title = video_config.get("window_title")
+        if mode == "cdp_window":
+            # Resolved per run, not stored: this window's title is whatever
+            # page it is showing, which is different every time.
+            window_title = cdp.browser_window_title(int(video_config.get("port") or cdp.DEFAULT_PORT))
+            if window_title:
+                mode = "window"
+            else:
+                mode = "fullscreen"
+                self._broadcast({"type": "video_error", "message":
+                                 "The CDP browser window wasn't open, so this run was recorded full screen."})
         recorder = video.VideoRecorder(
             output_path,
-            mode=video_config.get("mode", "fullscreen"),
+            mode=mode,
             fps=video_config.get("fps", video.DEFAULT_FPS),
             region=video_config.get("region"),
-            window_title=video_config.get("window_title"),
+            window_title=window_title,
         )
         try:
             recorder.start()
