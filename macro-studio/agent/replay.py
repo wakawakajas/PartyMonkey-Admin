@@ -299,6 +299,17 @@ class ReplayEngine:
             results.append(result)
             self._broadcast({"type": "run_step_result", "result": result})
 
+            # A failed step normally doesn't end the run -- most macros do
+            # several unrelated things and one miss shouldn't cancel the
+            # rest. But some steps are the reason the next ones make sense:
+            # if the wait for a page's content times out, saving a PDF of it
+            # produces a file that looks fine and isn't. Marking such a step
+            # "stop the run if this fails" says so.
+            if result["status"] == "failed" and step.get("stop_on_fail"):
+                self._broadcast({"type": "run_halted", "reason": result.get("reason", ""),
+                                 "step_id": step.get("id")})
+                return False
+
             if self._stop_event.is_set():
                 return False
             delay = min(step.get("delay_ms", 0) / 1000.0, 5.0)  # cap so one long idle gap can't hang a run

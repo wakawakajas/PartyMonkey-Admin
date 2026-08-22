@@ -138,6 +138,18 @@ the JS execution context underneath the call. Those errors are retried
 against the re-resolved tab until the step's own timeout rather than failing
 the run, since "the page moved" isn't the same as "this didn't work".
 
+## When a step fails
+
+A failed step doesn't end the run. Most macros do several unrelated things and one
+miss shouldn't cancel the rest -- but some steps are the reason the ones after them
+make sense. A wait that times out and then saves a PDF of a half-drawn page
+produces a file that looks fine and isn't.
+
+Tick **stop run if this fails** on such a step. The run halts there, the report
+shows why, and nothing downstream gets the chance to write something wrong. Waits
+are the obvious candidates; so is anything whose failure means the page isn't where
+the next step thinks it is.
+
 ## When a click opens a tab
 
 A PDF, a print preview, a report: sites open them in a new tab, and every step
