@@ -5831,7 +5831,7 @@ function renderBundleJobs(){
     const {done,total}=bundleOrderProgress(o);
     const sets=o.jobs.reduce((n,j)=>n+(j.sets||1),0);
     const pct=total?Math.round(done/total*100):0;
-    return `<button class="ph-card selectable" data-order="${o.id}"
+    return `<div class="pl-card-wrap"><button class="ph-card selectable" data-order="${o.id}"
         style="display:flex;align-items:center;gap:10px;width:100%;text-align:left;">
       <span style="min-width:0;flex:1;">
         <b style="word-break:break-word;">${escapeHtml(o.title)}</b>
@@ -5841,18 +5841,127 @@ function renderBundleJobs(){
         <span class="hint" style="display:block;margin:2px 0 0;">${bundleWhenRan(o)}</span>
       </span>
       <span class="bundle-chev">&rsaquo;</span>
-    </button>`;
+    </button>${may('admin')?`<div class="pl-card-admin">
+      ${o.status==='completed'?''
+        :`<button type="button" data-order-done="${o.id}"
+            title="Mark the whole order packed from here, finished or not">✓ Complete</button>`}
+      <button type="button" data-order-clear="${o.id}"
+        title="Take every tick off this order so it can be packed again. It is not deleted -- hold the card for that.">Clear</button>
+    </div>`:''}</div>`;
   }).join('');
 }
 document.getElementById('bundleJobTabs').addEventListener('click',e=>{
   const b=e.target.closest('[data-job-tab]'); if(!b) return;
   bundleJobTab=b.dataset.jobTab; renderBundleJobs();
 });
-document.getElementById('bundleJobList').addEventListener('click',e=>{
+document.getElementById('bundleJobList').addEventListener('click',async e=>{
+  const done=e.target.closest('[data-order-done]');
+  if(done){ await bundleOrderComplete(done.dataset.orderDone); return; }
+  const clear=e.target.closest('[data-order-clear]');
+  if(clear){ await bundleOrderClear(clear.dataset.orderClear); return; }
   const b=e.target.closest('[data-order]'); if(!b) return;
+  if(bundleHeld){ bundleHeld=false; return; }
   bundleOrderId=b.dataset.order;
   showScreen('bundle-order');
 });
+
+// An order is opened every few minutes and deleted once, so there is no × on
+// the card: deleting takes a deliberate half second on it, and then says what
+// is about to go. The same half second as the pick list, because it is the
+// same gesture on the same kind of card.
+let bundleHoldTimer=null, bundleHeld=false, bundleHoldFrom=null;
+(function bundleHoldToDelete(){
+  const list=document.getElementById('bundleJobList');
+  const stop=()=>{ clearTimeout(bundleHoldTimer); bundleHoldTimer=null; bundleHoldFrom=null; };
+  list.addEventListener('pointerdown',e=>{
+    const card=e.target.closest('[data-order]'); if(!card) return;
+    if(!may('admin')) return;
+    bundleHeld=false;
+    bundleHoldFrom={x:e.clientX,y:e.clientY};
+    bundleHoldTimer=setTimeout(()=>{
+      bundleHeld=true; stop();
+      bundleOrderDelete(card.dataset.order);
+    },550);
+  });
+  // a scroll that started on a card is a scroll, not a hold
+  list.addEventListener('pointermove',e=>{
+    if(!bundleHoldFrom) return;
+    if(Math.hypot(e.clientX-bundleHoldFrom.x,e.clientY-bundleHoldFrom.y)>8) stop();
+  });
+  ['pointerup','pointercancel','pointerleave'].forEach(ev=>list.addEventListener(ev,stop));
+  list.addEventListener('contextmenu',e=>{ if(e.target.closest('[data-order]')) e.preventDefault(); });
+})();
+
+function bundleOrderById(id){ return bundleOrders.find(o=>o.id===id)||null; }
+async function bundleOrderDelete(id){
+  const o=bundleOrderById(id); if(!o) return;
+  const {done,total}=bundleOrderProgress(o);
+  if(!confirm(`Are you sure?\n\nDelete "${o.title}" and its ${total} `
+    +`bundle${total===1?'':'s'}${done?`, ${done} of them packed`:''}. This cannot be undone.`)) return;
+  const msg=document.getElementById('bundleOrdersMsg');
+  try{
+    const {error}=await sb.from('bundle_orders').delete().eq('id',id);
+    if(error) throw error;                     // the bundles go with it, by cascade
+    await refreshBundleJobs();
+    showMsg(msg,`✓ "${escapeHtml(o.title)}" deleted.`,true);
+  }catch(e){
+    showMsg(msg,'Could not delete it: '+escapeHtml(e.message||String(e)),false);
+  }
+}
+// Clear is not delete: the order and its bundles stay exactly as they were
+// read, with every tick taken off, so a morning packed against the wrong
+// sheet can be packed again rather than uploaded again.
+async function bundleOrderClear(id){
+  const o=bundleOrderById(id); if(!o) return;
+  if(!confirm(`Are you sure?\n\nTake every tick off "${o.title}" so it can be `
+    +'packed again. Nothing is deleted.')) return;
+  const msg=document.getElementById('bundleOrdersMsg');
+  try{
+    const ids=o.jobs.map(j=>j.id);
+    if(ids.length){
+      const {error}=await sb.from('bundle_job_items').update({done:false}).in('job_id',ids);
+      if(error) throw error;
+      const {error:e2}=await sb.from('bundle_jobs')
+        .update({status:'pending',completed_at:null,started_at:null}).in('id',ids);
+      if(e2) throw e2;
+    }
+    const {error:e3}=await sb.from('bundle_orders')
+      .update({status:'pending',completed_at:null,started_at:null}).eq('id',id);
+    if(e3) throw e3;
+    bundleJobTab='pending';
+    await refreshBundleJobs();
+    showMsg(msg,`✓ "${escapeHtml(o.title)}" is ready to pack again.`,true);
+  }catch(e){
+    showMsg(msg,'Could not clear it: '+escapeHtml(e.message||String(e)),false);
+  }
+}
+// Marked packed from here, finished or not: an order the floor has left
+// hanging is worse than one somebody decided about.
+async function bundleOrderComplete(id){
+  const o=bundleOrderById(id); if(!o) return;
+  const {done,total}=bundleOrderProgress(o);
+  const left=total-done;
+  if(left&&!confirm(`${left} bundle${left===1?'':'s'} of "${o.title}" `
+    +`${left===1?'is':'are'} not packed.\n\nMark the whole order complete anyway?`)) return;
+  const msg=document.getElementById('bundleOrdersMsg');
+  const now=new Date().toISOString();
+  try{
+    const ids=o.jobs.filter(j=>j.status!=='completed').map(j=>j.id);
+    if(ids.length){
+      const {error}=await sb.from('bundle_jobs')
+        .update({status:'completed',completed_at:now}).in('id',ids);
+      if(error) throw error;
+    }
+    const {error:e2}=await sb.from('bundle_orders')
+      .update({status:'completed',completed_at:now}).eq('id',id);
+    if(e2) throw e2;
+    bundleJobTab='completed';
+    await refreshBundleJobs();
+    showMsg(msg,`✓ "${escapeHtml(o.title)}" marked complete.`,true);
+  }catch(e){
+    showMsg(msg,'Could not complete it: '+escapeHtml(e.message||String(e)),false);
+  }
+}
 
 // ---- one order, and the bundles that came off it ----
 function bundleOrderNow(){ return bundleOrders.find(o=>o.id===bundleOrderId)||null; }
