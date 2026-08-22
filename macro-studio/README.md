@@ -30,14 +30,19 @@ PATH", then re-run `start.bat`.
 ## Status: Phase 10 of 10 — all phases complete
 
 Each macro can now optionally record video of its own runs (Edit → Video Recording):
-full screen, a specific window (by title), or a screen region, at a configurable
-framerate (default 10fps). Capture and H.264 MP4 encoding are both handled by ffmpeg's
-`gdigrab` input device — the agent just launches/stops the process. Macro Studio's own
-windows are excluded from full-screen/region capture via `SetWindowDisplayAffinity`
-(Windows 10 2004+), the same API screen-capture-blocking apps use. If ffmpeg isn't on
-PATH, the video settings panel and the agent's startup banner say so plainly with a
-download link — the macro's actual steps still run normally, only the video is skipped.
-Finished recordings are saved alongside the run report and linked from the run result.
+full screen, the CDP browser window, a specific window (by title), or a screen region,
+at a configurable framerate (default 10fps). Capture and H.264 MP4 encoding are both
+handled by ffmpeg's `gdigrab` input device — the agent just launches/stops the process.
+"The CDP browser window" resolves that window itself at the start of every run: its
+title is whatever page it happens to be showing, so there's nothing stable to type, and
+asking Chrome over the debugging port which processes are its own is what tells it apart
+from your normal Chrome. Macro Studio's own windows are excluded from full-screen/region
+capture via `SetWindowDisplayAffinity` (Windows 10 2004+), the same API
+screen-capture-blocking apps use. If ffmpeg isn't on PATH, the video settings panel and
+the agent's startup banner say so plainly with a download link — the macro's actual
+steps still run normally, only the video is skipped. Finished recordings are saved
+alongside the run report and linked from the run result.
+
 Videos older than `config.VIDEO_RETENTION_DAYS` (default 5) are auto-deleted by a
 background check every 6 hours -- the rest of that run's report (results, screenshots)
 stays intact, just without a video link.
