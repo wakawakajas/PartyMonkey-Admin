@@ -12721,6 +12721,13 @@ function renderRequests(){
   setTimeout(()=>inbox.querySelectorAll('[data-req-remarks]').forEach(growNote),0);
 }
 // Open and Completed moved into the shared Filter sheet at the foot of this file
+// The person who asked may withdraw their own, which is the ordinary case and
+// the only one most accounts ever see. An admin may remove anybody's, from any
+// of the three lists: a request sent to the wrong person, or one left behind by
+// somebody who has since gone, is otherwise nobody's to clear away. The
+// database has always said the same thing — requests_delete, part one.
+const canRemoveRequest=(r,mine,watching)=>
+  access.admin || (!mine && !watching && r.status!=='claimed');
 // watching is the admin's third list: somebody else's request, read only.
 // mine=false already takes the buttons off it — what is left is to say both
 // names rather than "to them", and to stop offering a photo slot on a job
@@ -12755,7 +12762,8 @@ function requestCard(r,mine,watching){
       <span class="req-ask" style="flex:1;min-width:0;overflow-wrap:anywhere;">${escapeHtml(r.title)}</span>
       ${r.urgent&&open?'<span class="tag urgent">URGENT</span>':''}
       <span class="tag ${cls}">${word}</span>
-      ${mine||watching||r.status==='claimed'?'':`<button class="del-btn" data-req-del title="Withdraw">×</button>`}
+      ${canRemoveRequest(r,mine,watching)
+        ? `<button class="del-btn" data-req-del title="${r.requester_id===myUserId?'Withdraw':'Delete'}">×</button>` : ''}
     </div>
     ${r.body?`<p class="req-detail" style="margin:0 0 4px;">${escapeHtml(r.body)}</p>`:''}
     ${shotStrip(r,watching)}
@@ -12955,7 +12963,7 @@ let requestQueue=[], requestShowing=null;
 // closed with the × this session; a snooze expiring takes an id back out
 const requestDismissed=new Set();
 function alertRequest(r){
-  if(!r||r.status==='completed') return;
+  if(!r||r.status==='completed'||r.status==='claimed') return;
   if(requestDismissed.has(r.id)) return;
   // a refresh hands back new objects for the same rows, so anything already on
   // screen or queued takes the fresh copy rather than a second slot
@@ -13158,6 +13166,7 @@ async function handleShotClick(e,r){
 document.getElementById('requestInbox').addEventListener('click',async e=>{
   const card=e.target.closest('[data-req-id]'); if(!card) return;
   const r=requestInbox.find(x=>x.id===card.dataset.reqId); if(!r) return;
+  if(e.target.closest('[data-req-del]')){ await removeRequest(r); return; }
   if(await handleShotClick(e,r)) return;
   if(e.target.closest('[data-req-done]')){
     cheer();
@@ -13220,12 +13229,14 @@ document.getElementById('requestLaterSheet').addEventListener('click',e=>{
                  snoozes:(r.snoozes||0)+1});
   showMsg(document.getElementById('requestMsg'),`⏰ Back in ${snoozeWord(mins)}.`,true);
 });
-document.getElementById('requestOutbox').addEventListener('click',async e=>{
-  const card=e.target.closest('[data-req-id]'); if(!card) return;
-  const r=requestOutbox.find(x=>x.id===card.dataset.reqId); if(!r) return;
-  if(await handleShotClick(e,r)) return;
-  if(!e.target.closest('[data-req-del]')) return;
-  if(!confirm('Withdraw “'+r.title+'”?\n\nThey are told it is cancelled and the reminders stop.')) return;
+// Withdrawing your own and an admin clearing away somebody else's are the same
+// act on the same row, so they are the same function — asked from whichever of
+// the three lists the × was tapped on.
+async function removeRequest(r){
+  const mine=r.requester_id===myUserId;
+  if(!confirm((mine?'Withdraw “':'Delete “')+r.title+'”?\n\n'
+    +(mine?'They are told it is cancelled and the reminders stop.'
+          :'It goes for both of them, with its photos, and the reminders stop.'))) return;
   // Told first, deleted second. The function reads the request with the
   // caller's own token to decide who to tell, and a deleted row reads as
   // nothing at all — so the order here is the difference between the person
@@ -13233,8 +13244,24 @@ document.getElementById('requestOutbox').addEventListener('click',async e=>{
   await pushRequest(r.id,'cancelled');
   const paths=(requestPhotos[r.id]||[]).map(p=>p.path);
   await sb.from('requests').delete().eq('id',r.id);
+  // both people's files, which the widened storage rule is what allows
   if(paths.length) await sb.storage.from(PHOTO_BUCKET).remove(paths);
   await refreshRequests();
+}
+document.getElementById('requestOutbox').addEventListener('click',async e=>{
+  const card=e.target.closest('[data-req-id]'); if(!card) return;
+  const r=requestOutbox.find(x=>x.id===card.dataset.reqId); if(!r) return;
+  if(await handleShotClick(e,r)) return;
+  if(e.target.closest('[data-req-del]')) await removeRequest(r);
+});
+// The admin's third list. Read only apart from this: a photo enlarges, and the
+// × clears the whole thing away.
+document.getElementById('requestOthers').addEventListener('click',async e=>{
+  const card=e.target.closest('[data-req-id]'); if(!card) return;
+  const r=requestOthers.find(x=>x.id===card.dataset.reqId); if(!r) return;
+  if(e.target.closest('[data-req-del]')){ await removeRequest(r); return; }
+  const shot=e.target.closest('[data-req-shot]');
+  if(shot) openPhotoModal(shot.dataset.reqShot,r.title||'Photo');
 });
 
 // ---- the snooze coming back round ----

@@ -291,7 +291,20 @@ Deno.serve(async (req) => {
     // and the direction has to match who is asking: an assignee cannot send
     // themselves a "new request", nor a requester an acknowledgement
     const senderShouldBe = KIND[kind].to === "assignee" ? r.requester_id : r.assignee_id;
-    if (user.id !== senderShouldBe) return json({ error: "not yours to send" }, 403);
+    if (user.id !== senderShouldBe) {
+      // An admin may clear away anybody's request, so an admin may also be the
+      // one telling the person who was asked that it is off. Only that one
+      // kind: nothing here lets somebody else's acknowledgement be sent for
+      // them. The read above already proved they can see the row — for an
+      // admin that is the widened policy, for anyone else it is being party
+      // to it — and this is the second half, that they may act on it.
+      const admin = kind === "cancelled" &&
+        (await sb.from("profiles").select("is_admin")
+           .eq("user_id", user.id).maybeSingle()).data?.is_admin === true;
+      if (!admin) return json({ error: "not yours to send" }, 403);
+    }
+    // nobody needs telling about their own tap
+    if (target === user.id) return json({ sent: 0, note: "that is you" });
 
     let out;
     try {
