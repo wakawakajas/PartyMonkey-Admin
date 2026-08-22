@@ -5360,20 +5360,34 @@ document.getElementById('bundleUploadBtn').addEventListener('click',()=>{
 const BUNDLE_ORDER_SKU_HEAD=/^(?:sku name|merchant sku|merchant sku name|sku|product sku|seller sku|item sku)$/;
 const BUNDLE_ORDER_QTY_HEAD=/^(?:qty|quantity|sku qty|item qty|order qty|purchase qty|qty pcs)$/;
 
-// Whichever tab carries a SKU column and a count beside it.
+// Whichever tab carries a SKU column and a count beside it. Failing that, the
+// plainest reading there is: the SKU on the left and the quantity to its
+// right, which is what the export is even when its headings say nothing this
+// side recognises -- or when it has no heading row at all.
 function bundleOrderSheet(wb){
   let best=null;
   for(const name of wb.SheetNames){
     const grid=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,defval:''});
-    if(grid.length<2) continue;
+    const rows=grid.filter(r=>r.some(v=>String(v).trim()!==''));
+    if(!rows.length) continue;
     let sku,qty;
     (grid[0]||[]).forEach((raw,i)=>{
       const h=bundleHead(raw);
       if(sku===undefined&&BUNDLE_ORDER_SKU_HEAD.test(h)) sku=i;
       else if(qty===undefined&&BUNDLE_ORDER_QTY_HEAD.test(h)) qty=i;
     });
-    const score=(sku!==undefined?10:0)+(qty!==undefined?1:0);
-    if(score&&(!best||score>best.score)) best={name,grid,sku,qty,score};
+    let named=sku!==undefined;
+    if(!named){ sku=0; qty=1; }
+    // A first row is a heading unless it reads like a line: something in the
+    // name and a number in the count. Getting this wrong costs one line, so it
+    // is decided by what the row holds rather than by whether headings matched.
+    const first=grid[0]||[];
+    const looksLikeData=String(first[sku]==null?'':first[sku]).trim()!==''
+      &&(qty===undefined||/^\d+(\.\d+)?$/.test(String(first[qty]==null?'':first[qty]).trim()));
+    const start=looksLikeData?0:1;
+    const filled=grid.slice(start).filter(r=>String(r[sku]==null?'':r[sku]).trim()!=='').length;
+    const score=(named?100:0)+(qty!==undefined?10:0)+(filled?1:0);
+    if(filled&&(!best||score>best.score)) best={name,grid,sku,qty,start,score};
   }
   return best;
 }
@@ -5391,10 +5405,10 @@ document.getElementById('bundleOrdersBtn').addEventListener('click',()=>{
       const session=await requireSession(msg); if(!session) return;
       const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
       const sheet=bundleOrderSheet(wb);
-      if(!sheet||sheet.sku===undefined){
+      if(!sheet){
         const heads=(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''})[0]||[])
           .map(h=>String(h).trim()).filter(Boolean).slice(0,12).join(', ');
-        throw new Error('no SKU column on any tab -- the first tab reads: '+escapeHtml(heads));
+        throw new Error('no rows with a SKU in them -- the first tab reads: '+escapeHtml(heads));
       }
       // the catalogue has to be in hand before a line can be told apart
       if(!bundleRows.length) await refreshBundles();
@@ -5404,7 +5418,7 @@ document.getElementById('bundleOrdersBtn').addEventListener('click',()=>{
       const known=new Map(bundleRows.map(b=>[b.name.trim().toLowerCase(),b]));
       const counts=new Map();          // combination -> how many of it today
       let lines=0,plain=0;
-      for(const row of sheet.grid.slice(1)){
+      for(const row of sheet.grid.slice(sheet.start)){
         const name=String(row[sheet.sku]==null?'':row[sheet.sku]).trim();
         if(!name) continue;
         lines++;
