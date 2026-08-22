@@ -221,8 +221,17 @@ def wait_for_new_page(port: int, known_ids, match: str = "", timeout_ms: int = 1
     known = set(known_ids or [])
     needle = (match or "").strip().lower()
     deadline = time.time() + max(0, timeout_ms) / 1000.0
+
+    def is_content(page: dict) -> bool:
+        # chrome://newtab and devtools windows count as tabs and appear at
+        # exactly the wrong moment -- when Chrome was just launched, or when
+        # a click opened the one we actually want. Following one produces a
+        # blank PDF and a run that reports success.
+        url = str(page.get("url", ""))
+        return not url.startswith(("chrome://", "chrome-extension://", "devtools://", "edge://"))
+
     while True:
-        fresh = [p for p in list_pages(port) if p.get("id") not in known]
+        fresh = [p for p in list_pages(port) if p.get("id") not in known and is_content(p)]
         for page in fresh:
             haystack = f"{page.get('url', '')} {page.get('title', '')}".lower()
             if not needle or needle in haystack:
@@ -436,7 +445,8 @@ def hover(page: dict, selector: str = "", text: str = "", exact: bool = False,
 
 
 def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
-          timeout_ms: int = 8000, match_index: int = 0, button: str = "left") -> dict:
+          timeout_ms: int = 8000, match_index: int = 0, button: str = "left",
+          hover_selector: str = "", hover_text: str = "", hover_exact: bool = False) -> dict:
     """Clicks the best match, retrying until timeout -- a page still
     rendering is the normal case right after a navigation, not something
     worth failing a run over.
@@ -446,7 +456,8 @@ def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
     custom right-click menu is part of the page and works normally, while
     Chrome's own grey menu (Save image as, Inspect) is drawn by the
     browser, not the page, and nothing here can click an entry in it."""
-    spot = _locate(page, selector, text, exact, timeout_ms, match_index)
+    spot = _locate_reopening(page, selector, text, exact, timeout_ms, match_index,
+                             hover_selector, hover_text, hover_exact)
     if not spot.get("hit"):
         # The point doesn't resolve back to the element -- something is
         # over it, or it is still moving. Dispatch on the node itself.
@@ -468,6 +479,53 @@ def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
         # Some pages tear down and rebuild between locate and press; the
         # DOM-event path doesn't depend on coordinates staying valid.
         return _dispatch_click(page, selector, text, exact, button)
+
+
+def _locate_reopening(page: dict, selector: str, text: str, exact: bool, timeout_ms: int,
+                      match_index: int, hover_selector: str, hover_text: str,
+                      hover_exact: bool) -> dict:
+    """Finds the target, re-opening the menu it lives in on every attempt.
+
+    A dropdown item is in the DOM whether or not the menu is open -- ant
+    just marks the panel hidden and gives it no size -- so "is it there"
+    and "can it be clicked" are different questions, and the second one
+    depends on where the pointer happens to be. Hovering once before the
+    click isn't enough: any re-render that moves the trigger out from
+    under the pointer closes the menu again, which is exactly why such a
+    step works one run and fails the next. Re-hovering each attempt turns
+    that race into a retry."""
+    if not (hover_selector or hover_text):
+        return _locate(page, selector, text, exact, timeout_ms, match_index)
+
+    # ">>" separates the levels of a nested menu -- "Bulk Print >> Print
+    # Pick List" -- because a submenu only exists while its parent is
+    # hovered, so re-opening means walking the whole chain again, not just
+    # the last hop.
+    selectors = [part.strip() for part in str(hover_selector).split(">>")]
+    texts = [part.strip() for part in str(hover_text).split(">>")]
+    levels = max(len(selectors), len(texts))
+    chain = [(selectors[i] if i < len(selectors) else "",
+              texts[i] if i < len(texts) else "") for i in range(levels)]
+
+    deadline = time.time() + max(1000, timeout_ms) / 1000.0
+    attempt_ms = 1500
+    last: Exception = RuntimeError("Never looked for the target.")
+    while True:
+        try:
+            for level_selector, level_text in chain:
+                if not (level_selector or level_text):
+                    continue
+                hover(page, selector=level_selector, text=level_text, exact=hover_exact, timeout_ms=3000)
+                time.sleep(0.35)  # menus animate open; measuring mid-animation finds nothing
+        except RuntimeError as exc:
+            last = exc
+        try:
+            return _locate(page, selector, text, exact, attempt_ms, match_index)
+        except RuntimeError as exc:
+            last = exc
+        if time.time() >= deadline:
+            raise last
+        time.sleep(0.2)
 
 
 def _dispatch_click(page: dict, selector: str, text: str, exact: bool,

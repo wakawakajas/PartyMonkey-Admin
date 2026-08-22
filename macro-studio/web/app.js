@@ -769,7 +769,7 @@ const STEP_TEMPLATES = {
   },
   web_click: {
     label: "Web: click",
-    make: () => ({ type: "web_click", port: 9222, tab_match: "", selector: "", text: "", exact: false, match_index: 0, button: "left", timeout_ms: 8000, delay_ms: 0 }),
+    make: () => ({ type: "web_click", port: 9222, tab_match: "", selector: "", text: "", exact: false, match_index: 0, button: "left", hover_selector: "", hover_text: "", hover_exact: true, timeout_ms: 8000, delay_ms: 0 }),
   },
   web_hover: {
     label: "Web: hover (opens hover menus)",
@@ -836,7 +836,7 @@ const STEP_HELP = {
   loop: "Repeats its steps a set number of times, or until a variable matches.",
   cdp_launch: "Opens the separate Chrome the Web steps drive. Put this first in any web macro.",
   web_goto: "Opens a page in that Chrome, in its own tab, and waits for it to finish loading.",
-  web_click: "Clicks something in the page: a link, button, tab, checkbox. Found by CSS selector, visible text, or both. Set button to right for a right-click -- that reaches a site's own context menu, not Chrome's grey one.",
+  web_click: "Clicks something in the page: a link, button, tab, checkbox. Found by CSS selector, visible text, or both. For an item in a dropdown, fill the \"open menu\" fields with what opens it -- the hover is re-applied every attempt, so a menu that shut itself doesn't fail the run.",
   web_hover: "Moves the pointer over something without clicking -- what you need before clicking an item in a menu that opens on hover.",
   web_wait_for: "Waits until something appears on the page. Use it at the end to prove the macro actually worked.",
   web_type: "Types a value into a form field, optionally pressing Enter after.",
@@ -1162,6 +1162,8 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     }
     if (step.type === "web_click") {
       addField("button", editorSelect(step.button || "left", ["left", "right"], (v) => (step.button = v)));
+      addField("open menu: hover selector (>> for nested)", editorInput("text", step.hover_selector, (v) => (step.hover_selector = v), "150px"));
+      addField("open menu: hover text (>> for nested)", editorInput("text", step.hover_text, (v) => (step.hover_text = v), "150px"));
     }
     addField("timeout (ms)", editorInput("number", step.timeout_ms, (v) => (step.timeout_ms = v), "80px"));
   } else if (step.type === "web_type") {

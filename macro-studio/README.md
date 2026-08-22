@@ -80,6 +80,10 @@ itself uses, no API key, no per-run cost, nothing leaving the machine.
 - A click or hover takes a "match #" when several things share the same
   selector or label -- 0 is the first, 1 the second, which is how you tick one
   row's checkbox out of a list of identical ones
+- A click on a menu item carries what opens that menu ("open menu" fields, `>>`
+  between levels of a nested one) and re-hovers on every attempt. Hovering once in
+  a separate step works until a re-render moves the trigger out from under the
+  pointer -- which is why such a step passes one run and fails the next
 - A click can be a right-click (`button: right`), recorded and replayed the same
   way. It reaches a site's own context menu, which is part of the page; Chrome's
   grey menu is drawn by the browser and nothing can drive an entry in it
@@ -153,7 +157,8 @@ so destination, orientation, paper size, margins, scale and the folder all becom
 arguments, and the file lands exactly where the step says instead of wherever the
 last download went.
 
-The path takes the same tokens as everything else, so
+The path takes the same tokens as everything else, including the bare form
+`{{DD.MM}}`, so
 `C:\Orders\Picklist {{date:DD-MM-YYYY}}.pdf` names itself.
 
 What comes out is whatever the page prints. An app screen that renders nothing

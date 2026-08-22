@@ -286,13 +286,13 @@ class WebRecorder:
             gap_ms = max(0, min(int((clicked_at - self._last_click_at) * 1000), 5000))
         self._last_click_at = clicked_at
 
-        opener = entry.get("opener")
-        if opener and opener.get("text"):
-            # The menu has to be open before the item exists to click.
-            self._add(self._step("web_hover", selector=opener.get("selector", ""),
-                                 text=opener.get("text", ""), exact=True,
-                                 timeout_ms=10000, delay_ms=gap_ms))
-            gap_ms = 0
+        # A menu item is recorded together with what opens it, rather than
+        # as two steps. A separate hover works right up until something
+        # re-renders and moves the trigger out from under the pointer --
+        # then the menu is shut by the time the click looks, and the same
+        # macro fails on a run where nothing about it changed. Carried on
+        # the click, the hover is re-applied on every attempt.
+        opener = entry.get("opener") or {}
 
         text = str(entry.get("text") or "")
         # Selector and text narrow each other on replay, so record both --
@@ -305,6 +305,9 @@ class WebRecorder:
             text=text if keep_text else "",
             exact=keep_text,
             button=entry.get("button", "left"),
+            hover_selector=opener.get("selector", ""),
+            hover_text=opener.get("text", ""),
+            hover_exact=True,
             timeout_ms=10000,
             delay_ms=gap_ms,
         ))

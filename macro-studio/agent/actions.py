@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-VAR_PATTERN = re.compile(r"\{\{(\w+)(?::([^}]+))?\}\}")
+VAR_PATTERN = re.compile(r"\{\{([^}:]+)(?::([^}]+))?\}\}")
 
 # Friendly date tokens, because nobody should need strftime to name a file.
 # Longest first, so YYYY matches before YY.
@@ -49,6 +49,21 @@ def _strftime_pattern(fmt: str) -> str:
             out.append(fmt[i])
             i += 1
     return "".join(out)
+
+
+_DATE_SEPARATORS = set(" ._-/:,")
+
+
+def _looks_like_date_format(name: str) -> bool:
+    """True for {{DD.MM}} and friends -- a format written on its own, with
+    no "date:" in front of it. People reach for that spelling constantly,
+    and treating it as a missing variable turns it into an empty string or
+    a filename with braces in it, neither of which reads as a mistake
+    until you go looking for the file."""
+    if not any(token in name for token in ("YYYY", "YY", "MM", "DD", "HH", "ss")):
+        return False
+    letters = {c for c in name if c not in _DATE_SEPARATORS}
+    return letters.issubset(set("YMDHhmsAP"))
 
 
 def _builtin_value(name: str, fmt: Optional[str]) -> Optional[str]:
@@ -85,7 +100,11 @@ def substitute(value, variables: dict):
                 return ", ".join(str(x) for x in v)
             return str(v)
         builtin = _builtin_value(name, fmt)
-        return builtin if builtin is not None else ""
+        if builtin is not None:
+            return builtin
+        if _looks_like_date_format(name):
+            return datetime.now().strftime(_strftime_pattern(name))
+        return ""
 
     return VAR_PATTERN.sub(_sub, value)
 

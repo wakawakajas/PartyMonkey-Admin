@@ -643,7 +643,9 @@ class ReplayEngine:
                 result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.click(
                     p, selector=sub("selector"), text=sub("text"),
                     exact=bool(step.get("exact")), timeout_ms=timeout_ms or 8000,
-                    match_index=match_index, button=button))
+                    match_index=match_index, button=button,
+                    hover_selector=sub("hover_selector"), hover_text=sub("hover_text"),
+                    hover_exact=bool(step.get("hover_exact", True))))
                 label = result.get("label") or sub("text") or sub("selector")
                 verb = "Right-clicked" if button.lower().startswith("r") else "Clicked"
                 return {"status": "success", "tier": "cdp",
