@@ -394,6 +394,16 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* A combination opens to show what is inside it, so the row has to look like
    something you may press. The triangle a browser puts there by default is
    tiny and sits outside the padding, so it is replaced by one of our own. */
+/* A catalogue of five hundred rows is not what you came to this screen for,
+   so it stays folded until asked for. */
+.fold > summary.fold-head{cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;}
+.fold > summary.fold-head::-webkit-details-marker{display:none;}
+.fold[open] > summary.fold-head .bundle-chev{transform:rotate(90deg);}
+.bundle-pick{flex-shrink:0;width:20px;height:20px;accent-color:var(--lime);}
+.bundle-edit{margin-top:10px;border-top:1px solid rgba(255,255,255,.12);padding-top:10px;}
+.bundle-edit .bundle-piece{display:flex;gap:6px;align-items:center;margin-bottom:6px;}
+.bundle-edit .bundle-piece input[type=text]{flex:1;min-width:0;}
+.bundle-edit .bundle-piece input[type=number]{width:74px;flex-shrink:0;}
 .bundle-row summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;}
 .bundle-row summary::-webkit-details-marker{display:none;}
 .bundle-thumb{width:42px;height:42px;flex-shrink:0;border-radius:8px;object-fit:cover;
@@ -2124,29 +2134,59 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="card"><div class="card-body" style="padding:14px;">
       <div class="sect-label">Combination SKU list</div>
       <p class="hint" style="margin:0 0 10px;">The export from BigSeller — every combination
-        with the sub-SKUs inside it. Nothing is saved yet: this reads the file and shows what
-        columns it found, so the reading can be matched to your sheet.</p>
+        with the sub-SKUs inside it. Uploading <b>replaces the whole catalogue</b>: whatever was
+        here before is deleted, so what you see is always what the last file said.</p>
       <button class="btn-primary" id="bundleUploadBtn" style="width:100%;">⬆ Upload combination list</button>
+      <p class="hint" id="bundleUpdated" style="margin:8px 0 0;"></p>
       <div id="bundleUploadMsg"></div>
+
+      <details class="fold" id="bundleListFold" style="margin-top:12px;">
+        <summary class="fold-head">
+          <span class="sect-label" style="margin:0;">Combinations on file</span>
+          <span class="hint" id="bundleCount">—</span>
+          <span class="bundle-chev">&rsaquo;</span>
+        </summary>
+        <div style="margin-top:10px;">
+          <label class="field" style="margin-bottom:8px;"><span>SEARCH</span>
+            <input type="text" id="bundleSearch" placeholder="Combination or sub-SKU" autocomplete="off"/>
+          </label>
+          <div class="chips chips-left">
+            <button class="btn-outline btn-sm" id="bundleSelectAll">Select all</button>
+            <button class="btn-outline btn-sm" id="bundleClearSel">Clear</button>
+            <button class="btn-outline btn-sm" id="bundleDeleteSel">🗑 Delete selected</button>
+          </div>
+          <div id="bundleList"></div>
+        </div>
+      </details>
     </div></div>
 
     <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
       <div class="sect-label">Today's orders</div>
       <p class="hint" style="margin:0 0 10px;">The day's order export, PDF or spreadsheet.
-        Only the lines that are combinations are kept -- what they hold, and how many of each,
+        Only the lines that are combinations are kept — what they hold, and how many of each,
         so packing knows what to put in the box. It is not saved: upload it again whenever the
         day moves on.</p>
       <button class="btn-primary" id="bundleOrdersBtn" style="width:100%;">⬆ Upload today's orders</button>
       <div id="bundleOrdersMsg"></div>
-      <div id="bundleOrdersOut"></div>
-    </div></div>
 
-    <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
-      <div class="sect-label">Combinations on file</div>
-      <label class="field" style="margin-bottom:10px;"><span>SEARCH</span>
-        <input type="text" id="bundleSearch" placeholder="Combination or sub-SKU" autocomplete="off"/>
-      </label>
-      <div id="bundleList"></div>
+      <details class="fold" id="bundleOrdersFold" style="margin-top:12px;display:none;">
+        <summary class="fold-head">
+          <span class="sect-label" style="margin:0;">Bundles in today's orders</span>
+          <span class="hint" id="bundleOrdersCount">—</span>
+          <span class="bundle-chev">&rsaquo;</span>
+        </summary>
+        <div style="margin-top:10px;">
+          <label class="field" style="margin-bottom:8px;"><span>SEARCH</span>
+            <input type="text" id="bundleOrdersSearch" placeholder="Combination or sub-SKU" autocomplete="off"/>
+          </label>
+          <div class="chips chips-left">
+            <button class="btn-outline btn-sm" id="bundleOrdersSelectAll">Select all</button>
+            <button class="btn-outline btn-sm" id="bundleOrdersClearSel">Clear</button>
+            <button class="btn-outline btn-sm" id="bundleOrdersDeleteSel">🗑 Remove selected</button>
+          </div>
+          <div id="bundleOrdersOut"></div>
+        </div>
+      </details>
     </div></div>
   </div>
 
@@ -5300,10 +5340,20 @@ document.getElementById('bundleUploadBtn').addEventListener('click',()=>{
       if(!combos.length) throw new Error('every row was empty -- '
         +`${col.subs.size} sub-SKU columns were found, but no row filled any of them`);
 
+      showMsg(msg,`Clearing what was there...`,true);
+      // The file is the catalogue, not an addition to it: a combination
+      // retired in BigSeller must stop being here too, and nothing in an
+      // export says which ones went. So what is here goes first, and the
+      // pieces go with it by cascade -- no row and no picture is left behind
+      // to sit in the database being nobody's.
+      {
+        const {error}=await sb.from('bundle_skus').delete().not('id','is',null);
+        if(error) throw error;
+      }
+
       showMsg(msg,`Saving ${combos.length} combinations...`,true);
-      // Upsert on the name so a second upload tops the catalogue up rather
-      // than doubling it, and so a combination that changed keeps its id and
-      // whatever already points at it.
+      // Upsert rather than insert only so that a file naming one combination
+      // twice cannot fail the whole upload.
       const saved=[];
       for(let i=0;i<combos.length;i+=200){
         const slice=combos.slice(i,i+200);
@@ -5520,11 +5570,31 @@ document.getElementById('bundleOrdersBtn').addEventListener('click',()=>{
 // combination's own quantity multiplied out, because two of a bundle of ten
 // balloons is twenty balloons and that is what goes in the box.
 let bundleToday=[];
+const bundleTodayPicked=new Set();     // rows ticked for taking off the day
+function bundleTodayMatches(r,q){
+  return !q||r.combo.name.toLowerCase().includes(q)
+    ||r.combo.subs.some(x=>x.sku.toLowerCase().includes(q));
+}
 function renderBundleToday(){
   const el=document.getElementById('bundleOrdersOut');
+  const fold=document.getElementById('bundleOrdersFold');
+  fold.style.display=bundleToday.length?'':'none';
   if(!bundleToday.length){ el.innerHTML=''; return; }
-  el.innerHTML=bundleToday.map(({combo,qty})=>`<details class="ph-card bundle-row" style="padding:10px 12px;" open>
+  const pieces=bundleToday.reduce((n,r)=>n+r.combo.subs.reduce((m,x)=>m+x.qty*r.qty,0),0);
+  document.getElementById('bundleOrdersCount').textContent=
+    `${bundleToday.length} to pack \u00b7 ${pieces} pieces`
+    +(bundleTodayPicked.size?` \u00b7 ${bundleTodayPicked.size} selected`:'');
+  const q=(document.getElementById('bundleOrdersSearch').value||'').trim().toLowerCase();
+  const rows=bundleToday.filter(r=>bundleTodayMatches(r,q));
+  if(!rows.length){
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">-- nothing matches that --</p>'; return;
+  }
+  el.innerHTML=rows.map(({combo,qty})=>{
+    const picked=bundleTodayPicked.has(combo.id);
+    return `<details class="ph-card bundle-row${picked?' is-picked':''}" style="padding:10px 12px;" open>
       <summary>
+        <input type="checkbox" class="bundle-pick" data-today-pick="${combo.id}"${picked?' checked':''}
+               aria-label="Select ${escapeHtml(combo.name)}"/>
         ${combo.image_url?`<img class="bundle-thumb" src="${escapeHtml(combo.image_url)}" alt="" loading="lazy"/>`:''}
         <span style="min-width:0;">
           <b style="word-break:break-word;">${escapeHtml(combo.name)}</b>
@@ -5537,8 +5607,35 @@ function renderBundleToday(){
            <span>${escapeHtml(sub.sku)}</span>
            <span class="hint">&times;${sub.qty*qty}${qty>1?` (${sub.qty} \u00d7 ${qty})`:''}</span>
          </div>`).join('')||'<p class="hint" style="margin:0;">-- empty --</p>'}</div>
-    </details>`).join('');
+    </details>`;
+  }).join('');
 }
+document.getElementById('bundleOrdersSearch').addEventListener('input',renderBundleToday);
+document.getElementById('bundleOrdersOut').addEventListener('change',e=>{
+  const box=e.target.closest('[data-today-pick]'); if(!box) return;
+  const id=box.dataset.todayPick;
+  if(box.checked) bundleTodayPicked.add(id); else bundleTodayPicked.delete(id);
+  renderBundleToday();
+});
+document.getElementById('bundleOrdersOut').addEventListener('click',e=>{
+  if(e.target.closest('[data-today-pick]')) e.stopPropagation();
+});
+document.getElementById('bundleOrdersSelectAll').addEventListener('click',()=>{
+  const q=(document.getElementById('bundleOrdersSearch').value||'').trim().toLowerCase();
+  bundleToday.filter(r=>bundleTodayMatches(r,q)).forEach(r=>bundleTodayPicked.add(r.combo.id));
+  renderBundleToday();
+});
+document.getElementById('bundleOrdersClearSel').addEventListener('click',()=>{
+  bundleTodayPicked.clear(); renderBundleToday();
+});
+// Taking a line off the day is not deleting anything: the day was never
+// saved, and the next upload brings it all back.
+document.getElementById('bundleOrdersDeleteSel').addEventListener('click',()=>{
+  if(!bundleTodayPicked.size) return;
+  bundleToday=bundleToday.filter(r=>!bundleTodayPicked.has(r.combo.id));
+  bundleTodayPicked.clear();
+  renderBundleToday();
+});
 
 // ---- what is on file ----
 // A read answers with a thousand rows at most, whatever it was asked for, and
@@ -5585,21 +5682,64 @@ async function refreshBundles(){
   bundleRows=combos.map(c=>({...c,subs:byBundle.get(c.id)||[]}));
   renderBundles();
 }
+const bundlePicked=new Set();      // combinations ticked for deleting
+let bundleEditing=null;            // the one open in its editor, by id
+
+function bundleWhen(iso){
+  if(!iso) return '';
+  const d=new Date(iso);
+  if(isNaN(d)) return '';
+  return d.toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'})
+    +', '+d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+}
+function renderBundleHead(){
+  const when=bundleRows.map(b=>b.updated_at||b.created_at).filter(Boolean).sort().pop();
+  document.getElementById('bundleUpdated').innerHTML=bundleRows.length
+    ? `Last updated ${escapeHtml(bundleWhen(when))} \u00b7 ${bundleRows.length} combinations.`
+    : 'Nothing uploaded yet.';
+  document.getElementById('bundleCount').textContent=bundleRows.length
+    ? `${bundleRows.length} on file${bundlePicked.size?` \u00b7 ${bundlePicked.size} selected`:''}`
+    : 'none yet';
+}
+function bundleMatches(b,q){
+  return !q||b.name.toLowerCase().includes(q)
+    ||b.subs.some(x=>x.sku.toLowerCase().includes(q));
+}
 function renderBundles(){
   const el=document.getElementById('bundleList');
+  renderBundleHead();
   const q=(document.getElementById('bundleSearch').value||'').trim().toLowerCase();
-  // a search matches the combination or anything inside it, because half the
-  // time what you know is the piece in your hand, not the bundle it came in
-  const rows=q?bundleRows.filter(b=>b.name.toLowerCase().includes(q)
-    ||b.subs.some(s=>s.sku.toLowerCase().includes(q))):bundleRows;
+  const rows=bundleRows.filter(b=>bundleMatches(b,q));
   if(!bundleRows.length){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">-- nothing uploaded yet --</p>'; return;
   }
   if(!rows.length){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">-- nothing matches that --</p>'; return;
   }
-  el.innerHTML=rows.map(b=>`<details class="ph-card bundle-row" style="padding:10px 12px;"${q?' open':''}>
+  el.innerHTML=rows.map(b=>{
+    const picked=bundlePicked.has(b.id);
+    if(bundleEditing===b.id) return `<div class="ph-card" style="padding:10px 12px;">
+      <div class="bundle-edit" style="border:0;padding:0;margin:0;">
+        <label class="field" style="margin-bottom:6px;"><span>NAME</span>
+          <input type="text" data-edit-name value="${escapeHtml(b.name)}"/></label>
+        <label class="field" style="margin-bottom:8px;"><span>IMAGE LINK</span>
+          <input type="text" data-edit-image value="${escapeHtml(b.image_url||'')}" placeholder="https://"/></label>
+        <div class="sect-label" style="margin:0 0 6px;">Pieces</div>
+        <div data-edit-pieces>${b.subs.map(sub=>`<div class="bundle-piece">
+            <input type="text" data-piece-sku value="${escapeHtml(sub.sku)}"/>
+            <input type="number" min="1" step="1" data-piece-qty value="${sub.qty}"/>
+            <button class="btn-outline btn-sm" data-piece-drop title="Remove">\u00d7</button>
+          </div>`).join('')}</div>
+        <button class="btn-outline btn-sm" data-piece-add style="margin-bottom:10px;">+ Add a piece</button>
+        <div class="chips chips-left" style="margin:0;">
+          <button class="btn-primary btn-sm" data-edit-save="${b.id}">Save</button>
+          <button class="btn-outline btn-sm" data-edit-cancel>Cancel</button>
+        </div>
+      </div></div>`;
+    return `<details class="ph-card bundle-row${picked?' is-picked':''}" style="padding:10px 12px;"${q?' open':''}>
       <summary>
+        <input type="checkbox" class="bundle-pick" data-pick="${b.id}"${picked?' checked':''}
+               aria-label="Select ${escapeHtml(b.name)}"/>
         ${b.image_url?`<img class="bundle-thumb" src="${escapeHtml(b.image_url)}" alt="" loading="lazy"/>`:''}
         <span style="min-width:0;">
           <b style="word-break:break-word;">${escapeHtml(b.name)}</b>
@@ -5610,10 +5750,121 @@ function renderBundles(){
       <div style="margin-top:8px;">${b.subs.map(sub=>
         `<div class="bundle-sub">
            <span>${escapeHtml(sub.sku)}</span><span class="hint">&times;${sub.qty}</span>
-         </div>`).join('')||'<p class="hint" style="margin:0;">-- empty --</p>'}</div>
-    </details>`).join('');
+         </div>`).join('')||'<p class="hint" style="margin:0;">-- empty --</p>'}
+        <div class="chips chips-left" style="margin:10px 0 0;">
+          <button class="btn-outline btn-sm" data-edit="${b.id}">\u270e Edit</button>
+          <button class="btn-outline btn-sm" data-drop="${b.id}">\ud83d\uddd1 Delete</button>
+        </div>
+      </div>
+    </details>`;
+  }).join('');
 }
 document.getElementById('bundleSearch').addEventListener('input',renderBundles);
+
+// ---- ticking, and what may be done to what is ticked ----
+document.getElementById('bundleList').addEventListener('change',e=>{
+  const box=e.target.closest('[data-pick]'); if(!box) return;
+  const id=box.dataset.pick;
+  if(box.checked) bundlePicked.add(id); else bundlePicked.delete(id);
+  box.closest('.ph-card').classList.toggle('is-picked',box.checked);
+  renderBundleHead();
+});
+// a tick is not an open: pressing the box must not unfold the row under it
+document.getElementById('bundleList').addEventListener('click',e=>{
+  if(e.target.closest('[data-pick]')) e.stopPropagation();
+});
+document.getElementById('bundleSelectAll').addEventListener('click',()=>{
+  const q=(document.getElementById('bundleSearch').value||'').trim().toLowerCase();
+  bundleRows.filter(b=>bundleMatches(b,q)).forEach(b=>bundlePicked.add(b.id));
+  renderBundles();
+});
+document.getElementById('bundleClearSel').addEventListener('click',()=>{
+  bundlePicked.clear(); renderBundles();
+});
+document.getElementById('bundleDeleteSel').addEventListener('click',async()=>{
+  if(!bundlePicked.size) return;
+  if(!confirm(`Are you sure?\n\nDelete ${bundlePicked.size} combination(s). `
+    +'This cannot be undone.')) return;
+  await bundleDelete([...bundlePicked]);
+});
+document.getElementById('bundleList').addEventListener('click',async e=>{
+  const drop=e.target.closest('[data-drop]');
+  if(drop){
+    e.preventDefault();
+    const b=bundleRows.find(x=>x.id===drop.dataset.drop);
+    if(!confirm(`Are you sure?\n\nDelete "${(b&&b.name)||'this combination'}". `
+      +'This cannot be undone.')) return;
+    await bundleDelete([drop.dataset.drop]);
+    return;
+  }
+  const edit=e.target.closest('[data-edit]');
+  if(edit){ e.preventDefault(); bundleEditing=edit.dataset.edit; renderBundles(); return; }
+  const cancel=e.target.closest('[data-edit-cancel]');
+  if(cancel){ e.preventDefault(); bundleEditing=null; renderBundles(); return; }
+  const add=e.target.closest('[data-piece-add]');
+  if(add){
+    e.preventDefault();
+    const box=add.previousElementSibling;
+    const row=document.createElement('div');
+    row.className='bundle-piece';
+    row.innerHTML='<input type="text" data-piece-sku value=""/>'
+      +'<input type="number" min="1" step="1" data-piece-qty value="1"/>'
+      +'<button class="btn-outline btn-sm" data-piece-drop title="Remove">\u00d7</button>';
+    box.appendChild(row);
+    row.querySelector('input').focus();
+    return;
+  }
+  const dropPiece=e.target.closest('[data-piece-drop]');
+  if(dropPiece){ e.preventDefault(); dropPiece.closest('.bundle-piece').remove(); return; }
+  const save=e.target.closest('[data-edit-save]');
+  if(save){ e.preventDefault(); await bundleSaveEdit(save.dataset.editSave,save.closest('.ph-card')); }
+});
+
+async function bundleDelete(ids){
+  const msg=document.getElementById('bundleUploadMsg');
+  try{
+    const {error}=await sb.from('bundle_skus').delete().in('id',ids);
+    if(error) throw error;                 // the pieces go with it, by cascade
+    ids.forEach(id=>bundlePicked.delete(id));
+    if(ids.includes(bundleEditing)) bundleEditing=null;
+    await refreshBundles();
+    showMsg(msg,`\u2713 ${ids.length} deleted.`,true);
+  }catch(e){
+    showMsg(msg,'Could not delete: '+escapeHtml(e.message||String(e)),false);
+  }
+}
+// The pieces are written afresh rather than reconciled one by one: an edit is
+// a statement of what the combination holds now, and matching up what moved is
+// work with nothing to show for it.
+async function bundleSaveEdit(id,card){
+  const msg=document.getElementById('bundleUploadMsg');
+  const name=(card.querySelector('[data-edit-name]').value||'').trim();
+  const image=(card.querySelector('[data-edit-image]').value||'').trim();
+  const pieces=[...card.querySelectorAll('.bundle-piece')].map(row=>({
+    sku:(row.querySelector('[data-piece-sku]').value||'').trim(),
+    qty:Math.max(1,Math.round(Number(row.querySelector('[data-piece-qty]').value)||1))
+  })).filter(x=>x.sku);
+  if(!name){ showMsg(msg,'A combination needs a name.',false); return; }
+  try{
+    const session=await requireSession(msg); if(!session) return;
+    const {error}=await sb.from('bundle_skus').update({name,
+      image_url:/^https?:\/\//i.test(image)?image:null,
+      updated_at:new Date().toISOString()}).eq('id',id);
+    if(error) throw error;
+    const {error:e2}=await sb.from('bundle_sku_items').delete().eq('bundle_id',id);
+    if(e2) throw e2;
+    if(pieces.length){
+      const {error:e3}=await sb.from('bundle_sku_items').insert(pieces.map((x,n)=>
+        ({user_id:session.user.id,bundle_id:id,sku:x.sku,qty:x.qty,sort_order:n})));
+      if(e3) throw e3;
+    }
+    bundleEditing=null;
+    await refreshBundles();
+    showMsg(msg,'\u2713 Saved.',true);
+  }catch(e){
+    showMsg(msg,'Could not save: '+escapeHtml(e.message||String(e)),false);
+  }
+}
 document.getElementById('goToPickListBtn').addEventListener('click',()=>showScreen('pick-lists'));
 
 const MACRO_STUDIO_BUCKET='macro-studio-builds';
