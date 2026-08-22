@@ -2127,14 +2127,17 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         with the sub-SKUs inside it. Nothing is saved yet: this reads the file and shows what
         columns it found, so the reading can be matched to your sheet.</p>
       <button class="btn-primary" id="bundleUploadBtn" style="width:100%;">⬆ Upload combination list</button>
-      <button class="btn-outline" id="bundleCheckBtn" style="width:100%;margin-top:8px;">🔍 Check a file first (nothing saved)</button>
       <div id="bundleUploadMsg"></div>
-      <label class="field" id="bundleLookupField" style="margin:10px 0 0;display:none;">
-        <span>LOOK ONE COMBINATION UP IN THE FILE JUST CHECKED</span>
-        <input type="text" id="bundleLookup" placeholder="e.g. Aircraft-Bundle (B)" autocomplete="off"/>
-      </label>
-      <div id="bundleLookupOut"></div>
-      <div id="bundleCheck"></div>
+    </div></div>
+
+    <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
+      <div class="sect-label">Today's orders</div>
+      <p class="hint" style="margin:0 0 10px;">The day's order export. Only the lines that
+        are combinations are kept -- what they hold, and how many of each, so packing knows
+        what to put in the box. It is not saved: upload it again whenever the day moves on.</p>
+      <button class="btn-primary" id="bundleOrdersBtn" style="width:100%;">⬆ Upload today's orders</button>
+      <div id="bundleOrdersMsg"></div>
+      <div id="bundleOrdersOut"></div>
     </div></div>
 
     <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
@@ -2925,7 +2928,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="wrap" id="giftTagScreen" style="display:none;">
     <div class="eyebrow">PRINT TEMPLATE</div>
     <h1>Gift Tag</h1>
-    <p class="sub">Pick a design, type the words, set the quantity. The sheet fills itself and starts another page when it runs out of room. Tap a tag to work on that line, then drag its words to move them or the corner to resize the box — that line only. Zoom in fills the view with the tag being worked on; + and − or the wheel take it closer or further out, and dragging the paper between the tags moves the view about. Words too long for their box wrap onto a second line, and shrink from there.</p>
+    <p class="sub">Pick a design, type the words, set the quantity. The sheet fills itself and starts another page when it runs out of room. Tap a tag to work on that line, then drag its words to move them or the corner to resize the box — that line only. Zoom in fills the view with the tag being worked on; + and − or the wheel take it closer or further out, and dragging the paper between the tags moves the view about. Words too long for their box wrap onto a second line, and shrink from there. Click a text and press space to hold the sheet to it — nothing else can be picked up until space is pressed again.</p>
 
     <div class="preview-wrap">
       <div class="preview-card">
@@ -3168,11 +3171,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="wrap" id="giftTagDesignScreen" style="display:none;">
     <div class="eyebrow">GIFT TAG</div>
     <h1 id="gtDesignTitle">Design</h1>
-    <p class="sub">Drag a text box to move it, or its bottom-right corner to resize; arrow keys nudge it half a millimetre, with Shift two and Alt a tenth. Shift-click picks out several, and Ctrl+G ties those into a group that moves as one (Ctrl+Shift+G unties it). Everything here is the design's default — an order can override the words, the font and its size without touching this.</p>
+    <p class="sub">Drag a text box to move it, or its bottom-right corner to resize; arrow keys nudge it half a millimetre, with Shift two and Alt a tenth. Shift-click picks out several, and Ctrl+G ties those into a group that moves as one (Ctrl+Shift+G unties it). Click a box and press space to hold the tag to it — nothing else answers until space is pressed again. Everything here is the design's default — an order can override the words, the font and its size without touching this.</p>
 
     <div class="gt-rail">
       <div class="preview-card">
-        <div class="top-row"><span>ONE TAG</span>
+        <div class="top-row"><span id="gtDesignLbl">ONE TAG</span>
           <button class="icon-btn" id="gtReplaceArtBtn">Replace artwork</button>
         </div>
         <canvas id="gtDesignCanvas" style="touch-action:none;cursor:default;"></canvas>
@@ -5349,100 +5352,109 @@ document.getElementById('bundleUploadBtn').addEventListener('click',()=>{
   inp.click();
 });
 
-// ---- reading a file out loud, so a wrong column can be seen ----
-// A sheet that maps wrongly still saves happily, and what comes out the other
-// end is a combination full of nonsense. This says what it made of each
-// heading before anything is written.
-function bundleColLetter(i){
-  let n=i+1,out='';
-  while(n>0){ const r=(n-1)%26; out=String.fromCharCode(65+r)+out; n=(n-1-r)/26; }
-  return out;
-}
-// what the last check read, so one combination can be looked at slot by slot
-let bundleChecked=null;
+// ---- the day's orders ----
+// The order export is not the combination export: it is a list of lines, a
+// SKU and a count on each, and most of them are ordinary SKUs already on the
+// picking sheet. What is wanted here is only the lines naming a combination,
+// because those are the ones nobody can pack from the name alone.
+const BUNDLE_ORDER_SKU_HEAD=/^(?:sku name|merchant sku|merchant sku name|sku|product sku|seller sku|item sku)$/;
+const BUNDLE_ORDER_QTY_HEAD=/^(?:qty|quantity|sku qty|item qty|order qty|purchase qty|qty pcs)$/;
 
-document.getElementById('bundleCheckBtn').addEventListener('click',()=>{
-  const msg=document.getElementById('bundleUploadMsg');
-  const out=document.getElementById('bundleCheck');
+// Whichever tab carries a SKU column and a count beside it.
+function bundleOrderSheet(wb){
+  let best=null;
+  for(const name of wb.SheetNames){
+    const grid=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,defval:''});
+    if(grid.length<2) continue;
+    let sku,qty;
+    (grid[0]||[]).forEach((raw,i)=>{
+      const h=bundleHead(raw);
+      if(sku===undefined&&BUNDLE_ORDER_SKU_HEAD.test(h)) sku=i;
+      else if(qty===undefined&&BUNDLE_ORDER_QTY_HEAD.test(h)) qty=i;
+    });
+    const score=(sku!==undefined?10:0)+(qty!==undefined?1:0);
+    if(score&&(!best||score>best.score)) best={name,grid,sku,qty,score};
+  }
+  return best;
+}
+
+document.getElementById('bundleOrdersBtn').addEventListener('click',()=>{
+  const msg=document.getElementById('bundleOrdersMsg');
   const inp=document.createElement('input');
   inp.type='file'; inp.accept='.xlsx,.xls,.csv';
   inp.onchange=async()=>{
     const file=inp.files[0]; if(!file) return;
+    const btn=document.getElementById('bundleOrdersBtn');
+    btn.disabled=true; const label=btn.textContent; btn.textContent='Reading...';
     try{
       if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
+      const session=await requireSession(msg); if(!session) return;
       const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
-      const sheet=bundlePickSheet(wb);
-      if(!sheet) throw new Error('that workbook has no rows in any of its tabs');
-      const {grid,col}=sheet;
-      const head=(grid[0]||[]).map(v=>String(v==null?'':v).trim());
-      const first=grid.slice(1).find(r=>r.some(v=>String(v).trim()!==''))||[];
-      const role=new Map();
-      if(col.name!==undefined) role.set(col.name,'SKU Name');
-      if(col.image!==undefined) role.set(col.image,'SKU Image');
-      if(col.url!==undefined) role.set(col.url,'Image URL');
-      col.subs.forEach((pair,n)=>{
-        if(pair.sku!==undefined) role.set(pair.sku,`sub-SKU ${n}`);
-        if(pair.qty!==undefined) role.set(pair.qty,`sub-SKU ${n} qty`);
-      });
-      const rows=head.map((h,i)=>({i,h:bundleHead(h)||h,used:role.get(i)||'',
-        val:String(first[i]==null?'':first[i]).trim()}))
-        .filter(r=>r.h||r.used||r.val);
-      const cut=v=>v.length>60?v.slice(0,60)+'\u2026':v;
-      out.innerHTML=`<p class="hint" style="margin:10px 0 6px;"><b>${escapeHtml(file.name)}</b>`
-        +` \u2014 tab "${escapeHtml(sheet.name)}" of ${wb.SheetNames.length},`
-        +` ${head.length} columns, ${grid.length-1} rows.`
-        +` Read as ${col.subs.size} sub-SKU slots.</p>`
-        +'<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;">'
-        +'<thead><tr>'+['Col','Heading','Read as','First row'].map(h=>
-          `<th style="padding:4px 8px;text-align:left;border-bottom:1px solid rgba(255,255,255,.25);white-space:nowrap;">${h}</th>`).join('')
-        +'</tr></thead><tbody>'
-        +rows.map(r=>`<tr style="${r.used?'':'opacity:.45;'}">`
-          +`<td style="padding:3px 8px;">${bundleColLetter(r.i)}</td>`
-          +`<td style="padding:3px 8px;">${escapeHtml(cut(r.h))||'\u2014'}</td>`
-          +`<td style="padding:3px 8px;white-space:nowrap;">${escapeHtml(r.used)||'\u2014'}</td>`
-          +`<td style="padding:3px 8px;">${escapeHtml(cut(r.val))}</td></tr>`).join('')
-        +'</tbody></table></div>';
-      bundleChecked={sheet,head};
-      document.getElementById('bundleLookupField').style.display='';
-      showMsg(msg,'Read it, saved nothing. The dim rows are columns it ignored.',true);
+      const sheet=bundleOrderSheet(wb);
+      if(!sheet||sheet.sku===undefined){
+        const heads=(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''})[0]||[])
+          .map(h=>String(h).trim()).filter(Boolean).slice(0,12).join(', ');
+        throw new Error('no SKU column on any tab -- the first tab reads: '+escapeHtml(heads));
+      }
+      // the catalogue has to be in hand before a line can be told apart
+      if(!bundleRows.length) await refreshBundles();
+      if(!bundleRows.length) throw new Error('no combinations are on file yet -- '
+        +'upload the combination list first');
+
+      const known=new Map(bundleRows.map(b=>[b.name.trim().toLowerCase(),b]));
+      const counts=new Map();          // combination -> how many of it today
+      let lines=0,plain=0;
+      for(const row of sheet.grid.slice(1)){
+        const name=String(row[sheet.sku]==null?'':row[sheet.sku]).trim();
+        if(!name) continue;
+        lines++;
+        const combo=known.get(name.toLowerCase());
+        if(!combo){ plain++; continue; }
+        const qty=sheet.qty===undefined?1:Math.max(1,Math.round(numOf(row[sheet.qty])||1));
+        counts.set(combo.id,(counts.get(combo.id)||0)+qty);
+      }
+      bundleToday=[...counts.entries()]
+        .map(([id,qty])=>({combo:bundleRows.find(b=>b.id===id),qty}))
+        .filter(r=>r.combo)
+        .sort((a,b)=>a.combo.name.localeCompare(b.combo.name));
+      renderBundleToday();
+      showMsg(msg,bundleToday.length
+        ? `\u2713 ${bundleToday.length} combinations on ${lines} order lines. `
+          +`${plain} lines were ordinary SKUs.`
+        : `No line on that file names a combination -- ${lines} lines read.`,
+        !!bundleToday.length);
     }catch(e){
       showMsg(msg,'Could not read that file: '+escapeHtml(e.message||String(e)),false);
+    }finally{
+      btn.disabled=false; btn.textContent=label;
     }
   };
   inp.click();
 });
 
-// Every slot of one row, filled or not, straight off the sheet. A bundle that
-// arrives here short is either short in the file or being read short, and
-// nothing but the row itself settles which.
-document.getElementById('bundleLookup').addEventListener('input',()=>{
-  const out=document.getElementById('bundleLookupOut');
-  const q=(document.getElementById('bundleLookup').value||'').trim().toLowerCase();
-  if(!bundleChecked||!q){ out.innerHTML=''; return; }
-  const {sheet}=bundleChecked;
-  const {grid,col}=sheet;
-  const hits=grid.slice(1).filter(r=>
-    String(r[col.name]==null?'':r[col.name]).trim().toLowerCase().includes(q));
-  if(!hits.length){ out.innerHTML='<p class="hint" style="margin:8px 0 0;">-- no row of that name --</p>'; return; }
-  const slots=[...col.subs.keys()].sort((a,b)=>a-b);
-  out.innerHTML=hits.slice(0,3).map(r=>{
-    const at=i=>i===undefined?'':String(r[i]==null?'':r[i]).trim();
-    const filled=slots.filter(n=>at(col.subs.get(n).sku));
-    return `<p class="hint" style="margin:10px 0 4px;"><b>${escapeHtml(at(col.name))}</b>`
-      +` -- ${filled.length} of ${slots.length} slots filled</p>`
-      +'<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;">'
-      +slots.map(n=>{
-        const pair=col.subs.get(n);
-        const sku=at(pair.sku), qty=at(pair.qty);
-        return `<tr style="${sku?'':'opacity:.4;'}">`
-          +`<td style="padding:2px 8px;white-space:nowrap;">${n} (${bundleColLetter(pair.sku)})</td>`
-          +`<td style="padding:2px 8px;">${escapeHtml(sku)||'--'}</td>`
-          +`<td style="padding:2px 8px;">${escapeHtml(qty)||''}</td></tr>`;
-      }).join('')
-      +'</table></div>';
-  }).join('')
-  +(hits.length>3?`<p class="hint" style="margin:6px 0 0;">${hits.length-3} more rows match.</p>`:'');
-});
+// What today asks for, combination by combination. The piece count is the
+// combination's own quantity multiplied out, because two of a bundle of ten
+// balloons is twenty balloons and that is what goes in the box.
+let bundleToday=[];
+function renderBundleToday(){
+  const el=document.getElementById('bundleOrdersOut');
+  if(!bundleToday.length){ el.innerHTML=''; return; }
+  el.innerHTML=bundleToday.map(({combo,qty})=>`<details class="ph-card bundle-row" style="padding:10px 12px;" open>
+      <summary>
+        ${combo.image_url?`<img class="bundle-thumb" src="${escapeHtml(combo.image_url)}" alt="" loading="lazy"/>`:''}
+        <span style="min-width:0;">
+          <b style="word-break:break-word;">${escapeHtml(combo.name)}</b>
+          <span class="hint" style="display:block;margin:2px 0 0;">${qty} to pack &middot; ${combo.subs.length} pieces each</span>
+        </span>
+        <span class="bundle-chev">&rsaquo;</span>
+      </summary>
+      <div style="margin-top:8px;">${combo.subs.map(sub=>
+        `<div class="bundle-sub">
+           <span>${escapeHtml(sub.sku)}</span>
+           <span class="hint">&times;${sub.qty*qty}${qty>1?` (${sub.qty} \u00d7 ${qty})`:''}</span>
+         </div>`).join('')||'<p class="hint" style="margin:0;">-- empty --</p>'}</div>
+    </details>`).join('');
+}
 
 // ---- what is on file ----
 // A read answers with a thousand rows at most, whatever it was asked for, and
@@ -15324,6 +15336,13 @@ function gtEditGeom(){
   return {c,img,sc,w,h,art,tag:T};
 }
 function gtDrawDesign(){
+  if(gtEditLock&&!(gtCurrentDesign&&gtCurrentDesign.fields.some(f=>f.id===gtEditLock)))
+    gtEditLock=null;
+  const lbl=document.getElementById('gtDesignLbl');
+  if(lbl){
+    const h=gtEditLock&&gtCurrentDesign.fields.find(f=>f.id===gtEditLock);
+    lbl.textContent='ONE TAG'+(h?` · HELD TO ${(h.name||'THAT TEXT').toUpperCase()}`:'');
+  }
   const d=gtCurrentDesign; if(!d) return;
   const {c,img,sc,w,h,art,tag}=gtEditGeom();
   c.width=w; c.height=h;
@@ -15360,13 +15379,20 @@ function gtDrawDesign(){
     if(f.rot){                                   // the box turns with its words
       ctx.translate(x+bw/2,y+bh/2); ctx.rotate(f.rot*Math.PI/180); ctx.translate(-x-bw/2,-y-bh/2);
     }
+    const held=gtEditLock===f.id;
     const on=f===gtEditSel||gtFieldPick.has(f.id);
-    ctx.strokeStyle=on?'#CCF344':'#B24C25';
-    ctx.setLineDash([4,3]); ctx.lineWidth=on?2:1.5;
+    // the held box solid and the rest faint, so what the tag answers to is
+    // read off it rather than remembered
+    ctx.globalAlpha=(gtEditLock&&!held)?0.3:1;
+    ctx.strokeStyle=(on||held)?'#CCF344':'#B24C25';
+    if(held){ ctx.setLineDash([]); ctx.lineWidth=2; }
+    else{ ctx.setLineDash([4,3]); ctx.lineWidth=on?2:1.5; }
     ctx.strokeRect(x,y,bw,bh);
     ctx.setLineDash([]);
-    ctx.fillStyle=on?'#CCF344':'#B24C25';
-    ctx.fillRect(x+bw-7,y+bh-7,7,7);            // the corner you drag to resize
+    if(!gtEditLock||held){
+      ctx.fillStyle=(on||held)?'#CCF344':'#B24C25';
+      ctx.fillRect(x+bw-7,y+bh-7,7,7);          // the corner you drag to resize
+    }
     ctx.restore();
   });
   // a group is one thing to move, so it is drawn as one box round the lot
@@ -15398,6 +15424,10 @@ function gtDrawDesign(){
   }
 }
 let gtEditSel=null, gtEditDrag=null;
+// the box the tag is held to, if any. Same as the sheet: a tag is small and
+// its boxes sit on top of each other, so the one being worked on is held to
+// with space and let go with space.
+let gtEditLock=null;
 // Lining up a stack of lines one box at a time is the slow way. Ticked boxes,
 // or boxes grouped together, move as one: a drag on any of them carries the
 // rest, and so do the arrow keys.
@@ -15437,6 +15467,19 @@ document.addEventListener('keydown',e=>{
   if(currentScreen!=='tool-gift-tag-design') return;
   const typing=e.target&&/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
   const d=gtCurrentDesign; if(!d) return;
+  // space holds the tag to the box that was clicked, and lets it go again
+  if(e.key===' '||e.key==='Spacebar'||e.code==='Space'){
+    if(typing||(e.target&&(e.target.tagName==='BUTTON'||e.target.isContentEditable))) return;
+    if(gtEditLock) gtEditLock=null;
+    else{
+      if(!gtEditSel) return;            // nothing has been taken hold of yet
+      gtEditLock=gtEditSel.id;
+      gtFieldPick.clear();              // held to one box, not gathering several
+    }
+    e.preventDefault();
+    gtDrawDesign(); gtRenderFields();
+    return;
+  }
   // Ctrl+G ties the ticked boxes together, and Ctrl+Shift+G unties them again
   if((e.ctrlKey||e.metaKey)&&(e.key==='g'||e.key==='G')){
     const ticked=d.fields.filter(f=>gtFieldPick.has(f.id));
@@ -15494,9 +15537,12 @@ document.addEventListener('keydown',e=>{
   c.addEventListener('pointerdown',e=>{
     const d=gtCurrentDesign; if(!d) return;
     const p=at(e);
+    // While the tag is held to one box, that box is the only thing on it that
+    // answers — a press anywhere else leaves everything where it is.
+    const list=gtEditLock?d.fields.filter(f=>f.id===gtEditLock):d.fields;
     // topmost first, so a box drawn over another takes the tap
-    for(let i=d.fields.length-1;i>=0;i--){
-      const f=d.fields[i];
+    for(let i=list.length-1;i>=0;i--){
+      const f=list[i];
       const l=localFrac(p,f,p.g);
       const inside=l.u>=0&&l.u<=1&&l.v>=0&&l.v<=1;
       if(!inside) continue;
@@ -15524,6 +15570,8 @@ document.addEventListener('keydown',e=>{
       gtDrawDesign(); gtRenderFields();
       return;
     }
+    // held to a box, a press that missed it changes nothing at all
+    if(gtEditLock) return;
     // nothing under the pointer: the selection goes, ticks and all
     gtEditSel=null; gtFieldPick.clear();
     gtDrawDesign(); gtRenderFields();
