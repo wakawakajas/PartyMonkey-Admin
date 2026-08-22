@@ -2112,7 +2112,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         columns it found, so the reading can be matched to your sheet.</p>
       <button class="btn-primary" id="bundleUploadBtn" style="width:100%;">⬆ Upload combination list</button>
       <div id="bundleUploadMsg"></div>
-      <div id="bundlePreview"></div>
+    </div></div>
+
+    <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
+      <div class="sect-label">Combinations on file</div>
+      <label class="field" style="margin-bottom:10px;"><span>SEARCH</span>
+        <input type="text" id="bundleSearch" placeholder="Combination or sub-SKU" autocomplete="off"/>
+      </label>
+      <div id="bundleList"></div>
     </div></div>
   </div>
 
@@ -4750,6 +4757,7 @@ function showScreen(name,viaBack){
   if(name==='request') refreshRequests();
   if(name==='calculator') openCalculator();
   if(name==='macro-studio') refreshMacroStudio();
+  if(name==='bundle-sku') refreshBundles();
   if(name==='pick-lists'){ refreshPickLists(); plWatchRoll(); }
   else plUnwatchRoll();
   if(name==='pick-list') openPickList();
@@ -5129,8 +5137,35 @@ document.getElementById('goToMacroStudioBtn').addEventListener('click',()=>showS
 document.getElementById('goToBundleSkuBtn').addEventListener('click',()=>showScreen('bundle-sku'));
 
 // ---- the combination SKU list ----
-// Reading only, for now: the sheet's own headings are what the parsing will be
-// written against, and guessing them before seeing one would only be a guess.
+// The sheet is BigSeller's combination export, and its shape is positional
+// rather than headed: the combination's own name in the first column, its
+// picture in the ninth, then up to fifty sub-SKUs laid out five columns apart
+// -- the name at O, T, Y ... and its quantity two columns further along at
+// Q, V, AA. Reading it by position is not a guess; it is the only thing the
+// sheet offers, since the fiftieth pair is headed the same as the first.
+const BUNDLE_NAME_COL=0;          // A
+const BUNDLE_IMAGE_COL=8;         // I
+const BUNDLE_FIRST_SKU_COL=14;    // O
+const BUNDLE_QTY_OFFSET=2;        // O -> Q
+const BUNDLE_PAIR_STRIDE=5;       // O -> T
+const BUNDLE_MAX_SUBS=50;
+
+// One spreadsheet row into one combination, or null if the row is filler.
+function bundleRowToCombo(row){
+  const name=String(row[BUNDLE_NAME_COL]==null?'':row[BUNDLE_NAME_COL]).trim();
+  if(!name) return null;
+  const image=String(row[BUNDLE_IMAGE_COL]==null?'':row[BUNDLE_IMAGE_COL]).trim();
+  const subs=[];
+  for(let n=0;n<BUNDLE_MAX_SUBS;n++){
+    const c=BUNDLE_FIRST_SKU_COL+n*BUNDLE_PAIR_STRIDE;
+    const sku=String(row[c]==null?'':row[c]).trim();
+    if(!sku) continue;            // a gap is not the end -- keep looking
+    const qty=Math.max(1,Math.round(numOf(row[c+BUNDLE_QTY_OFFSET])||1));
+    subs.push({sku,qty});
+  }
+  return {name,image_url:/^https?:\/\//i.test(image)?image:'',subs};
+}
+
 document.getElementById('bundleUploadBtn').addEventListener('click',()=>{
   const msg=document.getElementById('bundleUploadMsg');
   const inp=document.createElement('input');
@@ -5138,32 +5173,126 @@ document.getElementById('bundleUploadBtn').addEventListener('click',()=>{
   inp.onchange=async()=>{
     const file=inp.files[0]; if(!file) return;
     const btn=document.getElementById('bundleUploadBtn');
-    btn.disabled=true; const label=btn.textContent; btn.textContent='Reading…';
+    btn.disabled=true; const label=btn.textContent; btn.textContent='Reading...';
     try{
       if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
+      const session=await requireSession(msg); if(!session) return;
       const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
       const grid=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
-      if(!grid.length) throw new Error('that sheet is empty');
-      const head=(grid[0]||[]).map(v=>String(v).trim());
-      const body=grid.slice(1).filter(r=>r.some(v=>String(v).trim()!==''));
-      const cell=v=>`<td style="padding:4px 8px;border-bottom:1px solid rgba(255,255,255,.08);white-space:nowrap;">${escapeHtml(String(v))}</td>`;
-      document.getElementById('bundlePreview').innerHTML=
-        `<p class="hint" style="margin:10px 0 6px;"><b>${escapeHtml(file.name)}</b> — `
-        +`${body.length} rows, ${head.length} columns. First few rows:</p>`
-        +'<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;"><thead><tr>'
-        +head.map(h=>`<th style="padding:4px 8px;text-align:left;border-bottom:1px solid rgba(255,255,255,.25);white-space:nowrap;">${escapeHtml(h||'—')}</th>`).join('')
-        +'</tr></thead><tbody>'
-        +body.slice(0,5).map(r=>'<tr>'+head.map((_,i)=>cell(r[i]==null?'':r[i])).join('')+'</tr>').join('')
-        +'</tbody></table></div>';
-      showMsg(msg,'✓ Read it. Nothing saved — tell me which columns to use and this starts storing them.',true);
+      if(grid.length<2) throw new Error('that sheet has no rows under its header');
+
+      // last one wins, so a sheet naming a combination twice does not try to
+      // insert the same name twice in the one go
+      const byName=new Map();
+      let empty=0;
+      for(const row of grid.slice(1)){
+        const combo=bundleRowToCombo(row);
+        if(!combo) continue;
+        if(!combo.subs.length){ empty++; continue; }
+        byName.set(combo.name.toLowerCase(),combo);
+      }
+      const combos=[...byName.values()];
+      if(!combos.length) throw new Error('no combinations with sub-SKUs were found -- '
+        +'is the combination name in column A and the first sub-SKU in column O?');
+
+      showMsg(msg,`Saving ${combos.length} combinations...`,true);
+      // Upsert on the name so a second upload tops the catalogue up rather
+      // than doubling it, and so a combination that changed keeps its id and
+      // whatever already points at it.
+      const saved=[];
+      for(let i=0;i<combos.length;i+=200){
+        const slice=combos.slice(i,i+200);
+        const {data,error}=await sb.from('bundle_skus')
+          .upsert(slice.map(c=>({user_id:session.user.id,name:c.name,
+            image_url:c.image_url||null,updated_at:new Date().toISOString()})),
+            {onConflict:'name'})
+          .select('id,name');
+        if(error) throw error;
+        saved.push(...(data||[]));
+        showMsg(msg,`Saving combination ${Math.min(i+200,combos.length)} of ${combos.length}...`,true);
+      }
+      const idOf=new Map(saved.map(r=>[r.name.toLowerCase(),r.id]));
+
+      // The contents are replaced rather than merged: a combination that lost
+      // a piece must lose it here too, and nothing in the sheet distinguishes
+      // a removed sub-SKU from one it never mentioned.
+      const ids=combos.map(c=>idOf.get(c.name.toLowerCase())).filter(Boolean);
+      for(let i=0;i<ids.length;i+=200){
+        const {error}=await sb.from('bundle_sku_items').delete().in('bundle_id',ids.slice(i,i+200));
+        if(error) throw error;
+      }
+      const items=[];
+      combos.forEach(c=>{
+        const id=idOf.get(c.name.toLowerCase()); if(!id) return;
+        c.subs.forEach((sub,n)=>items.push({user_id:session.user.id,bundle_id:id,
+          sku:sub.sku,qty:sub.qty,sort_order:n}));
+      });
+      for(let i=0;i<items.length;i+=500){
+        const {error}=await sb.from('bundle_sku_items').insert(items.slice(i,i+500));
+        if(error) throw error;
+        showMsg(msg,`Saving piece ${Math.min(i+500,items.length)} of ${items.length}...`,true);
+      }
+
+      showMsg(msg,`\u2713 ${combos.length} combinations, ${items.length} pieces in all.`
+        +(empty?` ${empty} rows had no sub-SKUs and were left out.`:''),true);
+      await refreshBundles();
     }catch(e){
-      showMsg(msg,'Could not read that file: '+escapeHtml(e.message||String(e)),false);
+      showMsg(msg,'Could not take that file in: '+escapeHtml(e.message||String(e)),false);
     }finally{
       btn.disabled=false; btn.textContent=label;
     }
   };
   inp.click();
 });
+
+// ---- what is on file ----
+let bundleRows=[];
+async function refreshBundles(){
+  const el=document.getElementById('bundleList');
+  if(!el) return;
+  if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
+  const [combosRes,itemsRes]=await Promise.all([
+    sb.from('bundle_skus').select('*').order('name'),
+    sb.from('bundle_sku_items').select('*').order('sort_order')
+  ]);
+  if(combosRes.error||itemsRes.error){
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load them. '
+      +'Run supabase-migration-BUNDLE-SKU-TABLES.sql first.</p>';
+    return;
+  }
+  const byBundle=new Map();
+  (itemsRes.data||[]).forEach(it=>{
+    if(!byBundle.has(it.bundle_id)) byBundle.set(it.bundle_id,[]);
+    byBundle.get(it.bundle_id).push(it);
+  });
+  bundleRows=(combosRes.data||[]).map(c=>({...c,subs:byBundle.get(c.id)||[]}));
+  renderBundles();
+}
+function renderBundles(){
+  const el=document.getElementById('bundleList');
+  const q=(document.getElementById('bundleSearch').value||'').trim().toLowerCase();
+  // a search matches the combination or anything inside it, because half the
+  // time what you know is the piece in your hand, not the bundle it came in
+  const rows=q?bundleRows.filter(b=>b.name.toLowerCase().includes(q)
+    ||b.subs.some(s=>s.sku.toLowerCase().includes(q))):bundleRows;
+  if(!bundleRows.length){
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">-- nothing uploaded yet --</p>'; return;
+  }
+  if(!rows.length){
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">-- nothing matches that --</p>'; return;
+  }
+  el.innerHTML=rows.map(b=>`<details class="ph-card" style="padding:10px 12px;">
+      <summary style="cursor:pointer;list-style:none;">
+        <b>${escapeHtml(b.name)}</b>
+        <span class="hint" style="display:block;margin:2px 0 0;">${b.subs.length} pieces</span>
+      </summary>
+      <div style="margin-top:8px;">${b.subs.map(s=>
+        `<div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;">
+           <span>${escapeHtml(s.sku)}</span><span class="hint">&times;${s.qty}</span>
+         </div>`).join('')||'<p class="hint" style="margin:0;">-- empty --</p>'}</div>
+    </details>`).join('');
+}
+document.getElementById('bundleSearch').addEventListener('input',renderBundles);
 document.getElementById('goToPickListBtn').addEventListener('click',()=>showScreen('pick-lists'));
 
 const MACRO_STUDIO_BUCKET='macro-studio-builds';
