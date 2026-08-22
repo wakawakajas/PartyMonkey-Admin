@@ -1307,12 +1307,16 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     moveInArray(stepsArray, index, 1);
     renderStepArrayInto(stepsArray, containerEl);
   });
+  const copyBtn = mkActionBtn("Copy", "Duplicate this step, just below", false, () => {
+    stepsArray.splice(index + 1, 0, cloneStep(step));
+    renderStepArrayInto(stepsArray, containerEl);
+  });
   const delBtn = mkActionBtn("Delete", "", false, () => {
     stepsArray.splice(index, 1);
     renderStepArrayInto(stepsArray, containerEl);
   });
 
-  actions.append(upBtn, downBtn, delBtn);
+  actions.append(upBtn, downBtn, copyBtn, delBtn);
 
   // Drag to reorder. The handle is its own element rather than the whole
   // row because every field in that row is an input -- making the row
@@ -1371,6 +1375,25 @@ function buildStepRow(step, index, stepsArray, containerEl) {
   }
 
   return li;
+}
+
+function freshStepId() {
+  return (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())).replace(/-/g, "");
+}
+
+// A copied step needs its own id, and so does everything nested inside a
+// conditional or a loop -- two steps sharing an id makes the run report
+// ambiguous about which one a result belongs to.
+function cloneStep(step) {
+  const copy = JSON.parse(JSON.stringify(step));
+  const reid = (s) => {
+    s.id = freshStepId();
+    ["then_steps", "else_steps", "body_steps"].forEach((key) => {
+      if (Array.isArray(s[key])) s[key].forEach(reid);
+    });
+  };
+  reid(copy);
+  return copy;
 }
 
 function moveInArray(arr, index, dir) {
