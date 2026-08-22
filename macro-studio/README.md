@@ -74,7 +74,11 @@ custom widgets, icon glyphs and wrapper elements all work, in background
 tabs, with no window focus. It's local and free -- the protocol DevTools
 itself uses, no API key, no per-run cost, nothing leaving the machine.
 
-- **Launch Chrome (CDP)** starts (or reuses) a Chrome on `--remote-debugging-port`
+- **Launch Chrome (CDP)** starts (or reuses) a Chrome on `--remote-debugging-port`,
+  and **Close Chrome (CDP)** quits it again -- the graceful `Browser.close`, so the
+  profile isn't left looking crashed and the next launch doesn't offer to restore
+  tabs. Both have a button in the Browser panel too. Neither can touch your normal
+  Chrome: they work through the debugging port, which only this browser listens on
 - **Web: go to / click / hover / wait for / type / read** act on a tab, matched
   by a URL or title fragment; blank means "the tab this run is already using"
 - A click or hover takes a "match #" when several things share the same

@@ -110,6 +110,33 @@ def launch(port: int = DEFAULT_PORT, user_data_dir: str = "", url: str = "",
     )
 
 
+def close_browser(port: int = DEFAULT_PORT, timeout: float = 10.0) -> str:
+    """Quits the debugging Chrome.
+
+    Browser.close is the graceful path -- Chrome writes its session out and
+    exits the way it would on File > Exit, so the profile isn't left looking
+    crashed and the next launch doesn't offer to restore tabs. Nothing here
+    can reach a normal Chrome: this connects through the debugging port,
+    which only the browser Macro Studio started is listening on."""
+    if not is_running(port):
+        return f"No Chrome was debugging on port {port} -- nothing to close."
+    version = _http_json(port, "/json/version") or {}
+    browser_ws = version.get("webSocketDebuggerUrl")
+    if not browser_ws:
+        raise RuntimeError(f"Chrome on port {port} didn't offer a browser socket to close it by.")
+    try:
+        _send({"webSocketDebuggerUrl": browser_ws}, "Browser.close", {}, timeout=5)
+    except RuntimeError:
+        pass  # it often drops the socket mid-reply; the wait below is the real check
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not is_running(port):
+            return f"Closed the Chrome on port {port}."
+        time.sleep(0.3)
+    raise RuntimeError(f"Chrome on port {port} was asked to close but is still answering.")
+
+
 def list_pages(port: int = DEFAULT_PORT) -> list:
     try:
         targets = _http_json(port, "/json/list") or []

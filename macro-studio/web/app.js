@@ -30,6 +30,7 @@ const macroNameInput = document.getElementById("macroNameInput");
 const confirmSaveMacroBtn = document.getElementById("confirmSaveMacroBtn");
 const cancelSaveMacroBtn = document.getElementById("cancelSaveMacroBtn");
 const openCdpBtn = document.getElementById("openCdpBtn");
+const closeCdpBtn = document.getElementById("closeCdpBtn");
 const webRecordBtn = document.getElementById("webRecordBtn");
 const webRecordStopBtn = document.getElementById("webRecordStopBtn");
 const webRecordUrl = document.getElementById("webRecordUrl");
@@ -118,7 +119,8 @@ function typeLabel(type) {
     file_op: "File op", clipboard: "Clipboard", keyboard_shortcut: "Shortcut",
     get_cursor_position: "Cursor pos", read_control_value: "Read value",
     conditional: "If/Else", loop: "Loop",
-    cdp_launch: "Launch Chrome (CDP)", web_goto: "Web: go to", web_click: "Web: click",
+    cdp_launch: "Launch Chrome (CDP)", cdp_close: "Close Chrome (CDP)",
+    web_goto: "Web: go to", web_click: "Web: click",
     web_hover: "Web: hover",
     web_wait_for: "Web: wait for", web_type: "Web: type", web_read: "Web: read",
     web_print_pdf: "Web: save PDF", web_switch_tab: "Web: follow tab", web_close_tab: "Web: close tab",
@@ -191,6 +193,23 @@ openCdpBtn.addEventListener("click", async () => {
     showNote(webRecordNote, `Could not reach the agent: ${err.message}`, "error");
   } finally {
     openCdpBtn.disabled = false;
+  }
+});
+
+closeCdpBtn.addEventListener("click", async () => {
+  closeCdpBtn.disabled = true;
+  try {
+    const res = await fetch("/api/cdp/close", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const body = await res.json();
+    showNote(webRecordNote, body.detail || `Unexpected error (HTTP ${res.status})`, res.ok ? "info" : "error");
+  } catch (err) {
+    showNote(webRecordNote, `Could not reach the agent: ${err.message}`, "error");
+  } finally {
+    closeCdpBtn.disabled = false;
   }
 });
 
@@ -759,6 +778,10 @@ const STEP_TEMPLATES = {
     label: "Read control value",
     make: () => ({ type: "read_control_value", window_title: "", target: { name: "", automation_id: "" }, store_as: "value", delay_ms: 0 }),
   },
+  cdp_close: {
+    label: "Web: close Chrome (CDP)",
+    make: () => ({ type: "cdp_close", port: 9222, delay_ms: 0 }),
+  },
   cdp_launch: {
     label: "Web: launch Chrome (CDP)",
     make: () => ({ type: "cdp_launch", port: 9222, user_data_dir: "", url: "", timeout_ms: 20000, delay_ms: 0 }),
@@ -835,6 +858,7 @@ const STEP_HELP = {
   conditional: "Runs one set of steps if a variable matches, another if it doesn't.",
   loop: "Repeats its steps a set number of times, or until a variable matches.",
   cdp_launch: "Opens the separate Chrome the Web steps drive. Put this first in any web macro.",
+  cdp_close: "Quits that Chrome. Put it last if you'd rather not leave a browser window open after the run. Your normal Chrome is untouched.",
   web_goto: "Opens a page in that Chrome, in its own tab, and waits for it to finish loading.",
   web_click: "Clicks something in the page: a link, button, tab, checkbox. Found by CSS selector, visible text, or both. For an item in a dropdown, fill the \"open menu\" fields with what opens it -- the hover is re-applied every attempt, so a menu that shut itself doesn't fail the run.",
   web_hover: "Moves the pointer over something without clicking -- what you need before clicking an item in a menu that opens on hover.",
@@ -1146,6 +1170,8 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("URL (optional)", editorInput("text", step.url, (v) => (step.url = v), "200px"));
     addField("profile folder (blank=default)", editorInput("text", step.user_data_dir, (v) => (step.user_data_dir = v), "180px"));
     addField("timeout (ms)", editorInput("number", step.timeout_ms, (v) => (step.timeout_ms = v), "80px"));
+  } else if (step.type === "cdp_close") {
+    addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
   } else if (step.type === "web_goto") {
     addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
     addField("URL", editorInput("text", step.url, (v) => (step.url = v), "220px"));

@@ -227,6 +227,17 @@ def cdp_launch(body: CdpLaunchRequest) -> JSONResponse:
     return JSONResponse(content={"detail": message, "port": body.port})
 
 
+@app.post("/api/cdp/close")
+def cdp_close(body: CdpLaunchRequest) -> JSONResponse:
+    """Closes the debugging Chrome -- the counterpart to the launch button,
+    for when it's in the way or a run left it somewhere odd."""
+    try:
+        message = cdp.close_browser(port=body.port)
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"error": "cdp_close_failed", "detail": str(exc)})
+    return JSONResponse(content={"detail": message, "port": body.port})
+
+
 class WebRecordingRequest(BaseModel):
     port: int = cdp.DEFAULT_PORT
     url: str = ""

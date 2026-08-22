@@ -428,7 +428,7 @@ class ReplayEngine:
                 outcome = self._run_read_control_value(step, context)
             elif step_type in ("cdp_launch", "web_goto", "web_click", "web_hover",
                                "web_wait_for", "web_type", "web_read", "web_print_pdf",
-                               "web_switch_tab", "web_close_tab"):
+                               "web_switch_tab", "web_close_tab", "cdp_close"):
                 outcome = self._run_web_step(step_type, step, context)
             else:
                 outcome = {"status": "skipped", "tier": None, "reason": f"Unknown step type '{step_type}'."}
@@ -578,6 +578,12 @@ class ReplayEngine:
                     wait_seconds=min(max(1, int(step.get("timeout_ms", 20000))) / 1000.0, 60.0),
                 )
                 context["cdp_port"] = port
+                return {"status": "success", "tier": "cdp", "reason": message}
+
+            if step_type == "cdp_close":
+                message = cdp.close_browser(port)
+                context["cdp_tab"] = ""
+                context["cdp_seen_tabs"] = []
                 return {"status": "success", "tier": "cdp", "reason": message}
 
             timeout_ms = min(max(0, int(step.get("timeout_ms", 10000))), 120_000)
