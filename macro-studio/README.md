@@ -84,6 +84,20 @@ itself uses, no API key, no per-run cost, nothing leaving the machine.
 - Steps mix freely with UIA steps -- one macro can drive File Explorer and a
   web page in sequence
 
+**Recording a web macro.** The Browser panel's "Record clicks" watches that
+Chrome from inside the page: a capture-phase listener is injected into the
+tab, and every click becomes a `Web: click` step with both a generated CSS
+selector and the element's visible label, since on replay those two narrow
+each other. Clicking an item inside a dropdown also emits the `Web: hover`
+step that opens it -- without which the item wouldn't exist to click. The
+listener is re-injected on every poll, so a recording survives navigation,
+which destroys the JS context along with everything in it. Stop, then Save
+with the same buttons a recorded input macro uses.
+
+The OS-level Record button is still the right tool for desktop apps, and the
+wrong one here: against a browser it captures screen coordinates, which is
+not what a web step needs.
+
 To open that Chrome yourself -- to sign in, to look up a selector with F12, or
 to watch a macro run -- double-click [`open-cdp-chrome.bat`](open-cdp-chrome.bat),
 optionally with a URL. It reuses the debugging Chrome if one is already up, and

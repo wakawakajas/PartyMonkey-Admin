@@ -26,11 +26,12 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import config, macro_store, run_reports, settings, video
+from agent import cdp, config, macro_store, run_reports, settings, video
 from agent.macro_store import MacroNotFoundError
 from agent.panic import PanicWatcher
 from agent.recorder import Recorder
 from agent.replay import ReplayBusyError, ReplayEngine
+from agent.web_recorder import WebRecorder
 
 START_TIME = time.time()
 AGENT_PID = os.getpid()
@@ -81,6 +82,7 @@ def broadcast(message: dict) -> None:
 
 recorder = Recorder(broadcast=broadcast)
 replay_engine = ReplayEngine(broadcast=broadcast)
+web_recorder = WebRecorder(broadcast=broadcast)
 
 
 def _handle_panic() -> None:
@@ -205,6 +207,63 @@ def cancel_recording() -> JSONResponse:
 def recording_state() -> dict:
     """Lets the web UI rehydrate the step list on page load/refresh."""
     return {"state": recorder.state, "steps": recorder.steps}
+
+
+class CdpLaunchRequest(BaseModel):
+    port: int = cdp.DEFAULT_PORT
+    url: str = ""
+    user_data_dir: str = ""
+
+
+@app.post("/api/cdp/launch")
+def cdp_launch(body: CdpLaunchRequest) -> JSONResponse:
+    """Opens (or surfaces) the Chrome that the Web: steps drive -- the
+    same thing open-cdp-chrome.bat does, for people who are already
+    looking at the web UI."""
+    try:
+        message = cdp.launch(port=body.port, user_data_dir=body.user_data_dir, url=body.url)
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"error": "cdp_launch_failed", "detail": str(exc)})
+    return JSONResponse(content={"detail": message, "port": body.port})
+
+
+class WebRecordingRequest(BaseModel):
+    port: int = cdp.DEFAULT_PORT
+    url: str = ""
+    tab_match: str = ""
+
+
+@app.post("/api/web-recording/start")
+def start_web_recording(body: WebRecordingRequest) -> JSONResponse:
+    if recorder.state in ("recording", "paused"):
+        return _recorder_error(RuntimeError("Stop the input recording first -- one recorder at a time."))
+    try:
+        result = web_recorder.start(port=body.port, url=body.url, tab_match=body.tab_match)
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"error": "web_recording_failed", "detail": str(exc)})
+    return JSONResponse(content=result)
+
+
+@app.post("/api/web-recording/stop")
+def stop_web_recording() -> JSONResponse:
+    """Hands the captured steps to the input recorder's buffer so the
+    existing Save/Discard flow covers browser recordings too."""
+    try:
+        result = web_recorder.stop()
+        recorder.adopt_steps(result["steps"])
+    except RuntimeError as exc:
+        return _recorder_error(exc)
+    return JSONResponse(content=result)
+
+
+@app.post("/api/web-recording/cancel")
+def cancel_web_recording() -> JSONResponse:
+    return JSONResponse(content=web_recorder.cancel())
+
+
+@app.get("/api/web-recording/state")
+def web_recording_state() -> dict:
+    return web_recorder.snapshot()
 
 
 class HotkeyUpdate(BaseModel):

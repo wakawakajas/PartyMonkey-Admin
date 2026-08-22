@@ -29,6 +29,11 @@ const saveMacroForm = document.getElementById("saveMacroForm");
 const macroNameInput = document.getElementById("macroNameInput");
 const confirmSaveMacroBtn = document.getElementById("confirmSaveMacroBtn");
 const cancelSaveMacroBtn = document.getElementById("cancelSaveMacroBtn");
+const openCdpBtn = document.getElementById("openCdpBtn");
+const webRecordBtn = document.getElementById("webRecordBtn");
+const webRecordStopBtn = document.getElementById("webRecordStopBtn");
+const webRecordUrl = document.getElementById("webRecordUrl");
+const webRecordNote = document.getElementById("webRecordNote");
 const selectAllMacros = document.getElementById("selectAllMacros");
 const deleteSelectedBtn = document.getElementById("deleteSelectedBtn");
 const deleteAllBtn = document.getElementById("deleteAllBtn");
@@ -170,6 +175,67 @@ async function callRecordingApi(path) {
     showNote(recordNote, `Could not reach the agent: ${err.message}`, "error");
   }
 }
+
+openCdpBtn.addEventListener("click", async () => {
+  openCdpBtn.disabled = true;
+  try {
+    const res = await fetch("/api/cdp/launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: webRecordUrl.value.trim() }),
+    });
+    const body = await res.json();
+    showNote(webRecordNote, body.detail || `Unexpected error (HTTP ${res.status})`, res.ok ? "info" : "error");
+  } catch (err) {
+    showNote(webRecordNote, `Could not reach the agent: ${err.message}`, "error");
+  } finally {
+    openCdpBtn.disabled = false;
+  }
+});
+
+function applyWebRecordingState(state) {
+  const recording = state === "recording";
+  webRecordBtn.disabled = recording;
+  webRecordStopBtn.disabled = !recording;
+  webRecordBtn.classList.toggle("recording", recording);
+}
+
+webRecordBtn.addEventListener("click", async () => {
+  try {
+    const res = await fetch("/api/web-recording/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: webRecordUrl.value.trim() }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showNote(webRecordNote, body.detail || `Unexpected error (HTTP ${res.status})`, "error");
+      return;
+    }
+    clearSteps();
+    (body.steps || []).forEach(appendStep);
+    applyWebRecordingState("recording");
+    showNote(webRecordNote, "Recording that browser. Click through the page -- steps appear above.", "info");
+  } catch (err) {
+    showNote(webRecordNote, `Could not reach the agent: ${err.message}`, "error");
+  }
+});
+
+webRecordStopBtn.addEventListener("click", async () => {
+  try {
+    const res = await fetch("/api/web-recording/stop", { method: "POST" });
+    const body = await res.json();
+    if (!res.ok) {
+      showNote(webRecordNote, body.detail || `Unexpected error (HTTP ${res.status})`, "error");
+      return;
+    }
+    applyWebRecordingState("stopped");
+    applyRecordingState("stopped");
+    showNote(webRecordNote, `Captured ${(body.steps || []).length} steps -- Save them above, or Replay to test.`, "info");
+  } catch (err) {
+    showNote(webRecordNote, `Could not reach the agent: ${err.message}`, "error");
+  }
+});
 
 recordBtn.addEventListener("click", () => callRecordingApi("start"));
 pauseBtn.addEventListener("click", () => callRecordingApi(recordingState === "paused" ? "resume" : "pause"));
@@ -614,6 +680,9 @@ function connectWebSocket() {
         break;
       case "step_added":
         appendStep(msg.step);
+        break;
+      case "web_recording_state":
+        applyWebRecordingState(msg.state);
         break;
       case "hotkey_stop_triggered":
         showNote(recordNote, "Recording stopped via global hotkey.", "info");

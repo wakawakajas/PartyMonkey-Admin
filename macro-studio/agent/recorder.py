@@ -113,6 +113,19 @@ class Recorder:
         self._broadcast({"type": "recording_state", "state": "stopped", "step_count": len(steps)})
         return {"state": "stopped", "steps": steps}
 
+    def adopt_steps(self, steps: list[dict]) -> dict:
+        """Takes a step list captured somewhere else -- the browser
+        recorder -- and parks it in the "stopped" state, which is what
+        Save expects. One buffer, one Save button, whichever recorder
+        filled it."""
+        with self._lock:
+            if self.state in ("recording", "paused"):
+                raise RuntimeError("Stop the input recording before adopting browser steps.")
+            self.steps = list(steps)
+            self.state = "stopped" if steps else "idle"
+        self._broadcast({"type": "recording_state", "state": self.state, "step_count": len(steps)})
+        return {"state": self.state, "steps": list(steps)}
+
     def cancel(self) -> dict:
         """Discards the in-progress or just-stopped recording without
         saving -- distinct from stop(), which keeps the captured steps
