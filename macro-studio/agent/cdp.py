@@ -92,6 +92,15 @@ def launch(port: int = DEFAULT_PORT, user_data_dir: str = "", url: str = "",
         f"--user-data-dir={profile}",
         "--no-first-run",
         "--no-default-browser-check",
+        # Chrome stops rendering a window it believes nobody can see, and
+        # a page that isn't rendering doesn't update hover state -- so a
+        # macro that worked in front failed the moment the window was
+        # minimised or covered. These three keep it live regardless: no
+        # occlusion detection, no throttling of a backgrounded window or
+        # its renderer.
+        "--disable-features=CalculateNativeWinOcclusion",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
     ]
     if url:
         args.append(url)
@@ -149,8 +158,29 @@ def list_pages(port: int = DEFAULT_PORT) -> list:
 
 
 def open_tab(port: int, url: str) -> dict:
-    """New tab via the HTTP endpoint rather than Target.createTarget -- no
-    WebSocket needed for the one call, and it behaves identically."""
+    """Opens a tab without bringing the window forward.
+
+    The HTTP /json/new endpoint raises and focuses the window, which is
+    the one thing a background macro must not do -- the user is working in
+    something else. Target.createTarget takes `background`, so the tab
+    opens where it belongs: behind."""
+    version = _http_json(port, "/json/version") or {}
+    browser_ws = version.get("webSocketDebuggerUrl")
+    if browser_ws:
+        try:
+            result = _send({"webSocketDebuggerUrl": browser_ws}, "Target.createTarget",
+                           {"url": url, "background": True}, timeout=10)
+            target_id = result.get("targetId")
+            if target_id:
+                for page in list_pages(port):
+                    if page.get("id") == target_id:
+                        return page
+                # Listed a moment too early; the id is enough to act on.
+                return {"id": target_id, "url": url,
+                        "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/page/{target_id}"}
+        except RuntimeError:
+            pass  # older Chrome, or background unsupported -- fall through
+
     quoted = urllib.parse.quote(url, safe="")
     request = urllib.request.Request(f"http://127.0.0.1:{port}/json/new?{quoted}", method="PUT")
     try:

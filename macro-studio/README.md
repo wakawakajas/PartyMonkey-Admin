@@ -128,6 +128,15 @@ to watch a macro run -- double-click [`open-cdp-chrome.bat`](open-cdp-chrome.bat
 optionally with a URL. It reuses the debugging Chrome if one is already up, and
 never touches your normal Chrome, which keeps its own separate profile.
 
+That browser is launched with occlusion detection and background throttling
+disabled, and macro tabs are created with `Target.createTarget`'s `background`
+flag rather than the HTTP endpoint that raises the window. Both matter for the
+same reason: Chrome stops rendering a window it believes nobody is looking at,
+and a page that isn't rendering doesn't update hover state -- so a macro that
+worked in front would fail the moment the window was minimised, while opening a
+tab would yank the window in front of whatever you were doing. Flags only apply
+at launch, so a Chrome started before this needs closing and reopening once.
+
 Since Chrome 136 the debugging port is refused on the default user-data-dir,
 so these steps run against a Chrome with its own profile folder (default
 `%LocalAppData%\MacroStudio\ChromeProfile`). That profile starts signed out:
