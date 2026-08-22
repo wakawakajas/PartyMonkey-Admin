@@ -5148,33 +5148,69 @@ document.getElementById('goToMacroStudioBtn').addEventListener('click',()=>showS
 document.getElementById('goToBundleSkuBtn').addEventListener('click',()=>showScreen('bundle-sku'));
 
 // ---- the combination SKU list ----
-// The sheet is BigSeller's combination export, and its shape is positional
-// rather than headed: the combination's own name in the first column, its
-// picture in the ninth, then up to fifty sub-SKUs laid out five columns apart
-// -- the name at O, T, Y ... and its quantity two columns further along at
-// Q, V, AA. Reading it by position is not a guess; it is the only thing the
-// sheet offers, since the fiftieth pair is headed the same as the first.
-const BUNDLE_NAME_COL=0;          // A
-const BUNDLE_IMAGE_COL=8;         // I
-const BUNDLE_FIRST_SKU_COL=14;    // O
-const BUNDLE_QTY_OFFSET=2;        // O -> Q
-const BUNDLE_PAIR_STRIDE=5;       // O -> T
+// Counting columns across was the wrong way to read this sheet: BigSeller
+// moves them about, and the fiftieth pair is fifty columns from anything you
+// could anchor on. The headings are what is read instead -- "SKU Name", the
+// picture and its link, and then the numbered pairs, wherever they sit and in
+// whatever order.
 const BUNDLE_MAX_SUBS=50;
+// what each heading is called, allowing for the wording drifting a little
+const BUNDLE_HEAD={
+  name:/^sku\s*name$/i,
+  image:/^sku\s*image$/i,
+  url:/^image\s*url$/i
+};
+// "Single SKU 7" and "SKU 7 qty" / "Single SKU 7 qty" -- the number is what
+// pairs a name with its quantity, not the distance between their columns
+const BUNDLE_SUB_HEAD=/^single\s*sku\s*(\d+)$/i;
+const BUNDLE_SUB_QTY_HEAD=/^(?:single\s*)?sku\s*(\d+)\s*qty$/i;
+
+// Reads the header row into column numbers. Anything unrecognised is left
+// alone rather than guessed at.
+function bundleColumns(head){
+  const col={subs:new Map()};
+  head.forEach((raw,i)=>{
+    const h=String(raw==null?'':raw).trim();
+    if(!h) return;
+    for(const k of Object.keys(BUNDLE_HEAD))
+      if(col[k]===undefined&&BUNDLE_HEAD[k].test(h)) col[k]=i;
+    let m=h.match(BUNDLE_SUB_HEAD);
+    if(m){
+      const n=Number(m[1]);
+      if(n>=1&&n<=BUNDLE_MAX_SUBS){
+        if(!col.subs.has(n)) col.subs.set(n,{});
+        col.subs.get(n).sku=i;
+      }
+      return;
+    }
+    m=h.match(BUNDLE_SUB_QTY_HEAD);
+    if(m){
+      const n=Number(m[1]);
+      if(n>=1&&n<=BUNDLE_MAX_SUBS){
+        if(!col.subs.has(n)) col.subs.set(n,{});
+        col.subs.get(n).qty=i;
+      }
+    }
+  });
+  return col;
+}
 
 // One spreadsheet row into one combination, or null if the row is filler.
-function bundleRowToCombo(row){
-  const name=String(row[BUNDLE_NAME_COL]==null?'':row[BUNDLE_NAME_COL]).trim();
+// The picture is whichever of the two picture columns actually holds a link:
+// one of them is the image itself, which a spreadsheet reader cannot see.
+function bundleRowToCombo(row,col){
+  const at=i=>i===undefined?'':String(row[i]==null?'':row[i]).trim();
+  const name=at(col.name);
   if(!name) return null;
-  const image=String(row[BUNDLE_IMAGE_COL]==null?'':row[BUNDLE_IMAGE_COL]).trim();
+  const link=[at(col.url),at(col.image)].find(v=>/^https?:\/\//i.test(v))||'';
   const subs=[];
-  for(let n=0;n<BUNDLE_MAX_SUBS;n++){
-    const c=BUNDLE_FIRST_SKU_COL+n*BUNDLE_PAIR_STRIDE;
-    const sku=String(row[c]==null?'':row[c]).trim();
-    if(!sku) continue;            // a gap is not the end -- keep looking
-    const qty=Math.max(1,Math.round(numOf(row[c+BUNDLE_QTY_OFFSET])||1));
-    subs.push({sku,qty});
-  }
-  return {name,image_url:/^https?:\/\//i.test(image)?image:'',subs};
+  [...col.subs.keys()].sort((a,b)=>a-b).forEach(n=>{
+    const pair=col.subs.get(n);
+    const sku=at(pair.sku);
+    if(!sku) return;              // a gap is not the end -- keep looking
+    subs.push({sku,qty:Math.max(1,Math.round(numOf(row[pair.qty])||1))});
+  });
+  return {name,image_url:link,subs};
 }
 
 document.getElementById('bundleUploadBtn').addEventListener('click',()=>{
@@ -5192,19 +5228,27 @@ document.getElementById('bundleUploadBtn').addEventListener('click',()=>{
       const grid=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
       if(grid.length<2) throw new Error('that sheet has no rows under its header');
 
+      const col=bundleColumns(grid[0]||[]);
+      if(col.name===undefined) throw new Error('no "SKU Name" column -- '
+        +'the headings read: '+escapeHtml((grid[0]||[]).map(h=>String(h).trim())
+          .filter(Boolean).slice(0,12).join(', ')));
+      if(!col.subs.size) throw new Error('no "Single SKU 1" column -- '
+        +'the headings read: '+escapeHtml((grid[0]||[]).map(h=>String(h).trim())
+          .filter(Boolean).slice(0,12).join(', ')));
+
       // last one wins, so a sheet naming a combination twice does not try to
       // insert the same name twice in the one go
       const byName=new Map();
       let empty=0;
       for(const row of grid.slice(1)){
-        const combo=bundleRowToCombo(row);
+        const combo=bundleRowToCombo(row,col);
         if(!combo) continue;
         if(!combo.subs.length){ empty++; continue; }
         byName.set(combo.name.toLowerCase(),combo);
       }
       const combos=[...byName.values()];
-      if(!combos.length) throw new Error('no combinations with sub-SKUs were found -- '
-        +'is the combination name in column A and the first sub-SKU in column O?');
+      if(!combos.length) throw new Error('every row was empty -- '
+        +`${col.subs.size} sub-SKU columns were found, but no row filled any of them`);
 
       showMsg(msg,`Saving ${combos.length} combinations...`,true);
       // Upsert on the name so a second upload tops the catalogue up rather
@@ -5244,7 +5288,9 @@ document.getElementById('bundleUploadBtn').addEventListener('click',()=>{
         showMsg(msg,`Saving piece ${Math.min(i+500,items.length)} of ${items.length}...`,true);
       }
 
-      showMsg(msg,`\u2713 ${combos.length} combinations, ${items.length} pieces in all.`
+      const withPic=combos.filter(c=>c.image_url).length;
+      showMsg(msg,`\u2713 ${combos.length} combinations, ${items.length} pieces in all. `
+        +`${withPic} have a picture.`
         +(empty?` ${empty} rows had no sub-SKUs and were left out.`:''),true);
       await refreshBundles();
     }catch(e){
