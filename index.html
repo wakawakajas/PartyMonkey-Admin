@@ -397,7 +397,12 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* A card explains itself when asked rather than at all times: the sentence
    that helps on the first day is in the way on the second. */
 .card-head-row{display:flex;align-items:flex-start;gap:8px;margin:0 0 8px;}
-.info-dot{flex-shrink:0;margin-left:auto;width:20px;height:20px;border-radius:999px;
+/* The three cards on Bundle SKU are the whole screen, not sections of one, so
+   their headings are read at a glance rather than squinted at. */
+.sect-label.lg{font-size:14px;letter-spacing:.02em;text-transform:none;color:var(--ink);
+  font-family:'Space Grotesk',sans-serif;font-weight:700;}
+.info-dot{flex:0 0 auto;box-sizing:border-box;margin-left:auto;
+  width:22px;min-width:22px;height:22px;aspect-ratio:1;border-radius:50%;
   border:1px solid var(--border-strong);background:var(--card);color:var(--muted);
   font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:12px;line-height:1;
   display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;}
@@ -2164,7 +2169,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="bundle-pair">
     <div class="card drop-card" id="bundleCatalogueCard"><div class="card-body" style="padding:14px;">
       <div class="card-head-row">
-        <div class="sect-label" style="margin:0;">Combination SKU list</div>
+        <div class="sect-label lg" style="margin:0;">Combination SKU list</div>
         <button type="button" class="info-dot" data-info="bundleCatalogueInfo"
                 aria-expanded="false" aria-label="What this is">i</button>
       </div>
@@ -2199,7 +2204,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 
     <div class="card drop-card" id="bundleOrdersCard"><div class="card-body" style="padding:14px;">
       <div class="card-head-row">
-        <div class="sect-label" style="margin:0;">Today's orders</div>
+        <div class="sect-label lg" style="margin:0;">Today's orders</div>
         <button type="button" class="info-dot" data-info="bundleOrdersInfo"
                 aria-expanded="false" aria-label="What this is">i</button>
       </div>
@@ -2233,7 +2238,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     </div>
 
     <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
-      <div class="sect-label">Bundles to pack</div>
+      <div class="sect-label lg">Bundles to pack</div>
       <div class="chips" id="bundleJobTabs">
         <button class="chip on" data-job-tab="pending">Pending</button>
         <button class="chip" data-job-tab="completed">Completed</button>
@@ -2253,10 +2258,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <div id="bundleJobPieces"></div>
       <div id="bundleJobMsg"></div>
     </div></div>
-    <div class="chips chips-left" style="margin-top:12px;">
-      <button class="btn-primary" id="bundleJobNext" style="flex:1;">Say it again</button>
-      <button class="btn-outline" id="bundleJobDone">✓ Complete</button>
-    </div>
+    <p class="hint" id="bundleJobLeft" style="margin:12px 0 6px;"></p>
+    <button class="btn-primary" id="bundleJobNext" style="width:100%;height:54px;">▶ Start</button>
+    <button class="btn-outline" id="bundleJobDone" style="width:100%;margin-top:8px;">✓ Complete</button>
   </div>
 
   <div class="home-wrap" id="macroStudioScreen" style="display:none;">
@@ -5843,6 +5847,10 @@ function bundlePieceSpeech(piece,sets){
   const said=[plSpoken(piece.sku),plQtyWords(piece.qty*sets)];
   return said.filter(Boolean).join('. ');
 }
+// Opening a job shows it; Start begins it. A phone that starts talking the
+// moment a job is opened talks over whoever opened it to see what was in it,
+// and the pick list has always asked to be started for the same reason.
+let bundleJobRunning=false;
 function openBundleJob(){
   const j=bundleJobNow();
   if(!j){ showScreen('bundle-sku',true); return; }
@@ -5850,6 +5858,15 @@ function openBundleJob(){
   document.getElementById('bundleJobSub').textContent=
     `${j.sets} set${j.sets===1?'':'s'} to pack · ${j.pieces.length} pieces each`;
   // where the last person left off, so a job put down is picked back up
+  const first=j.pieces.findIndex(x=>!x.done);
+  bundleJobAt=first<0?Math.max(0,j.pieces.length-1):first;
+  bundleJobRunning=false;
+  try{ window.speechSynthesis&&window.speechSynthesis.cancel(); }catch(e){}
+  renderBundleJob();
+}
+function bundleJobStart(){
+  const j=bundleJobNow(); if(!j) return;
+  bundleJobRunning=true;
   const first=j.pieces.findIndex(x=>!x.done);
   bundleJobAt=first<0?Math.max(0,j.pieces.length-1):first;
   renderBundleJob();
@@ -5878,7 +5895,11 @@ function renderBundleJob(){
       </div>
     </div>`).join('')||'<p class="hint" style="margin:0;">-- this bundle has no pieces --</p>';
   const left=j.pieces.filter(x=>!x.done).length;
-  document.getElementById('bundleJobDone').disabled=false;
+  document.getElementById('bundleJobLeft').textContent=left
+    ? `${j.pieces.length-left} of ${j.pieces.length} pieces done · ${left} to go`
+    : 'Every piece is ticked.';
+  document.getElementById('bundleJobNext').textContent=
+    bundleJobRunning?'🔊 Say it again':'▶ Start';
   document.getElementById('bundleJobDone').textContent=left
     ? `✓ Complete (${left} left)` : '✓ Complete';
 }
@@ -5893,14 +5914,16 @@ document.getElementById('bundleJobPieces').addEventListener('click',async e=>{
   sb.from('bundle_job_items').update({done:piece.done}).eq('id',piece.id)
     .then(({error})=>{ if(error) showMsg(document.getElementById('bundleJobMsg'),
       'That tick did not save: '+escapeHtml(error.message||''),false); });
-  if(!piece.done) return;
+  if(!piece.done||!bundleJobRunning) return;
   const next=j.pieces.findIndex(x=>!x.done);
   if(next<0){ plSay('That is the last one.'); return; }
   bundleJobAt=next;
   renderBundleJob();
   bundleSayHere();
 });
-document.getElementById('bundleJobNext').addEventListener('click',()=>bundleSayHere());
+document.getElementById('bundleJobNext').addEventListener('click',()=>{
+  if(bundleJobRunning) bundleSayHere(); else bundleJobStart();
+});
 document.getElementById('bundleJobDone').addEventListener('click',async()=>{
   const j=bundleJobNow(); if(!j) return;
   const left=j.pieces.filter(x=>!x.done).length;
