@@ -427,7 +427,8 @@ class ReplayEngine:
             elif step_type == "read_control_value":
                 outcome = self._run_read_control_value(step, context)
             elif step_type in ("cdp_launch", "web_goto", "web_click", "web_hover",
-                               "web_wait_for", "web_type", "web_read", "web_print_pdf"):
+                               "web_wait_for", "web_type", "web_read", "web_print_pdf",
+                               "web_switch_tab", "web_close_tab"):
                 outcome = self._run_web_step(step_type, step, context)
             else:
                 outcome = {"status": "skipped", "tier": None, "reason": f"Unknown step type '{step_type}'."}
@@ -581,6 +582,36 @@ class ReplayEngine:
 
             timeout_ms = min(max(0, int(step.get("timeout_ms", 10000))), 120_000)
             match = sub("tab_match")
+            seen = context.setdefault("cdp_seen_tabs", [])
+
+            def remember(page_entry: dict) -> dict:
+                tab_id = page_entry.get("id", "")
+                if tab_id and tab_id not in seen:
+                    seen.append(tab_id)
+                context["cdp_tab"] = tab_id or context.get("cdp_tab", "")
+                context["cdp_port"] = port
+                return page_entry
+
+            if step_type == "web_switch_tab":
+                if step.get("mode") == "match" and match:
+                    page = cdp.find_page(port, match, timeout_ms=timeout_ms)
+                else:
+                    page = cdp.wait_for_new_page(port, seen, match, timeout_ms=timeout_ms or 15000)
+                remember(page)
+                return {"status": "success", "tier": "cdp",
+                        "reason": f'Following that tab: {page.get("url", "")[:90]}'}
+
+            if step_type == "web_close_tab":
+                page = cdp.find_page(port, match or context.get("cdp_tab", ""), timeout_ms=timeout_ms)
+                closed_url = page.get("url", "")
+                cdp.close_page(port, page.get("id", ""))
+                if page.get("id") in seen:
+                    seen.remove(page.get("id"))
+                # Hand the run back to the last tab it was using, so the
+                # steps after this one aren't left pointing at nothing.
+                context["cdp_tab"] = seen[-1] if seen else ""
+                return {"status": "success", "tier": "cdp",
+                        "reason": f'Closed that tab ({closed_url[:70]}).'}
 
             if step_type == "web_goto":
                 url = sub("url")
@@ -599,13 +630,11 @@ class ReplayEngine:
                 # Steps after this one act on the tab by id, and they must
                 # not start until the new document is the live one.
                 page = cdp.wait_ready(port, page.get("id", ""), url, timeout_ms=timeout_ms or 20000)
-                context["cdp_tab"] = page.get("id", "")
+                remember(page)
                 context["cdp_port"] = port
                 return {"status": "success", "tier": "cdp", "reason": reason}
 
-            page = cdp.find_page(port, match or context.get("cdp_tab", ""), timeout_ms=timeout_ms)
-            context["cdp_port"] = port
-            context["cdp_tab"] = page.get("id", context.get("cdp_tab", ""))
+            page = remember(cdp.find_page(port, match or context.get("cdp_tab", ""), timeout_ms=timeout_ms))
 
             match_index = max(0, int(step.get("match_index") or 0))
 

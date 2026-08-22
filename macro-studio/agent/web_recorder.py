@@ -167,6 +167,7 @@ class WebRecorder:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._last_click_at: Optional[float] = None
+        self._known_tabs: set = set()
         self._error: Optional[str] = None
 
     # -- lifecycle ---------------------------------------------------------
@@ -187,6 +188,10 @@ class WebRecorder:
             self.state = "recording"
             self.port = port
             self._target_id = page.get("id", "")
+            # Everything open when we start is "not new". A tab that shows
+            # up later did so because of something the user clicked.
+            self._known_tabs = {p.get("id") for p in cdp.list_pages(port)}
+            self._known_tabs.add(self._target_id)
             self.steps = []
             self._error = None
             self._last_click_at = None
@@ -241,6 +246,7 @@ class WebRecorder:
                 drained = cdp.evaluate(page, "window.__msRecorder ? window.__msRecorder.splice(0) : []", timeout=8)
                 for entry in drained or []:
                     self._record(entry)
+                self._follow_new_tab()
                 self._error = None
             except RuntimeError as exc:
                 # A navigation in progress is the common case here, and it
@@ -248,6 +254,20 @@ class WebRecorder:
                 # if it's still failing when the user stops.
                 self._error = str(exc)
             self._stop_event.wait(POLL_INTERVAL)
+
+    def _follow_new_tab(self) -> None:
+        """A click that opens a tab -- a PDF, a print preview, a report --
+        moves the person to it, and everything they do next happens there.
+        Without noticing, the recorder would keep watching the old tab and
+        silently capture none of it. Writing a "follow new tab" step and
+        moving with them keeps the recording and the replay in step."""
+        fresh = [p for p in cdp.list_pages(self.port) if p.get("id") not in self._known_tabs]
+        if not fresh:
+            return
+        page = fresh[-1]
+        self._known_tabs.add(page.get("id"))
+        self._target_id = page.get("id", "")
+        self._add(self._step("web_switch_tab", mode="new", tab_match="", timeout_ms=15000))
 
     def _page(self) -> dict:
         return cdp.find_page(self.port, self._target_id, timeout_ms=3000)

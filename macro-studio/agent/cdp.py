@@ -208,6 +208,43 @@ def browser_window_title(port: int = DEFAULT_PORT) -> str:
     return best
 
 
+def wait_for_new_page(port: int, known_ids, match: str = "", timeout_ms: int = 15000) -> dict:
+    """Waits for a tab that isn't one of `known_ids` and returns it.
+
+    Sites open a PDF, a print preview, or a report in a new tab, and the
+    steps after that click mean it, not the tab they were on. Which tab is
+    "new" can't be answered by URL or title -- there may be three tabs on
+    the same site -- so it's answered by identity: everything the run has
+    touched so far is known, and anything else appeared because of what
+    just happened. A match fragment narrows it further when a click opens
+    more than one."""
+    known = set(known_ids or [])
+    needle = (match or "").strip().lower()
+    deadline = time.time() + max(0, timeout_ms) / 1000.0
+    while True:
+        fresh = [p for p in list_pages(port) if p.get("id") not in known]
+        for page in fresh:
+            haystack = f"{page.get('url', '')} {page.get('title', '')}".lower()
+            if not needle or needle in haystack:
+                # Give it a moment to commit its first document, or the
+                # steps after this one evaluate against about:blank.
+                return wait_ready(port, page.get("id", ""), "", timeout_ms=min(8000, timeout_ms))
+        if time.time() >= deadline:
+            if fresh:
+                raise RuntimeError(
+                    f'{len(fresh)} new tab(s) opened but none matching "{match}".')
+            raise RuntimeError(f"No new tab opened within {timeout_ms}ms.")
+        time.sleep(0.3)
+
+
+def close_page(port: int, target_id: str) -> None:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/close/{target_id}", timeout=5):
+            pass
+    except Exception as exc:
+        raise RuntimeError(f"Couldn't close that tab: {exc}")
+
+
 # -- one round trip ----------------------------------------------------------
 def _send(page: dict, method: str, params: dict, timeout: float = _WS_TIMEOUT) -> dict:
     """Opens a socket, sends one command, waits for that command's reply.

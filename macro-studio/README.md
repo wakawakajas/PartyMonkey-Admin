@@ -130,6 +130,20 @@ the JS execution context underneath the call. Those errors are retried
 against the re-resolved tab until the step's own timeout rather than failing
 the run, since "the page moved" isn't the same as "this didn't work".
 
+## When a click opens a tab
+
+A PDF, a print preview, a report: sites open them in a new tab, and every step
+after that click means the new tab, not the old one. **Web: follow new tab** waits
+for a tab the run hasn't touched and points the rest of the macro at it. Which tab
+is "new" isn't answerable by URL or title -- there may be three tabs on the same
+site -- so it's answered by identity: the run remembers every tab it has used, and
+anything else appeared because of what just happened. **Web: close tab** shuts it
+again and hands the run back to the tab before it.
+
+The recorder does this on its own. When a tab opens mid-recording it writes the
+follow step and moves with you, because otherwise it would sit watching the old tab
+and silently capture nothing you did in the new one.
+
 ## Printing
 
 Chrome's Ctrl+P dialog -- destination, layout, the folder picker -- is browser UI,
