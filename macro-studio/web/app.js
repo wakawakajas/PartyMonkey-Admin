@@ -114,6 +114,7 @@ function typeLabel(type) {
     get_cursor_position: "Cursor pos", read_control_value: "Read value",
     conditional: "If/Else", loop: "Loop",
     cdp_launch: "Launch Chrome (CDP)", web_goto: "Web: go to", web_click: "Web: click",
+    web_hover: "Web: hover",
     web_wait_for: "Web: wait for", web_type: "Web: type", web_read: "Web: read",
   };
   return labels[type] || type;
@@ -695,6 +696,10 @@ const STEP_TEMPLATES = {
     label: "Web: click",
     make: () => ({ type: "web_click", port: 9222, tab_match: "", selector: "", text: "", exact: false, timeout_ms: 8000, delay_ms: 0 }),
   },
+  web_hover: {
+    label: "Web: hover (opens hover menus)",
+    make: () => ({ type: "web_hover", port: 9222, tab_match: "", selector: "", text: "", exact: false, timeout_ms: 8000, delay_ms: 0 }),
+  },
   web_wait_for: {
     label: "Web: wait for",
     make: () => ({ type: "web_wait_for", port: 9222, tab_match: "", selector: "", text: "", exact: false, timeout_ms: 10000, delay_ms: 0 }),
@@ -1016,11 +1021,11 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("URL", editorInput("text", step.url, (v) => (step.url = v), "220px"));
     addField("new tab", editorCheckbox(step.new_tab, (v) => (step.new_tab = v)));
     addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));
-  } else if (step.type === "web_click" || step.type === "web_wait_for") {
+  } else if (step.type === "web_click" || step.type === "web_hover" || step.type === "web_wait_for") {
     addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
     addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));
     addField("CSS selector", editorInput("text", step.selector, (v) => (step.selector = v), "160px"));
-    addField("or visible text", editorInput("text", step.text, (v) => (step.text = v), "140px"));
+    addField("and/or visible text", editorInput("text", step.text, (v) => (step.text = v), "140px"));
     addField("exact match", editorCheckbox(step.exact, (v) => (step.exact = v)));
     addField("timeout (ms)", editorInput("number", step.timeout_ms, (v) => (step.timeout_ms = v), "80px"));
   } else if (step.type === "web_type") {

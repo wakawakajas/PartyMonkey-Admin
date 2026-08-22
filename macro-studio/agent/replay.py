@@ -414,8 +414,8 @@ class ReplayEngine:
                 outcome = self._run_get_cursor_position(step, context)
             elif step_type == "read_control_value":
                 outcome = self._run_read_control_value(step, context)
-            elif step_type in ("cdp_launch", "web_goto", "web_click", "web_wait_for",
-                               "web_type", "web_read"):
+            elif step_type in ("cdp_launch", "web_goto", "web_click", "web_hover",
+                               "web_wait_for", "web_type", "web_read"):
                 outcome = self._run_web_step(step_type, step, context)
             else:
                 outcome = {"status": "skipped", "tier": None, "reason": f"Unknown step type '{step_type}'."}
@@ -602,6 +602,14 @@ class ReplayEngine:
                 label = result.get("label") or sub("text") or sub("selector")
                 return {"status": "success", "tier": "cdp",
                         "reason": f'Clicked <{result.get("tag")}> "{label}".'}
+
+            if step_type == "web_hover":
+                result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.hover(
+                    p, selector=sub("selector"), text=sub("text"),
+                    exact=bool(step.get("exact")), timeout_ms=timeout_ms or 8000))
+                label = result.get("label") or sub("text") or sub("selector")
+                return {"status": "success", "tier": "cdp",
+                        "reason": f'Hovering <{result.get("tag")}> "{label}".'}
 
             if step_type == "web_wait_for":
                 cdp.through_navigation(port, page, timeout_ms or 10000, lambda p: cdp.wait_for(

@@ -70,8 +70,17 @@ tabs, with no window focus. It's local and free -- the protocol DevTools
 itself uses, no API key, no per-run cost, nothing leaving the machine.
 
 - **Launch Chrome (CDP)** starts (or reuses) a Chrome on `--remote-debugging-port`
-- **Web: go to / click / wait for / type / read** act on a tab, matched by a
-  URL or title fragment; blank means "the tab this run is already using"
+- **Web: go to / click / hover / wait for / type / read** act on a tab, matched
+  by a URL or title fragment; blank means "the tab this run is already using"
+- Clicks go through CDP's Input domain -- browser-level pointer events, not
+  dispatched DOM events, so they carry `isTrusted` and settle hover state
+  first. **Web: hover** exists for the same reason: a menu that opens on CSS
+  `:hover` cannot be opened by a synthetic mouseover, because the browser,
+  not the page, decides what is hovered. Still no OS cursor: nothing moves on
+  screen and the tab needn't be focused or frontmost.
+- Before pressing, the target point is checked against `elementFromPoint`; if
+  something covers it or the menu is still animating, the click is dispatched
+  on the node itself instead of at coordinates
 - Steps mix freely with UIA steps -- one macro can drive File Explorer and a
   web page in sequence
 

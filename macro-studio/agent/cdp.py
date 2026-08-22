@@ -135,14 +135,23 @@ def find_page(port: int, match: str = "", timeout_ms: int = 0) -> dict:
     """Picks the tab to act on. An empty match takes the first page, which
     covers the common single-tab case; otherwise it is a case-insensitive
     substring test against the tab's URL and title -- the two things a
-    person can see and type. A timeout lets a step wait for a tab that a
+    person can see and type -- or a target id handed down from an earlier
+    step in the same run. A timeout lets a step wait for a tab that a
     previous step's navigation is still opening."""
     deadline = time.time() + max(0, timeout_ms) / 1000.0
+    exact_id = (match or "").strip()
     while True:
         pages = list_pages(port)
-        needle = (match or "").strip().lower()
+        needle = exact_id.lower()
         if not needle and pages:
             return pages[0]
+        # A step that inherits the tab from earlier in the run passes a
+        # target id, which survives navigation; a hand-typed match is a
+        # URL or title fragment. Ids are checked first so they can't be
+        # mistaken for a fragment that happens to match nothing.
+        for page in pages:
+            if page.get("id") == exact_id:
+                return page
         for page in pages:
             haystack = f"{page.get('url', '')} {page.get('title', '')}".lower()
             if needle and needle in haystack:
@@ -229,9 +238,21 @@ const __ms = {
     });
     return out;
   },
+  // Selector and text together narrow each other: a site's nav opener is
+  // one of a dozen elements sharing a class, and the text alone matches
+  // badges and column headers elsewhere on the page. Either one alone
+  // still works on its own terms.
   find(selector, text, exact) {
-    if (selector) return [...document.querySelectorAll(selector)].filter(__ms.visible);
-    return __ms.byText(text, exact);
+    if (!selector) return __ms.byText(text, exact);
+    let els = [...document.querySelectorAll(selector)].filter(__ms.visible);
+    if (text) {
+      const want = String(text).trim().toLowerCase();
+      els = els.filter((el) => {
+        const own = String(el.innerText || el.value || el.getAttribute("aria-label") || "").trim().toLowerCase();
+        return exact ? own === want : own.includes(want);
+      });
+    }
+    return els;
   },
   // A real pointer sequence, not just el.click() -- component libraries
   // listen for pointerdown/mousedown and ignore a bare click event, and
@@ -267,21 +288,102 @@ def _js(body: str) -> str:
     return "(async () => {" + _JS_HELPERS + body + "})()"
 
 
-def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
-          timeout_ms: int = 8000) -> dict:
-    """Clicks the best match, retrying until timeout -- a page still
-    rendering is the normal case right after a navigation, not something
-    worth failing a run over."""
+def _locate(page: dict, selector: str, text: str, exact: bool, timeout_ms: int) -> dict:
+    """Scrolls the best match into view and returns where it sits, so the
+    caller can aim real browser input at it.
+
+    `hit` says whether that point currently resolves back to the element.
+    A menu that is still fading in, or an overlay on top, makes the answer
+    no -- and a click aimed there would land on whatever is underneath,
+    which is worse than not clicking at all. The caller uses it to pick
+    the safer path."""
     args = json.dumps({"selector": selector, "text": text, "exact": exact, "timeout": timeout_ms})
     result = evaluate(page, _js(
         "const a = " + args + ";"
         "const el = await __ms.poll(() => __ms.find(a.selector, a.text, a.exact)[0] || null, a.timeout);"
         "if (!el) return { ok: false };"
-        "return Object.assign({ ok: true }, __ms.click(el));"
+        "el.scrollIntoView({ block: 'center', inline: 'center' });"
+        "let r = el.getBoundingClientRect(), hit = false;"
+        # Settle loop: animated menus report a moving rect for a frame or
+        # two after they open, so re-measure until the point sticks.
+        "for (let i = 0; i < 12 && !hit; i++) {"
+        "  await new Promise((res) => setTimeout(res, 60));"
+        "  r = el.getBoundingClientRect();"
+        "  const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);"
+        "  hit = !!at && (at === el || el.contains(at) || at.contains(el));"
+        "}"
+        "return { ok: true, hit, x: r.left + r.width / 2, y: r.top + r.height / 2,"
+        "         tag: el.tagName.toLowerCase(), label: String(el.innerText || '').trim().slice(0, 60) };"
     ), timeout=max(_WS_TIMEOUT, timeout_ms / 1000.0 + 5))
     if not result or not result.get("ok"):
         what = f'selector "{selector}"' if selector else f'text "{text}"'
+        if selector and text:
+            what = f'selector "{selector}" with text "{text}"'
         raise RuntimeError(f"Nothing matching {what} appeared on the page within {timeout_ms}ms.")
+    return result
+
+
+def hover(page: dict, selector: str = "", text: str = "", exact: bool = False,
+          timeout_ms: int = 8000) -> dict:
+    """Moves the browser's own pointer over an element.
+
+    This is the one thing dispatching DOM events cannot fake: a menu that
+    opens on CSS `:hover` ignores a synthetic mouseover, because the
+    browser -- not the page -- decides what is hovered. CDP's Input domain
+    drives that same internal pipeline, so the menu opens for real. It is
+    still not the OS cursor: nothing moves on screen and the tab need not
+    be focused or even frontmost."""
+    spot = _locate(page, selector, text, exact, timeout_ms)
+    _send(page, "Input.dispatchMouseEvent", {
+        "type": "mouseMoved", "x": spot["x"], "y": spot["y"], "buttons": 0,
+    })
+    return spot
+
+
+def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
+          timeout_ms: int = 8000) -> dict:
+    """Clicks the best match, retrying until timeout -- a page still
+    rendering is the normal case right after a navigation, not something
+    worth failing a run over."""
+    spot = _locate(page, selector, text, exact, timeout_ms)
+    if not spot.get("hit"):
+        # The point doesn't resolve back to the element -- something is
+        # over it, or it is still moving. Dispatch on the node itself.
+        return _dispatch_click(page, selector, text, exact)
+    try:
+        # Browser-level input, not a dispatched DOM event: it carries
+        # isTrusted, it moves the pointer first (so hover state settles
+        # before the press), and sites that gate on either one behave the
+        # way they do for a person. No OS cursor is involved.
+        common = {"x": spot["x"], "y": spot["y"], "button": "left", "clickCount": 1}
+        _send(page, "Input.dispatchMouseEvent", {"type": "mouseMoved", "buttons": 0, **common})
+        _send(page, "Input.dispatchMouseEvent", {"type": "mousePressed", "buttons": 1, **common})
+        _send(page, "Input.dispatchMouseEvent", {"type": "mouseReleased", "buttons": 0, **common})
+        return spot
+    except RuntimeError:
+        # Some pages tear down and rebuild between locate and press; the
+        # DOM-event path doesn't depend on coordinates staying valid.
+        return _dispatch_click(page, selector, text, exact)
+
+
+def _dispatch_click(page: dict, selector: str, text: str, exact: bool) -> dict:
+    args = json.dumps({"selector": selector, "text": text, "exact": exact})
+    result = evaluate(page, _js(
+        "const a = " + args + ";"
+        "const el = __ms.find(a.selector, a.text, a.exact)[0] || null;"
+        "if (!el) return { ok: false };"
+        # An anchor's own click() follows its href even when a dispatched
+        # event chain doesn't, so prefer it when there is one.
+        "if (el.tagName === 'A' && el.getAttribute('href')) {"
+        "  const info = { tag: 'a', label: String(el.innerText || '').trim().slice(0, 60) };"
+        "  el.click();"
+        "  return Object.assign({ ok: true }, info);"
+        "}"
+        "return Object.assign({ ok: true }, __ms.click(el));"
+    ))
+    if not result or not result.get("ok"):
+        what = f'selector "{selector}"' if selector else f'text "{text}"'
+        raise RuntimeError(f"Nothing matching {what} could be clicked on the page.")
     return result
 
 
