@@ -128,6 +128,20 @@ to watch a macro run -- double-click [`open-cdp-chrome.bat`](open-cdp-chrome.bat
 optionally with a URL. It reuses the debugging Chrome if one is already up, and
 never touches your normal Chrome, which keeps its own separate profile.
 
+Minimised is the one state a macro cannot work in, and it is not a matter of
+throttling: Chrome marks a minimised window's page hidden, requestAnimationFrame
+stops, and a menu that mounts through rAF -- ant's, and most component libraries'
+-- never opens. Off-screen is different: the page stays visible in the sense the
+renderer cares about while being just as far out of the way. So a run un-minimises
+what it finds minimised and parks it at x=-32000, through Win32 rather than
+`Browser.setWindowBounds`, because a plain restore takes the foreground and a
+maximised window ignores bounds changes. **Park off-screen** and **Bring back** in
+the Browser panel do it by hand.
+
+For the same reason a macro's page opens as a background *window* rather than a
+background tab: a background tab is hidden, with no rAF, so its menus never open
+either.
+
 That browser is launched with occlusion detection and background throttling
 disabled, and macro tabs are created with `Target.createTarget`'s `background`
 flag rather than the HTTP endpoint that raises the window. Both matter for the

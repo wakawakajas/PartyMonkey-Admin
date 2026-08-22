@@ -119,6 +119,95 @@ def launch(port: int = DEFAULT_PORT, user_data_dir: str = "", url: str = "",
     )
 
 
+OFFSCREEN_LEFT = -32000
+
+
+def _browser_socket(port: int) -> dict:
+    version = _http_json(port, "/json/version") or {}
+    ws_url = version.get("webSocketDebuggerUrl")
+    if not ws_url:
+        raise RuntimeError(f"Chrome on port {port} didn't offer a browser socket.")
+    return {"webSocketDebuggerUrl": ws_url}
+
+
+def _windows(port: int) -> list:
+    """Every window of the debugging browser, as (windowId, bounds)."""
+    sock = _browser_socket(port)
+    seen, out = set(), []
+    for page in list_pages(port):
+        try:
+            info = _send(sock, "Browser.getWindowForTarget", {"targetId": page.get("id")}, timeout=5)
+        except RuntimeError:
+            continue
+        window_id = info.get("windowId")
+        if window_id in seen:
+            continue
+        seen.add(window_id)
+        out.append((window_id, info.get("bounds", {})))
+    return out
+
+
+def browser_window_handles(port: int = DEFAULT_PORT) -> list:
+    """Top-level windows belonging to the debugging browser's processes.
+    Same identification as browser_window_title, which is the only way to
+    tell this Chrome from a normal one."""
+    from agent import winapi
+
+    pids = set()
+    try:
+        info = _send(_browser_socket(port), "SystemInfo.getProcessInfo", {}, timeout=5)
+        for entry in info.get("processInfo", []) or []:
+            pids.add(entry.get("id"))
+    except Exception:
+        return []
+    handles = []
+    for hwnd in winapi.enum_top_level_windows():
+        if winapi.window_pid(hwnd) in pids and winapi.window_class_name(hwnd) == "Chrome_WidgetWin_1":
+            if winapi.window_title(hwnd):
+                handles.append(hwnd)
+    return handles
+
+
+def park_offscreen(port: int = DEFAULT_PORT) -> int:
+    """Un-minimises the browser's windows and parks them off the desktop.
+
+    Minimised is the one state a macro cannot work in: Chrome marks the
+    page hidden, rAF stops, and menus that mount through it never open --
+    which reads as "the macro only works when I'm watching it". Off-screen
+    keeps the window rendering in every sense that matters while staying
+    just as far out of the way. Returns how many windows were moved."""
+    from agent import winapi
+
+    # Done through Win32 rather than Browser.setWindowBounds: a plain
+    # restore hands the window the foreground, which is the thing we're
+    # trying to avoid, and a maximised window ignores bounds changes
+    # entirely, so parking it would silently do nothing.
+    moved = 0
+    for hwnd in browser_window_handles(port):
+        if not winapi.is_minimized(hwnd):
+            continue
+        winapi.restore_without_focus(hwnd)
+        winapi.move_window(hwnd, OFFSCREEN_LEFT, 0, 1400, 950, to_back=True)
+        moved += 1
+    return moved
+
+
+def show_windows(port: int = DEFAULT_PORT) -> int:
+    """Brings parked windows back where they can be seen."""
+    from agent import winapi
+
+    shown = 0
+    for hwnd in browser_window_handles(port):
+        left = winapi.window_rect(hwnd)[0]
+        if winapi.is_minimized(hwnd):
+            winapi.restore_without_focus(hwnd)
+        elif left > -1000:
+            continue
+        winapi.move_window(hwnd, 60, 60, 1400, 950, to_back=False)
+        shown += 1
+    return shown
+
+
 def close_browser(port: int = DEFAULT_PORT, timeout: float = 10.0) -> str:
     """Quits the debugging Chrome.
 
@@ -160,16 +249,24 @@ def list_pages(port: int = DEFAULT_PORT) -> list:
 def open_tab(port: int, url: str) -> dict:
     """Opens a tab without bringing the window forward.
 
-    The HTTP /json/new endpoint raises and focuses the window, which is
-    the one thing a background macro must not do -- the user is working in
-    something else. Target.createTarget takes `background`, so the tab
-    opens where it belongs: behind."""
+    The HTTP /json/new endpoint raises and focuses the window, which is the
+    one thing a background macro must not do -- the user is working in
+    something else. Target.createTarget takes `background`, so the page
+    opens behind whatever they're doing.
+
+    It opens as a window rather than a tab, and that distinction decides
+    whether the macro works at all. A background *tab* is hidden:
+    visibilityState says so, and requestAnimationFrame never fires, which
+    means any menu that mounts or animates through rAF -- ant's, and most
+    component libraries' -- never opens, so nothing after the hover can be
+    clicked. A background *window* is visible in exactly the sense the
+    renderer cares about, without taking focus."""
     version = _http_json(port, "/json/version") or {}
     browser_ws = version.get("webSocketDebuggerUrl")
     if browser_ws:
         try:
             result = _send({"webSocketDebuggerUrl": browser_ws}, "Target.createTarget",
-                           {"url": url, "background": True}, timeout=10)
+                           {"url": url, "newWindow": True, "background": True}, timeout=10)
             target_id = result.get("targetId")
             if target_id:
                 for page in list_pages(port):

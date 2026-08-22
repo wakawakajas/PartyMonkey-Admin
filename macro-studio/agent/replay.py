@@ -590,6 +590,12 @@ class ReplayEngine:
                     wait_seconds=min(max(1, int(step.get("timeout_ms", 20000))) / 1000.0, 60.0),
                 )
                 context["cdp_port"] = port
+                # A window the user minimised can't render, and a page that
+                # can't render can't open a menu. Park it off-screen instead,
+                # which is just as out of the way and still alive.
+                parked = cdp.park_offscreen(port)
+                if parked:
+                    message += f" Un-minimised {parked} window(s) -- parked off-screen so they keep rendering."
                 return {"status": "success", "tier": "cdp", "reason": message}
 
             if step_type == "cdp_close":

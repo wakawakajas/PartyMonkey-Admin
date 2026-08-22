@@ -121,6 +121,40 @@ def get_foreground_window() -> int:
     return user32.GetForegroundWindow()
 
 
+SW_SHOWNOACTIVATE = 4
+HWND_BOTTOM = 1
+SWP_NOACTIVATE = 0x0010
+SWP_NOZORDER = 0x0004
+
+
+def is_minimized(hwnd: int) -> bool:
+    return bool(user32.IsIconic(hwnd))
+
+
+def restore_without_focus(hwnd: int) -> None:
+    """Un-minimises a window without making it the active one.
+
+    Plain restore hands it the foreground, which for a macro's browser
+    means the user loses whatever they were typing into. SW_SHOWNOACTIVATE
+    is the same restore minus that."""
+    user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+
+
+def move_window(hwnd: int, x: int, y: int, width: int, height: int, to_back: bool = True) -> None:
+    """Moves and resizes without activating. Also un-maximises first: a
+    maximised window ignores position changes, so parking one off-screen
+    silently does nothing."""
+    placement = ctypes.create_string_buffer(44)
+    ctypes.memset(placement, 0, 44)
+    ctypes.cast(placement, ctypes.POINTER(ctypes.c_uint))[0] = 44
+    if user32.GetWindowPlacement(hwnd, placement):
+        show_cmd = ctypes.cast(placement, ctypes.POINTER(ctypes.c_uint))[1]
+        if show_cmd == 3:  # SW_SHOWMAXIMIZED
+            user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+    flags = SWP_NOACTIVATE if to_back else (SWP_NOACTIVATE | SWP_NOZORDER)
+    user32.SetWindowPos(hwnd, HWND_BOTTOM if to_back else 0, x, y, width, height, flags)
+
+
 def get_cursor_pos() -> tuple[int, int]:
     pt = wintypes.POINT()
     user32.GetCursorPos(ctypes.byref(pt))

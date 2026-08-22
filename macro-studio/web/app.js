@@ -31,6 +31,8 @@ const confirmSaveMacroBtn = document.getElementById("confirmSaveMacroBtn");
 const cancelSaveMacroBtn = document.getElementById("cancelSaveMacroBtn");
 const openCdpBtn = document.getElementById("openCdpBtn");
 const closeCdpBtn = document.getElementById("closeCdpBtn");
+const hideCdpBtn = document.getElementById("hideCdpBtn");
+const showCdpBtn = document.getElementById("showCdpBtn");
 const webRecordBtn = document.getElementById("webRecordBtn");
 const webRecordStopBtn = document.getElementById("webRecordStopBtn");
 const webRecordUrl = document.getElementById("webRecordUrl");
@@ -212,6 +214,28 @@ closeCdpBtn.addEventListener("click", async () => {
   } finally {
     closeCdpBtn.disabled = false;
   }
+});
+
+// Minimising the debugging browser stops it rendering, and a page that
+// isn't rendering can't open a hover menu -- so "get it out of the way"
+// means off-screen here, not minimised.
+[[hideCdpBtn, "/api/cdp/hide"], [showCdpBtn, "/api/cdp/show"]].forEach(([btn, path]) => {
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      showNote(webRecordNote, body.detail || `Unexpected error (HTTP ${res.status})`, res.ok ? "info" : "error");
+    } catch (err) {
+      showNote(webRecordNote, `Could not reach the agent: ${err.message}`, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
 });
 
 function applyWebRecordingState(state) {
