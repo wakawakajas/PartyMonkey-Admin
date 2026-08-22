@@ -679,7 +679,12 @@ function connectWebSocket() {
         applyRecordingState(msg.state);
         break;
       case "step_added":
-        appendStep(msg.step);
+        if (editorRecording) {
+          editingSteps.push(msg.step);
+          renderEditorSteps();
+        } else {
+          appendStep(msg.step);
+        }
         break;
       case "web_recording_state":
         applyWebRecordingState(msg.state);
@@ -1259,6 +1264,64 @@ function moveInArray(arr, index, dir) {
 }
 
 const addStepHelp = document.getElementById("addStepHelp");
+const editorRecordBtn = document.getElementById("editorRecordBtn");
+const editorRecordStopBtn = document.getElementById("editorRecordStopBtn");
+
+// While this is on, steps the browser recorder captures land in the macro
+// being edited rather than in the unsaved-recording list -- which is the
+// whole point: adding three steps to a working macro shouldn't mean
+// recording it from the top again.
+let editorRecording = false;
+
+function applyEditorRecordingState(on) {
+  editorRecording = on;
+  if (!editorRecordBtn) return;
+  editorRecordBtn.disabled = on;
+  editorRecordBtn.classList.toggle("recording", on);
+  editorRecordStopBtn.disabled = !on;
+}
+
+if (editorRecordBtn) {
+  editorRecordBtn.addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/web-recording/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // No seed steps and no URL: attach to whatever that browser is
+        // already showing, since the macro being edited got it there.
+        body: JSON.stringify({ seed: false }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        showNote(editorNote, body.detail || `Unexpected error (HTTP ${res.status})`, "error");
+        return;
+      }
+      applyEditorRecordingState(true);
+      showNote(editorNote, "Recording. Click through the CDP browser -- steps append to the end of this list. Drag them where you want, then Save Changes.", "info");
+    } catch (err) {
+      showNote(editorNote, `Could not reach the agent: ${err.message}`, "error");
+    }
+  });
+
+  editorRecordStopBtn.addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/web-recording/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adopt: false }),
+      });
+      const body = await res.json();
+      applyEditorRecordingState(false);
+      if (!res.ok) {
+        showNote(editorNote, body.detail || `Unexpected error (HTTP ${res.status})`, "error");
+        return;
+      }
+      showNote(editorNote, "Stopped. The new steps are at the end -- Save Changes to keep them.", "info");
+    } catch (err) {
+      showNote(editorNote, `Could not reach the agent: ${err.message}`, "error");
+    }
+  });
+}
 const tallEditor = document.getElementById("tallEditor");
 
 if (tallEditor) {
@@ -1284,13 +1347,25 @@ addStepBtn.addEventListener("click", () => {
   renderEditorSteps();
 });
 
+function stopEditorRecordingIfRunning() {
+  if (!editorRecording) return;
+  applyEditorRecordingState(false);
+  fetch("/api/web-recording/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ adopt: false }),
+  }).catch(() => {});
+}
+
 cancelEditorBtn.addEventListener("click", () => {
+  stopEditorRecordingIfRunning();
   macroEditorPanel.style.display = "none";
   editingMacroId = null;
   editingSteps = [];
 });
 
 saveEditorBtn.addEventListener("click", async () => {
+  stopEditorRecordingIfRunning();
   if (!editingMacroId) return;
   try {
     const res = await fetch(`/api/macros/${editingMacroId}/steps`, {

@@ -231,6 +231,11 @@ class WebRecordingRequest(BaseModel):
     port: int = cdp.DEFAULT_PORT
     url: str = ""
     tab_match: str = ""
+    seed: bool = True
+
+
+class WebRecordingStopRequest(BaseModel):
+    adopt: bool = True
 
 
 @app.post("/api/web-recording/start")
@@ -238,19 +243,23 @@ def start_web_recording(body: WebRecordingRequest) -> JSONResponse:
     if recorder.state in ("recording", "paused"):
         return _recorder_error(RuntimeError("Stop the input recording first -- one recorder at a time."))
     try:
-        result = web_recorder.start(port=body.port, url=body.url, tab_match=body.tab_match)
+        result = web_recorder.start(port=body.port, url=body.url, tab_match=body.tab_match,
+                                    seed=body.seed)
     except RuntimeError as exc:
         return JSONResponse(status_code=502, content={"error": "web_recording_failed", "detail": str(exc)})
     return JSONResponse(content=result)
 
 
 @app.post("/api/web-recording/stop")
-def stop_web_recording() -> JSONResponse:
+def stop_web_recording(body: WebRecordingStopRequest = WebRecordingStopRequest()) -> JSONResponse:
     """Hands the captured steps to the input recorder's buffer so the
-    existing Save/Discard flow covers browser recordings too."""
+    existing Save/Discard flow covers browser recordings too -- unless the
+    caller is the step editor, which has already collected them live and
+    would rather the unsaved-recording buffer stayed untouched."""
     try:
         result = web_recorder.stop()
-        recorder.adopt_steps(result["steps"])
+        if body.adopt:
+            recorder.adopt_steps(result["steps"])
     except RuntimeError as exc:
         return _recorder_error(exc)
     return JSONResponse(content=result)

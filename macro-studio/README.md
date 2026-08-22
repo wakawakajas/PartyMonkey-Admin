@@ -102,6 +102,12 @@ listener is re-injected on every poll, so a recording survives navigation,
 which destroys the JS context along with everything in it. Stop, then Save
 with the same buttons a recorded input macro uses.
 
+The step editor has the same button, as "Record into this macro": it attaches to
+whatever that browser is already showing and appends what you click to the end of
+the list being edited, without the launch/go-to steps a fresh recording starts with.
+Adding three steps to a working macro shouldn't mean recording it from the top
+again. Drag them into place, then Save Changes.
+
 The OS-level Record button is still the right tool for desktop apps, and the
 wrong one here: against a browser it captures screen coordinates, which is
 not what a web step needs.

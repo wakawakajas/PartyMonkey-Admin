@@ -163,7 +163,11 @@ class WebRecorder:
         self._error: Optional[str] = None
 
     # -- lifecycle ---------------------------------------------------------
-    def start(self, port: int = cdp.DEFAULT_PORT, url: str = "", tab_match: str = "") -> dict:
+    def start(self, port: int = cdp.DEFAULT_PORT, url: str = "", tab_match: str = "",
+              seed: bool = True) -> dict:
+        """`seed` writes the two steps that get a fresh macro to the page --
+        launch the browser, open the URL. Recording extra steps into a macro
+        that already does both wants them left out, so the caller decides."""
         with self._lock:
             if self.state == "recording":
                 raise RuntimeError("Already recording the browser -- stop that first.")
@@ -181,13 +185,14 @@ class WebRecorder:
             self._last_click_at = None
             self._stop_event = threading.Event()
 
-            # Step 0 is the page we started on, so replaying the macro
-            # doesn't depend on the browser happening to sit there.
-            self.steps.append(self._step("cdp_launch", url="", user_data_dir="", timeout_ms=25000, tab_match=""))
-            self.steps.append(self._step("web_goto", url=page.get("url", url), new_tab=True,
-                                         tab_match="", timeout_ms=20000))
-            for step in self.steps:
-                self._broadcast({"type": "step_added", "step": step})
+            if seed:
+                # Step 0 is the page we started on, so replaying the macro
+                # doesn't depend on the browser happening to sit there.
+                self.steps.append(self._step("cdp_launch", url="", user_data_dir="", timeout_ms=25000, tab_match=""))
+                self.steps.append(self._step("web_goto", url=page.get("url", url), new_tab=True,
+                                             tab_match="", timeout_ms=20000))
+                for step in self.steps:
+                    self._broadcast({"type": "step_added", "step": step})
 
             self._thread = threading.Thread(target=self._poll_loop, name="web-recorder", daemon=True)
             self._thread.start()
