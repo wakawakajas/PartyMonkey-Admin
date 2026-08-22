@@ -121,6 +121,27 @@ the JS execution context underneath the call. Those errors are retried
 against the re-resolved tab until the step's own timeout rather than failing
 the run, since "the page moved" isn't the same as "this didn't work".
 
+## Naming a file after today
+
+Any text field takes `{{variable}}`, and `{{date}}`, `{{time}}` and `{{now}}` are
+always there without a step having to produce them -- naming a file after today is
+the commonest thing a macro needs that it can't click its way to. A format goes
+after a colon, in tokens anyone can read: `{{date:DD-MM-YYYY}}`,
+`{{now:YYYY-MM-DD HH-mm}}`. Raw strftime codes pass through untouched for anyone
+who prefers them.
+
+Renaming whatever a download just produced is two steps:
+
+1. **File Explorer search** -- folder `C:\Users\you\Downloads`, pattern `*.xlsx`,
+   *newest first* ticked, *keep* 1, store as `file`
+2. **File operation** -- rename, source `{{file}}`, destination
+   `C:\Users\you\Downloads\Summary {{date:DD-MM-YYYY}}.xlsx`
+
+Newest-first sorts the whole match list before applying the limit, since otherwise
+"newest" would mean "newest of whichever ones the filesystem happened to list
+first". Office lock files (`~$name.xlsx`, written while a workbook is open) are
+skipped -- they are newer than the download and never what anyone means.
+
 ## Architecture
 
 Two pieces, per the design brief — a browser tab can't touch the OS directly:
