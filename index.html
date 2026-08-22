@@ -1755,6 +1755,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         <button class="pl-focus-x" id="bundleFocusClose" title="Leave packing"
                 aria-label="Close">×</button>
       </div>
+      <p class="hint" id="bundleFocusWho" style="margin:-4px 0 10px;"></p>
       <div id="bundleFocusNow"></div>
       <!-- OK on the right, where the thumb that presses it a hundred times a
            morning already is, and Later out of its way -->
@@ -3785,6 +3786,16 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 <!-- Where to begin. Coming back after a break, "from here" is the whole
      question — the sheet has been half done by three other people and the top
      of it is somebody else's morning. -->
+<div class="sheet-bg" id="bundleLaterSheet">
+  <div class="sheet">
+    <div class="sheet-title">Leave what for later?</div>
+    <p class="hint" id="bundleLaterWhat" style="margin:0 0 4px;"></p>
+    <button class="btn-primary" id="bundleLaterPiece">Pack this Sub SKU later</button>
+    <button class="btn-outline" id="bundleLaterBundle">Move to Next Bundle</button>
+    <button class="btn-outline" id="bundleLaterCancel">Cancel</button>
+  </div>
+</div>
+
 <div class="sheet-bg" id="bundleStartSheet">
   <div class="sheet">
     <div class="sheet-title">Start packing from where?</div>
@@ -5819,16 +5830,15 @@ function renderBundleJobs(){
   el.innerHTML=rows.slice().reverse().map(o=>{
     const {done,total}=bundleOrderProgress(o);
     const sets=o.jobs.reduce((n,j)=>n+(j.sets||1),0);
+    const pct=total?Math.round(done/total*100):0;
     return `<button class="ph-card selectable" data-order="${o.id}"
         style="display:flex;align-items:center;gap:10px;width:100%;text-align:left;">
       <span style="min-width:0;flex:1;">
         <b style="word-break:break-word;">${escapeHtml(o.title)}</b>
-        <span class="hint" style="display:block;margin:2px 0 0;">${total}
-          bundle${total===1?'':'s'} &middot; ${sets} set${sets===1?'':'s'} &middot; ${
-          o.status==='completed'
-            ? `packed ${escapeHtml(bundleWhen(o.completed_at))}`
-            : `${done} of ${total} done`}</span>
-        <span class="hint" style="display:block;margin:2px 0 0;">read ${escapeHtml(bundleWhen(o.created_at))}</span>
+        <span class="pl-card-bar"><span style="width:${pct}%;"></span></span>
+        <span class="hint" style="display:block;">${done} of ${total}
+          bundle${total===1?'':'s'} &middot; ${sets} set${sets===1?'':'s'}</span>
+        <span class="hint" style="display:block;margin:2px 0 0;">${bundleWhenRan(o)}</span>
       </span>
       <span class="bundle-chev">&rsaquo;</span>
     </button>`;
@@ -5851,8 +5861,8 @@ function openBundleOrder(){
   if(!o){ showScreen('bundle-sku',true); return; }
   const {done,total}=bundleOrderProgress(o);
   document.getElementById('bundleOrderTitle').textContent=o.title;
-  document.getElementById('bundleOrderSub').textContent=
-    `${done} of ${total} bundle${total===1?'':'s'} packed · read ${bundleWhen(o.created_at)}`;
+  document.getElementById('bundleOrderSub').innerHTML=
+    `${done} of ${total} bundle${total===1?'':'s'} packed<br>${bundleWhenRan(o)}`;
   const el=document.getElementById('bundleOrderList');
   if(!o.jobs.length){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">-- nothing came off this order --</p>';
@@ -5874,10 +5884,11 @@ function openBundleOrder(){
         ${j.image_url?`<img class="bundle-thumb" src="${escapeHtml(j.image_url)}" alt="" loading="lazy"/>`:''}
         <span style="min-width:0;flex:1;">
           <b style="word-break:break-word;">${escapeHtml(j.combo_name)}</b>
-          <span class="hint" style="display:block;margin:2px 0 0;">${j.sets} set${j.sets===1?'':'s'}
-            &middot; ${j.status==='completed'
-              ? `packed ${escapeHtml(bundleWhen(j.completed_at))}`
-              : `${done} of ${wanted.length} pieces`}</span>
+          <span class="pl-card-bar"><span style="width:${
+            wanted.length?Math.round(done/wanted.length*100):0}%;"></span></span>
+          <span class="hint" style="display:block;">${j.sets} set${j.sets===1?'':'s'}
+            &middot; ${done} of ${wanted.length} pieces</span>
+          <span class="hint" style="display:block;margin:2px 0 0;">${bundleWhenRan(j)}</span>
         </span>
         <span class="bundle-chev">&rsaquo;</span>
       </button>
@@ -5955,10 +5966,26 @@ function bundleFocusOpen(jobId){
   document.getElementById('bundleFocus').classList.add('open');
   renderBundleFocus();
   bundlePrefetchPhotos(j);
+  bundleMarkStarted(j);
   // The name of the combination is written at the top of the card and is no
   // help said out loud -- what is wanted first is how many of it to build.
   plSay(`Prepare ${j.sets} set${j.sets===1?'':'s'}.`);
   setTimeout(()=>bundleFocusSay(),1600);
+}
+// The first time anybody opens a bundle is when it started, and the first
+// bundle of an order starts the order. Written once and never again -- a
+// second packer taking over is not a fresh start.
+function bundleMarkStarted(j){
+  const now=new Date().toISOString();
+  if(!j.started_at){
+    j.started_at=now;
+    sb.from('bundle_jobs').update({started_at:now}).eq('id',j.id).then(()=>{},()=>{});
+  }
+  const o=bundleOrderNow();
+  if(o&&!o.started_at){
+    o.started_at=now;
+    sb.from('bundle_orders').update({started_at:now}).eq('id',o.id).then(()=>{},()=>{});
+  }
 }
 function bundleFocusClose(){
   document.getElementById('bundleFocus').classList.remove('open');
@@ -5977,11 +6004,18 @@ function renderBundleFocus(){
   const j=bundleJobById(bundleFocusJob);
   if(!j){ bundleFocusClose(); return; }
   const left=bundleWanted(j).filter(x=>!x.done).length;
-  document.getElementById('bundleFocusName').textContent=j.combo_name;
-  document.getElementById('bundleFocusLeft').textContent=
-    `${j.sets} set${j.sets===1?'':'s'} · ${left} left`;
-  document.getElementById('bundleFocusLeft').classList.toggle('clear',!left);
   const piece=j.pieces[bundleFocusAt];
+  // What the head is for is the number you are working to, which is how many
+  // sets, and under it how many of the thing in your hand go in each one.
+  // The combination's name is underneath both: it names the job rather than
+  // telling you what to do next.
+  document.getElementById('bundleFocusName').textContent=
+    `PREPARE ${j.sets} SET${j.sets===1?'':'S'}`;
+  document.getElementById('bundleFocusLeft').textContent=piece
+    ? `${piece.qty} per set` : '';
+  document.getElementById('bundleFocusLeft').classList.toggle('clear',!left);
+  document.getElementById('bundleFocusWho').textContent=
+    `${j.combo_name} · ${left} piece${left===1?'':'s'} left`;
   const el=document.getElementById('bundleFocusNow');
   if(!piece){ el.innerHTML='<p class="hint" style="margin:0;">-- nothing in this bundle --</p>'; return; }
   const path=bundleSkuPhoto(piece.sku);
@@ -6071,9 +6105,37 @@ document.getElementById('bundleFocusOk').addEventListener('click',async()=>{
   if(next>=0){ bundleFocusAt=next; renderBundleFocus(); bundleFocusSay(); return; }
   await bundleFinishJob(j);
 });
-// Later puts this bundle down and takes up the next one. Nothing is undone --
-// what was ticked stays ticked, and the bundle is waiting where it was left.
+// Later is two things wearing one word. A piece that cannot be found right
+// now is not the same as a bundle that cannot be packed right now, and being
+// asked which costs one tap and saves walking back to a bundle you had only
+// meant to skip a line of. Nothing is undone by either: what was ticked stays
+// ticked, and whatever is put down waits where it was left.
 document.getElementById('bundleFocusLater').addEventListener('click',()=>{
+  const j=bundleJobById(bundleFocusJob); if(!j) return;
+  const piece=j.pieces[bundleFocusAt];
+  document.getElementById('bundleLaterWhat').textContent=piece
+    ? `"${piece.sku}" in "${j.combo_name}".` : j.combo_name;
+  document.getElementById('bundleLaterSheet').classList.add('open');
+});
+function bundleCloseLater(){
+  document.getElementById('bundleLaterSheet').classList.remove('open');
+}
+document.getElementById('bundleLaterCancel').addEventListener('click',bundleCloseLater);
+// the next piece of this bundle that is neither ticked nor the one being put
+// down; coming round to the top, so the skipped one is met again at the end
+document.getElementById('bundleLaterPiece').addEventListener('click',()=>{
+  bundleCloseLater();
+  const j=bundleJobById(bundleFocusJob); if(!j) return;
+  const n=j.pieces.length;
+  for(let k=1;k<n;k++){
+    const i=(bundleFocusAt+k)%n;
+    if(!j.pieces[i].done){ bundleFocusAt=i; renderBundleFocus(); bundleFocusSay(); return; }
+  }
+  showMsg(document.getElementById('bundleFocusMsg'),
+    'That is the only piece left in this bundle.',false);
+});
+document.getElementById('bundleLaterBundle').addEventListener('click',()=>{
+  bundleCloseLater();
   const j=bundleJobById(bundleFocusJob); if(!j) return;
   const next=bundleNextJob(j.id);
   if(!next||next.id===j.id){
@@ -6237,6 +6299,16 @@ async function refreshBundles(){
 const bundlePicked=new Set();      // combinations ticked for deleting
 let bundleEditing=null;            // the one open in its editor, by id
 
+// Started and finished, or as much of either as there is yet. An order read
+// at eight and started at ten took two hours, and the row that does not say so
+// is a row that reads as two hours of packing.
+function bundleWhenRan(x){
+  const bits=[];
+  if(x.started_at) bits.push('started '+bundleWhen(x.started_at));
+  else if(x.created_at) bits.push('read '+bundleWhen(x.created_at));
+  if(x.completed_at) bits.push('finished '+bundleWhen(x.completed_at));
+  return escapeHtml(bits.join(' \u00b7 '));
+}
 function bundleWhen(iso){
   if(!iso) return '';
   const d=new Date(iso);

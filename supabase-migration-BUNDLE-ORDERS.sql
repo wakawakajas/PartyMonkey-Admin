@@ -67,3 +67,10 @@ end $func$;
 
 revoke all on function public.purge_old_bundle_jobs() from public;
 grant execute on function public.purge_old_bundle_jobs() to authenticated;
+
+
+-- When the work actually began, as against when the file was read: an order
+-- uploaded at eight and started at ten took two hours, and the pick list card
+-- has always said so. Null until somebody starts.
+alter table public.bundle_orders add column if not exists started_at timestamptz;
+alter table public.bundle_jobs   add column if not exists started_at timestamptz;
