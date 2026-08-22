@@ -79,7 +79,7 @@ itself uses, no API key, no per-run cost, nothing leaving the machine.
   profile isn't left looking crashed and the next launch doesn't offer to restore
   tabs. Both have a button in the Browser panel too. Neither can touch your normal
   Chrome: they work through the debugging port, which only this browser listens on
-- **Web: go to / click / hover / wait for / type / read** act on a tab, matched
+- **Web: go to / click / hover / wait for / type / read / refresh** act on a tab, matched
   by a URL or title fragment; blank means "the tab this run is already using"
 - A click or hover takes a "match #" when several things share the same
   selector or label -- 0 is the first, 1 the second, which is how you tick one

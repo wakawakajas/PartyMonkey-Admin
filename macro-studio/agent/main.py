@@ -262,6 +262,19 @@ def cdp_show(body: CdpLaunchRequest) -> JSONResponse:
                                  "port": body.port})
 
 
+@app.post("/api/cdp/reload")
+def cdp_reload(body: CdpLaunchRequest) -> JSONResponse:
+    """Reloads whichever tab the debugging browser is showing -- the
+    button version of the reload step, for when a page has gone stale
+    while you were building a macro against it."""
+    try:
+        page = cdp.find_page(body.port, body.url)
+        url = cdp.reload(page)
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"error": "cdp_reload_failed", "detail": str(exc)})
+    return JSONResponse(content={"detail": f"Reloaded {url[:90]}", "port": body.port})
+
+
 class WebRecordingRequest(BaseModel):
     port: int = cdp.DEFAULT_PORT
     url: str = ""

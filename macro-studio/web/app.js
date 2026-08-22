@@ -31,6 +31,7 @@ const confirmSaveMacroBtn = document.getElementById("confirmSaveMacroBtn");
 const cancelSaveMacroBtn = document.getElementById("cancelSaveMacroBtn");
 const openCdpBtn = document.getElementById("openCdpBtn");
 const closeCdpBtn = document.getElementById("closeCdpBtn");
+const reloadCdpBtn = document.getElementById("reloadCdpBtn");
 const hideCdpBtn = document.getElementById("hideCdpBtn");
 const showCdpBtn = document.getElementById("showCdpBtn");
 const webRecordBtn = document.getElementById("webRecordBtn");
@@ -126,7 +127,7 @@ function typeLabel(type) {
     web_hover: "Web: hover",
     web_wait_for: "Web: wait for", web_type: "Web: type", web_read: "Web: read",
     web_print_pdf: "Web: save PDF", web_switch_tab: "Web: follow tab", web_close_tab: "Web: close tab",
-    web_wait_loaded: "Web: wait until loaded",
+    web_wait_loaded: "Web: wait until loaded", web_reload: "Web: refresh",
   };
   return labels[type] || type;
 }
@@ -219,7 +220,7 @@ closeCdpBtn.addEventListener("click", async () => {
 // Minimising the debugging browser stops it rendering, and a page that
 // isn't rendering can't open a hover menu -- so "get it out of the way"
 // means off-screen here, not minimised.
-[[hideCdpBtn, "/api/cdp/hide"], [showCdpBtn, "/api/cdp/show"]].forEach(([btn, path]) => {
+[[hideCdpBtn, "/api/cdp/hide"], [showCdpBtn, "/api/cdp/show"], [reloadCdpBtn, "/api/cdp/reload"]].forEach(([btn, path]) => {
   btn.addEventListener("click", async () => {
     btn.disabled = true;
     try {
@@ -811,6 +812,10 @@ const STEP_TEMPLATES = {
     label: "Web: launch Chrome (CDP)",
     make: () => ({ type: "cdp_launch", port: 9222, user_data_dir: "", url: "", timeout_ms: 20000, delay_ms: 0 }),
   },
+  web_reload: {
+    label: "Web: refresh the page",
+    make: () => ({ type: "web_reload", port: 9222, tab_match: "", ignore_cache: false, timeout_ms: 20000, delay_ms: 0 }),
+  },
   web_goto: {
     label: "Web: go to URL",
     make: () => ({ type: "web_goto", port: 9222, url: "https://", new_tab: true, tab_match: "", timeout_ms: 10000, delay_ms: 0 }),
@@ -895,6 +900,7 @@ const STEP_HELP = {
   web_type: "Types a value into a form field, optionally pressing Enter after.",
   web_switch_tab: "Waits for a tab that opened because of the previous step, and points the rest of the macro at it. Put it after a click that opens a PDF or a print preview.",
   web_close_tab: "Closes the tab the macro is on and hands the run back to the previous one.",
+  web_reload: "Reloads the page the macro is on -- for a screen showing stale counts, or a retry after something didn't take. Tick ignore cache for the hard-reload version.",
   web_wait_loaded: "Waits until the page stops changing -- document finished, nothing fetched and no DOM edits for a quiet stretch. A page that hasn't started looks the same as one that finished, so set \"wait at least\" for content on a timer, or use Web: wait for on the content itself.",
   web_print_pdf: "Saves the page as a PDF straight to a folder you name, portrait or landscape. Replaces Ctrl+P entirely. If the tab is already a PDF, the real file is downloaded instead of a picture of Chrome's viewer.",
   web_read: "Reads text off the page into a variable, and prints it in the run report.",
@@ -1228,6 +1234,11 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("CSS selector", editorInput("text", step.selector, (v) => (step.selector = v), "160px"));
     addField("value", editorInput("text", step.value, (v) => (step.value = v), "140px"));
     addField("press Enter after", editorCheckbox(step.submit, (v) => (step.submit = v)));
+  } else if (step.type === "web_reload") {
+    addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
+    addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));
+    addField("ignore cache", editorCheckbox(step.ignore_cache, (v) => (step.ignore_cache = v)));
+    addField("timeout (ms)", editorInput("number", step.timeout_ms, (v) => (step.timeout_ms = v), "80px"));
   } else if (step.type === "web_wait_loaded") {
     addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
     addField("tab match (blank=this run's tab)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "150px"));

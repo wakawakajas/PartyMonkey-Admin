@@ -440,7 +440,7 @@ class ReplayEngine:
             elif step_type in ("cdp_launch", "web_goto", "web_click", "web_hover",
                                "web_wait_for", "web_type", "web_read", "web_print_pdf",
                                "web_switch_tab", "web_close_tab", "cdp_close",
-                               "web_wait_loaded"):
+                               "web_wait_loaded", "web_reload"):
                 outcome = self._run_web_step(step_type, step, context)
             else:
                 outcome = {"status": "skipped", "tier": None, "reason": f"Unknown step type '{step_type}'."}
@@ -697,6 +697,12 @@ class ReplayEngine:
                             "reason": f'That tab was already a PDF -- saved it as-is to "{saved}".'}
                 return {"status": "success", "tier": "cdp",
                         "reason": f'Saved {layout} PDF to "{saved}".'}
+
+            if step_type == "web_reload":
+                url = cdp.reload(page, ignore_cache=bool(step.get("ignore_cache")))
+                page = remember(cdp.wait_ready(port, page.get("id", ""), "", timeout_ms=timeout_ms or 20000))
+                how = "Hard-reloaded" if step.get("ignore_cache") else "Reloaded"
+                return {"status": "success", "tier": "cdp", "reason": f"{how} {url[:80]}"}
 
             if step_type == "web_wait_loaded":
                 info = cdp.through_navigation(port, page, timeout_ms or 30000, lambda p: cdp.wait_loaded(

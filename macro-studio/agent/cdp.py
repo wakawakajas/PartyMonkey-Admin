@@ -1003,6 +1003,19 @@ def print_to_pdf(page: dict, output_path: str, landscape: bool = False, paper: s
     return str(target)
 
 
+def reload(page: dict, ignore_cache: bool = False, settle_ms: int = 1200) -> str:
+    """Reloads the tab and waits for the new document to be the live one.
+
+    `ignore_cache` is the Ctrl+Shift+R of the pair -- worth reaching for
+    when a page is showing yesterday's data because something cached it,
+    and worth leaving alone otherwise, since a cold reload of a heavy app
+    screen is several seconds slower."""
+    url = page.get("url", "")
+    _send(page, "Page.reload", {"ignoreCache": bool(ignore_cache)})
+    time.sleep(max(0, settle_ms) / 1000.0)
+    return url
+
+
 def navigate(page: dict, url: str, settle_ms: int = 1200) -> None:
     _send(page, "Page.navigate", {"url": url})
     time.sleep(max(0, settle_ms) / 1000.0)
