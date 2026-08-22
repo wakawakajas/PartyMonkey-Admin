@@ -5202,6 +5202,21 @@ function bundleColumns(head){
   return col;
 }
 
+// The export is a workbook, not a sheet: the first tab is the SKU list and
+// the combinations sit on a later one. Rather than trusting a position, every
+// tab is read and the one that actually has sub-SKU columns wins.
+function bundlePickSheet(wb){
+  let best=null;
+  for(const name of wb.SheetNames){
+    const grid=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,defval:''});
+    if(!grid.length) continue;
+    const col=bundleColumns(grid[0]||[]);
+    const score=(col.subs.size?1000:0)+(col.name!==undefined?10:0)+(col.url!==undefined?1:0);
+    if(!best||score>best.score) best={name,grid,col,score};
+  }
+  return best;
+}
+
 // One spreadsheet row into one combination, or null if the row is filler.
 // The picture is whichever of the two picture columns actually holds a link:
 // one of them is the image itself, which a spreadsheet reader cannot see.
@@ -5232,16 +5247,15 @@ document.getElementById('bundleUploadBtn').addEventListener('click',()=>{
       if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
       const session=await requireSession(msg); if(!session) return;
       const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
-      const grid=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
-      if(grid.length<2) throw new Error('that sheet has no rows under its header');
-
-      const col=bundleColumns(grid[0]||[]);
-      if(col.name===undefined) throw new Error('no "SKU Name" column -- '
-        +'the headings read: '+escapeHtml((grid[0]||[]).map(h=>String(h).trim())
-          .filter(Boolean).slice(0,12).join(', ')));
-      if(!col.subs.size) throw new Error('no "Single SKU 1" column -- '
-        +'the headings read: '+escapeHtml((grid[0]||[]).map(h=>String(h).trim())
-          .filter(Boolean).slice(0,12).join(', ')));
+      const sheet=bundlePickSheet(wb);
+      if(!sheet) throw new Error('that workbook has no rows in any of its tabs');
+      const {grid,col}=sheet;
+      if(grid.length<2) throw new Error('that tab has no rows under its header');
+      const heads=(grid[0]||[]).map(h=>String(h).trim()).filter(Boolean).slice(0,12).join(', ');
+      if(col.name===undefined) throw new Error(`no "SKU Name" column on any tab -- `
+        +`"${escapeHtml(sheet.name)}" reads: `+escapeHtml(heads));
+      if(!col.subs.size) throw new Error(`no "Single SKU 1" column on any tab -- `
+        +`"${escapeHtml(sheet.name)}" reads: `+escapeHtml(heads));
 
       // last one wins, so a sheet naming a combination twice does not try to
       // insert the same name twice in the one go
@@ -5296,8 +5310,8 @@ document.getElementById('bundleUploadBtn').addEventListener('click',()=>{
       }
 
       const withPic=combos.filter(c=>c.image_url).length;
-      showMsg(msg,`\u2713 ${combos.length} combinations, ${items.length} pieces in all. `
-        +`${withPic} have a picture.`
+      showMsg(msg,`\u2713 "${escapeHtml(sheet.name)}": ${combos.length} combinations, `
+        +`${items.length} pieces in all. ${withPic} have a picture.`
         +(empty?` ${empty} rows had no sub-SKUs and were left out.`:''),true);
       await refreshBundles();
     }catch(e){
@@ -5328,10 +5342,11 @@ document.getElementById('bundleCheckBtn').addEventListener('click',()=>{
     try{
       if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
       const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
-      const grid=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
+      const sheet=bundlePickSheet(wb);
+      if(!sheet) throw new Error('that workbook has no rows in any of its tabs');
+      const {grid,col}=sheet;
       const head=(grid[0]||[]).map(v=>String(v==null?'':v).trim());
       const first=grid.slice(1).find(r=>r.some(v=>String(v).trim()!==''))||[];
-      const col=bundleColumns(head);
       const role=new Map();
       if(col.name!==undefined) role.set(col.name,'SKU Name');
       if(col.image!==undefined) role.set(col.image,'SKU Image');
@@ -5345,7 +5360,8 @@ document.getElementById('bundleCheckBtn').addEventListener('click',()=>{
         .filter(r=>r.h||r.used||r.val);
       const cut=v=>v.length>60?v.slice(0,60)+'\u2026':v;
       out.innerHTML=`<p class="hint" style="margin:10px 0 6px;"><b>${escapeHtml(file.name)}</b>`
-        +` \u2014 ${head.length} columns, ${grid.length-1} rows.`
+        +` \u2014 tab "${escapeHtml(sheet.name)}" of ${wb.SheetNames.length},`
+        +` ${head.length} columns, ${grid.length-1} rows.`
         +` Read as ${col.subs.size} sub-SKU slots.</p>`
         +'<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:12px;width:100%;">'
         +'<thead><tr>'+['Col','Heading','Read as','First row'].map(h=>
