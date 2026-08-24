@@ -4479,6 +4479,22 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   </div>
 </div>
 
+<!-- ---- Which tool a SKU is going onto. Both can take it; they are different
+     machines and different stock, so it is asked rather than assumed. ---- -->
+<div class="sheet-bg" id="mcWhereSheet">
+  <div class="sheet">
+    <button class="req-x" id="mcWhereClose" title="Close" aria-label="Close">×</button>
+    <div class="sheet-title">Put it on which sheet?</div>
+    <div class="calc" id="mcWhereWhat" style="margin:0;"></div>
+    <button class="btn-primary" id="mcWherePrint">🖨️ Print template</button>
+    <button class="btn-primary" id="mcWhereGift">🏷️ Gift tag</button>
+    <div id="mcWhereMsg"></div>
+    <p class="hint" style="margin:2px 0 0;">Either one looks for artwork of the same
+      name — <strong>&lt;SKU&gt;.png</strong> in the print designs folder, or a design
+      called <strong>&lt;SKU&gt;</strong> in the gift tag library.</p>
+  </div>
+</div>
+
 <!-- ---- The sheet those SKUs just made. Small and centred like every other
      pop-up here rather than the full-screen enlarge: this is a look at what
      was built and a way to save it, not a place to inspect detail. ---- -->
@@ -24206,6 +24222,78 @@ document.getElementById('mcMadeOpen').addEventListener('click',()=>{
   if(mcBatch) mcFromBatch={summary:true};
   showScreen('tool-custom');
 });
+// ---------- print sheet, or gift tag ----------
+// Both tools can take a SKU and both match it by name, so which one is asked
+// once and then applied to everything in that press of the button.
+let mcWhereRows=null;
+function mcAskWhere(rows){
+  if(!rows||!rows.length) return;
+  mcWhereRows=rows;
+  const n=rows.length, total=rows.reduce((s,r)=>s+(Number(r.qty)||0),0);
+  document.getElementById('mcWhereWhat').textContent=
+    n===1?`${rows[0].sku} · ${rows[0].qty}`
+         :`${n} SKUs · ${total} in total`;
+  document.getElementById('mcWhereMsg').innerHTML='';
+  document.getElementById('mcSummarySheet').classList.remove('open');
+  document.getElementById('mcWhereSheet').classList.add('open');
+}
+const mcWhereClose=()=>{ mcWhereRows=null;
+  document.getElementById('mcWhereSheet').classList.remove('open'); };
+document.getElementById('mcWhereClose').addEventListener('click',mcWhereClose);
+document.getElementById('mcWhereSheet').addEventListener('click',e=>{
+  if(e.target.id==='mcWhereSheet') mcWhereClose();
+});
+document.getElementById('mcWherePrint').addEventListener('click',async()=>{
+  const rows=mcWhereRows; if(!rows) return;
+  mcWhereRows=null;
+  document.getElementById('mcWhereSheet').classList.remove('open');
+  document.getElementById('mcSummarySheet').classList.add('open');
+  await mcAddSkusToSheet(rows);
+});
+document.getElementById('mcWhereGift').addEventListener('click',async()=>{
+  const rows=mcWhereRows; if(!rows) return;
+  await mcAddSkusToGiftTag(rows);
+});
+// Onto the gift tag order, matched by name the way the print sheet matches a
+// PNG. The line is the tool's own shape, so everything downstream reads it
+// exactly as one added on that screen.
+async function mcAddSkusToGiftTag(rows){
+  const out=document.getElementById('mcWhereMsg');
+  showMsg(out,'Looking in the gift tag library…',true);
+  if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
+  const found=[], missing=[];
+  rows.forEach(r=>{
+    const d=gtDesignForName(r.sku);
+    if(d) found.push({row:r,design:d}); else missing.push(r.sku);
+  });
+  if(!found.length){
+    showMsg(out,missing.length===1
+      ? `No design called “${escapeHtml(missing[0])}” in the gift tag library.`
+      : `None of these ${missing.length} SKUs has a design of the same name.`,false);
+    return;
+  }
+  let added=0,updated=0;
+  found.forEach(({row,design})=>{
+    const qty=Math.max(1,Math.round(Number(row.qty)||1));
+    // already on the order: set it to the batch's figure rather than doubling,
+    // the same rule the print sheet follows
+    const had=gtOrder.find(l=>l.designId===design.id);
+    if(had){ had.qty=qty; updated++; }
+    else { gtOrder.push({id:gtId('l'),designId:design.id,qty,vals:{}}); added++; }
+  });
+  mcWhereRows=null;
+  document.getElementById('mcWhereSheet').classList.remove('open');
+  // the batch's ticket back, so Back from the gift tag screen returns here
+  if(mcBatch) mcFromBatch={summary:true};
+  showScreen('tool-gift-tag');
+  await new Promise(r=>setTimeout(r,60));
+  gtRenderOrder(); gtDraw();
+  const note=[`${added} added`,updated?`${updated} updated`:'',
+    missing.length?`${missing.length} with no design of that name: ${missing.slice(0,3).join(', ')}`
+      +(missing.length>3?'…':''):''].filter(Boolean).join(' · ');
+  const msg=document.getElementById('gtLibMsg');
+  if(msg) showMsg(msg,note,!missing.length);
+}
 function mcSummaryFolderState(){
   const el=document.getElementById('mcSummaryFolderLbl'); if(!el) return;
   el.textContent=loadDesignFiles.length
@@ -24255,8 +24343,7 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
   }
   const b=e.target.closest('[data-mc-sum-add]'); if(!b||b.disabled) return;
   const row=mcSummaryRows().find(r=>String(r.sku)===b.dataset.mcSumAdd); if(!row) return;
-  b.disabled=true;
-  await mcAddSkusToSheet([row]);
+  mcAskWhere([row]);            // print sheet or gift tag — both match by name
 });
 document.getElementById('mcSummaryAddAll').addEventListener('click',async()=>{
   const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
@@ -24264,11 +24351,9 @@ document.getElementById('mcSummaryAddAll').addEventListener('click',async()=>{
   const rows=q?all.filter(r=>
     String(r.sku).toLowerCase().includes(q)||String(r.name||'').toLowerCase().includes(q)):all;
   if(!rows.length) return;
-  const n=rows.filter(r=>designFileForSku(r.sku)).length;
-  if(!n){ showMsg(document.getElementById('mcSummaryMsg'),
-    'None of these have a matching PNG in the designs folder.',false); return; }
-  if(!confirm(`Put ${n} design${n===1?'':'s'} on a print sheet?`)) return;
-  await mcAddSkusToSheet(rows);
+  // which tool takes them is asked once, and whichever it is says for itself
+  // how many of them it could match — the two match against different folders
+  mcAskWhere(rows);
 });
 document.getElementById('mcSummaryClose').addEventListener('click',()=>
   document.getElementById('mcSummarySheet').classList.remove('open'));
@@ -24710,6 +24795,18 @@ async function mcApplyArt(it){
 // what cannot be done in a panel this size is a button away on the screen
 // that can.
 let mcGtPick='';                 // the design id chosen in the window
+// The design filed under this name, by that name exactly — the same rule the
+// print sheet matches <SKU>.png by. Nothing is guessed: a near miss here puts
+// the wrong artwork on somebody's order.
+function gtDesignForName(name){
+  const want=String(name||'').trim().toLowerCase();
+  if(!want) return null;
+  const all=(typeof gtLib!=='undefined'&&gtLib.designs)||[];
+  return all.find(d=>String(d.name||'').trim().toLowerCase()===want)||null;
+}
+// what a batch line is called, in the order worth matching on
+const mcNamesOf=it=>[it&&it.sku,it&&it.design_name,it&&it.product].filter(Boolean);
+const mcGtMatch=it=>{ for(const n of mcNamesOf(it)){ const d=gtDesignForName(n); if(d) return d; } return null; };
 function mcGiftBody(it){
   const designs=(typeof gtLib!=='undefined'&&gtLib.designs)||[];
   if(!designs.length){
@@ -24718,12 +24815,15 @@ function mcGiftBody(it){
       +'back — the designs and the sheet it prints on come from there.</p>';
   }
   const si=it.sheet_item||{};
-  mcGtPick=si.designId||'';
+  // nothing chosen yet: the design named after this line's SKU, where the
+  // library holds one. Saves finding by hand what the name already says.
+  const auto=si.designId?null:mcGtMatch(it);
+  mcGtPick=si.designId||(auto?auto.id:'');
   const chosen=mcGtDesign(mcGtPick);
   return `<div class="sect-label" style="margin-top:14px;">On this batch's sheet</div>
     <div class="combo" id="mcGtCombo" style="margin-bottom:8px;">
-      <label class="field"><span>DESIGN</span>
-        <input type="text" id="mcGtSearch" placeholder="Search the design library…"
+      <label class="field"><span>DESIGN${chosen&&auto?' · matched by name':''}</span>
+        <input type="text" id="mcGtSearch" placeholder="Search for design"
                autocomplete="off" role="combobox" aria-expanded="false"
                aria-controls="mcGtPanel" value="${chosen?escapeHtml(chosen.name||''):''}"/>
       </label>
