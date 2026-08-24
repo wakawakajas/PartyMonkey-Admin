@@ -1771,7 +1771,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .mc-win-bar:active{cursor:grabbing;}
 .mc-win-title{flex:1;min-width:0;font-family:'Space Grotesk',sans-serif;font-weight:700;
   font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.mc-win-x{flex:0 0 auto;width:30px;height:30px;padding:0;border-radius:9px;
+.mc-win-min,.mc-win-x{flex:0 0 auto;width:30px;height:30px;padding:0;border-radius:9px;
   border:1px solid var(--border-strong);background:transparent;color:var(--muted);
   font-size:15px;line-height:1;}
 .mc-win-body{flex:1;min-height:0;overflow:auto;padding:13px;}
@@ -1782,6 +1782,19 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   background:linear-gradient(135deg,transparent 46%,var(--border-strong) 46%,
              var(--border-strong) 54%,transparent 54%,transparent 71%,
              var(--border-strong) 71%,var(--border-strong) 79%,transparent 79%);}
+/* Minimised, the window is this instead — the same idea as the ad-hoc bubble
+   on the pick list: dragged clear of whatever it would otherwise sit over,
+   and a tap puts the window back exactly where it was left. */
+.mc-bubble{position:fixed;right:14px;bottom:calc(84px + env(safe-area-inset-bottom));
+  z-index:61;width:52px;height:52px;border-radius:50%;cursor:grab;touch-action:none;
+  border:1px solid var(--french);background:var(--card);color:var(--french);
+  display:none;flex-direction:column;align-items:center;justify-content:center;
+  box-shadow:0 6px 18px rgba(0,0,0,.5);user-select:none;}
+.mc-bubble.show{display:flex;}
+.mc-bubble.dragging{cursor:grabbing;opacity:.85;}
+.mc-bubble-ico{font-size:17px;line-height:1;}
+.mc-bubble-n{font-family:'IBM Plex Sans',sans-serif;font-size:9px;font-weight:700;
+  line-height:1.3;max-width:44px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 /* the way back to the batch from a screen a line was opened on */
 .mc-back{position:fixed;left:12px;bottom:12px;z-index:55;display:flex;align-items:center;
   gap:6px;height:42px;padding:0 15px 0 11px;border-radius:999px;
@@ -4094,11 +4107,19 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 <div class="mc-win" id="mcWin" role="dialog" aria-label="Magic Create builder">
   <div class="mc-win-bar" id="mcWinBar">
     <span class="mc-win-title" id="mcWinTitle">Line</span>
+    <button class="mc-win-min" id="mcWinMin" title="Minimise — keep it going in the background"
+            aria-label="Minimise">–</button>
     <button class="mc-win-x" id="mcWinX" title="Close — the work is kept" aria-label="Close">✕</button>
   </div>
   <div class="mc-win-body" id="mcWinBody"></div>
   <div class="mc-win-grip" id="mcWinGrip" title="Drag to resize"></div>
 </div>
+<!-- What the window becomes while minimised — dragged clear the same way the
+     pick list's own bubble is, and a tap puts the window straight back. -->
+<button type="button" class="mc-bubble" id="mcBubble" title="Bring the line builder back">
+  <span class="mc-bubble-ico" aria-hidden="true">✎</span>
+  <span class="mc-bubble-n" id="mcBubbleN"></span>
+</button>
 
 <!-- Samsung's picker opens straight into the gallery with no way to reach the
      camera, so the choice is made here rather than hoping the phone offers it -->
@@ -22461,6 +22482,7 @@ function mcUnwatch(){
 const mcWinEl=document.getElementById('mcWin');
 const mcWinRect={x:null,y:null,w:560,h:620};
 let mcWinItem=null;              // exactly ONE line is live at a time
+let mcWinMin=false;              // minimised to the bubble rather than closed
 let mcHomeState=null;            // the operator's own builder, put back on close
 
 try{
@@ -22504,15 +22526,22 @@ async function mcWinOpen(id){
   if(!mcHomeState) mcHomeState={meta:mcSnapshot(),orderId:state.orderId,
     paperType:state.paperType,gsm:state.gsm};
   mcWinItem=id;
+  mcWinMin=false;                // Create always opens the window itself, not the bubble
   mcWinEl.classList.add('open');
   mcWinPlace();
   mcWinRender();
+  mcBubbleSync();
 }
 function mcWinClose(){
-  if(!mcWinEl.classList.contains('open')) return;
+  // checked on mcWinItem rather than the 'open' class, so a window closed
+  // from elsewhere (leaving the batch, completing it) is actually let go of
+  // even while it was sitting minimised as the bubble, not the panel
+  if(!mcWinItem) return;
   mcCommit().finally(()=>{
     mcWinEl.classList.remove('open');
     mcWinItem=null;
+    mcWinMin=false;
+    mcBubbleSync();
     // hand the builder back the way it was found
     if(mcHomeState){
       applyPrintState(mcHomeState.meta);
@@ -22526,6 +22555,32 @@ function mcWinClose(){
   });
 }
 document.getElementById('mcWinX').addEventListener('click',mcWinClose);
+
+// ---------- minimised to a bubble, and back ----------
+// The panel and the bubble are the same live line, just shown two ways — the
+// window is never actually closed by either, so nothing here touches
+// mcWinItem or mcHomeState, only which of the two is on screen.
+function mcBubbleSync(){
+  const b=document.getElementById('mcBubble');
+  if(!b) return;
+  const it=mcWinItem?mcItem(mcWinItem):null;
+  b.classList.toggle('show',!!(mcWinMin&&it));
+  document.getElementById('mcBubbleN').textContent=
+    it?(it.order_id||it.sku||''):'';
+}
+document.getElementById('mcWinMin').addEventListener('click',()=>{
+  if(!mcWinItem) return;
+  mcWinMin=true;
+  mcWinEl.classList.remove('open');
+  mcBubbleSync();
+});
+plDraggable(document.getElementById('mcBubble'),()=>{
+  if(!mcWinItem) return;
+  mcWinMin=false;
+  mcWinEl.classList.add('open');
+  mcWinPlace();
+  mcBubbleSync();
+});
 
 // Dragged by its bar. plDraggable moves the element it is bound to, and here
 // the handle and the thing being moved are two different elements, so this is
