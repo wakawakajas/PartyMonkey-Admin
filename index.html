@@ -3998,13 +3998,18 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="card" data-card>
     <div class="card-head"><span class="num">2</span><h3>Final artwork</h3><span class="chev">▾</span></div>
     <div class="card-body">
-      <p class="hint">Repeated into every placeholder — 20 placeholders gives 20 copies, centred in each card. Set width and height independently — the aspect ratio is not locked.</p>
+      <p class="hint">What the front of the sheet is printed from. Preset lays several saved designs out at a few each; Single artwork repeats one picture into every placeholder.</p>
 
-      <!-- Designs and Single artwork are the same slot in the card: whichever
-           one the job is using is the one on show. Designs takes over the
-           moment there is a line, because that is what the front then prints. -->
+      <!-- Which of the two the job is using, said outright rather than guessed
+           from whether a design line happens to exist. Only the chosen one is
+           on show, so the card holds one idea at a time. -->
+      <div class="seg" id="artModeSeg" style="margin-bottom:14px;">
+        <button data-artmode="preset">Preset</button>
+        <button data-artmode="single" class="on">Single artwork</button>
+      </div>
+
       <div id="designSection">
-        <div class="sect-label" style="margin-top:0;">Designs</div>
+        <div class="sect-label" style="margin-top:0;">Preset designs</div>
         <p class="hint">Pick designs from the folder and say how many of each. They fill the placeholders from the bottom left across, and run onto as many sheets as the quantities need.</p>
         <div class="ph-list list-full" id="designLines"></div>
         <div class="grid2" style="margin:10px 0 6px;">
@@ -4016,7 +4021,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 
       <div id="singleArtSection">
         <div class="sect-label" style="margin-top:0;">Single artwork</div>
-        <p class="hint">One design, repeated into every placeholder. Add a design line above to print several at once instead.</p>
+        <p class="hint">One picture, repeated into every placeholder.</p>
         <div class="art-sides" style="margin-bottom:14px;">
           <div><div class="slot-label">Front</div>
             <div class="upload-slot">
@@ -4599,6 +4604,10 @@ const state={
   // is the old behaviour and still the default: the single Front artwork
   // repeated into every placeholder.
   designs:[],
+  // which of the two the front is printed from, chosen outright rather than
+  // guessed from whether a design line happens to exist: 'preset' is the list
+  // above, 'single' the one uploaded picture repeated into every placeholder
+  artMode:'single',
   page:0,          // which sheet is being previewed
   // 'card' — every design stretched to the placeholder, which is what gets
   // trimmed; 'original' — the file's own proportions, fitted inside it
@@ -4727,11 +4736,10 @@ function generateGrid(){
 // it leaves white inside the cut. "Original" is the way back out: the file's
 // own proportions, sized to fit inside the card rather than stretched to it.
 function fitArtToCard(side){
-  // The image this side is sized from: once the design list has lines it
-  // drives the front, so the box is set even when nothing was ever uploaded
-  // into the Front slot. Without this the front stayed at zero and drew
-  // nothing at all.
-  const img=(side==='front'&&state.designs.length&&state.designs[0].img)
+  // The image this side is sized from: on Preset the front is sized from the
+  // first design, so the box is set even when nothing was ever uploaded into
+  // the Front slot. Without this the front stayed at zero and drew nothing.
+  const img=(side==='front'&&usingPreset()&&state.designs.length&&state.designs[0].img)
     ? state.designs[0].img : state.final[side].img;
   if(!img) return;
   const L=layoutMm();
@@ -4769,10 +4777,13 @@ function designQueue(){
   return out;
 }
 const designTotal=()=>designQueue().length;
-// as many sheets as the quantities need — always at least the one on screen
+// the front prints from the design list only while Preset is the chosen mode
+const usingPreset=()=>state.artMode==='preset';
+// as many sheets as the quantities need — always at least the one on screen.
+// Single artwork is one sheet however many are wanted: it is the same sheet.
 function sheetCount(){
   const per=state.placeholders.length;
-  if(!per||!state.designs.length) return 1;
+  if(!per||!usingPreset()||!state.designs.length) return 1;
   return Math.max(1,Math.ceil(designTotal()/per));
 }
 function clampPage(){
@@ -4924,11 +4935,11 @@ function renderSide(side,canvas,maxDim,opts){
     ctx.drawImage(img,-srcW/2,-srcH/2,srcW,srcH);
     ctx.restore();
   };
-  // A design list drives the front: the queue is laid into the placeholders in
-  // fill order, and this sheet takes the slice belonging to its page number.
-  // Everything else — the back, and the front while the list is empty — is the
-  // single artwork repeated into every placeholder, as it always was.
-  const useList=side==='front'&&state.designs.length>0;
+  // On Preset the design queue drives the front: it is laid into the
+  // placeholders in fill order, and this sheet takes the slice belonging to
+  // its page number. Everything else — the back, and the front on Single
+  // artwork — is the one picture repeated into every placeholder, as ever.
+  const useList=side==='front'&&usingPreset();
   if(useList&&a.wMm&&a.hMm){
     const order=fillOrder(), per=order.length;
     if(per){
@@ -5236,10 +5247,23 @@ function renderDesignLines(){
       </div>`).join('');
   }
   document.getElementById('designTally').textContent=state.designs.length?designTallyText():'';
-  // Designs and Single artwork share the one slot: whichever the job is
-  // actually printing from is the one on show.
-  document.getElementById('singleArtSection').style.display=state.designs.length?'none':'';
 }
+// Only the chosen mode's block is on show, so the card holds one idea at a
+// time rather than two that half-apply.
+function setArtMode(mode,skipDraw){
+  state.artMode=mode==='preset'?'preset':'single';
+  document.querySelectorAll('#artModeSeg button').forEach(b=>
+    b.classList.toggle('on',b.dataset.artmode===state.artMode));
+  document.getElementById('designSection').style.display=usingPreset()?'':'none';
+  document.getElementById('singleArtSection').style.display=usingPreset()?'none':'';
+  if(skipDraw) return;
+  state.page=0;
+  fitArtToCard('front'); fitArtToCard('back');
+  renderDesignLines(); refreshArtInputs(); drawAll();
+}
+document.querySelectorAll('#artModeSeg button').forEach(b=>{
+  b.addEventListener('click',()=>setArtMode(b.dataset.artmode));
+});
 // the list is only rebuilt when lines come and go — a field rebuilt under the
 // caret while it is being typed into is a keystroke lost
 document.getElementById('designLines').addEventListener('input',e=>{
@@ -15643,7 +15667,7 @@ async function saveTemplate(){
       design,designs,orderId:state.orderId,pdfNaming:state.pdfNaming,
       // the job, not just the layout: what it is printed on, how big the
       // artwork sits and how far it bleeds all come back with the template
-      artFit:state.artFit,art:state.art,bleed:state.bleed,
+      artFit:state.artFit,artMode:state.artMode,art:state.art,bleed:state.bleed,
       paperType:state.paperType,gsm:state.gsm};
     // yours by that name, not anybody's — saving overwrites your own copy and
     // never touches a colleague's, so somebody else's "A6 postcard" must not
@@ -15697,6 +15721,10 @@ function applyPrintState(meta,name){
   if(meta.orderId!==undefined) state.orderId=meta.orderId||'';
   if(meta.pdfNaming!==undefined) setPdfNaming(meta.pdfNaming,true);
   if(meta.artFit!==undefined) setArtFit(meta.artFit,true);
+  // Templates saved before the mode existed say which they meant by what they
+  // carry: a saved design list is a Preset job, anything else a single one.
+  if(meta.artMode!==undefined) setArtMode(meta.artMode,true);
+  else if(Array.isArray(meta.designs)) setArtMode(meta.designs.length?'preset':'single',true);
   if(meta.paperType!==undefined) state.paperType=meta.paperType||'';
   if(meta.gsm!==undefined) state.gsm=meta.gsm||'';
   if(meta.paperType!==undefined||meta.gsm!==undefined) ppFillSelects();
@@ -15890,7 +15918,8 @@ function pdfNamingTokens(side){
         dd=String(d.getDate()).padStart(2,'0');
   // the design is whichever one names the job: the first line, or the single
   // artwork when there is no list
-  const design=state.designs.length?state.designs[0].name:(state.final.front.name||'');
+  const design=(usingPreset()&&state.designs.length)
+    ? state.designs[0].name : (state.final.front.name||'');
   return {
     order:state.orderId,
     paper:state.paperType,
@@ -16187,7 +16216,7 @@ async function exportSide(side){
     : 'Rendering full-resolution, uncompressed PDF…',true);
   try{
     const hasArt=side==='front'
-      ? (state.designs.length?designTotal()>0:!!state.final.front.data)
+      ? (usingPreset()?designTotal()>0:!!state.final.front.data)
       : !!state.final.back.data;
     const filename=buildPdfFilename(side);
     const pdfBytes=pages>1
@@ -22766,7 +22795,7 @@ window.addEventListener('resize',drawAll);
 writeLayoutInputs();
 generateGrid();
 renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();
-renderDesignLines();refreshPdfNamingPreview();drawAll();
+setArtMode(state.artMode,true);renderDesignLines();refreshPdfNamingPreview();drawAll();
 if(sb){
   purgeExpired();
   purgeExpiredAdhoc();
@@ -23862,10 +23891,10 @@ async function mcPickArt(it,side){
 // — which is the one call every PDF here is built on.
 async function mcApplyArt(it){
   const art=it.art||{};
-  // A batch line's own artwork is the whole of that line. A design list left
-  // over from working the tool by hand would otherwise sit on top of it and
-  // print somebody else's job.
-  state.designs=[]; state.page=0; renderDesignLines();
+  // A batch line's own artwork is the whole of that line, and it is a single
+  // artwork. A design list left over from working the tool by hand would
+  // otherwise sit on top of it and print somebody else's job.
+  state.designs=[]; state.page=0; setArtMode('single',true); renderDesignLines();
   for(const side of ['front','back']){
     if(!art[side]){ state.final[side]={data:null,img:null,name:''}; continue; }
     try{
@@ -24195,15 +24224,17 @@ async function mcPut(dir,name,bytes){
 async function mcBorrowBuilder(fn){
   const keep={meta:mcSnapshot(),orderId:state.orderId,
     paperType:state.paperType,gsm:state.gsm,
-    // the design list and the sheet being looked at are the operator's place
-    // in their own work; a batch borrowing the builder must not lose it
-    designs:state.designs,page:state.page,
+    // the design list, the mode and the sheet being looked at are the
+    // operator's place in their own work; a batch borrowing the builder
+    // must not lose it
+    designs:state.designs,page:state.page,artMode:state.artMode,
     final:{front:state.final.front,back:state.final.back}};
   try{ return await fn(); }
   finally{
     state.final.front=keep.final.front; state.final.back=keep.final.back;
     applyPrintState(keep.meta);
     state.designs=keep.designs; state.page=keep.page;
+    setArtMode(keep.artMode,true);
     state.orderId=keep.orderId||'';
     state.paperType=keep.paperType||''; state.gsm=keep.gsm||'';
     const oid=document.getElementById('artOrderId');
