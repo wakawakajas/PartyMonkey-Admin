@@ -17067,18 +17067,35 @@ async function gtReadPiguFolder(dir,folderName,keep){
   let sub;
   try{ sub=await dir.getDirectoryHandle(folderName); }
   catch(e){ return {ok:false,why:`There is no folder called ${folderName} any more.`,made:[]}; }
+  // A product folder is filed the same way the library is: artwork in a
+  // designs subfolder, and anything dropped straight into the folder read
+  // just the same. Reading only the top of it found the loose files and
+  // missed the whole designs folder, which is where they actually are.
+  const spots=[['designs/',await sub.getDirectoryHandle('designs').catch(()=>null)],
+               ['',sub]];
   const files=[];
-  try{ for await (const e of sub.values())
-    if(e.kind==='file'&&GT_ART.test(e.name)) files.push(e); }catch(e){}
-  files.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
+  const seen=new Set();
+  for(const [prefix,dh] of spots){
+    if(!dh) continue;
+    try{ for await (const e of dh.values()){
+      if(e.kind!=='file'||!GT_ART.test(e.name)) continue;
+      // the same file cannot be in both places, but a folder read twice
+      // through some other route must not produce it twice either
+      const rel=prefix+e.name;
+      if(seen.has(rel)) continue;
+      seen.add(rel);
+      files.push({entry:e,rel});
+    } }catch(e){}
+  }
+  files.sort((a,b)=>a.rel.localeCompare(b.rel,undefined,{numeric:true}));
   const made=[];
-  for(const e of files){
-    const path='adhoc/pigu/'+folderName+'/'+e.name;
+  for(const f of files){
+    const path='adhoc/pigu/'+folderName+'/'+f.rel;
     if(keep.some(k=>k.file===path)) continue;      // already on the order
-    let blob; try{ blob=await e.getFile(); }catch(err){ continue; }
+    let blob; try{ blob=await f.entry.getFile(); }catch(err){ continue; }
     const id=gtId('d');
     gtAssets.set(path,blob);
-    const d=gtNormalizeDesign({id,name:e.name.replace(/\.[^.]+$/,''),file:path,adhoc:true,
+    const d=gtNormalizeDesign({id,name:f.entry.name.replace(/\.[^.]+$/,''),file:path,adhoc:true,
       fields:[{id:gtId('f'),name:'Text',def:'Thank you',size:6,align:'center',
                x:0.12,y:0.4,w:0.76,h:0.2}]});
     try{ gtImgs.set(id,await loadImage(await fileToDataURL(blob))); }catch(err){}
@@ -17101,17 +17118,34 @@ async function gtLoadMappedFolders(){
   if(!gtOwnDesigns) gtOwnDesigns=gtLib.designs.filter(d=>!d.adhoc);
   const used=new Set(gtOrder.map(l=>l.designId));
   const keep=gtLib.designs.filter(d=>used.has(d.id));
-  const all=[]; const missing=[];
+  const all=[]; const missing=[]; const skipped=[];
+  gtLibFolderName='';
   for(const f of folders){
+    // The Design Library folder may itself be one of these. Its designs are
+    // already in the library, read the ordinary way, and reading them again
+    // here put every one of them on the list twice.
+    if(gtDir){
+      let same=false;
+      try{ same=await gtDir.isSameEntry(await dir.getDirectoryHandle(f)); }catch(e){}
+      if(same){ skipped.push(f); gtLibFolderName=f; continue; }
+    }
     const r=await gtReadPiguFolder(dir,f,keep);
     if(!r.ok){ missing.push(f); continue; }
     all.push(...r.made);
   }
-  gtLib.designs=keep.concat(all);
+  // A folder skipped for being the library itself is still one of the mapped
+  // folders — its designs belong on the list, they are simply already there as
+  // the library's own. Stashing them out of sight would be losing exactly the
+  // designs the mapping was meant to bring.
+  const base=skipped.length?gtOwnDesigns.slice():[];
+  const byId=new Set(base.map(d=>d.id));
+  const merged=base.concat(keep.filter(d=>!byId.has(d.id)));
+  const seenId=new Set(merged.map(d=>d.id));
+  gtLib.designs=merged.concat(all.filter(d=>!seenId.has(d.id)));
   gtSortDesigns();
   gtPiguLoaded=true;
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
-  return {ok:true,n:all.length,folders:folders.length,missing};
+  return {ok:true,n:all.length,folders:folders.length,missing,skipped};
 }
 // back to the library's own designs, whatever the folders put in their place
 function gtDropPiguFolders(){
@@ -17123,10 +17157,16 @@ function gtDropPiguFolders(){
   gtSortDesigns();
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
 }
-// which Pigu folder a design came out of, or '' for the library's own
+// Which Pigu folder a design came out of, or '' for one that is nobody's.
+// Where the Design Library folder is itself one of the mapped folders its
+// designs are held the ordinary way, with no pigu path on them — they still
+// belong to that folder, and still bring its shape.
+let gtLibFolderName='';
 const gtPiguFolderOf=d=>{
-  const m=/^adhoc\/pigu\/([^/]+)\//.exec((d&&d.file)||'');
-  return m?m[1]:'';
+  if(!d) return '';
+  const m=/^adhoc\/pigu\/([^/]+)\//.exec(d.file||'');
+  if(m) return m[1];
+  return d.adhoc?'':gtLibFolderName;
 };
 // Choosing a design is choosing what is being printed; the shape it is cut to
 // follows from it. Applies that folder's cutting file unless the sheet is on
