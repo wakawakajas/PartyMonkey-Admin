@@ -1827,6 +1827,15 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   background:var(--paper);border:1px solid var(--border);}
 .mc-sum-shot.blank{display:flex;align-items:center;justify-content:center;
   color:var(--faint);font-size:15px;}
+/* a cutting file and the folder its designs come from, side by side */
+.gt-map-row{display:flex;align-items:center;gap:10px;}
+.gt-map-row .nm{flex:1;min-width:0;}
+.gt-map-row .nm .t{font-size:13px;overflow-wrap:anywhere;}
+.gt-map-row .field{flex:0 0 190px;margin:0;}
+@media (max-width:520px){
+  .gt-map-row{flex-wrap:wrap;}
+  .gt-map-row .field{flex:1 1 100%;}
+}
 /* already on the print sheet — said on the row, and read off the sheet itself
    so it survives the window being shut */
 .mc-sum-row.is-on{background:var(--nest);}
@@ -3635,7 +3644,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <!-- GIFT TAG -->
   <div class="wrap" id="giftTagScreen" style="display:none;">
     <div class="eyebrow">PRINT TEMPLATE</div>
-    <h1>Gift Tag</h1>
+    <div class="pl-head">
+      <h1>Gift Tag</h1>
+      <button class="icon-btn" id="gtSettingsBtn" aria-label="Gift Tag settings"
+              title="Which folder each shape takes its designs from">⚙</button>
+    </div>
     <p class="sub">Pick a design, type the words, set the quantity. The sheet fills itself and starts another page when it runs out of room. Tap a tag to work on that line, then drag its words to move them or the corner to resize the box — that line only. Zoom in fills the view with the tag being worked on; + and − or the wheel take it closer or further out, and dragging the paper between the tags moves the view about. Words too long for their box wrap onto a second line, and shrink from there. Click a text and press space to hold the sheet to it — nothing else can be picked up until space is pressed again.</p>
 
     <div class="preview-wrap">
@@ -3880,6 +3893,32 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         <div id="gtLibMsg"></div>
       </div>
     </div>
+  </div>
+
+  <!-- GIFT TAG SETTINGS — which folder each shape's designs come from -->
+  <div class="home-wrap" id="giftTagSettingsScreen" style="display:none;">
+    <div class="eyebrow">GIFT TAG</div>
+    <h1>Settings</h1>
+    <p class="sub">Which designs go with which shape. Point a shape at a folder here and
+      choosing that shape loads its designs on its own, instead of hunting for the right
+      set every time.</p>
+
+    <div class="sect-label lg">The designs folder</div>
+    <p class="hint">The folder the per-shape folders sit inside — normally
+      <strong>C:\NAS Folders\Partymonkey NAS\Pigu</strong>. Chosen once and remembered.
+      Chrome and Edge on a computer only.</p>
+    <div class="calc" id="gtPiguState" style="margin-bottom:10px;"></div>
+    <div class="grid2" style="margin-bottom:18px;">
+      <button class="btn-outline" id="gtPiguPickBtn">📁 Choose folder</button>
+      <button class="btn-outline" id="gtPiguForgetBtn">Forget folder</button>
+    </div>
+
+    <div class="sect-label lg">Shape → designs</div>
+    <p class="hint">Every cutting file the library holds. Give one a folder and its designs
+      are swapped in the moment that shape is chosen; the lines already on the order are
+      left alone.</p>
+    <div class="ph-list list-full" id="gtShapeMapList"></div>
+    <div id="gtSettingsMsg"></div>
   </div>
 
   <!-- GIFT TAG DESIGN -->
@@ -5668,6 +5707,7 @@ async function checkForUpdate(){
 // ---------- home / tool / shipment navigation (mobile-app-style side drawer + back buttons) ----------
 const SCREEN_EL={home:'homeScreen',tool:'toolLandingScreen','tool-custom':'appScreen',
   'tool-gift-tag':'giftTagScreen','tool-gift-tag-design':'giftTagDesignScreen',
+  'gift-tag-settings':'giftTagSettingsScreen',
   'magic':'magicScreen','magic-batch':'magicBatchScreen',
   'print-paper':'printPaperScreen',
   shipment:'shipmentScreen','shipment-add':'shipmentAddScreen',
@@ -5690,7 +5730,7 @@ const SCREEN_SECTION={tool:'print','tool-custom':'print','tool-gift-tag':'print'
   // a second permission on a room already behind a locked one only means
   // two keys to hand out for one visit
   'magic':'print','magic-batch':'print','print-paper':'print',
-  'tool-gift-tag-design':'print',
+  'tool-gift-tag-design':'print','gift-tag-settings':'print',
   shipment:'shipping','shipment-add':'shipping','shipment-detail':'shipping',
   'shipment-tracking':'shipping','shipment-boxes':'shipping','shipment-box':'shipping',
   'shipment-china':'shipping','shipment-outstanding':'shipping',
@@ -5843,6 +5883,7 @@ const SCREEN_PARENT={
   tool:'home','tool-custom':'tool','tool-gift-tag':'tool',
   // settings is reached from the Print template door, so back goes there
   'magic':'tool','magic-batch':'magic','print-paper':'tool',
+  'gift-tag-settings':'tool-gift-tag',
   'tool-gift-tag-design':'tool-gift-tag',
   shipment:'home','shipment-add':'shipment','shipment-detail':'shipment',
   'shipment-tracking':'shipment-detail','shipment-boxes':'shipment-detail',
@@ -5970,6 +6011,7 @@ function showScreen(name,viaBack){
   syncAddButton(name);
   if(name==='tool-custom'){ drawAll(); ppLoad(); } // canvases were hidden (0 size) while off-screen; redraw now they're visible
   if(name==='tool-gift-tag') gtOpen();
+  if(name==='gift-tag-settings') gtSettingsOpen();
   if(name==='print-paper') ppOpen();
   if(name==='magic') mcOpenOverview();
   if(name==='magic-batch') mcOpenBatch();
@@ -16629,9 +16671,15 @@ async function gtDirOk(handle,ask){
 // the manifest nor the folder ever hears of it — the file it was made from
 // stays wherever it was picked from and nothing is written beside it.
 const gtIsAdhoc=path=>String(path||'').startsWith('adhoc/');
+// The library's own designs, stashed while a shape's folder is showing in
+// their place. The manifest is written from this rather than from what is on
+// screen: swapping the visible list must never be able to write a manifest
+// that has lost the folder's real contents.
+let gtOwnDesigns=null;
 function gtManifest(){
+  const own=gtOwnDesigns||gtLib.designs;
   return {version:2,sheet:{...gtSheet},
-    designs:gtLib.designs.filter(d=>!d.adhoc)
+    designs:own.filter(d=>!d.adhoc)
       .map(d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.hole})),
     fonts:gtLib.fonts.map(f=>({id:f.id,name:f.name,file:f.file})),
     texts:gtLib.texts.map(t=>({id:t.id,name:t.name,text:t.text}))};
@@ -16980,6 +17028,159 @@ function gtApplyCut(file,path,text){
   gtRebuildSlots();
   return true;
 }
+// ---------- a shape and the folder its designs come from ----------
+// The tags on a sheet come from the shape it is cut to, and the designs that
+// go on them are the ones filed under that shape. Said once here, and the
+// right set is in hand every time that shape is chosen rather than searched
+// for again. The folders are the ones inside Pigu, one per product.
+let gtPiguDir=null, gtPiguRead=false;
+let gtShapeFolders={};            // cutting file path -> folder name inside Pigu
+let gtPiguShowing='';             // whose designs are on screen right now
+async function gtPiguDirGet(){
+  if(!gtPiguRead){ gtPiguDir=await gtIdbGet('piguDir').catch(()=>null)||null; gtPiguRead=true; }
+  return gtPiguDir;
+}
+async function gtShapeFoldersGet(){
+  if(!Object.keys(gtShapeFolders).length)
+    gtShapeFolders=await gtIdbGet('shapeFolders').catch(()=>null)||{};
+  return gtShapeFolders;
+}
+async function gtPiguSubfolders(){
+  const dir=await gtPiguDirGet();
+  if(!dir||!await loadDesignDirOk(dir,false)) return [];
+  const out=[];
+  try{ for await (const e of dir.values()) if(e.kind==='directory') out.push(e.name); }catch(e){}
+  return out.sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'}));
+}
+// Swaps the designs on screen for the ones in this folder. The library's own
+// are stashed, not lost — see gtManifest — and a design an order line is still
+// pointing at is kept alongside, so nothing already built comes apart.
+async function gtUsePiguFolder(folderName){
+  const dir=await gtPiguDirGet();
+  if(!dir||!await loadDesignDirOk(dir,false)) return {ok:false,why:'The Pigu folder is not connected.'};
+  let sub;
+  try{ sub=await dir.getDirectoryHandle(folderName); }
+  catch(e){ return {ok:false,why:`There is no folder called ${folderName} any more.`}; }
+  const files=[];
+  try{ for await (const e of sub.values())
+    if(e.kind==='file'&&GT_ART.test(e.name)) files.push(e); }catch(e){}
+  if(!files.length) return {ok:false,why:`${folderName} holds no artwork.`};
+  files.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
+  if(!gtOwnDesigns) gtOwnDesigns=gtLib.designs.filter(d=>!d.adhoc);
+  const used=new Set(gtOrder.map(l=>l.designId));
+  const keep=gtLib.designs.filter(d=>used.has(d.id));
+  const made=[];
+  for(const e of files){
+    const path='adhoc/pigu/'+folderName+'/'+e.name;
+    if(keep.some(k=>k.file===path)) continue;      // already on the order
+    let blob; try{ blob=await e.getFile(); }catch(err){ continue; }
+    const id=gtId('d');
+    gtAssets.set(path,blob);
+    const d=gtNormalizeDesign({id,name:e.name.replace(/\.[^.]+$/,''),file:path,adhoc:true,
+      fields:[{id:gtId('f'),name:'Text',def:'Thank you',size:6,align:'center',
+               x:0.12,y:0.4,w:0.76,h:0.2}]});
+    try{ gtImgs.set(id,await loadImage(await fileToDataURL(blob))); }catch(err){}
+    made.push(d);
+  }
+  gtLib.designs=keep.concat(made);
+  gtSortDesigns();
+  gtPiguShowing=folderName;
+  gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+  return {ok:true,n:made.length,kept:keep.length};
+}
+// back to the folder's own library, whatever a shape swapped in
+function gtDropPiguFolder(){
+  if(!gtOwnDesigns) return;
+  const used=new Set(gtOrder.map(l=>l.designId));
+  const keep=gtLib.designs.filter(d=>d.adhoc&&used.has(d.id));
+  gtLib.designs=gtOwnDesigns.concat(keep);
+  gtOwnDesigns=null; gtPiguShowing='';
+  gtSortDesigns();
+  gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+}
+// ---------- the settings screen ----------
+function gtPiguState(){
+  const el=document.getElementById('gtPiguState'); if(!el) return;
+  if(!gtCanUseFolder()){ el.textContent='This browser cannot browse a folder — use Chrome or Edge on a PC.'; return; }
+  el.textContent=gtPiguDir?`Reading folders from ${gtPiguDir.name}`
+    :'Not chosen yet — pick the Pigu folder.';
+}
+async function gtRenderShapeMap(){
+  const list=document.getElementById('gtShapeMapList'); if(!list) return;
+  const folders=await gtPiguSubfolders();
+  const shapes=(await gtShapeList()).filter(s=>s.kind==='cut');
+  await gtShapeFoldersGet();
+  if(!shapes.length){
+    list.innerHTML='<p class="hint" style="margin:4px 0 0;">— no cutting files in the library yet —</p>';
+    return;
+  }
+  list.innerHTML=shapes.map(s=>{
+    const sel=gtShapeFolders[s.path]||'';
+    const opts=['<option value="">— none —</option>'].concat(
+      folders.map(f=>`<option value="${escapeHtml(f)}"${f===sel?' selected':''}>${escapeHtml(f)}</option>`));
+    // a folder set before, whose folder has since gone, still says what it was
+    const gone=sel&&!folders.includes(sel)
+      ? `<option value="${escapeHtml(sel)}" selected>${escapeHtml(sel)} (missing)</option>`:'';
+    return `<div class="ph-card gt-map-row">
+      <div class="nm">
+        <div class="t">${escapeHtml(s.name)}</div>
+        ${s.path!==s.name?`<div class="hint" style="margin:0;">${escapeHtml(s.path)}</div>`:''}
+      </div>
+      <label class="field"><span>DESIGNS FROM</span>
+        <select data-gt-map="${escapeHtml(s.path)}">${opts.join('')}${gone}</select></label>
+    </div>`;}).join('');
+  if(!folders.length&&gtPiguDir)
+    list.insertAdjacentHTML('afterbegin',
+      '<p class="hint" style="margin:4px 0 8px;">— that folder has no subfolders in it —</p>');
+}
+async function gtSettingsOpen(){
+  await gtEnsureDir(false);          // the library is where the shapes are listed from
+  await gtPiguDirGet(); await gtShapeFoldersGet();
+  gtPiguState();
+  await gtRenderShapeMap();
+}
+document.getElementById('gtSettingsBtn').addEventListener('click',()=>showScreen('gift-tag-settings'));
+document.getElementById('gtPiguPickBtn').addEventListener('click',async()=>{
+  const out=document.getElementById('gtSettingsMsg');
+  if(!gtCanUseFolder()){ showMsg(out,'This browser cannot browse a folder — use Chrome or Edge on a PC.',false); return; }
+  try{
+    const dir=await window.showDirectoryPicker({mode:'read'});
+    if(!await loadDesignDirOk(dir,true)){ showMsg(out,'Permission to that folder was not given.',false); return; }
+    gtPiguDir=dir; gtPiguRead=true; await gtIdbPut('piguDir',dir);
+    gtPiguState(); await gtRenderShapeMap();
+    showMsg(out,`✓ Reading folders from ${dir.name}.`,true);
+  }catch(e){ /* cancelled */ }
+});
+document.getElementById('gtPiguForgetBtn').addEventListener('click',async()=>{
+  gtPiguDir=null; gtPiguRead=true; await gtIdbPut('piguDir',null);
+  gtPiguState(); await gtRenderShapeMap();
+});
+document.getElementById('gtShapeMapList').addEventListener('change',async e=>{
+  const sel=e.target.closest('[data-gt-map]'); if(!sel) return;
+  const path=sel.dataset.gtMap;
+  if(sel.value) gtShapeFolders[path]=sel.value; else delete gtShapeFolders[path];
+  await gtIdbPut('shapeFolders',{...gtShapeFolders});
+  const out=document.getElementById('gtSettingsMsg');
+  showMsg(out,sel.value
+    ? `✓ ${path.split('/').pop()} takes its designs from ${sel.value}.`
+    : `${path.split('/').pop()} is back to the library's own designs.`,true);
+  // if that shape is the one on the sheet, the swap happens there and then
+  if(gtSheet.layoutFile===path){
+    if(sel.value) await gtShapeFolderFor(path); else gtDropPiguFolder();
+  }
+});
+
+// called the moment a shape is applied, whichever way it was chosen
+async function gtShapeFolderFor(path){
+  await gtShapeFoldersGet();
+  const folder=gtShapeFolders[path];
+  if(!folder||folder===gtPiguShowing) return;
+  const r=await gtUsePiguFolder(folder);
+  const msg=document.getElementById('gtLibMsg');
+  if(msg) showMsg(msg,r.ok
+    ? `✓ ${folder} — ${r.n} design${r.n===1?'':'s'} for this shape.`
+    : r.why,!!r.ok);
+}
 async function gtApplyBase(file,path){
   gtAssets.set(path,file);
   gtSheet.baseFile=path; gtBaseFrom=path;
@@ -17020,6 +17221,8 @@ document.getElementById('gtCutPanel').addEventListener('click',async e=>{
   document.getElementById('gtCutPanel').classList.remove('open');
   await gtSaveLib();
   gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
+  // and the designs filed under this shape, if it has been given a folder
+  await gtShapeFolderFor(path);
 });
 document.getElementById('gtBasePanel').addEventListener('click',async e=>{
   const row=e.target.closest('[data-gt-shape]'); if(!row) return;
