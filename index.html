@@ -3899,9 +3899,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="home-wrap" id="giftTagSettingsScreen" style="display:none;">
     <div class="eyebrow">GIFT TAG</div>
     <h1>Settings</h1>
-    <p class="sub">Which designs go with which shape. Point a shape at a folder here and
-      choosing that shape loads its designs on its own, instead of hunting for the right
-      set every time.</p>
+    <p class="sub">Which shape each folder of designs is cut to. Say it once here and
+      picking any design out of that folder sets the sheet to its shape on its own,
+      instead of the right cutting file being found by hand every time.</p>
 
     <div class="sect-label lg">The designs folder</div>
     <p class="hint">The folder the per-shape folders sit inside — normally
@@ -3913,10 +3913,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button class="btn-outline" id="gtPiguForgetBtn">Forget folder</button>
     </div>
 
-    <div class="sect-label lg">Shape → designs</div>
-    <p class="hint">Every cutting file the library holds. Give one a folder and its designs
-      are swapped in the moment that shape is chosen; the lines already on the order are
-      left alone.</p>
+    <div class="sect-label lg">Designs → shape</div>
+    <p class="hint">Every folder inside Pigu. Give one a cutting file and its designs join
+      the library; picking any of them cuts the sheet to that shape. The lines already on
+      the order, and the library's own designs, fonts and saved phrases, are left alone.</p>
     <div class="ph-list list-full" id="gtShapeMapList"></div>
     <div id="gtSettingsMsg"></div>
   </div>
@@ -17028,22 +17028,30 @@ function gtApplyCut(file,path,text){
   gtRebuildSlots();
   return true;
 }
-// ---------- a shape and the folder its designs come from ----------
-// The tags on a sheet come from the shape it is cut to, and the designs that
-// go on them are the ones filed under that shape. Said once here, and the
-// right set is in hand every time that shape is chosen rather than searched
-// for again. The folders are the ones inside Pigu, one per product.
+// ---------- a folder of designs and the shape they are cut to ----------
+// The design is what is chosen; the shape is a consequence of it. A folder
+// inside Pigu is one product, cut to one shape, so saying it once here means
+// picking any design out of that folder brings its own shape with it.
 let gtPiguDir=null, gtPiguRead=false;
-let gtShapeFolders={};            // cutting file path -> folder name inside Pigu
-let gtPiguShowing='';             // whose designs are on screen right now
+let gtFolderShapes={};            // folder name inside Pigu -> cutting file path
+let gtPiguLoaded=false;           // the mapped folders' designs are in the library
 async function gtPiguDirGet(){
   if(!gtPiguRead){ gtPiguDir=await gtIdbGet('piguDir').catch(()=>null)||null; gtPiguRead=true; }
   return gtPiguDir;
 }
-async function gtShapeFoldersGet(){
-  if(!Object.keys(gtShapeFolders).length)
-    gtShapeFolders=await gtIdbGet('shapeFolders').catch(()=>null)||{};
-  return gtShapeFolders;
+async function gtFolderShapesGet(){
+  if(Object.keys(gtFolderShapes).length) return gtFolderShapes;
+  gtFolderShapes=await gtIdbGet('folderShapes').catch(()=>null)||{};
+  // read the other way round before: shape -> folder. Turned over once so a
+  // mapping already set up is not asked for again.
+  if(!Object.keys(gtFolderShapes).length){
+    const old=await gtIdbGet('shapeFolders').catch(()=>null);
+    if(old&&Object.keys(old).length){
+      Object.entries(old).forEach(([shape,folder])=>{ if(folder) gtFolderShapes[folder]=shape; });
+      await gtIdbPut('folderShapes',{...gtFolderShapes});
+    }
+  }
+  return gtFolderShapes;
 }
 async function gtPiguSubfolders(){
   const dir=await gtPiguDirGet();
@@ -17052,23 +17060,17 @@ async function gtPiguSubfolders(){
   try{ for await (const e of dir.values()) if(e.kind==='directory') out.push(e.name); }catch(e){}
   return out.sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'}));
 }
-// Swaps the designs on screen for the ones in this folder. The library's own
-// are stashed, not lost — see gtManifest — and a design an order line is still
-// pointing at is kept alongside, so nothing already built comes apart.
-async function gtUsePiguFolder(folderName){
-  const dir=await gtPiguDirGet();
-  if(!dir||!await loadDesignDirOk(dir,false)) return {ok:false,why:'The Pigu folder is not connected.'};
+// Reads one folder's artwork into designs. They are marked ad-hoc, so they are
+// never written into the library folder and never reach its manifest — the
+// files stay where they are, in Pigu.
+async function gtReadPiguFolder(dir,folderName,keep){
   let sub;
   try{ sub=await dir.getDirectoryHandle(folderName); }
-  catch(e){ return {ok:false,why:`There is no folder called ${folderName} any more.`}; }
+  catch(e){ return {ok:false,why:`There is no folder called ${folderName} any more.`,made:[]}; }
   const files=[];
   try{ for await (const e of sub.values())
     if(e.kind==='file'&&GT_ART.test(e.name)) files.push(e); }catch(e){}
-  if(!files.length) return {ok:false,why:`${folderName} holds no artwork.`};
   files.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
-  if(!gtOwnDesigns) gtOwnDesigns=gtLib.designs.filter(d=>!d.adhoc);
-  const used=new Set(gtOrder.map(l=>l.designId));
-  const keep=gtLib.designs.filter(d=>used.has(d.id));
   const made=[];
   for(const e of files){
     const path='adhoc/pigu/'+folderName+'/'+e.name;
@@ -17082,21 +17084,68 @@ async function gtUsePiguFolder(folderName){
     try{ gtImgs.set(id,await loadImage(await fileToDataURL(blob))); }catch(err){}
     made.push(d);
   }
-  gtLib.designs=keep.concat(made);
-  gtSortDesigns();
-  gtPiguShowing=folderName;
-  gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
-  return {ok:true,n:made.length,kept:keep.length};
+  return {ok:true,made};
 }
-// back to the folder's own library, whatever a shape swapped in
-function gtDropPiguFolder(){
+// Every folder that has been given a shape, all in at once, so any design in
+// any of them can be picked and each brings its own shape with it. The
+// library's own designs are stashed rather than dropped — see gtManifest — and
+// a design an order line is still pointing at is kept, so nothing already
+// built comes apart. Fonts and saved phrases are not touched at all.
+async function gtLoadMappedFolders(){
+  const dir=await gtPiguDirGet();
+  await gtFolderShapesGet();
+  const folders=Object.keys(gtFolderShapes).filter(f=>gtFolderShapes[f]);
+  if(!dir||!await loadDesignDirOk(dir,false))
+    return {ok:false,why:'The Pigu folder is not connected.'};
+  if(!folders.length) return {ok:false,why:'No folder has been given a shape yet.'};
+  if(!gtOwnDesigns) gtOwnDesigns=gtLib.designs.filter(d=>!d.adhoc);
+  const used=new Set(gtOrder.map(l=>l.designId));
+  const keep=gtLib.designs.filter(d=>used.has(d.id));
+  const all=[]; const missing=[];
+  for(const f of folders){
+    const r=await gtReadPiguFolder(dir,f,keep);
+    if(!r.ok){ missing.push(f); continue; }
+    all.push(...r.made);
+  }
+  gtLib.designs=keep.concat(all);
+  gtSortDesigns();
+  gtPiguLoaded=true;
+  gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+  return {ok:true,n:all.length,folders:folders.length,missing};
+}
+// back to the library's own designs, whatever the folders put in their place
+function gtDropPiguFolders(){
   if(!gtOwnDesigns) return;
   const used=new Set(gtOrder.map(l=>l.designId));
   const keep=gtLib.designs.filter(d=>d.adhoc&&used.has(d.id));
   gtLib.designs=gtOwnDesigns.concat(keep);
-  gtOwnDesigns=null; gtPiguShowing='';
+  gtOwnDesigns=null; gtPiguLoaded=false;
   gtSortDesigns();
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+}
+// which Pigu folder a design came out of, or '' for the library's own
+const gtPiguFolderOf=d=>{
+  const m=/^adhoc\/pigu\/([^/]+)\//.exec((d&&d.file)||'');
+  return m?m[1]:'';
+};
+// Choosing a design is choosing what is being printed; the shape it is cut to
+// follows from it. Applies that folder's cutting file unless the sheet is on
+// it already.
+async function gtShapeForDesign(d){
+  const folder=gtPiguFolderOf(d); if(!folder) return;
+  await gtFolderShapesGet();
+  const path=gtFolderShapes[folder];
+  if(!path||gtSheet.layoutFile===path) return;
+  const msg=document.getElementById('gtLibMsg');
+  const file=await gtShapeFile(path);
+  if(!file){ if(msg) showMsg(msg,`${folder}'s shape (${path.split('/').pop()}) is not in the folder any more.`,false); return; }
+  let text=''; try{ text=await file.text(); }catch(e){}
+  if(!gtApplyCut(file,path,text)){
+    if(msg) showMsg(msg,`No shapes found in ${path.split('/').pop()}.`,false); return;
+  }
+  await gtSaveLib();
+  gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
+  if(msg) showMsg(msg,`✓ ${folder} — sheet cut to ${path.split('/').pop()}.`,true);
 }
 // ---------- the settings screen ----------
 function gtPiguState(){
@@ -17109,33 +17158,32 @@ async function gtRenderShapeMap(){
   const list=document.getElementById('gtShapeMapList'); if(!list) return;
   const folders=await gtPiguSubfolders();
   const shapes=(await gtShapeList()).filter(s=>s.kind==='cut');
-  await gtShapeFoldersGet();
-  if(!shapes.length){
-    list.innerHTML='<p class="hint" style="margin:4px 0 0;">— no cutting files in the library yet —</p>';
+  await gtFolderShapesGet();
+  if(!folders.length){
+    list.innerHTML='<p class="hint" style="margin:4px 0 0;">'
+      +(gtPiguDir?'— that folder has nothing in it —':'— choose the Pigu folder first —')+'</p>';
     return;
   }
-  list.innerHTML=shapes.map(s=>{
-    const sel=gtShapeFolders[s.path]||'';
+  list.innerHTML=folders.map(f=>{
+    const sel=gtFolderShapes[f]||'';
     const opts=['<option value="">— none —</option>'].concat(
-      folders.map(f=>`<option value="${escapeHtml(f)}"${f===sel?' selected':''}>${escapeHtml(f)}</option>`));
-    // a folder set before, whose folder has since gone, still says what it was
-    const gone=sel&&!folders.includes(sel)
-      ? `<option value="${escapeHtml(sel)}" selected>${escapeHtml(sel)} (missing)</option>`:'';
+      shapes.map(s=>`<option value="${escapeHtml(s.path)}"${s.path===sel?' selected':''}>${escapeHtml(s.name)}</option>`));
+    // a shape set before and since taken out of the library still says so,
+    // rather than the row quietly reading as though it was never set
+    const gone=sel&&!shapes.some(s=>s.path===sel)
+      ? `<option value="${escapeHtml(sel)}" selected>${escapeHtml(sel.split('/').pop())} (missing)</option>`:'';
     return `<div class="ph-card gt-map-row">
-      <div class="nm">
-        <div class="t">${escapeHtml(s.name)}</div>
-        ${s.path!==s.name?`<div class="hint" style="margin:0;">${escapeHtml(s.path)}</div>`:''}
-      </div>
-      <label class="field"><span>DESIGNS FROM</span>
-        <select data-gt-map="${escapeHtml(s.path)}">${opts.join('')}${gone}</select></label>
+      <div class="nm"><div class="t">${escapeHtml(f)}</div></div>
+      <label class="field"><span>CUT TO</span>
+        <select data-gt-map="${escapeHtml(f)}">${opts.join('')}${gone}</select></label>
     </div>`;}).join('');
-  if(!folders.length&&gtPiguDir)
+  if(!shapes.length)
     list.insertAdjacentHTML('afterbegin',
-      '<p class="hint" style="margin:4px 0 8px;">— that folder has no subfolders in it —</p>');
+      '<p class="hint" style="margin:4px 0 8px;">— no cutting files in the library yet —</p>');
 }
 async function gtSettingsOpen(){
   await gtEnsureDir(false);          // the library is where the shapes are listed from
-  await gtPiguDirGet(); await gtShapeFoldersGet();
+  await gtPiguDirGet(); await gtFolderShapesGet();
   gtPiguState();
   await gtRenderShapeMap();
 }
@@ -17157,30 +17205,17 @@ document.getElementById('gtPiguForgetBtn').addEventListener('click',async()=>{
 });
 document.getElementById('gtShapeMapList').addEventListener('change',async e=>{
   const sel=e.target.closest('[data-gt-map]'); if(!sel) return;
-  const path=sel.dataset.gtMap;
-  if(sel.value) gtShapeFolders[path]=sel.value; else delete gtShapeFolders[path];
-  await gtIdbPut('shapeFolders',{...gtShapeFolders});
+  const folder=sel.dataset.gtMap;
+  if(sel.value) gtFolderShapes[folder]=sel.value; else delete gtFolderShapes[folder];
+  await gtIdbPut('folderShapes',{...gtFolderShapes});
   const out=document.getElementById('gtSettingsMsg');
+  // the folders in play have changed, so what is in the library changes with them
+  const r=Object.keys(gtFolderShapes).length?await gtLoadMappedFolders():(gtDropPiguFolders(),{ok:true,n:0});
   showMsg(out,sel.value
-    ? `✓ ${path.split('/').pop()} takes its designs from ${sel.value}.`
-    : `${path.split('/').pop()} is back to the library's own designs.`,true);
-  // if that shape is the one on the sheet, the swap happens there and then
-  if(gtSheet.layoutFile===path){
-    if(sel.value) await gtShapeFolderFor(path); else gtDropPiguFolder();
-  }
+    ? `✓ ${folder} is cut to ${sel.value.split('/').pop()}`
+      +(r.ok&&r.n!=null?` — ${r.n} design${r.n===1?'':'s'} in the library.`:'.')
+    : `${folder} no longer brings a shape with it.`,true);
 });
-
-// called the moment a shape is applied, whichever way it was chosen
-async function gtShapeFolderFor(path){
-  await gtShapeFoldersGet();
-  const folder=gtShapeFolders[path];
-  if(!folder||folder===gtPiguShowing) return;
-  const r=await gtUsePiguFolder(folder);
-  const msg=document.getElementById('gtLibMsg');
-  if(msg) showMsg(msg,r.ok
-    ? `✓ ${folder} — ${r.n} design${r.n===1?'':'s'} for this shape.`
-    : r.why,!!r.ok);
-}
 async function gtApplyBase(file,path){
   gtAssets.set(path,file);
   gtSheet.baseFile=path; gtBaseFrom=path;
@@ -17221,8 +17256,6 @@ document.getElementById('gtCutPanel').addEventListener('click',async e=>{
   document.getElementById('gtCutPanel').classList.remove('open');
   await gtSaveLib();
   gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
-  // and the designs filed under this shape, if it has been given a folder
-  await gtShapeFolderFor(path);
 });
 document.getElementById('gtBasePanel').addEventListener('click',async e=>{
   const row=e.target.closest('[data-gt-shape]'); if(!row) return;
@@ -18404,6 +18437,7 @@ document.getElementById('gtOrderList').addEventListener('click',e=>{
     line.designId=d.id; line.vals={};
     gtCurrentDesign=d;
     gtRenderOrder(); gtDraw();
+    gtShapeForDesign(d);            // the shape this one is cut to, if it has one
     showScreen('tool-gift-tag-design');
     return;
   }
@@ -18412,6 +18446,7 @@ document.getElementById('gtOrderList').addEventListener('click',e=>{
   gtCloseDesignPanels(null);
   gtAskAge(line);
   gtRenderOrder(); gtDraw();
+  gtShapeForDesign(gtDesign(line.designId));
 });
 document.addEventListener('click',e=>{
   if(!e.target.closest('#gtOrderList')) gtCloseDesignPanels(null);
@@ -19868,6 +19903,9 @@ async function gtOpen(){
   // anything dropped into the folder since the last look is taken on quietly —
   // arriving on the screen is not the moment to be told about housekeeping
   await gtPickUpNew(true);
+  // and the designs from every folder that has been given a shape, so any of
+  // them can be picked and each brings its own shape with it
+  if(!gtPiguLoaded) await gtLoadMappedFolders().catch(()=>{});
 }
 
 // ==================== One filter, for every list that has one ====================
