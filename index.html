@@ -6271,7 +6271,10 @@ async function bundleTakeOrders(file){
         .sort((a,b)=>a.combo.name.localeCompare(b.combo.name));
       bundleReadAt=new Date().toISOString();
       renderBundleToday(file.name);
-      if(bundleToday.length) await bundleWriteJobs(session,file.name,shop);
+      if(bundleToday.length){
+        await bundleWriteJobs(session,file.name,shop);
+        pushBatch('bundle',`${bundleShopName(shop)} — ${file.name}`);
+      }
       showMsg(msg,bundleToday.length
         ? `✓ ${bundleShopName(shop)} — ${bundleToday.length} combinations on ${lines} `
           +`order lines. ${plain} lines were ordinary SKUs.`
@@ -13389,6 +13392,15 @@ async function pushOthers(kind,orderId,name){
     await callNotify({kind,order_id:orderId,name:name||'',from:pushEndpoint});
   }catch(e){ /* the chime already happened; a failed push is not worth a banner */ }
 }
+// A new batch of work — a pick list sheet, a bundle order — reaches everyone
+// granted that section, not just the phone that uploaded it. Best-effort, same
+// as pushOthers: the upload already succeeded, so a failed push here is not
+// worth a banner of its own.
+async function pushBatch(kind,title){
+  try{
+    await invokeFn('notify-batch',{kind,title:title||'',from:pushEndpoint});
+  }catch(e){ /* the upload already happened; a failed push is not worth a banner */ }
+}
 // Once this phone is registered the chip becomes a self-test, because the
 // device that makes a change is normally skipped — with one phone you would
 // otherwise have no way to see whether any of this works.
@@ -19961,6 +19973,9 @@ async function plDrainQueue(){
     plIngesting=false; plDrop.classList.remove('busy');
   }
   const {ok,failed,lines}=plBatch;
+  // one push per drain, not per sheet — several PDFs dropped together are one
+  // batch of work landing, not several
+  if(ok) pushBatch('picklist',ok===1?plBatch.last.replace(/^✓ /,''):`${ok} sheets — ${lines} lines`);
   if(ok&&!failed)
     showMsg(msg,ok===1?plBatch.last:`✓ ${ok} sheets — ${lines} lines in all.`,true);
   else if(ok&&failed)
@@ -22567,6 +22582,16 @@ function mcWinRender(){
           <span class="mc-pick-mode">${v.mode==='per-order'?'own PDF':'shared sheet'}</span>
         </button>`).join('')}
     </div>`;
+  // Gift Tag's library lives on disk and used to need a visit to Print
+  // template › Gift Tag to fetch it before a line here could use it — one
+  // extra trip multiplied by every line. It is fetched right here instead,
+  // the same lazy way Open full builder and Download All already do it.
+  if(it.tile==='giftTag'&&!gtLoaded&&typeof gtOpen==='function'){
+    const body='<p class="hint" style="margin:12px 0 0;">Loading the design library…</p>';
+    document.getElementById('mcWinBody').innerHTML=head+picker+body+'<div id="mcWinMsg"></div>';
+    gtOpen().then(()=>{ if(mcWinItem===it.id) mcWinRender(); });
+    return;
+  }
   const body=t?t.body(it):'<p class="hint" style="margin:12px 0 0;">Pick a tile above to '
     +'work on this line, or leave it as it is and mark it done from the list.</p>';
   // whatever the last render hung on the document goes with it: the body is
