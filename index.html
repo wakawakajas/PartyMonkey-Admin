@@ -1827,6 +1827,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   background:var(--paper);border:1px solid var(--border);}
 .mc-sum-shot.blank{display:flex;align-items:center;justify-content:center;
   color:var(--faint);font-size:15px;}
+/* the artwork on a design row in the gift tag picker — a library of a few
+   hundred is recognised by the picture long before the name is read */
+.mc-gt-shot{flex:0 0 auto;width:30px;height:30px;border-radius:7px;object-fit:cover;
+  background:var(--paper);border:1px solid var(--border);margin-right:8px;}
+.mc-gt-shot.blank{display:inline-flex;align-items:center;justify-content:center;
+  color:var(--faint);font-size:13px;}
+#mcGtPanel .combo-opt{display:flex;align-items:center;}
+#mcGtPanel .combo-opt .nm{flex:1;min-width:0;}
 /* a cutting file and the folder its designs come from, side by side */
 .gt-map-row{display:flex;align-items:center;gap:10px;}
 .gt-map-row .nm{flex:1;min-width:0;}
@@ -16398,6 +16406,11 @@ const LOAD_DESIGN_FOLDER_HINT=String.raw`C:\NAS Folders\Partymonkey NAS\Pigu\Big
 const LOAD_DESIGN_ART=/\.(png|jpe?g|webp|pdf)$/i;
 let loadDesignDir=null, loadDesignDirRead=false;
 let loadDesignFiles=[], loadDesignSelected=null;
+// which SKU on the Magic Create summary this picker was opened for, so the
+// sheet it makes is shown the same way Add shows it rather than the picker
+// quietly closing. Declared here with the rest of the picker's state — the
+// close function reads it, and that runs long before Magic Create's own.
+let mcSummaryPickFor=null;
 async function loadDesignDirGet(){
   if(!loadDesignDirRead){ loadDesignDir=await gtIdbGet('loadDesignDir').catch(()=>null)||null; loadDesignDirRead=true; }
   return loadDesignDir;
@@ -16501,7 +16514,12 @@ async function openLoadDesignModal(){
   if(dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan(); else loadDesignFiles=[];
   loadDesignRenderList();
 }
-function closeLoadDesignModal(){ document.getElementById('loadDesignModal').classList.remove('open'); }
+function closeLoadDesignModal(){
+  document.getElementById('loadDesignModal').classList.remove('open');
+  // shut without picking: the SKU that opened it is no longer waiting, so an
+  // ordinary Load design later does not finish as though it were
+  mcSummaryPickFor=null;
+}
 document.getElementById('loadDesignBtn').addEventListener('click',openLoadDesignModal);
 document.getElementById('loadDesignClose').addEventListener('click',closeLoadDesignModal);
 document.addEventListener('keydown',e=>{
@@ -16560,6 +16578,15 @@ document.getElementById('loadDesignConfirmBtn').addEventListener('click',async()
   btn.disabled=true;
   try{
     await addDesignLine(loadDesignSelected,qty);
+    // opened from a SKU on the summary: finish the way Add does, on the sheet
+    // it just made, rather than leaving the picker to close on its own
+    if(mcSummaryPickFor){
+      const sku=mcSummaryPickFor.sku; mcSummaryPickFor=null;
+      closeLoadDesignModal();
+      setArtMode('preset');
+      mcOpenMade(`${sku} — ${loadDesignSelected.name} × ${qty}`,true);
+      return;
+    }
     const sheets=sheetCount();
     showMsg(msgEl,`✓ Added ${loadDesignSelected.name} × ${qty} — `
       +`${designTotal()} card${designTotal()===1?'':'s'} over ${sheets} sheet${sheets===1?'':'s'}.`,true);
@@ -24020,12 +24047,17 @@ function mcRenderSummary(){
     const badge=on
       ? `<span class="mc-sum-on">✓ on the sheet${on.qty!==r.qty?` ×${on.qty}`:''}</span>`
       : '';
+    // Add takes the SKU's own PNG where there is one. Choose is for the rest —
+    // and for the times the right artwork is simply filed under another name.
+    const pick=`<button type="button" class="btn-outline" data-mc-sum-pick="${escapeHtml(r.sku)}"
+           title="Search the designs folder and pick one for ${escapeHtml(r.sku)}">Choose…</button>`;
     const btn=on
       ? `<button type="button" class="btn-danger" data-mc-sum-del="${escapeHtml(r.sku)}"
            title="Take ${escapeHtml(r.sku)} off the print sheet">Remove</button>`
-      : `<button type="button" class="btn-outline" data-mc-sum-add="${escapeHtml(r.sku)}"
-           ${has?'':'disabled'} title="${has?`Put ${escapeHtml(r.sku)}.png on a print sheet, ${r.qty} up`
-             :`No ${escapeHtml(r.sku)}.png in the designs folder`}">${has?'Add':'No PNG'}</button>`;
+      : (has
+        ? `<button type="button" class="btn-outline" data-mc-sum-add="${escapeHtml(r.sku)}"
+             title="Put ${escapeHtml(r.sku)}.png on a print sheet, ${r.qty} up">Add</button>`+pick
+        : pick);
     return `<div class="mc-sum-row${on?' is-on':''}">
       ${shot}
       <span class="mc-sum-main">
@@ -24184,6 +24216,19 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
     showMsg(document.getElementById('mcSummaryMsg'),
       `Took ${del.dataset.mcSumDel} off the sheet — `
       +`${designTotal()} card${designTotal()===1?'':'s'} left.`,true);
+    return;
+  }
+  // pick the artwork by hand: the folder's own search, opened on this SKU and
+  // at the quantity the batch adds up to
+  const pick=e.target.closest('[data-mc-sum-pick]');
+  if(pick){
+    const row=mcSummaryRows().find(r=>String(r.sku)===pick.dataset.mcSumPick); if(!row) return;
+    mcSummaryPickFor=row;
+    document.getElementById('mcSummarySheet').classList.remove('open');
+    await openLoadDesignModal();
+    document.getElementById('loadDesignSearch').value=row.sku;
+    loadDesignRenderList();
+    document.getElementById('loadDesignQty').value=row.qty;
     return;
   }
   const b=e.target.closest('[data-mc-sum-add]'); if(!b||b.disabled) return;
@@ -24719,13 +24764,20 @@ function mcGiftWire(it){
       panel.innerHTML='<div class="combo-empty">No design matches “'+escapeHtml(term)+'”.</div>';
       return;
     }
-    panel.innerHTML=rows.map(d=>
-      `<div class="combo-opt${d.id===mcGtPick?' active':''}" role="option"
+    // artwork on the row: a design is recognised by what it looks like long
+    // before its name is read, and a library of a few hundred is all names
+    panel.innerHTML=rows.map(d=>{
+      const img=gtImgs.get(d.id);
+      const shot=img&&img.src
+        ? `<img class="mc-gt-shot" src="${escapeHtml(img.src)}" alt="" loading="lazy"/>`
+        : '<span class="mc-gt-shot blank">◻</span>';
+      return `<div class="combo-opt${d.id===mcGtPick?' active':''}" role="option"
             data-mc-gtd="${d.id}" aria-selected="${d.id===mcGtPick?'true':'false'}">
+         ${shot}
          <span class="nm">${escapeHtml(d.name||'Design')}</span>
          <span class="mc-pick-mode">${(d.fields||[]).length} text${
            (d.fields||[]).length===1?'':'s'}</span>
-       </div>`).join('');
+       </div>`;}).join('');
   }
   box.addEventListener('focus',()=>openPanel(true));
   box.addEventListener('input',()=>{ openPanel(true); drawPanel(box.value); });
