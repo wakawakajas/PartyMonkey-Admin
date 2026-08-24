@@ -1814,6 +1814,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
    pull off the shelf, not what it is going out to. */
 /* .pl-find is shaped for a flex row; here it is a block on its own line */
 #mcSummarySearch{display:block;width:100%;flex:none;margin:8px 0 4px;}
+/* These three carry lists and a sheet, not a question with two answers, so
+   they are given half again the width the ordinary pop-up is shaped for. */
+#mcSummarySheet > .sheet,#mcWhereSheet > .sheet,#mcMadeSheet > .sheet{max-width:630px;}
 .mc-sum-row{display:flex;align-items:center;gap:9px;padding:7px 0;
   border-bottom:1px solid var(--paper-line);}
 /* .sheet's blanket rule stretches every button inside it to a full-width 50px
@@ -16574,12 +16577,16 @@ document.getElementById('loadDesignList').addEventListener('click',e=>{
 // Nothing about the grid is touched: the sheet holds what it holds, and a
 // quantity past that runs onto the next sheet rather than reflowing the
 // layout under a job that is already set up.
-async function addDesignLine(pick,qty){
+// sku: which SKU on a Magic Create batch this line was put on for. Kept on the
+// line because the summary asks "is this SKU on the sheet?" and the answer
+// cannot come from the file name — the artwork is often filed under another
+// name, and Choose… exists precisely for that.
+async function addDesignLine(pick,qty,sku){
   const file=await pick.handle.getFile();
   const dataURL=await fileToImageData(file);
   const img=await loadImage(dataURL);
   const line={id:uid(),name:pick.name,qty:Math.max(1,Math.round(qty)||1),
-    data:dataURL,img,source:{dir:'loadDesignDir',path:pick.path}};
+    data:dataURL,img,sku:sku||'',source:{dir:'loadDesignDir',path:pick.path}};
   state.designs.push(line);
   ensureGridFor(line.qty);
   fitArtToCard('front'); fitArtToCard('back');
@@ -24075,7 +24082,8 @@ function mcRenderSummary(){
   // pressed, so it says so rather than failing on the tap
   body.innerHTML=rows.map(r=>{
     const has=!!designFileForSku(r.sku);
-    const on=mcLineForSku(r.sku);
+    const where=mcWhereIsSku(r.sku);
+    const on=where;
     const shot=r.img
       ? `<img class="mc-sum-shot" src="${escapeHtml(r.img)}" alt="" loading="lazy"
            referrerpolicy="no-referrer"/>`
@@ -24083,7 +24091,8 @@ function mcRenderSummary(){
     // what is on the sheet is read off the sheet itself, so it is still right
     // after the window has been shut and opened again
     const badge=on
-      ? `<span class="mc-sum-on">✓ on the sheet${on.qty!==r.qty?` ×${on.qty}`:''}</span>`
+      ? `<span class="mc-sum-on">✓ on the ${on.on==='gift'?'gift tag':'print'} sheet${
+          on.qty!==r.qty?` ×${on.qty}`:''}</span>`
       : '';
     // Add takes the SKU's own PNG where there is one. Choose is for the rest —
     // and for the times the right artwork is simply filed under another name.
@@ -24119,8 +24128,43 @@ function designFileForSku(sku){
 // sheet rather than remembered, so shutting the summary loses nothing and two
 // ways of taking a design off cannot disagree about what is on.
 function mcLineForSku(sku){
-  const pick=designFileForSku(sku); if(!pick) return null;
+  const key=String(sku||'');
+  // what it was added for beats what the file happens to be called
+  const tagged=state.designs.find(d=>d.sku&&d.sku===key);
+  if(tagged) return tagged;
+  const pick=designFileForSku(key); if(!pick) return null;
   return state.designs.find(d=>d.source&&d.source.path===pick.path)||null;
+}
+// the same question of the gift tag order: tagged with the SKU it was added
+// for, or carrying the design of that name
+function mcGiftLineForSku(sku){
+  const key=String(sku||'');
+  const order=(typeof gtOrder!=='undefined'&&gtOrder)||[];
+  const tagged=order.find(l=>l.sku&&l.sku===key);
+  if(tagged) return tagged;
+  const d=gtDesignForName(key); if(!d) return null;
+  return order.find(l=>l.designId===d.id)||null;
+}
+// where this SKU already is, if anywhere
+function mcWhereIsSku(sku){
+  const p=mcLineForSku(sku); if(p) return {on:'print',line:p,qty:p.qty};
+  const g=mcGiftLineForSku(sku); if(g) return {on:'gift',line:g,qty:g.qty};
+  return null;
+}
+// Which saved template these designs belong on. A folder of designs is one
+// product printed one way, so the template named after that folder is the one
+// — and failing that, one named after the SKU itself. Nothing else is
+// guessed: the wrong template is the wrong card size and the wrong cuts.
+function mcTemplateFor(rows){
+  const rowsArr=rows||[];
+  const rows0=rowsArr[0]; if(!rows0) return null;
+  const named=n=>{
+    const want=String(n||'').trim().toLowerCase();
+    if(!want) return null;
+    return (templateRows||[]).find(t=>String(t.name||'').trim().toLowerCase()===want)||null;
+  };
+  const pick=designFileForSku(rows0.sku);
+  return (pick&&named(pick.folder))||named(rows0.sku)||null;
 }
 // Puts SKUs onto the print sheet at the quantities the batch adds up to, then
 // shows the sheet they made. A SKU already on the sheet is set to the batch's
@@ -24156,17 +24200,28 @@ async function mcAddSkusToSheet(rows){
     refreshSlots();
   }
   showMsg(out,`Putting ${usable.length} design${usable.length===1?'':'s'} on the sheet…`,true);
+  // The layout they are printed on, before any of them are laid into it —
+  // loading a template replaces the design list, so it has to come first.
+  const tpl=mcTemplateFor(usable);
+  let tplName='';
+  if(tpl&&String(selectedTemplate||'')!==String(tpl.id)){
+    await loadTemplate(tpl.id);
+    setSelectedTemplate(tpl.id);
+    document.getElementById('templateSearch').value=tpl.name;
+    tplName=tpl.name;
+    state.designs=[]; state.page=0;      // the template's own list is not this batch's
+  }
   setArtMode('preset',true);
   let added=0,updated=0;
   for(const r of usable){
     const pick=designFileForSku(r.sku);
     const existing=state.designs.find(d=>d.source&&d.source.path===pick.path);
     if(existing){ existing.qty=Math.max(1,Math.round(r.qty)||1); updated++; }
-    else { await addDesignLine(pick,r.qty); added++; }
+    else { await addDesignLine(pick,r.qty,r.sku); added++; }
   }
   setArtMode('preset');
   document.getElementById('mcSummarySheet').classList.remove('open');
-  const note=[`${added} added`,updated?`${updated} updated`:'',
+  const note=[tplName?`on ${tplName}`:'',`${added} added`,updated?`${updated} updated`:'',
     missing.length?`${missing.length} without a PNG: ${missing.slice(0,4).join(', ')}`
       +(missing.length>4?'…':''):'']
     .filter(Boolean).join(' · ');
@@ -24177,8 +24232,11 @@ async function mcAddSkusToSheet(rows){
 // Its own small pop-up rather than the full-screen enlarge: this is a look at
 // what was built and a way to save it, at the sheet's own size.
 let mcMadePage=0;
+// which tool's sheet the pop-up is showing
+let mcMadeMode='print';
+const mcMadePages=()=>mcMadeMode==='gift'?gtPageCount():sheetCount();
 function mcRenderMade(){
-  const n=sheetCount();
+  const n=mcMadePages();
   if(mcMadePage>=n) mcMadePage=Math.max(0,n-1);
   if(mcMadePage<0) mcMadePage=0;
   // sized to the box it sits in, so it is the whole sheet at 100% and never
@@ -24186,22 +24244,35 @@ function mcRenderMade(){
   const stage=document.querySelector('.mc-made-stage');
   const w=Math.max(120,(stage?stage.clientWidth:320)-20);
   const h=Math.max(160,Math.round(window.innerHeight*0.44));
-  const p=paperMm();
+  const gift=mcMadeMode==='gift';
+  const p=gift?{w:gtSheet.paperW,h:gtSheet.paperH}:paperMm();
   // whichever of the two limits the sheet hits first
-  const dim=Math.min(w*Math.max(p.w,p.h)/p.w,h*Math.max(p.w,p.h)/p.h);
-  renderSide('front',document.getElementById('mcMadeCanvas'),Math.max(160,dim),{page:mcMadePage});
+  const dim=Math.max(160,Math.min(w*Math.max(p.w,p.h)/p.w,h*Math.max(p.w,p.h)/p.h));
+  const c=document.getElementById('mcMadeCanvas');
+  if(gift) gtRenderPage(c,mcMadePage,dim,false);
+  else renderSide('front',c,dim,{page:mcMadePage});
   document.getElementById('mcMadePager').style.display=n>1?'':'none';
   document.getElementById('mcMadeLbl').textContent=`SHEET ${mcMadePage+1} OF ${n}`;
   document.getElementById('mcMadePrev').disabled=mcMadePage<=0;
   document.getElementById('mcMadeNext').disabled=mcMadePage>=n-1;
 }
-function mcOpenMade(note,ok){
+function mcOpenMade(note,ok,mode){
+  mcMadeMode=mode==='gift'?'gift':'print';
   mcMadePage=0;
   document.getElementById('mcMadeMsg').innerHTML='';
   document.getElementById('mcMadeSheet').classList.add('open');
-  const n=sheetCount();
+  const gift=mcMadeMode==='gift';
+  const n=mcMadePages();
+  document.querySelector('#mcMadeSheet .sheet-title').textContent=
+    gift?'Gift tag sheet':'Print sheet';
+  document.getElementById('mcMadeDownload').textContent=
+    gift?'⬇ Save gift tag PDF':'⬇ Download front PDF';
+  document.getElementById('mcMadeOpen').textContent=
+    gift?'Open the gift tag builder':'Open the builder';
+  const per=gift?gtSheet.slots.length:state.placeholders.length;
+  const total=gift?gtQueue().length:designTotal();
   document.getElementById('mcMadeTally').textContent=
-    `${designTotal()} cards · ${state.placeholders.length} per sheet · ${n} sheet${n===1?'':'s'}`
+    `${total} ${gift?'tag':'card'}${total===1?'':'s'} · ${per} per sheet · ${n} sheet${n===1?'':'s'}`
     +(note?` · ${note}`:'');
   document.getElementById('mcMadeTally').style.color=ok?'':'var(--rust)';
   mcRenderMade();
@@ -24213,14 +24284,24 @@ document.getElementById('mcMadeSheet').addEventListener('click',e=>{
 });
 document.getElementById('mcMadePrev').addEventListener('click',()=>{mcMadePage--;mcRenderMade();});
 document.getElementById('mcMadeNext').addEventListener('click',()=>{mcMadePage++;mcRenderMade();});
-document.getElementById('mcMadeDownload').addEventListener('click',()=>exportSide('front','mcMadeMsg'));
+document.getElementById('mcMadeDownload').addEventListener('click',()=>{
+  if(mcMadeMode==='gift'){
+    // the gift tag tool's own export, which is on its screen
+    document.getElementById('mcMadeSheet').classList.remove('open');
+    if(mcBatch) mcFromBatch={summary:true};
+    showScreen('tool-gift-tag');
+    setTimeout(()=>document.getElementById('gtExportBtn').click(),120);
+    return;
+  }
+  exportSide('front','mcMadeMsg');
+});
 document.getElementById('mcMadeOpen').addEventListener('click',()=>{
   document.getElementById('mcMadeSheet').classList.remove('open');
   // no line is live on this trip — the sheet belongs to the whole batch — so
   // the batch is what Back is told to come back to, and the summary is what
   // it reopens, because that is the list this came off
   if(mcBatch) mcFromBatch={summary:true};
-  showScreen('tool-custom');
+  showScreen(mcMadeMode==='gift'?'tool-gift-tag':'tool-custom');
 });
 // ---------- print sheet, or gift tag ----------
 // Both tools can take a SKU and both match it by name, so which one is asked
@@ -24277,22 +24358,19 @@ async function mcAddSkusToGiftTag(rows){
     const qty=Math.max(1,Math.round(Number(row.qty)||1));
     // already on the order: set it to the batch's figure rather than doubling,
     // the same rule the print sheet follows
-    const had=gtOrder.find(l=>l.designId===design.id);
-    if(had){ had.qty=qty; updated++; }
-    else { gtOrder.push({id:gtId('l'),designId:design.id,qty,vals:{}}); added++; }
+    const had=gtOrder.find(l=>(l.sku&&l.sku===row.sku)||l.designId===design.id);
+    if(had){ had.qty=qty; had.sku=row.sku; updated++; }
+    else { gtOrder.push({id:gtId('l'),designId:design.id,qty,vals:{},sku:row.sku}); added++; }
   });
   mcWhereRows=null;
   document.getElementById('mcWhereSheet').classList.remove('open');
-  // the batch's ticket back, so Back from the gift tag screen returns here
-  if(mcBatch) mcFromBatch={summary:true};
-  showScreen('tool-gift-tag');
-  await new Promise(r=>setTimeout(r,60));
   gtRenderOrder(); gtDraw();
   const note=[`${added} added`,updated?`${updated} updated`:'',
     missing.length?`${missing.length} with no design of that name: ${missing.slice(0,3).join(', ')}`
       +(missing.length>3?'…':''):''].filter(Boolean).join(' · ');
-  const msg=document.getElementById('gtLibMsg');
-  if(msg) showMsg(msg,note,!missing.length);
+  // the sheet it made, in the pop-up — the same as the print side, rather than
+  // being dropped into the builder with no sight of what was done
+  mcOpenMade(note,!missing.length,'gift');
 }
 function mcSummaryFolderState(){
   const el=document.getElementById('mcSummaryFolderLbl'); if(!el) return;
@@ -24319,12 +24397,21 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
   // stays put — this is an edit to the sheet, not a new sheet to look at
   const del=e.target.closest('[data-mc-sum-del]');
   if(del){
-    const line=mcLineForSku(del.dataset.mcSumDel); if(!line) return;
-    state.designs=state.designs.filter(d=>d.id!==line.id);
+    const sku=del.dataset.mcSumDel;
+    const at=mcWhereIsSku(sku); if(!at) return;
+    if(at.on==='gift'){
+      gtOrder=gtOrder.filter(l=>l.id!==at.line.id);
+      if(typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
+      mcRenderSummary();
+      showMsg(document.getElementById('mcSummaryMsg'),
+        `Took ${sku} off the gift tag sheet.`,true);
+      return;
+    }
+    state.designs=state.designs.filter(d=>d.id!==at.line.id);
     state.page=0;
     renderDesignLines(); refreshArtInputs(); drawAll(); mcRenderSummary();
     showMsg(document.getElementById('mcSummaryMsg'),
-      `Took ${del.dataset.mcSumDel} off the sheet — `
+      `Took ${sku} off the print sheet — `
       +`${designTotal()} card${designTotal()===1?'':'s'} left.`,true);
     return;
   }
@@ -24674,6 +24761,38 @@ function mcCustomBody(it){
       <button class="btn-primary" id="mcSaveLineBtn" style="flex:1 1 150px;">Save to line</button>
     </div>`;
 }
+// The layout and the artwork a line's own name asks for. Same rules the SKU
+// summary uses, so a line worked here and a line added from the summary come
+// out on the same template with the same picture on it.
+async function mcAutoLayoutFor(it,sel){
+  const msg=document.getElementById('mcWinMsg');
+  const names=mcNamesOf(it);
+  // the folder is read off the PNG match, so the folder's template is found
+  // even where the template is not named after the SKU itself
+  let pick=null,sku='';
+  for(const n of names){ const p=designFileForSku(n); if(p){ pick=p; sku=n; break; } }
+  const tpl=mcTemplateFor([{sku:sku||names[0]||''}]);
+  if(!tpl&&!pick) return;
+  if(tpl){
+    const {data,error}=await sb.from('templates').select('data').eq('id',tpl.id).single();
+    if(!error&&data){
+      applyPrintState(data.data);
+      state.orderId=it.order_id;
+      state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
+      ppFillSelects();
+      mcWinLive=true;
+      if(sel) sel.value=tpl.id;
+    }
+  }
+  if(pick){
+    state.designs=[]; setArtMode('preset',true);
+    await addDesignLine(pick,it.qty||1,sku);
+    setArtMode('preset');
+    mcWinLive=true;
+  }
+  if(msg) showMsg(msg,[tpl?`Layout: ${tpl.name}`:'',pick?`Artwork: ${pick.name}`:'']
+    .filter(Boolean).join(' · ')+' — matched by name.',true);
+}
 function mcCustomWire(it){
   mcWinLive=false;
   // both are in the file name, so both are saved the moment they are chosen
@@ -24707,6 +24826,11 @@ function mcCustomWire(it){
     ppFillSelects();
     mcWinLive=true;
     mcApplyArt(it);
+  }else{
+    // Nothing saved on it yet, and the line's own name already says what it
+    // wants: the template named after this SKU's designs folder, and the
+    // <SKU>.png inside it. Found here rather than hunted for on every line.
+    mcAutoLayoutFor(it,sel);
   }
   document.getElementById('mcWinBody').querySelectorAll('[data-mc-art]').forEach(b=>{
     b.addEventListener('click',()=>mcPickArt(it,b.dataset.mcArt));
