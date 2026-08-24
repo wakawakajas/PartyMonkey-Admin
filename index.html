@@ -2326,6 +2326,70 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         </div>
       </details>
     </div></div>
+
+    <!-- The four rules that used to be written into the app and had to be
+         deployed to change. They are how the two shops work, so they are set
+         here and apply to everybody. -->
+    <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
+      <div class="sect-label lg">Rules</div>
+      <p class="hint" style="margin:0 0 10px;">A word has to stand on its own — beside a space,
+        a dash, a dot or a digit, but never beside another letter. So <b>seed</b> catches
+        <i>Basil Seed Kit</i> and leaves <i>Seeded Bread</i> alone. Separate several with
+        commas.</p>
+
+      <label class="field" style="margin-bottom:8px;"><span>PLANT TALKS ORDER FILE NAME</span>
+        <input type="text" id="bundleRulePt" placeholder="PT" autocomplete="off"/></label>
+      <p class="hint" style="margin:-4px 0 12px;">An order file with this in its name is Plant
+        Talks; anything else is PartyMonkey.</p>
+
+      <label class="field" style="margin-bottom:8px;"><span>PLANT TALKS PACKS THESE WORDS</span>
+        <input type="text" id="bundleRuleSeed" placeholder="seed, seeds" autocomplete="off"/></label>
+      <p class="hint" style="margin:-4px 0 12px;">Only lines whose name holds one of these are
+        made into bundles for a Plant Talks order. Everything else on its list stays on the
+        list. Leave it empty and a Plant Talks order packs nothing.</p>
+
+      <label class="field" style="margin-bottom:8px;"><span>MADE TO ORDER WORDS</span>
+        <input type="text" id="bundleRuleNote" placeholder="Custom" autocomplete="off"/></label>
+      <p class="hint" style="margin:-4px 0 12px;">A piece with one of these in its name is
+        tagged <b>made to order</b> while it is packed — printed rather than picked, but still
+        something that goes in the box.</p>
+
+      <div class="toggle-row filter-opt">
+        <span>PartyMonkey packs combinations only</span>
+        <label class="switch"><input type="checkbox" id="bundleRuleCombos"/>
+          <span class="slider"></span></label>
+      </div>
+      <p class="hint" style="margin:6px 0 12px;">On, a row that names a SKU and nothing else
+        stays on the list but is never made into a bundle. Off, it is packed as itself.</p>
+
+      <button class="btn-primary" id="bundleRuleSave" style="width:100%;">Save rules</button>
+      <div id="bundleRuleMsg"></div>
+    </div></div>
+
+    <!-- The same voice the pick list is read in, one for each shop, set here
+         as well so it can be changed without leaving the order. -->
+    <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
+      <div class="sect-label lg">Voice</div>
+      <p class="hint" style="margin:0 0 10px;">What packing reads out loud, and how. This is the
+        same setting the Daily Pick List uses, one for each shop — change it here and the
+        morning's sheets are read that way too. An order is read in its own shop's voice.</p>
+      <details class="fold" style="margin-bottom:8px;">
+        <summary class="fold-head">
+          <span class="sect-label" style="margin:0;">PartyMonkey</span>
+          <span class="hint" style="margin-left:auto;">Open</span>
+          <span class="bundle-chev">&rsaquo;</span>
+        </summary>
+        <div style="margin-top:10px;" id="bundleVoicePm"></div>
+      </details>
+      <details class="fold">
+        <summary class="fold-head">
+          <span class="sect-label" style="margin:0;">Plant Talks</span>
+          <span class="hint" style="margin-left:auto;">Open</span>
+          <span class="bundle-chev">&rsaquo;</span>
+        </summary>
+        <div style="margin-top:10px;" id="bundleVoicePt"></div>
+      </details>
+    </div></div>
   </div>
 
   <!-- BUNDLE SKU — the bundles that came off one order -->
@@ -5003,7 +5067,7 @@ function showScreen(name,viaBack){
   if(name==='macro-studio') refreshMacroStudio();
   if(name==='bundle-sku'){ refreshBundles(); refreshBundleJobs(); }
   if(name==='bundle-order') openBundleOrder();
-  if(name==='bundle-settings') refreshBundles();
+  if(name==='bundle-settings') openBundleSettings();
   // the bubble belongs to the order it starts, and follows nothing else --
   // on that screen it is openBundleOrder that says whether there is anything
   // left to start, so this only takes it away everywhere else
@@ -5483,6 +5547,44 @@ function bundleRowToCombo(row,col){
 // and the floor already knows this one.
 const bundleShopOf=x=>String((x&&x.shop)||'')==='planttalks'?'planttalks':'partymonkey';
 const bundleShopName=v=>v==='planttalks'?'Plant Talks':'PartyMonkey';
+// ---- the rules, as the floor set them ----
+// They were written into the app and had to be deployed to change, which put a
+// word like Custom or PT a day away from whoever noticed it was wrong. One row
+// for the team, read when the screen opens and again whenever the day's jobs
+// are.
+const BUNDLE_RULES_DEFAULT={pt_word:'PT',seed_words:'seed, seeds',
+  made_to_order:'Custom',pm_combos_only:true};
+let bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT);
+const bundleWordList=v=>String(v==null?'':v).split(/[,\n]/).map(x=>x.trim()).filter(Boolean);
+// A word has to stand on its own -- beside a space, a dash, a dot or a digit,
+// but never beside another letter, or September, Receipt and Empty would all
+// quietly become Plant Talks, and Seeded Bread a packet of seeds.
+// Escaped here rather than borrowed from the pick list: this runs as the page
+// is read, and the pick list's own helper is a few thousand lines further down
+// and not yet itself.
+const bundleReEscape=v=>String(v).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+function bundleWordRe(list){
+  const ws=bundleWordList(list).map(bundleReEscape);
+  return ws.length?new RegExp('(^|[^a-z])(?:'+ws.join('|')+')([^a-z]|$)','i'):null;
+}
+let bundleSeedRe=null,bundleNoteRe=null,bundlePtRe=null;
+function bundleRulesReady(){
+  bundleSeedRe=bundleWordRe(bundleRules.seed_words);
+  bundleNoteRe=bundleWordRe(bundleRules.made_to_order);
+  bundlePtRe=bundleWordRe(bundleRules.pt_word);
+}
+bundleRulesReady();
+async function loadBundleRules(){
+  if(!sb) return;
+  try{
+    const {data,error}=await sb.from('bundle_settings').select('*').limit(1);
+    if(error) throw error;
+    const r=(data||[])[0];
+    if(r) bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT,r);
+  }catch(e){ /* not set up yet -- what the app was born with stands */ }
+  bundleRulesReady();
+}
+
 // Nothing crosses between the two shops. A list belongs to the card it was
 // uploaded on, and an order is matched against its own shop's list and no
 // other -- a PartyMonkey line that happens to share a name with a Plant Talks
@@ -5496,14 +5598,17 @@ const bundleShopName=v=>v==='planttalks'?'Plant Talks':'PartyMonkey';
 //
 //   Plant Talks packs seeds, single SKU or combination, and nothing else. The
 //   word has to stand on its own: Seed and Seeds, but not Seeded.
-const BUNDLE_SEED=/\bseeds?\b/i;
-const bundleIsSeed=b=>BUNDLE_SEED.test(String((b&&b.name)||''));
+const bundleIsSeed=b=>!!bundleSeedRe&&bundleSeedRe.test(String((b&&b.name)||''));
+// Which shop an order file is for, by the word its name has to hold.
+const bundleOrderStore=name=>bundlePtRe&&bundlePtRe.test(String(name||''))
+  ?'planttalks':'partymonkey';
 // A plain SKU is the row kept as itself on upload: one piece, its own name.
 // There is nothing else on such a row to tell it from a combination by.
 const bundleIsPlain=b=>(b&&b.subs||[]).length===1
   &&String(b.subs[0].sku||'').trim().toLowerCase()===String(b.name||'').trim().toLowerCase();
 const bundleForOrder=(b,shop)=>bundleShopOf(b)===shop
-  &&(shop==='planttalks'?bundleIsSeed(b):!bundleIsPlain(b));
+  &&(shop==='planttalks'?bundleIsSeed(b)
+    :!(bundleRules.pm_combos_only&&bundleIsPlain(b)));
 const BUNDLE_SHOP_CARDS=[
   {shop:'partymonkey',card:'bundleCatalogueCardPm',btn:'bundleUploadBtnPm',
    msg:'bundleUploadMsgPm',updated:'bundleUpdatedPm'},
@@ -5761,7 +5866,7 @@ async function bundleTakeOrders(file){
       // The file name says which shop this is, so the file name says which
       // list it is read against. A PT order matched against PartyMonkey's
       // list is a box packed out of the wrong catalogue.
-      const shop=plTitleStore(file.name);
+      const shop=bundleOrderStore(file.name);
       const mine=bundleRows.filter(b=>bundleForOrder(b,shop));
       if(!mine.length) throw new Error(shop==='planttalks'
         ? 'no Plant Talks seed lines are on file yet -- upload the Plant Talks '
@@ -5853,6 +5958,53 @@ bundleDropZone('bundleOrdersCard','.pdf,.xlsx,.xls,.csv',bundleTakeOrders);
 document.getElementById('bundleSettingsBtn').addEventListener('click',()=>
   showScreen('bundle-settings'));
 
+// ---- the settings screen: the lists, the rules, and the voice ----
+async function openBundleSettings(){
+  refreshBundles();
+  // The voice editors are the pick list's own, drawn here as well -- the
+  // handlers behind them are bound to the page rather than to that screen, so
+  // a second copy saves the same row the first one does.
+  document.getElementById('bundleVoicePm').innerHTML=plVoiceEditorHtml('partymonkey');
+  document.getElementById('bundleVoicePt').innerHTML=plVoiceEditorHtml('planttalks');
+  await loadBundleRules();
+  renderBundleRules();
+}
+function renderBundleRules(){
+  const set=(id,v)=>{ const el=document.getElementById(id); if(el) el.value=v||''; };
+  set('bundleRulePt',bundleRules.pt_word);
+  set('bundleRuleSeed',bundleRules.seed_words);
+  set('bundleRuleNote',bundleRules.made_to_order);
+  const box=document.getElementById('bundleRuleCombos');
+  if(box) box.checked=!!bundleRules.pm_combos_only;
+}
+// Saved whole and on a press rather than a field at a time: a rule half
+// written is a rule that matches the wrong things, and typing one is exactly
+// when it is half written.
+document.getElementById('bundleRuleSave').addEventListener('click',async()=>{
+  const msg=document.getElementById('bundleRuleMsg');
+  const val=id=>(document.getElementById(id).value||'').trim();
+  const next={pt_word:val('bundleRulePt')||BUNDLE_RULES_DEFAULT.pt_word,
+    seed_words:val('bundleRuleSeed'),
+    made_to_order:val('bundleRuleNote'),
+    pm_combos_only:document.getElementById('bundleRuleCombos').checked};
+  const session=await requireSession(msg); if(!session) return;
+  try{
+    const {error}=await sb.from('bundle_settings')
+      .upsert(Object.assign({id:true,updated_at:new Date().toISOString()},next),
+        {onConflict:'id'});
+    if(error) throw error;
+    bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT,next);
+    bundleRulesReady();
+    renderBundleRules();
+    renderBundles();
+    showMsg(msg,'✓ Saved. Orders read from now on follow these.',true);
+  }catch(e){
+    showMsg(msg,/relation|does not exist|schema cache/i.test(e.message||'')
+      ? 'Run supabase-migration-BUNDLE-RULES.sql in Supabase first.'
+      : 'Could not save: '+escapeHtml(e.message||String(e)),false);
+  }
+});
+
 // What today asks for, combination by combination. The piece count is the
 // combination's own quantity multiplied out, because two of a bundle of ten
 // balloons is twenty balloons and that is what goes in the box.
@@ -5918,7 +6070,7 @@ async function refreshBundleJobs(){
   // at all, and which SKUs are somebody else's job. Read afresh here for the
   // same reason the pick list reads them afresh -- a word added on Settings
   // should be in force by the time anybody picks up a box.
-  try{ await Promise.all([loadPlHidden(),loadPlVoice()]); }catch(e){}
+  try{ await Promise.all([loadPlHidden(),loadPlVoice(),loadBundleRules()]); }catch(e){}
   let orders,jobs,items;
   try{
     [orders,jobs,items]=await Promise.all([
@@ -6229,7 +6381,7 @@ function bundlePieceHidden(piece){ return false; }
 // piece with Custom in its name is made to order; the rest of that list means
 // other things, and none of them mean go and have this printed.
 function bundlePieceNoted(piece){
-  return /custom/i.test(String(piece&&piece.sku||''));
+  return !!bundleNoteRe&&bundleNoteRe.test(String(piece&&piece.sku||''));
 }
 function bundleWanted(j){ return j.pieces.filter(x=>!bundlePieceHidden(x)); }
 // What is packed is one set at a time, so what is read is one set's worth:
@@ -19626,7 +19778,18 @@ let plAdhocOrderStore=null;              // and which shop it went to
 // all quietly become Plant Talks.
 const PL_PT=/(^|[^a-z])pt([^a-z]|$)/i;
 const plTitleStore=t=>PL_PT.test(String(t||''))?'planttalks':'partymonkey';
-const plStore=()=>plTitleStore(plList&&plList.title);
+// While a bundle is being packed, the sheet in hand is that order -- so it is
+// read in that order's shop's voice rather than in whichever pick list was
+// open last.
+function bundleVoiceStore(){
+  if(typeof currentScreen==='undefined') return null;
+  const focus=document.getElementById('bundleFocus');
+  const packing=focus&&focus.classList.contains('open');
+  if(currentScreen!=='bundle-order'&&currentScreen!=='bundle-sku'&&!packing) return null;
+  const o=bundleOrderNow();
+  return o?bundleShopOf(o):null;
+}
+const plStore=()=>bundleVoiceStore()||plTitleStore(plList&&plList.title);
 
 // One list per sheet, whatever is raised off it. A refill and an ad-hoc job
 // are two kinds of work on the same morning's sheet, and splitting them into
