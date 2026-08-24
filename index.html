@@ -280,6 +280,16 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   padding:14px;padding-bottom:calc(14px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch;}
 .modal-scroll canvas{border:1px solid #555;}
 .zoom-btn{background:#333;border:1px solid #555;color:#fff;font-size:17px;min-height:36px;width:38px;border-radius:3px;}
+.zoom-btn:disabled{opacity:.35;}
+/* the sheet pager, kept as one group so it reads apart from the zoom controls */
+.modal-pages{display:flex;align-items:center;gap:6px;padding-right:6px;
+  border-right:1px solid #444;margin-right:2px;}
+.modal-top .btn-primary{flex:0 0 auto;min-height:36px;padding:0 12px;font-size:12px;}
+/* the title gives up its stretch once the bar is carrying this much */
+@media (max-width:560px){
+  .modal-top{gap:6px;flex-wrap:wrap;}
+  .modal-top h4{flex:1 1 100%;}
+}
 /* ---- the mark-up-a-photo screen ----
    It sits above the plain photo viewer (70) because a picture can be opened
    from inside a sheet, and this one is opened while a sheet is still closing.
@@ -1806,6 +1816,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 #mcSummarySearch{display:block;width:100%;flex:none;margin:8px 0 4px;}
 .mc-sum-row{display:flex;align-items:center;gap:10px;padding:8px 0;
   border-bottom:1px solid var(--paper-line);}
+.mc-sum-row .btn-outline{flex:0 0 auto;min-height:32px;padding:0 11px;font-size:12px;}
+.mc-sum-row .btn-outline:disabled{opacity:.4;}
 .mc-sum-row:last-child{border-bottom:0;}
 .mc-sum-main{flex:1;min-width:0;}
 .mc-sum-sku{display:block;font-family:'Space Grotesk',sans-serif;font-weight:700;
@@ -4016,6 +4028,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
           <button type="button" class="btn-outline" id="addDesignLineBtn">＋ Add line</button>
           <button type="button" class="btn-outline" id="loadDesignBtn">📂 Load design</button>
         </div>
+        <button type="button" class="btn-danger" id="clearDesignsBtn" style="width:100%;margin-bottom:6px;">Clear designs</button>
         <div class="calc" id="designTally" style="margin-bottom:14px;"></div>
       </div>
 
@@ -4377,8 +4390,16 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="sheet-title">SKU summary</div>
     <p class="hint" style="margin:0 0 4px;">Every line on this batch, added up by SKU
       and in SKU order — what to pull, not what order it is for.</p>
+    <p class="hint" style="margin:0 0 4px;">Add puts a SKU onto a print sheet at the
+      quantity shown, taking <strong>&lt;SKU&gt;.png</strong> from the designs folder.
+      The sheet opens when they are on it.</p>
     <input type="text" id="mcSummarySearch" class="pl-find" placeholder="🔍 Find a SKU"
            autocomplete="off" aria-label="Find a SKU in this summary"/>
+    <div class="chips" style="margin:8px 0 4px;align-items:center;">
+      <button type="button" class="btn-outline btn-sm" id="mcSummaryAddAll">＋ Add all shown</button>
+      <span class="hint" id="mcSummaryFolderLbl" style="margin:0;"></span>
+    </div>
+    <div id="mcSummaryMsg"></div>
     <div id="mcSummaryBody"></div>
   </div>
 </div>
@@ -4531,12 +4552,21 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 <div class="modal-bg" id="modalBg">
   <div class="modal-top">
     <h4 id="modalTitle">Front</h4>
+    <!-- a job can run to several sheets, so the enlarged view pages through
+         them rather than being stuck on whichever one was on screen -->
+    <span class="modal-pages" id="modalPages" style="display:none;">
+      <button class="zoom-btn" id="modalPrevPage" aria-label="Previous sheet">‹</button>
+      <span class="zoomlbl" id="modalPageLbl">1 / 1</span>
+      <button class="zoom-btn" id="modalNextPage" aria-label="Next sheet">›</button>
+    </span>
     <button class="zoom-btn" id="zoomOut">−</button>
     <span class="zoomlbl" id="zoomLbl">1.0×</span>
     <button class="zoom-btn" id="zoomIn">+</button>
+    <button class="btn-primary btn-sm" id="modalDownload">⬇ PDF</button>
     <button class="close-btn" id="modalClose">×</button>
   </div>
   <div class="modal-scroll"><canvas id="modalCanvas"></canvas></div>
+  <div id="modalMsg" style="padding:0 12px 10px;"></div>
 </div>
 
 <!-- Presets saved on the NAS ("Big TY Card" etc.) picked straight into the
@@ -5348,6 +5378,15 @@ function ensureGridFor(qty){
 // A line with no design yet: pick it from the dropdown on the row. Faster than
 // the folder modal once the folder has been scanned once, which is the whole
 // point of adding several lines in a row.
+// Back to an empty list. Asked first once there is something to lose: the
+// quantities on those lines are somebody's typing, not just a file pick.
+document.getElementById('clearDesignsBtn').addEventListener('click',()=>{
+  if(!state.designs.length) return;
+  const n=state.designs.length;
+  if(!confirm(`Clear ${n} design line${n===1?'':'s'}?\n\nThe designs stay in the folder — only this sheet's list is emptied.`)) return;
+  state.designs=[]; state.page=0;
+  renderDesignLines(); refreshArtInputs(); drawAll();
+});
 document.getElementById('addDesignLineBtn').addEventListener('click',async()=>{
   if(!loadDesignFiles.length){
     const dir=await loadDesignDirGet();
@@ -5395,22 +5434,38 @@ document.getElementById('refMarkLen').addEventListener('input',e=>{
 // ---------- enlarge ----------
 const modalBg=document.getElementById('modalBg');
 const DEFAULT_ENLARGE_ZOOM=3;
-let modalSide='front',modalZoom=DEFAULT_ENLARGE_ZOOM;
+// Its own page, starting from the sheet that was on screen: enlarging sheet 4
+// to look at it and being shown sheet 1 is the wrong sheet, every time.
+let modalSide='front',modalZoom=DEFAULT_ENLARGE_ZOOM,modalPage=0;
 function baseModalDim(){return Math.max(280,Math.min(window.innerWidth-40,window.innerHeight-120));}
 function renderModal(){
-  renderSide(modalSide,document.getElementById('modalCanvas'),baseModalDim()*modalZoom);
+  const n=sheetCount();
+  if(modalPage>=n) modalPage=Math.max(0,n-1);
+  if(modalPage<0) modalPage=0;
+  renderSide(modalSide,document.getElementById('modalCanvas'),baseModalDim()*modalZoom,{page:modalPage});
   document.getElementById('zoomLbl').textContent=modalZoom.toFixed(1)+'×';
+  document.getElementById('modalPages').style.display=n>1?'':'none';
+  document.getElementById('modalPageLbl').textContent=`${modalPage+1} / ${n}`;
+  document.getElementById('modalPrevPage').disabled=modalPage<=0;
+  document.getElementById('modalNextPage').disabled=modalPage>=n-1;
+}
+function openEnlarge(side,page){
+  // opens already magnified — you enlarge to inspect detail, not to see the sheet small
+  modalSide=side; modalZoom=DEFAULT_ENLARGE_ZOOM;
+  modalPage=page!=null?page:clampPage();     // the sheet being looked at, not the first
+  document.getElementById('modalTitle').textContent=side==='front'?'Front':'Back';
+  document.getElementById('modalMsg').innerHTML='';
+  renderModal(); modalBg.classList.add('open');
 }
 document.querySelectorAll('[data-enlarge]').forEach(b=>{
-  b.addEventListener('click',()=>{
-    // opens already magnified — you enlarge to inspect detail, not to see the sheet small
-    modalSide=b.dataset.enlarge;modalZoom=DEFAULT_ENLARGE_ZOOM;
-    document.getElementById('modalTitle').textContent=modalSide==='front'?'Front':'Back';
-    renderModal();modalBg.classList.add('open');
-  });
+  b.addEventListener('click',()=>openEnlarge(b.dataset.enlarge));
 });
 document.getElementById('zoomIn').addEventListener('click',()=>{modalZoom=Math.min(8,modalZoom+0.5);renderModal();});
 document.getElementById('zoomOut').addEventListener('click',()=>{modalZoom=Math.max(0.5,modalZoom-0.5);renderModal();});
+document.getElementById('modalPrevPage').addEventListener('click',()=>{modalPage--;renderModal();});
+document.getElementById('modalNextPage').addEventListener('click',()=>{modalPage++;renderModal();});
+// the same export the sheet's own button runs, from the view you are in
+document.getElementById('modalDownload').addEventListener('click',()=>exportSide(modalSide,'modalMsg'));
 document.getElementById('modalClose').addEventListener('click',()=>modalBg.classList.remove('open'));
 
 // ---------- template library (synced via Supabase) ----------
@@ -16185,8 +16240,10 @@ async function renderSidePdfAll(side,pages,onPage){
     return {imgData,wMm:p.w,hMm:p.h};
   });
 }
-async function exportSide(side){
-  const out=exportMsgEl(side);
+// msgId: where to report. Defaults to the message line under that sheet's own
+// button; the enlarged view passes its own so the result lands where you are.
+async function exportSide(side,msgId){
+  const out=msgId?document.getElementById(msgId):exportMsgEl(side);
   const btn=document.getElementById(side==='front'?'exportFrontBtn':'exportBackBtn');
   const other=document.getElementById(side==='front'?'exportBackBtn':'exportFrontBtn');
   // Whatever the name is built from is asked for before anything is rendered.
@@ -23468,21 +23525,105 @@ function mcRenderSummary(){
       +escapeHtml(q)+'” —</p>';
     return;
   }
-  body.innerHTML=rows.map(r=>`<div class="mc-sum-row">
+  // whether a SKU can be put on a sheet is knowable before the button is
+  // pressed, so it says so rather than failing on the tap
+  body.innerHTML=rows.map(r=>{
+    const has=!!designFileForSku(r.sku);
+    return `<div class="mc-sum-row">
       <span class="mc-sum-main">
         <span class="mc-sum-sku">${escapeHtml(r.sku)}</span>
         ${r.name?`<span class="mc-sum-name">${escapeHtml(r.name)}</span>`:''}
       </span>
       <span class="mc-sum-qty">×${r.qty}</span>
-    </div>`).join('');
+      <button type="button" class="btn-outline btn-sm" data-mc-sum-add="${escapeHtml(r.sku)}"
+        ${has?'':'disabled'} title="${has?`Put ${escapeHtml(r.sku)}.png on a print sheet, ${r.qty} up`
+          :`No ${escapeHtml(r.sku)}.png in the designs folder`}">${has?'Add':'No PNG'}</button>
+    </div>`;}).join('');
 }
-function mcOpenSummary(){
+// <SKU>.png in the designs folder, by that exact name — nothing is guessed,
+// because guessing here prints the wrong card a hundred times.
+function designFileForSku(sku){
+  const want=String(sku||'').trim().toLowerCase();
+  if(!want) return null;
+  return loadDesignFiles.find(f=>
+    /\.png$/i.test(f.name)&&f.name.replace(/\.png$/i,'').trim().toLowerCase()===want)||null;
+}
+// Puts SKUs onto the print sheet at the quantities the batch adds up to, then
+// shows the sheet they made. A SKU already on the sheet is set to the batch's
+// figure rather than doubled — the sheet is meant to mirror the batch.
+async function mcAddSkusToSheet(rows){
+  const out=document.getElementById('mcSummaryMsg');
+  const usable=rows.filter(r=>designFileForSku(r.sku));
+  const missing=rows.filter(r=>!designFileForSku(r.sku)).map(r=>r.sku);
+  if(!usable.length){
+    showMsg(out,missing.length
+      ? `No PNG found for ${missing.length===1?escapeHtml(missing[0]):missing.length+' of these SKUs'}. `
+        +'Check the designs folder under Load design.'
+      : 'Nothing to add.',false);
+    return;
+  }
+  showMsg(out,`Putting ${usable.length} design${usable.length===1?'':'s'} on the sheet…`,true);
+  setArtMode('preset',true);
+  let added=0,updated=0;
+  for(const r of usable){
+    const pick=designFileForSku(r.sku);
+    const existing=state.designs.find(d=>d.source&&d.source.path===pick.path);
+    if(existing){ existing.qty=Math.max(1,Math.round(r.qty)||1); updated++; }
+    else { await addDesignLine(pick,r.qty); added++; }
+  }
+  setArtMode('preset');
+  document.getElementById('mcSummarySheet').classList.remove('open');
+  // onto the sheet they have just built, and open on it magnified so the
+  // pages can be looked through and saved from there
+  showScreen('tool-custom');
+  await new Promise(r=>setTimeout(r,60));      // let the canvases get their size back
+  openEnlarge('front',0);
+  const note=[`${added} added`,updated?`${updated} updated`:'',
+    missing.length?`${missing.length} without a PNG: ${missing.slice(0,4).join(', ')}`
+      +(missing.length>4?'…':''):'']
+    .filter(Boolean).join(' · ');
+  showMsg(document.getElementById('modalMsg'),
+    `${designTotal()} cards over ${sheetCount()} sheet${sheetCount()===1?'':'s'} · ${note}`,
+    !missing.length);
+}
+function mcSummaryFolderState(){
+  const el=document.getElementById('mcSummaryFolderLbl'); if(!el) return;
+  el.textContent=loadDesignFiles.length
+    ? `${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'} in the folder`
+    : 'No designs folder chosen — set one under Load design.';
+}
+async function mcOpenSummary(){
   document.getElementById('mcSummarySearch').value='';   // a fresh look, not the last search
-  mcRenderSummary();
+  document.getElementById('mcSummaryMsg').innerHTML='';
   document.getElementById('mcSummarySheet').classList.add('open');
+  mcRenderSummary();
+  // the folder is what says which SKUs can be added, so it is read on the way in
+  if(!loadDesignFiles.length){
+    const dir=await loadDesignDirGet();
+    if(dir&&await loadDesignDirOk(dir,false)){ await loadDesignRescan(); mcRenderSummary(); }
+  }
+  mcSummaryFolderState();
 }
 document.getElementById('mcSummaryBtn').addEventListener('click',mcOpenSummary);
 document.getElementById('mcSummarySearch').addEventListener('input',mcRenderSummary);
+document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
+  const b=e.target.closest('[data-mc-sum-add]'); if(!b||b.disabled) return;
+  const row=mcSummaryRows().find(r=>String(r.sku)===b.dataset.mcSumAdd); if(!row) return;
+  b.disabled=true;
+  await mcAddSkusToSheet([row]);
+});
+document.getElementById('mcSummaryAddAll').addEventListener('click',async()=>{
+  const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
+  const all=mcSummaryRows();
+  const rows=q?all.filter(r=>
+    String(r.sku).toLowerCase().includes(q)||String(r.name||'').toLowerCase().includes(q)):all;
+  if(!rows.length) return;
+  const n=rows.filter(r=>designFileForSku(r.sku)).length;
+  if(!n){ showMsg(document.getElementById('mcSummaryMsg'),
+    'None of these have a matching PNG in the designs folder.',false); return; }
+  if(!confirm(`Put ${n} design${n===1?'':'s'} on a print sheet?`)) return;
+  await mcAddSkusToSheet(rows);
+});
 document.getElementById('mcSummaryClose').addEventListener('click',()=>
   document.getElementById('mcSummarySheet').classList.remove('open'));
 document.getElementById('mcSummarySheet').addEventListener('click',e=>{
