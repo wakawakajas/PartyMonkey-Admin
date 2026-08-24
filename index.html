@@ -17173,21 +17173,30 @@ const gtPiguFolderOf=d=>{
 // Choosing a design is choosing what is being printed; the shape it is cut to
 // follows from it. Applies that folder's cutting file unless the sheet is on
 // it already.
-async function gtShapeForDesign(d){
+// The shape no longer takes over the whole order — a line goes onto its own
+// shape's sheets and the others keep theirs. What this does is make sure that
+// shape is in hand, so the sheets can be counted, and then show the sheet the
+// new line actually landed on: its own, where the shape is new to the order,
+// or the one that shape was already running on.
+async function gtShapeForDesign(d,lineId){
   const folder=gtPiguFolderOf(d); if(!folder) return;
   await gtFolderShapesGet();
   const path=gtFolderShapes[folder];
-  if(!path||gtSheet.layoutFile===path) return;
+  if(!path) return;
   const msg=document.getElementById('gtLibMsg');
-  const file=await gtShapeFile(path);
-  if(!file){ if(msg) showMsg(msg,`${folder}'s shape (${path.split('/').pop()}) is not in the folder any more.`,false); return; }
-  let text=''; try{ text=await file.text(); }catch(e){}
-  if(!gtApplyCut(file,path,text)){
-    if(msg) showMsg(msg,`No shapes found in ${path.split('/').pop()}.`,false); return;
+  const known=gtShapeSlots.has(path)||gtSheet.layoutFile===path;
+  if(!known){
+    const file=await gtShapeFile(path);
+    if(!file){ if(msg) showMsg(msg,`${folder}'s shape (${path.split('/').pop()}) is not in the folder any more.`,false); return; }
+    if(!await gtShowShape(path)){
+      if(msg) showMsg(msg,`No shapes found in ${path.split('/').pop()}.`,false); return;
+    }
+    await gtSaveLib();
+    gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots();
   }
-  await gtSaveLib();
-  gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
-  if(msg) showMsg(msg,`✓ ${folder} — sheet cut to ${path.split('/').pop()}.`,true);
+  const at=lineId?gtFirstSlotOf(lineId):null;
+  if(at) await gtGoPage(at.page); else gtDraw();
+  if(msg&&!known) showMsg(msg,`✓ ${folder} — its own sheet, cut to ${path.split('/').pop()}.`,true);
 }
 // ---------- the settings screen ----------
 function gtPiguState(){
@@ -17618,19 +17627,120 @@ function gtStrokeSlot(ctx,slot,sc){
 // ---------- the sheet ----------
 // Every tag the order asks for, in the order it was keyed. One entry per
 // physical tag — the sheet does not care which line it came from.
-function gtQueue(){
+function gtQueue(lines){
   const out=[];
-  gtOrder.forEach(l=>{
+  (lines||gtOrder).forEach(l=>{
     if(!gtDesign(l.designId)) return;
     const n=Math.max(0,Math.floor(Number(l.qty)||0));
     for(let i=0;i<n;i++) out.push(l);
   });
   return out;
 }
+
+// ---------- one order, several shapes ----------
+// A tag is cut to the shape its design belongs to, and two shapes cannot come
+// off the same sheet. So the order is grouped by shape, in the order the
+// shapes first appear on it, and each group runs onto as many sheets as its
+// own quantities need. A line added on a shape already in the order joins that
+// shape's sheets rather than starting another.
+//
+// gtSheet stays what it always was — the sheet on screen — so everything that
+// draws, zooms, hit-tests or edits placeholders goes on reading it. What is
+// new is that turning the page can change which shape that is.
+let gtDefaultShape=null;          // where lines whose design names no shape go
+const gtShapeSlots=new Map();     // cut path -> {slots,paperW,paperH,layout}
+function gtBaseShape(){
+  if(gtDefaultShape==null) gtDefaultShape=gtSheet.layoutFile||'';
+  return gtDefaultShape;
+}
+// the shape a line is cut to: the one its design's folder names, or the
+// order's own where the design names none
+function gtShapeOfLine(l){
+  const d=gtDesign(l&&l.designId);
+  const folder=d?gtPiguFolderOf(d):'';
+  const mapped=folder?gtFolderShapes[folder]:'';
+  return mapped||gtBaseShape();
+}
+// the shapes on this order, in the order they first appear, with their lines
+function gtShapeGroups(){
+  const seen=new Map();
+  gtOrder.forEach(l=>{
+    if(!gtDesign(l.designId)) return;
+    const shape=gtShapeOfLine(l);
+    if(!seen.has(shape)) seen.set(shape,[]);
+    seen.get(shape).push(l);
+  });
+  if(!seen.size) seen.set(gtBaseShape(),[]);
+  return [...seen.entries()].map(([shape,lines])=>({shape,lines}));
+}
+// what is on each sheet of the whole order: its shape, its placeholders, and
+// the slice of that shape's queue it carries
+function gtPagePlan(){
+  const out=[];
+  gtShapeGroups().forEach(g=>{
+    const sh=gtShapeSlots.get(g.shape);
+    // the shape on screen is read live, so placeholder edits show at once
+    const slots=(g.shape===gtSheet.layoutFile||!sh)?gtSheet.slots:sh.slots;
+    const per=slots.length;
+    const q=gtQueue(g.lines);
+    const pages=per?Math.max(1,Math.ceil(q.length/per)):(q.length?1:1);
+    for(let p=0;p<pages;p++)
+      out.push({shape:g.shape,slots,per,queue:q,start:p*per,of:pages,at:p,lines:g.lines});
+  });
+  return out;
+}
 const gtPageCount=()=>{
-  const per=gtSheet.slots.length; if(!per) return 0;
-  return Math.max(1,Math.ceil(gtQueue().length/per));
+  const plan=gtPagePlan();
+  if(plan.length===1&&!plan[0].per) return gtSheet.slots.length?1:0;
+  return plan.length;
 };
+// the plan entry for the sheet on screen
+const gtPageAt=p=>{ const plan=gtPagePlan(); return plan[Math.max(0,Math.min(plan.length-1,p))]||null; };
+// Puts the sheet on screen onto a shape, keeping each shape's placeholders as
+// they were left — nudged, resized or dropped — rather than rebuilding them
+// every time the page turns past one.
+async function gtShowShape(path){
+  if(path===gtSheet.layoutFile) return true;
+  // the shape being left keeps its placeholders and its paper
+  if(gtSheet.layoutFile)
+    gtShapeSlots.set(gtSheet.layoutFile,{slots:gtSheet.slots,layout:gtLayout,
+      paperW:gtSheet.paperW,paperH:gtSheet.paperH,
+      layoutW:gtSheet.layoutW,layoutH:gtSheet.layoutH,
+      layoutX:gtSheet.layoutX,layoutY:gtSheet.layoutY});
+  const had=gtShapeSlots.get(path);
+  if(had){
+    gtSheet.layoutFile=path; gtLayout=had.layout; gtLayoutFrom=path;
+    gtSheet.slots=had.slots;
+    gtSheet.paperW=had.paperW; gtSheet.paperH=had.paperH;
+    gtSheet.layoutW=had.layoutW; gtSheet.layoutH=had.layoutH;
+    gtSheet.layoutX=had.layoutX; gtSheet.layoutY=had.layoutY;
+    return true;
+  }
+  if(!path) return false;
+  const file=await gtShapeFile(path);
+  if(!file) return false;
+  let text=''; try{ text=await file.text(); }catch(e){ return false; }
+  if(!gtApplyCut(file,path,text)) return false;   // builds slots and paper
+  gtShapeSlots.set(path,{slots:gtSheet.slots,layout:gtLayout,
+    paperW:gtSheet.paperW,paperH:gtSheet.paperH,
+    layoutW:gtSheet.layoutW,layoutH:gtSheet.layoutH,
+    layoutX:gtSheet.layoutX,layoutY:gtSheet.layoutY});
+  return true;
+}
+// Turning to a sheet of another shape puts that shape on screen first. Async,
+// because a shape not yet used has to be read off the folder; gtDraw stays
+// synchronous, so this is what the page buttons and the export loop call.
+async function gtGoPage(p){
+  const plan=gtPagePlan();
+  const at=Math.max(0,Math.min(plan.length-1,p));
+  const want=plan[at];
+  if(want&&want.shape!==gtSheet.layoutFile){
+    await gtShowShape(want.shape);
+    gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots();
+  }
+  gtPage=at;
+  gtDraw();
+}
 function gtFit(iw,ih,bw,bh){
   const s=Math.min(bw/iw,bh/ih);
   const w=iw*s,h=ih*s;
@@ -17835,9 +17945,12 @@ function gtRenderPage(canvas,page,maxDim,forExport,view){
   // cut lines and holes above — it is artwork, not something to cut by
   const base=gtBaseRect();
   if(base) ctx.drawImage(gtBaseImg,base.x*sc,base.y*sc,base.w*sc,base.h*sc);
+  // this sheet's own shape and its own slice of that shape's queue — the page
+  // number counts across the whole order, not within one shape
+  const plan=gtPageAt(page);
   const per=S.slots.length; if(!per) return;
-  const q=gtQueue();
-  const start=page*per;
+  const q=plan?plan.queue:gtQueue();
+  const start=plan?plan.start:page*per;
   S.slots.forEach((slot,i)=>{
     const line=q[start+i]; if(!line) return;
     gtDrawTag(ctx,line,slot.x,slot.y,slot.w,slot.h,sc,forExport);
@@ -17890,12 +18003,19 @@ let gtZoomScale=1;                 // 1 is the whole sheet; 8 is eight times clo
 let gtZoomAt=null;                 // what the window is centred on, in mm
 const GT_ZOOM_MAX=60;
 // where a line's first tag falls: which sheet, and which placeholder on it
+// Where a line first lands, counted across every shape's sheets rather than
+// within one — the page number the buttons use runs over the whole order.
 function gtFirstSlotOf(lineId){
-  const per=gtSheet.slots.length;
-  if(!per) return null;
-  const i=gtQueue().findIndex(l=>l.id===lineId);
-  if(i<0) return null;
-  return {page:Math.floor(i/per),slot:i%per};
+  const plan=gtPagePlan();
+  for(let p=0;p<plan.length;p++){
+    const at=plan[p];
+    if(!at.per) continue;
+    for(let i=0;i<at.per;i++){
+      const line=at.queue[at.start+i];
+      if(line&&line.id===lineId) return {page:p,slot:i};
+    }
+  }
+  return null;
 }
 // how close a placeholder has to be looked at to fill the window. The window
 // keeps the sheet's own shape, so a tag of another shape fills it the way it
@@ -17927,9 +18047,15 @@ function gtZoomSlotTo(i){
   gtZoomOn=true;
   return true;
 }
-function gtZoomTo(lineId){
+async function gtZoomTo(lineId){
   const at=gtFirstSlotOf(lineId);
   if(!at) return;
+  // that line may live on another shape's sheet, so put that shape up first
+  const want=gtPagePlan()[at.page];
+  if(want&&want.shape!==gtSheet.layoutFile){
+    await gtShowShape(want.shape);
+    gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots();
+  }
   gtPage=at.page;
   gtZoomSlotTo(at.slot);
   gtDraw();
@@ -17949,13 +18075,12 @@ function gtZoomBy(mul,about){
   gtZoomScale=z; gtZoomOn=true;
   gtDraw();
 }
-document.getElementById('gtZoomBtn').addEventListener('click',()=>{
+document.getElementById('gtZoomBtn').addEventListener('click',async()=>{
   if(gtZoomOn){ gtZoomOn=false; gtZoomScale=1; gtDraw(); return; }
   // straight to the tag being worked on, and to the first one — bottom left —
   // when no line has been picked yet
-  const at=gtSelLine?gtFirstSlotOf(gtSelLine):null;
-  if(at) gtPage=at.page;
-  gtZoomSlotTo(at?at.slot:0);
+  if(gtSelLine&&gtFirstSlotOf(gtSelLine)){ await gtZoomTo(gtSelLine); return; }
+  gtZoomSlotTo(0);
   gtDraw();
 });
 document.getElementById('gtZoomInBtn').addEventListener('click',()=>gtZoomBy(1.4));
@@ -18006,15 +18131,25 @@ function gtDraw(){
   document.getElementById('gtZoomOutBtn').disabled=!gtZoomOn;
   zb.classList.toggle('on',gtZoomOn);
   zb.disabled=!gtSheet.slots.length;
+  // where several shapes are on the order, the sheet says which one it is and
+  // where it sits among that shape's own sheets
+  const here=gtPageAt(gtPage);
+  const groups=gtShapeGroups();
+  const which=(groups.length>1&&here)
+    ? ` · ${(here.shape.split('/').pop()||'no shape').replace(/\.svg$/i,'').toUpperCase()}`
+      +(here.of>1?` ${here.at+1}/${here.of}`:'')
+    : '';
   document.getElementById('gtPageLbl').textContent=
     (pages?(gtZoomOn?`SHEET ${gtPage+1} · ×${gtZoomScale.toFixed(1)}`
                     :`SHEET ${gtPage+1} OF ${pages}`):'SHEET')
+    +which
     +(gtLock?` · HELD TO ${(gtLock.name||'THAT TEXT').toUpperCase()}`:'');
   document.getElementById('gtPrevPageBtn').disabled=gtPage<=0;
   document.getElementById('gtNextPageBtn').disabled=gtPage>=pages-1;
   const per=S.slots.length, q=gtQueue().length;
   document.getElementById('gtOrderCalc').innerHTML=
-    `${q} tag${q===1?'':'s'} · ${per} per sheet · ${pages} sheet${pages===1?'':'s'}`;
+    `${q} tag${q===1?'':'s'} · ${per} per sheet · ${pages} sheet${pages===1?'':'s'}`
+    +(groups.length>1?` · ${groups.length} shapes`:'');
   const sc=document.getElementById('gtSheetCalc');
   sc.innerHTML=per
     ? `${per} placeholder${per===1?'':'s'} on the sheet`
@@ -18055,7 +18190,9 @@ let gtHeld=null, gtLock=null;
   };
   const hit=p=>{
     const per=gtSheet.slots.length; if(!per||!p) return null;
-    const q=gtQueue(), start=gtPage*per;
+    // this sheet's own shape and slice, the same ones it was drawn from
+    const at=gtPageAt(gtPage);
+    const q=at?at.queue:gtQueue(), start=at?at.start:gtPage*per;
     for(let i=0;i<per;i++){
       const slot=gtSheet.slots[i], line=q[start+i];
       if(!line) continue;
@@ -18479,7 +18616,7 @@ document.getElementById('gtOrderList').addEventListener('click',e=>{
     line.designId=d.id; line.vals={};
     gtCurrentDesign=d;
     gtRenderOrder(); gtDraw();
-    gtShapeForDesign(d);            // the shape this one is cut to, if it has one
+    gtShapeForDesign(d,line.id);    // onto that shape's sheets, if it names one
     showScreen('tool-gift-tag-design');
     return;
   }
@@ -18488,7 +18625,7 @@ document.getElementById('gtOrderList').addEventListener('click',e=>{
   gtCloseDesignPanels(null);
   gtAskAge(line);
   gtRenderOrder(); gtDraw();
-  gtShapeForDesign(gtDesign(line.designId));
+  gtShapeForDesign(gtDesign(line.designId),line.id);
 });
 document.addEventListener('click',e=>{
   if(!e.target.closest('#gtOrderList')) gtCloseDesignPanels(null);
@@ -18551,8 +18688,8 @@ document.getElementById('gtAddLineBtn').addEventListener('click',()=>{
   gtOrder.push({id:gtId('l'),designId:'',qty:1,vals:{}});
   gtRenderOrder(); gtDraw();
 });
-document.getElementById('gtPrevPageBtn').addEventListener('click',()=>{ gtPage=Math.max(0,gtPage-1); gtDraw(); });
-document.getElementById('gtNextPageBtn').addEventListener('click',()=>{ gtPage=Math.min(gtPageCount()-1,gtPage+1); gtDraw(); });
+document.getElementById('gtPrevPageBtn').addEventListener('click',()=>{ gtGoPage(gtPage-1); });
+document.getElementById('gtNextPageBtn').addEventListener('click',()=>{ gtGoPage(gtPage+1); });
 
 // ---------- canvas and placeholder controls ----------
 // The sheet size only rearranges a grid; with a cutting file the shapes hold
@@ -19718,13 +19855,25 @@ document.getElementById('gtExportBtn').addEventListener('click',async()=>{
   showMsg(out,`Rendering ${pages} sheet(s) at print resolution…`,true);
   try{
     const S=gtSheet;
-    const px=Math.min(6000,Math.round(Math.max(S.paperW,S.paperH)/25.4*300));
+    // where the order runs over several shapes each sheet is rendered on its
+    // own, so the page carries that shape's placeholders and its paper size
+    const wasShape=S.layoutFile, wasPage=gtPage;
+    const plan=gtPagePlan();
     const bytes=await gtBuildPdf(pages,async i=>{
+      const at=plan[i];
+      if(at&&at.shape!==S.layoutFile) await gtShowShape(at.shape);
+      const px=Math.min(6000,Math.round(Math.max(S.paperW,S.paperH)/25.4*300));
       const c=document.createElement('canvas');
       gtRenderPage(c,i,px,true);          // cut lines and holes are preview furniture
       const ctx=c.getContext('2d');
-      return {imgData:ctx.getImageData(0,0,c.width,c.height),wMm:S.paperW,hMm:S.paperH};
+      const out={imgData:ctx.getImageData(0,0,c.width,c.height),wMm:S.paperW,hMm:S.paperH};
+      setTimeout(()=>{ c.width=c.height=0; },0);
+      return out;
     });
+    // back to the sheet that was on screen before the run
+    if(S.layoutFile!==wasShape) await gtShowShape(wasShape);
+    gtPage=wasPage;
+    gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
     const filename=`Gift Tag_${gtFinish}.pdf`;
     downloadBlob(new Blob([bytes],{type:'application/pdf'}),filename);
     showMsg(out,`✓ Downloaded ${filename} — ${pages} sheet(s)`,true);
