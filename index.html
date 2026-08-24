@@ -3927,7 +3927,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="card-body">
       <p class="hint">Repeated into every placeholder — 20 placeholders gives 20 copies, centred in each card. Set width and height independently — the aspect ratio is not locked.</p>
       <div class="chips" style="margin-bottom:10px;">
-        <button type="button" class="chip chip-state" id="presetNameCard">Name Card 89 × 54</button>
+        <button type="button" class="chip chip-state on" id="presetNameCard" data-preset-id="nameCard">Name Card 89 × 54</button>
+        <button type="button" class="chip chip-state" id="presetMiniTY" data-preset-id="miniTY">Mini TY Card 95 × 65</button>
       </div>
       <button type="button" class="btn-outline" id="loadDesignBtn" style="width:100%;margin-bottom:14px;">📂 Load design</button>
       <div class="art-sides" style="margin-bottom:14px;">
@@ -4494,8 +4495,11 @@ const state={
   foldOverlay:false,
   refMark:{enabled:true,offsetMm:5,lenMm:4},
   foldLine:{enabled:false},
-  final:{front:{data:null,img:null,name:''},back:{data:null,img:null,name:''}},
+  final:{front:{data:null,img:null,name:'',source:null},back:{data:null,img:null,name:'',source:null}},
   art:{front:{wMm:0,hMm:0},back:{wMm:0,hMm:0}},
+  // whichever preset chip is active — the default (place card holder size)
+  // until something else is picked, or saved with a template
+  presetSize:{id:'nameCard',label:'Name Card 89 × 54',wMm:89,hMm:54},
   bleed:{enabled:true,mm:2.5},
   rotate:{front:0,back:0},
   orderId:'',   // per job, not part of a saved template — names the exported files
@@ -4546,13 +4550,16 @@ async function shrink(dataURL,maxPx,q){
   return c.toDataURL('image/jpeg',q);
 }
 // however the artwork arrived — chosen, or pasted
-async function useArtFile(group,side,file){
+// source: {dir:'loadDesignDir',path} when the file came off the NAS presets
+// folder — kept so a template can point back at the same file later. A plain
+// Upload has no reusable path, so it's left null.
+async function useArtFile(group,side,file,source){
   const infoEl=document.getElementById('finalInfo'+(side==='front'?'Front':'Back'));
   infoEl.textContent='Loading…';
   try{
     const dataURL=await fileToImageData(file);
     const img=await loadImage(dataURL);
-    state[group][side]={data:dataURL,img,name:file.name};
+    state[group][side]={data:dataURL,img,name:file.name,source:source||null};
     fitArtToCard(side);
     refreshSlots();refreshArtInputs();drawAll();
   }catch(err){ infoEl.textContent=(err&&err.message)||'Could not read that file'; }
@@ -5002,11 +5009,22 @@ document.querySelectorAll('#bleedPresets [data-bleed]').forEach(b=>{
     refreshArtInputs(); drawAll();
   });
 });
-// a standard business card, applied to both sides at once
-const NAME_CARD={wMm:89,hMm:54};
-document.getElementById('presetNameCard').addEventListener('click',()=>{
-  ['front','back'].forEach(s=>{ state.art[s].wMm=NAME_CARD.wMm; state.art[s].hMm=NAME_CARD.hMm; });
-  refreshArtInputs(); drawAll();
+// preset card sizes, applied to both sides at once. "Name Card" is the place
+// card holder size — the default until a template says otherwise or another
+// preset is picked.
+const PRESET_SIZES={
+  nameCard:{id:'nameCard',label:'Name Card 89 × 54',wMm:89,hMm:54,btn:'presetNameCard'},
+  miniTY:{id:'miniTY',label:'Mini TY Card 95 × 65',wMm:95,hMm:65,btn:'presetMiniTY'}
+};
+function applyPresetSize(id,skipDraw){
+  const p=PRESET_SIZES[id]; if(!p) return;
+  state.presetSize=p;
+  ['front','back'].forEach(s=>{ state.art[s].wMm=p.wMm; state.art[s].hMm=p.hMm; });
+  Object.values(PRESET_SIZES).forEach(o=>document.getElementById(o.btn).classList.toggle('on',o.id===id));
+  if(!skipDraw){ refreshArtInputs(); drawAll(); }
+}
+Object.values(PRESET_SIZES).forEach(p=>{
+  document.getElementById(p.btn).addEventListener('click',()=>applyPresetSize(p.id));
 });
 document.getElementById('refMarkToggle').addEventListener('change',e=>{
   state.refMark.enabled=e.target.checked;drawAll();
@@ -15284,8 +15302,13 @@ async function saveTemplate(){
   btn.disabled=true;btn.textContent='Saving…';
   try{
     readLayoutInputs();
+    // the design only carries over if it came off the NAS presets folder —
+    // a plain Upload has no reusable path to point the next load back at
+    const design=state.final.front.source
+      ? {path:state.final.front.source.path,name:state.final.front.name} : null;
     const meta={name,paper:state.paper,layout:state.layout,placeholders:state.placeholders,
-      showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate};
+      showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate,
+      presetSize:state.presetSize,design};
     // yours by that name, not anybody's — saving overwrites your own copy and
     // never touches a colleague's, so somebody else's "A6 postcard" must not
     // make this look like an existing one
@@ -15325,9 +15348,27 @@ function applyPrintState(meta,name){
   if(meta.bleed) state.bleed=Object.assign(state.bleed,meta.bleed);
   if(meta.shift){ state.shift.front=Object.assign(state.shift.front,meta.shift.front); state.shift.back=Object.assign(state.shift.back,meta.shift.back); }
   if(meta.rotate){ state.rotate.front=meta.rotate.front||0; state.rotate.back=meta.rotate.back||0; }
+  if(meta.presetSize&&meta.presetSize.wMm&&meta.presetSize.hMm){
+    state.presetSize=meta.presetSize;
+    const known=PRESET_SIZES[meta.presetSize.id];
+    Object.values(PRESET_SIZES).forEach(o=>document.getElementById(o.btn).classList.toggle('on',!!known&&o.id===meta.presetSize.id));
+    ['front','back'].forEach(s=>{ state.art[s].wMm=meta.presetSize.wMm; state.art[s].hMm=meta.presetSize.hMm; });
+  }
   if(name!==undefined) document.getElementById('templateName').value=meta.name||name;
   document.getElementById('artOrderId').value=state.orderId||'';
   renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();drawAll();
+  // the design, if any, loads separately and after — a NAS file read shouldn't
+  // hold up the rest of the template landing
+  if(meta.design&&meta.design.path){
+    (async()=>{
+      const file=await loadDesignFileByPath(meta.design.path);
+      if(file){
+        await useArtFile('final','front',file,{dir:'loadDesignDir',path:meta.design.path});
+      }else{
+        showMsg(msgEl,`Template loaded — its design (${meta.design.name||meta.design.path}) isn't reachable. Choose the NAS folder or use Load design.`,false);
+      }
+    })();
+  }
 }
 async function loadTemplate(id){
   if(!sb){showMsg(msgEl,'Template sync unavailable — check your connection.',false);return;}
@@ -15612,6 +15653,21 @@ async function loadDesignScan(dir,prefix){
   }
   return out;
 }
+// walks straight to a known path (e.g. one saved with a template) rather
+// than rescanning the whole folder — null if the folder isn't connected or
+// the file is no longer there
+async function loadDesignFileByPath(path){
+  const dir=await loadDesignDirGet();
+  if(!dir||!await loadDesignDirOk(dir,false)) return null;
+  const parts=String(path||'').split('/').filter(Boolean);
+  if(!parts.length) return null;
+  try{
+    let cur=dir;
+    for(let i=0;i<parts.length-1;i++) cur=await cur.getDirectoryHandle(parts[i]);
+    const fh=await cur.getFileHandle(parts[parts.length-1]);
+    return await fh.getFile();
+  }catch(e){ return null; }
+}
 async function loadDesignRescan(){
   loadDesignFiles=[];
   const dir=await loadDesignDirGet();
@@ -15714,7 +15770,7 @@ document.getElementById('loadDesignConfirmBtn').addEventListener('click',async()
     const file=await loadDesignSelected.handle.getFile();
     // a clean canvas each time — refit + regenerate, the same steps behind the
     // Reset button and Generate placeholder grid
-    await useArtFile('final','front',file);
+    await useArtFile('final','front',file,{dir:'loadDesignDir',path:loadDesignSelected.path});
     const g=computeGridForQty(qty);
     document.getElementById('gridCols').value=g.cols;
     document.getElementById('gridRows').value=g.rows;
