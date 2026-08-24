@@ -5256,6 +5256,9 @@ function showScreen(name,viaBack){
   if(name==='magic-batch') mcOpenBatch();
   // the batch's live channel belongs to the batch, and to nothing after it
   if(name!=='magic-batch') mcUnwatch();
+  // a batch that lent its sheet to the Gift Tag screen takes it back on
+  // the way out, whichever way somebody leaves
+  if(name!=='tool-gift-tag'&&name!=='tool-gift-tag-design') mcGtReturn();
   if(name==='tool-gift-tag-design') gtDesignOpen();
   if(name==='shipment') refreshShipmentList(); else if(selectMode) exitSelectMode();
   if(name==='shipment-detail') refreshOrderDetail();
@@ -22043,6 +22046,11 @@ function mcWinRender(){
     </div>`;
   const body=t?t.body(it):'<p class="hint" style="margin:12px 0 0;">Pick a tile above to '
     +'work on this line, or leave it as it is and mark it done from the list.</p>';
+  // whatever the last render hung on the document goes with it: the body is
+  // replaced whole, and a listener bound to an element that has gone would
+  // otherwise keep firing for the rest of the session
+  const oldCombo=document.getElementById('mcGtCombo');
+  if(oldCombo&&oldCombo._mcAway) document.removeEventListener('pointerdown',oldCombo._mcAway);
   document.getElementById('mcWinBody').innerHTML=head+picker+body+'<div id="mcWinMsg"></div>';
   document.getElementById('mcPick').addEventListener('click',async e=>{
     const b=e.target.closest('[data-mc-pick]'); if(!b) return;
@@ -22197,6 +22205,12 @@ async function mcApplyArt(it){
 }
 
 // ---------- the Gift Tag tile ----------
+// A library of a few hundred designs is not a list anybody scrolls, so the
+// design is searched for by name the way templates and the shape folder are.
+// The words are all of them, set the way the Gift Tag screen sets them, and
+// what cannot be done in a panel this size is a button away on the screen
+// that can.
+let mcGtPick='';                 // the design id chosen in the window
 function mcGiftBody(it){
   const designs=(typeof gtLib!=='undefined'&&gtLib.designs)||[];
   if(!designs.length){
@@ -22205,58 +22219,197 @@ function mcGiftBody(it){
       +'back — the designs and the sheet it prints on come from there.</p>';
   }
   const si=it.sheet_item||{};
+  mcGtPick=si.designId||'';
+  const chosen=mcGtDesign(mcGtPick);
   return `<div class="sect-label" style="margin-top:14px;">On this batch's sheet</div>
-    <label class="field" style="margin-bottom:8px;"><span>DESIGN</span>
-      <select id="mcGtDesign">
-        <option value="">— pick a design —</option>
-        ${designs.map(d=>`<option value="${d.id}"${si.designId===d.id?' selected':''}>${
-          escapeHtml(d.name||'Design')}</option>`).join('')}
-      </select></label>
+    <div class="combo" id="mcGtCombo" style="margin-bottom:8px;">
+      <label class="field"><span>DESIGN</span>
+        <input type="text" id="mcGtSearch" placeholder="Search the design library…"
+               autocomplete="off" role="combobox" aria-expanded="false"
+               aria-controls="mcGtPanel" value="${chosen?escapeHtml(chosen.name||''):''}"/>
+      </label>
+      <button class="combo-caret" id="mcGtCaret" type="button"
+              aria-label="Show every design">▾</button>
+      <div class="combo-panel" id="mcGtPanel" role="listbox"></div>
+    </div>
     <label class="field" style="margin-bottom:8px;"><span>HOW MANY</span>
       <input type="number" min="1" step="1" id="mcGtQty" value="${si.qty||it.qty||1}"/></label>
     <div id="mcGtWords"></div>
-    <button class="btn-primary" id="mcGtSaveBtn" style="width:100%;margin-top:14px;">Save to line</button>
+    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+      <button class="btn-outline" id="mcGtFullBtn" style="flex:1 1 150px;">Open full builder</button>
+      <button class="btn-primary" id="mcGtSaveBtn" style="flex:1 1 150px;">Save to line</button>
+    </div>
     <p class="hint" style="margin:8px 0 0;">Every line given a design lands on one sheet
-      for this batch, and <b>Download All</b> brings it out as a single PDF.</p>`;
+      for this batch, and <b>Download All</b> brings it out as a single PDF. The full
+      builder opens that same sheet, and what is changed there comes back here.</p>`;
 }
+const mcGtDesign=id=>((typeof gtLib!=='undefined'&&gtLib.designs)||[])
+  .find(d=>d.id===id)||null;
+// the sheet_item, shaped as the gift tag tool's own order line — so gtVal and
+// everything downstream of it read a line here exactly as they read one there
+const mcGtLine=it=>({id:'mc-'+it.id,
+  designId:(it.sheet_item&&it.sheet_item.designId)||'',
+  qty:(it.sheet_item&&it.sheet_item.qty)||it.qty||1,
+  vals:(it.sheet_item&&it.sheet_item.vals)||{}});
+
 function mcGiftWire(it){
-  const sel=document.getElementById('mcGtDesign');
-  if(!sel) return;
+  const combo=document.getElementById('mcGtCombo');
+  if(!combo) return;                      // the library is not open; the note is all there is
+  const box=document.getElementById('mcGtSearch');
+  const panel=document.getElementById('mcGtPanel');
   const words=document.getElementById('mcGtWords');
-  const draw=()=>{
-    const d=(typeof gtDesign==='function')?gtDesign(sel.value):null;
-    if(!d){ words.innerHTML=''; return; }
-    const si=it.sheet_item||{};
-    const fields=(typeof gtFieldsOf==='function')?gtFieldsOf(d,null):(d.fields||[]);
-    words.innerHTML=fields.map(f=>{
-      const v=(si.vals&&si.vals[f.id]&&si.vals[f.id].text);
-      // the buyer's own message is what most of these are for, so it is the
-      // first thing offered rather than something to copy across by hand
-      const val=v===undefined?(fields.length===1?(it.message||f.def||''):(f.def||'')):v;
-      return `<label class="field" style="margin-bottom:8px;">
-        <span>${escapeHtml(f.name||'TEXT')}</span>
-        <input type="text" data-mc-gtf="${f.id}" value="${escapeHtml(val)}"/></label>`;
-    }).join('');
+
+  const openPanel=on=>{
+    panel.classList.toggle('open',on);
+    box.setAttribute('aria-expanded',on?'true':'false');
+    if(on) drawPanel(box.value);
   };
-  sel.addEventListener('change',draw);
-  draw();
-  document.getElementById('mcGtSaveBtn').addEventListener('click',async()=>{
-    const msg=document.getElementById('mcWinMsg');
-    if(!sel.value){ showMsg(msg,'Pick a design first.',false); return; }
+  function drawPanel(term){
+    const q=String(term||'').trim().toLowerCase();
+    const all=(gtLib.designs||[]);
+    // a design already chosen is not filtered out by its own name sitting in
+    // the box — an empty search means everything, which is what the caret is for
+    const rows=q&&!(mcGtDesign(mcGtPick)&&q===String(mcGtDesign(mcGtPick).name||'').toLowerCase())
+      ? all.filter(d=>String(d.name||'').toLowerCase().includes(q)) : all;
+    if(!all.length){ panel.innerHTML='<div class="combo-empty">The library is empty.</div>'; return; }
+    if(!rows.length){
+      panel.innerHTML='<div class="combo-empty">No design matches “'+escapeHtml(term)+'”.</div>';
+      return;
+    }
+    panel.innerHTML=rows.map(d=>
+      `<div class="combo-opt${d.id===mcGtPick?' active':''}" role="option"
+            data-mc-gtd="${d.id}" aria-selected="${d.id===mcGtPick?'true':'false'}">
+         <span class="nm">${escapeHtml(d.name||'Design')}</span>
+         <span class="mc-pick-mode">${(d.fields||[]).length} text${
+           (d.fields||[]).length===1?'':'s'}</span>
+       </div>`).join('');
+  }
+  box.addEventListener('focus',()=>openPanel(true));
+  box.addEventListener('input',()=>{ openPanel(true); drawPanel(box.value); });
+  document.getElementById('mcGtCaret').addEventListener('click',()=>{
+    const on=!panel.classList.contains('open');
+    if(on) box.value='';                  // the caret is "show me all of them"
+    openPanel(on);
+    if(on) box.focus();
+  });
+  panel.addEventListener('click',e=>{
+    const o=e.target.closest('[data-mc-gtd]'); if(!o) return;
+    mcGtPick=o.dataset.mcGtd;
+    const d=mcGtDesign(mcGtPick);
+    box.value=d?(d.name||''):'';
+    openPanel(false);
+    drawWords();
+  });
+  // a click anywhere else is a click away from it
+  const away=e=>{ if(!combo.contains(e.target)) openPanel(false); };
+  document.addEventListener('pointerdown',away);
+  // the panel and its listener belong to this render of the window body, and
+  // the body is replaced whole every time a tile is picked
+  combo._mcAway=away;
+
+  function drawWords(){
+    const d=mcGtDesign(mcGtPick);
+    if(!d){ words.innerHTML=''; return; }
+    const line=mcGtLine(it);
+    const fields=(typeof gtFieldsOf==='function')?gtFieldsOf(d,line):(d.fields||[]);
+    if(!fields.length){
+      words.innerHTML='<p class="hint" style="margin:0;">This design has no words on it.</p>';
+      return;
+    }
+    words.innerHTML='<div class="sect-label" style="margin-top:6px;">The words on it</div>'
+      +fields.map(f=>{
+      const v=(typeof gtVal==='function')?gtVal(line,f)
+        :{text:f.def||'',font:f.font,size:f.size||6,align:f.align||'center'};
+      // the buyer's own message is what a single-text design is nearly always
+      // for, so it is offered rather than something to copy across by hand
+      const text=(line.vals&&line.vals[f.id]&&line.vals[f.id].text!==undefined)
+        ? line.vals[f.id].text
+        : (fields.length===1&&it.message?it.message:v.text);
+      return `<label class="field" style="margin-bottom:4px;">
+          <span>${escapeHtml(f.name||'TEXT')}</span>
+          <input type="text" data-mc-gtf="${f.id}|text" value="${escapeHtml(text)}"/></label>
+        <div class="grid3e" style="margin-bottom:10px;">
+          <label class="field"><span>FONT</span>
+            <select data-mc-gtf="${f.id}|font">${
+              (typeof gtFontOptions==='function')?gtFontOptions(v.font):''}</select></label>
+          <label class="field"><span>SIZE MM</span>
+            <input type="number" step="0.1" min="0.5" value="${v.size}"
+                   data-mc-gtf="${f.id}|size"/></label>
+          <label class="field"><span>ALIGN</span>
+            <select data-mc-gtf="${f.id}|align">${
+              ['left','center','right'].map(a=>
+                `<option value="${a}"${a===v.align?' selected':''}>${
+                  a==='left'?'Left':a==='center'?'Centre':'Right'}</option>`).join('')
+            }</select></label>
+        </div>`;
+    }).join('');
+  }
+  drawWords();
+
+  // everything typed into the panel, back in the shape the sheet is drawn from
+  function collect(){
     const vals={};
-    words.querySelectorAll('[data-mc-gtf]').forEach(i=>{
-      vals[i.dataset.mcGtf]={text:i.value};
+    words.querySelectorAll('[data-mc-gtf]').forEach(el=>{
+      const [id,key]=el.dataset.mcGtf.split('|');
+      const v=vals[id]||(vals[id]={});
+      v[key]=key==='size'?(Number(el.value)||undefined):el.value;
     });
-    it.sheet_item={designId:sel.value,
+    return {designId:mcGtPick,
       qty:Math.max(1,Math.round(Number(document.getElementById('mcGtQty').value)||1)),
       vals};
+  }
+  document.getElementById('mcGtSaveBtn').addEventListener('click',async()=>{
+    const msg=document.getElementById('mcWinMsg');
+    if(!mcGtPick){ showMsg(msg,'Search for a design and pick one first.',false); return; }
+    it.sheet_item=collect();
     if(await mcSave(it,{sheet_item:it.sheet_item})){
       showMsg(msg,'✓ On the sheet',true);
       mcRepaintRow(it);
     }
   });
+  document.getElementById('mcGtFullBtn').addEventListener('click',async()=>{
+    const msg=document.getElementById('mcWinMsg');
+    if(!mcGtPick){ showMsg(msg,'Search for a design and pick one first.',false); return; }
+    it.sheet_item=collect();
+    if(!await mcSave(it,{sheet_item:it.sheet_item})) return;
+    mcRepaintRow(it);
+    await mcGtOpenFull();
+  });
 }
 
+// ---------- the batch's sheet, on the screen built for sheets ----------
+// The gift tag tool draws one order, held in one module-level list. The batch
+// lends it that list for as long as somebody is over there, and takes it back
+// on the way out — so a sheet being built on the Gift Tag screen is not lost
+// to a batch borrowing it, and edits made there land on the batch's rows.
+let mcGtHome=null;
+async function mcGtOpenFull(){
+  const msg=document.getElementById('mcWinMsg')||document.getElementById('mcBatchMsg');
+  const lines=mcItems.filter(x=>x.tile==='giftTag'&&x.sheet_item&&x.sheet_item.designId);
+  if(!lines.length){ if(msg) showMsg(msg,'Nothing is on this batch\'s sheet yet.',false); return; }
+  if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
+  if(!mcGtHome) mcGtHome={order:gtOrder,ids:lines.map(l=>l.id)};
+  gtOrder=lines.map(mcGtLine);
+  if(typeof gtRenderOrder==='function') gtRenderOrder();
+  showScreen('tool-gift-tag');
+}
+// Called on the way off the Gift Tag screen, whichever way somebody leaves it.
+async function mcGtReturn(){
+  if(!mcGtHome) return;
+  const home=mcGtHome; mcGtHome=null;
+  const edited=gtOrder;
+  gtOrder=home.order;
+  if(typeof gtRenderOrder==='function') gtRenderOrder();
+  for(const l of edited){
+    const id=String(l.id||'').startsWith('mc-')?String(l.id).slice(3):null;
+    const it=id?mcItem(id):null;
+    if(!it) continue;
+    it.sheet_item={designId:l.designId,qty:l.qty,vals:l.vals||{}};
+    await mcSave(it,{sheet_item:it.sheet_item});
+  }
+  if(currentScreen==='magic-batch') mcRenderItems();
+  if(mcWinItem) mcWinRender();
+}
 // ==================== export ====================
 function mcExportFolderLbl(){
   const el=document.getElementById('mcExportFolderLbl');
