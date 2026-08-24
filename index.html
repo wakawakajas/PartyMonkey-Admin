@@ -3458,9 +3458,19 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 
     <div class="sect-label lg">Downloaded file name</div>
     <p class="hint">How the exported PDFs are named. Tap a token to add it, or type your
-      own words between them — everything else is used as you write it. Saved with the
-      template, so each job keeps the naming its floor already knows.</p>
-    <label class="field"><span>NAMING CONVENTION</span>
+      own words between them — everything else is used as you write it.</p>
+    <!-- Naming belongs to a template, so which template is being named is the
+         first thing asked. Editing here writes straight back to that template
+         and leaves the job in the builder alone. -->
+    <div class="combo has-combo" id="namingTemplateCombo">
+      <label class="field"><span>WHICH TEMPLATE</span>
+        <input type="text" id="namingTemplateSearch" placeholder="Pick a template…"
+               autocomplete="off" role="combobox" aria-expanded="false" aria-controls="namingTemplateList"/>
+      </label>
+      <button class="combo-caret" id="namingTemplateCaret" type="button" aria-label="Show templates">▾</button>
+      <div class="combo-panel" id="namingTemplateList" role="listbox"></div>
+    </div>
+    <label class="field" style="margin-top:10px;"><span>NAMING CONVENTION</span>
       <input type="text" id="pdfNaming" placeholder="{order}_{paper}_{gsm}_{side}" autocomplete="off"/></label>
     <div class="chips" style="margin-top:8px;" id="pdfNamingTokens">
       <button type="button" class="chip chip-state" data-token="{order}" title="The Order ID">{order}</button>
@@ -3471,7 +3481,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button type="button" class="chip chip-state" data-token="{design}" title="The design's file name">{design}</button>
       <button type="button" class="chip chip-state" data-token="{date}" title="Today, as YYMMDD">{date}</button>
     </div>
-    <div class="calc" id="pdfNamingPreview" style="margin:8px 0 20px;"></div>
+    <div class="calc" id="pdfNamingPreview" style="margin:8px 0 0;"></div>
+    <div id="namingMsg" style="margin-bottom:20px;"></div>
 
     <div class="sect-label lg">Paper &amp; GSM</div>
     <p class="hint">What jobs are printed on, and the weights they come in. Both can be in
@@ -15893,8 +15904,9 @@ function pdfNamingTokens(side){
 // Token values are made safe individually so the separators someone typed
 // between them survive; the whole thing is then swept for the characters a
 // file name cannot hold.
-function buildPdfFilename(side){
-  const pattern=(state.pdfNaming||'').trim()||DEFAULT_PDF_NAMING;
+function buildPdfFilename(side,patternOverride){
+  const pattern=(patternOverride!=null?String(patternOverride):(state.pdfNaming||'')).trim()
+    ||DEFAULT_PDF_NAMING;
   const vals=pdfNamingTokens(side);
   // safeName's own fallback is the word "template", which is right for a
   // template name and wrong here — an Order ID nobody has typed yet should
@@ -15909,24 +15921,33 @@ function buildPdfFilename(side){
 function setPdfNaming(v,skipDraw){
   state.pdfNaming=String(v||'');
   const el=document.getElementById('pdfNaming');
-  if(el&&el.value!==state.pdfNaming) el.value=state.pdfNaming;
+  // only while the box is showing the job's own naming — with a template
+  // picked it is showing that template's, and must not be overwritten
+  if(el&&!namingTemplate&&el.value!==state.pdfNaming) el.value=state.pdfNaming;
   if(!skipDraw) refreshPdfNamingPreview();
 }
 function refreshPdfNamingPreview(){
   const el=document.getElementById('pdfNamingPreview'); if(!el) return;
+  // with a template picked the box is that template's pattern, so that is
+  // what the example name is built from
+  const used=(namingTemplate
+    ? (document.getElementById('pdfNaming').value||'')
+    : (state.pdfNaming||'')).trim()||DEFAULT_PDF_NAMING;
   const missing=[];
   if(!state.orderId) missing.push('Order ID');
   if(!state.paperType) missing.push('paper type');
   if(!state.gsm) missing.push('GSM');
-  const used=(state.pdfNaming||'').trim()||DEFAULT_PDF_NAMING;
   const blanks=missing.filter(m=>
     (m==='Order ID'&&/\{order\}/.test(used))||
     (m==='paper type'&&/\{paper\}/.test(used))||
     (m==='GSM'&&/\{gsm\}/.test(used)));
-  el.innerHTML=escapeHtml(buildPdfFilename('front'))
+  el.innerHTML=escapeHtml(buildPdfFilename('front',used))
     +(blanks.length?`<br><span style="color:var(--rust);">${escapeHtml(blanks.join(', '))} still blank</span>`:'');
 }
-document.getElementById('pdfNaming').addEventListener('input',e=>setPdfNaming(e.target.value));
+document.getElementById('pdfNaming').addEventListener('input',e=>{
+  if(namingTemplate){ refreshPdfNamingPreview(); queueNamingSave(); return; }
+  setPdfNaming(e.target.value);
+});
 document.getElementById('pdfNamingTokens').addEventListener('click',e=>{
   const b=e.target.closest('[data-token]'); if(!b) return;
   const el=document.getElementById('pdfNaming');
@@ -15934,8 +15955,116 @@ document.getElementById('pdfNamingTokens').addEventListener('click',e=>{
   // dropped in at the caret when there is one, appended otherwise
   const at=(document.activeElement===el&&el.selectionStart!=null)?el.selectionStart:cur.length;
   el.value=cur.slice(0,at)+b.dataset.token+cur.slice(at);
-  setPdfNaming(el.value);
+  if(namingTemplate){ refreshPdfNamingPreview(); queueNamingSave(); }
+  else setPdfNaming(el.value);
   el.focus(); el.setSelectionRange(at+b.dataset.token.length,at+b.dataset.token.length);
+});
+
+// ---------- naming a saved template, from the settings screen ----------
+// The pattern belongs to a template, so which template is being named has to
+// be said before it can be edited. Picking one loads its own pattern; typing
+// writes straight back to that template and leaves the job in the builder
+// alone — this screen is for setting up how jobs come out, not for loading one.
+let namingTemplate=null;           // {id,name,data} or null for the job in hand
+let namingSaveTimer=null;
+const namingMsgEl=()=>document.getElementById('namingMsg');
+function renderNamingTemplateList(){
+  const el=document.getElementById('namingTemplateList');
+  const raw=(document.getElementById('namingTemplateSearch').value||'').trim();
+  const q=raw.toLowerCase();
+  const mine=namingTemplate?namingTemplate.name.toLowerCase():'';
+  const filter=(q&&q!==mine)?q:'';
+  const rows=templateRows.filter(r=>!filter||r.name.toLowerCase().includes(filter));
+  const head=`<div class="combo-opt${namingTemplate?'':' active'}" role="option" data-naming-pick="">
+      <span class="nm">This job — not saved to a template</span></div>`;
+  if(!templateRows.length){
+    el.innerHTML=head+'<div class="combo-empty">No templates saved yet.</div>';
+    return;
+  }
+  el.innerHTML=head+(rows.length?rows.map(r=>{
+    const who=r._ambiguous
+      ? ` <span class="hint" style="margin:0;">· ${escapeHtml(
+          r.user_id===myTemplateOwner?'yours':(templateOwners[r.user_id]||'someone else'))}</span>`
+      : '';
+    return `<div class="combo-opt${namingTemplate&&String(namingTemplate.id)===String(r.id)?' active':''}"
+       role="option" data-naming-pick="${escapeHtml(String(r.id))}">
+      <span class="nm">${escapeHtml(r.name)}${who}</span></div>`;
+  }).join('')
+   :'<div class="combo-empty">No templates match “'+escapeHtml(raw)+'”.</div>');
+}
+function namingComboOpen(open){
+  document.getElementById('namingTemplateList').classList.toggle('open',open);
+  document.getElementById('namingTemplateSearch').setAttribute('aria-expanded',open?'true':'false');
+  if(open) renderNamingTemplateList();
+}
+async function pickNamingTemplate(id){
+  const box=document.getElementById('pdfNaming');
+  clearTimeout(namingSaveTimer); namingSaveTimer=null;
+  if(!id){
+    namingTemplate=null;
+    document.getElementById('namingTemplateSearch').value='';
+    box.value=state.pdfNaming||'';
+    namingMsgEl().innerHTML='';
+    refreshPdfNamingPreview();
+    return;
+  }
+  const row=templateRows.find(r=>String(r.id)===String(id));
+  if(!row||!sb) return;
+  document.getElementById('namingTemplateSearch').value=row.name;
+  namingMsgEl().innerHTML='';
+  box.disabled=true;
+  const {data,error}=await sb.from('templates').select('data').eq('id',id).single();
+  box.disabled=false;
+  if(error||!data){
+    namingTemplate=null;
+    showMsg(namingMsgEl(),'Could not open that template.',false);
+    return;
+  }
+  namingTemplate={id,name:row.name,data:data.data||{}};
+  box.value=namingTemplate.data.pdfNaming||'';
+  refreshPdfNamingPreview();
+}
+function queueNamingSave(){
+  clearTimeout(namingSaveTimer);
+  namingSaveTimer=setTimeout(saveNamingToTemplate,700);   // once the typing stops
+}
+async function saveNamingToTemplate(){
+  if(!namingTemplate||!sb) return;
+  const v=document.getElementById('pdfNaming').value;
+  // read-modify-write on the one field, so nothing else the template holds is
+  // touched — and by id, since the list is shared and names repeat
+  const merged=Object.assign({},namingTemplate.data,{pdfNaming:v});
+  const {error}=await sb.from('templates')
+    .update({data:merged,updated_at:new Date().toISOString()})
+    .eq('id',namingTemplate.id);
+  if(error){ showMsg(namingMsgEl(),'Could not save: '+(error.message||'unknown error'),false); return; }
+  namingTemplate.data=merged;
+  showMsg(namingMsgEl(),`✓ Saved to “${namingTemplate.name}”`,true);
+  // the job in the builder is this template — keep the two in step
+  if(selectedTemplate&&String(selectedTemplate)===String(namingTemplate.id)){
+    state.pdfNaming=v;
+  }
+}
+// leaving the box does not wait out the debounce — a tap away is a decision
+document.getElementById('pdfNaming').addEventListener('blur',()=>{
+  if(!namingTemplate||!namingSaveTimer) return;
+  clearTimeout(namingSaveTimer); namingSaveTimer=null;
+  saveNamingToTemplate();
+});
+document.getElementById('namingTemplateSearch').addEventListener('input',()=>namingComboOpen(true));
+document.getElementById('namingTemplateSearch').addEventListener('focus',()=>namingComboOpen(true));
+document.getElementById('namingTemplateCaret').addEventListener('click',()=>{
+  const open=document.getElementById('namingTemplateList').classList.contains('open');
+  namingComboOpen(!open);
+  if(!open) document.getElementById('namingTemplateSearch').focus();
+});
+document.getElementById('namingTemplateList').addEventListener('click',async e=>{
+  const opt=e.target.closest('[data-naming-pick]'); if(!opt) return;
+  namingComboOpen(false);
+  await pickNamingTemplate(opt.dataset.namingPick);
+});
+document.addEventListener('click',e=>{
+  if(!e.target.closest('#namingTemplateCombo')) namingComboOpen(false);
 });
 
 // ---------- where the exported PDFs land ----------
@@ -22704,7 +22833,12 @@ function ppFillSelects(){
 document.getElementById('printSettingsBtn')
   .addEventListener('click',()=>showScreen('print-paper'));
 
-async function ppOpen(){ await ppLoad(true); ppRender(); refreshPdfNamingPreview(); }
+async function ppOpen(){
+  await ppLoad(true); ppRender();
+  // the picker lists saved templates, so the list has to be there first
+  if(sb) await refreshTemplateList();
+  await pickNamingTemplate('');        // opens on the job in hand, not last visit's template
+}
 function ppRender(){
   [['ppPaperList','paper'],['ppGsmList','gsm']].forEach(([id,kind])=>{
     const el=document.getElementById(id);
