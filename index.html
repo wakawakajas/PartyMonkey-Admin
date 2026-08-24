@@ -1827,6 +1827,12 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   background:var(--paper);border:1px solid var(--border);}
 .mc-sum-shot.blank{display:flex;align-items:center;justify-content:center;
   color:var(--faint);font-size:15px;}
+/* already on the print sheet — said on the row, and read off the sheet itself
+   so it survives the window being shut */
+.mc-sum-row.is-on{background:var(--nest);}
+.mc-sum-on{display:inline-block;margin-top:2px;padding:1px 7px;border-radius:999px;
+  background:var(--blueprint);color:var(--lime-ink);font-size:10px;font-weight:700;
+  letter-spacing:.02em;}
 .mc-sum-row:last-child{border-bottom:0;}
 .mc-sum-main{flex:1;min-width:0;}
 .mc-sum-sku{display:block;font-family:'Space Grotesk',sans-serif;font-weight:700;
@@ -23574,20 +23580,31 @@ function mcRenderSummary(){
   // pressed, so it says so rather than failing on the tap
   body.innerHTML=rows.map(r=>{
     const has=!!designFileForSku(r.sku);
+    const on=mcLineForSku(r.sku);
     const shot=r.img
       ? `<img class="mc-sum-shot" src="${escapeHtml(r.img)}" alt="" loading="lazy"
            referrerpolicy="no-referrer"/>`
       : '<span class="mc-sum-shot blank">◻</span>';
-    return `<div class="mc-sum-row">
+    // what is on the sheet is read off the sheet itself, so it is still right
+    // after the window has been shut and opened again
+    const badge=on
+      ? `<span class="mc-sum-on">✓ on the sheet${on.qty!==r.qty?` ×${on.qty}`:''}</span>`
+      : '';
+    const btn=on
+      ? `<button type="button" class="btn-danger" data-mc-sum-del="${escapeHtml(r.sku)}"
+           title="Take ${escapeHtml(r.sku)} off the print sheet">Remove</button>`
+      : `<button type="button" class="btn-outline" data-mc-sum-add="${escapeHtml(r.sku)}"
+           ${has?'':'disabled'} title="${has?`Put ${escapeHtml(r.sku)}.png on a print sheet, ${r.qty} up`
+             :`No ${escapeHtml(r.sku)}.png in the designs folder`}">${has?'Add':'No PNG'}</button>`;
+    return `<div class="mc-sum-row${on?' is-on':''}">
       ${shot}
       <span class="mc-sum-main">
         <span class="mc-sum-sku">${escapeHtml(r.sku)}</span>
         ${r.name?`<span class="mc-sum-name">${escapeHtml(r.name)}</span>`:''}
+        ${badge}
       </span>
       <span class="mc-sum-qty">×${r.qty}</span>
-      <button type="button" class="btn-outline" data-mc-sum-add="${escapeHtml(r.sku)}"
-        ${has?'':'disabled'} title="${has?`Put ${escapeHtml(r.sku)}.png on a print sheet, ${r.qty} up`
-          :`No ${escapeHtml(r.sku)}.png in the designs folder`}">${has?'Add':'No PNG'}</button>
+      ${btn}
     </div>`;}).join('');
 }
 // <SKU>.png in the designs folder, by that exact name — nothing is guessed,
@@ -23597,6 +23614,13 @@ function designFileForSku(sku){
   if(!want) return null;
   return loadDesignFiles.find(f=>
     /\.png$/i.test(f.name)&&f.name.replace(/\.png$/i,'').trim().toLowerCase()===want)||null;
+}
+// the design line this SKU put on the sheet, if it is on there. Read off the
+// sheet rather than remembered, so shutting the summary loses nothing and two
+// ways of taking a design off cannot disagree about what is on.
+function mcLineForSku(sku){
+  const pick=designFileForSku(sku); if(!pick) return null;
+  return state.designs.find(d=>d.source&&d.source.path===pick.path)||null;
 }
 // Puts SKUs onto the print sheet at the quantities the batch adds up to, then
 // shows the sheet they made. A SKU already on the sheet is set to the batch's
@@ -23715,6 +23739,19 @@ async function mcOpenSummary(){
 document.getElementById('mcSummaryBtn').addEventListener('click',mcOpenSummary);
 document.getElementById('mcSummarySearch').addEventListener('input',mcRenderSummary);
 document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
+  // taking one back off: the row says so again straight away, and the summary
+  // stays put — this is an edit to the sheet, not a new sheet to look at
+  const del=e.target.closest('[data-mc-sum-del]');
+  if(del){
+    const line=mcLineForSku(del.dataset.mcSumDel); if(!line) return;
+    state.designs=state.designs.filter(d=>d.id!==line.id);
+    state.page=0;
+    renderDesignLines(); refreshArtInputs(); drawAll(); mcRenderSummary();
+    showMsg(document.getElementById('mcSummaryMsg'),
+      `Took ${del.dataset.mcSumDel} off the sheet — `
+      +`${designTotal()} card${designTotal()===1?'':'s'} left.`,true);
+    return;
+  }
   const b=e.target.closest('[data-mc-sum-add]'); if(!b||b.disabled) return;
   const row=mcSummaryRows().find(r=>String(r.sku)===b.dataset.mcSumAdd); if(!row) return;
   b.disabled=true;
