@@ -3902,6 +3902,16 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     </div>
   </div>
 
+  <div class="grid2" style="margin-bottom:12px;">
+    <button class="btn-primary" id="exportFrontBtn" style="height:54px;font-size:14px;">Download front</button>
+    <button class="btn-primary" id="exportBackBtn" style="height:54px;font-size:14px;">Download back</button>
+  </div>
+  <div class="chips" style="margin-bottom:10px;align-items:center;">
+    <button type="button" class="btn-outline btn-sm" id="exportFolderBtn">📁 Save folder…</button>
+    <span class="hint" id="exportFolderLbl" style="margin:0;"></span>
+  </div>
+  <div id="exportMsg"></div>
+
   <!-- 2 ARTWORK -->
   <div class="card" data-card>
     <div class="card-head"><span class="num">2</span><h3>Final artwork</h3><span class="chev">▾</span></div>
@@ -3910,6 +3920,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <div class="chips" style="margin-bottom:10px;">
         <button type="button" class="chip chip-state" id="presetNameCard">Name Card 89 × 54</button>
       </div>
+      <button type="button" class="btn-outline" id="loadDesignBtn" style="width:100%;margin-bottom:14px;">📂 Load design</button>
       <div class="art-sides" style="margin-bottom:14px;">
         <div><div class="slot-label">Front</div>
           <div class="upload-slot">
@@ -3966,16 +3977,6 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <p class="hint" style="margin-top:7px;margin-bottom:0;">Extends each copy of the artwork this far past its placeholder on every side, still centred — the extra size the card is trimmed down from, not extra spacing.</p>
     </div>
   </div>
-
-  <div class="grid2" style="margin-bottom:12px;">
-    <button class="btn-primary" id="exportFrontBtn" style="height:54px;font-size:14px;">Download front</button>
-    <button class="btn-primary" id="exportBackBtn" style="height:54px;font-size:14px;">Download back</button>
-  </div>
-  <div class="chips" style="margin-bottom:10px;align-items:center;">
-    <button type="button" class="btn-outline btn-sm" id="exportFolderBtn">📁 Save folder…</button>
-    <span class="hint" id="exportFolderLbl" style="margin:0;"></span>
-  </div>
-  <div id="exportMsg"></div>
 
   <!-- 4 CUT -->
   <div class="card collapsed" data-card>
@@ -4425,6 +4426,35 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <button class="close-btn" id="modalClose">×</button>
   </div>
   <div class="modal-scroll"><canvas id="modalCanvas"></canvas></div>
+</div>
+
+<!-- Presets saved on the NAS ("Big TY Card" etc.) picked straight into the
+     Front slot — the folder is browsed once, remembered, and every visit
+     after that is just a search. -->
+<div class="modal-bg" id="loadDesignModal">
+  <div class="modal-top">
+    <h4>Load design</h4>
+    <button class="close-btn" id="loadDesignClose">×</button>
+  </div>
+  <div class="modal-scroll" style="display:block;align-items:stretch;padding:14px;color:#111;">
+    <div class="calc" id="loadDesignFolderState" style="margin-bottom:10px;"></div>
+    <div class="grid2" style="margin-bottom:12px;">
+      <button class="btn-outline" id="loadDesignPickFolderBtn">📁 Choose folder</button>
+      <button class="btn-outline" id="loadDesignForgetFolderBtn">Forget folder</button>
+    </div>
+    <label class="field" style="margin-bottom:8px;"><span>SEARCH DESIGNS</span>
+      <input type="text" id="loadDesignSearch" placeholder="Type a name…" autocomplete="off"/></label>
+    <div class="calc" id="loadDesignCount" style="margin-bottom:8px;"></div>
+    <div class="ph-list list-full" id="loadDesignList"><p class="hint" style="margin:4px 0 0;">— choose a folder to see designs —</p></div>
+    <div id="loadDesignQtyRow" style="display:none;margin-top:12px;">
+      <div class="ph-card" id="loadDesignSelected" style="margin-bottom:8px;word-break:break-word;"></div>
+      <div class="grid2">
+        <label class="field"><span>QUANTITY</span><input type="number" id="loadDesignQty" min="1" value="1"/></label>
+        <button class="btn-primary" id="loadDesignConfirmBtn" style="align-self:end;height:44px;">Load design</button>
+      </div>
+    </div>
+    <div id="loadDesignMsg" style="margin-top:10px;"></div>
+  </div>
 </div>
 
 <script>
@@ -15485,6 +15515,169 @@ async function exportSide(side){
 }
 document.getElementById('exportFrontBtn').addEventListener('click',()=>exportSide('front'));
 document.getElementById('exportBackBtn').addEventListener('click',()=>exportSide('back'));
+
+// ---------- load a preset design straight into Front ----------
+// Presets live on the NAS, one image per design, sorted into a few folders
+// (a folder per card type, e.g. "Big TY Card"). The folder is picked once —
+// same File System Access pattern as the export folder above and the Design
+// Library further down — and every visit after that just searches what's in it.
+const LOAD_DESIGN_FOLDER_HINT=String.raw`C:\NAS Folders\Partymonkey NAS\Pigu\Big TY Card`;
+const LOAD_DESIGN_ART=/\.(png|jpe?g|webp|pdf)$/i;
+let loadDesignDir=null, loadDesignDirRead=false;
+let loadDesignFiles=[], loadDesignSelected=null;
+async function loadDesignDirGet(){
+  if(!loadDesignDirRead){ loadDesignDir=await gtIdbGet('loadDesignDir').catch(()=>null)||null; loadDesignDirRead=true; }
+  return loadDesignDir;
+}
+async function loadDesignDirSet(dir){ loadDesignDir=dir; loadDesignDirRead=true; await gtIdbPut('loadDesignDir',dir); }
+// read-only — nothing here is ever written back into the presets folder
+async function loadDesignDirOk(handle,ask){
+  if(!handle) return false;
+  try{
+    const opts={mode:'read'};
+    if(await handle.queryPermission(opts)==='granted') return true;
+    return ask&&await handle.requestPermission(opts)==='granted';
+  }catch(e){ return false; }
+}
+function loadDesignFolderState(){
+  const el=document.getElementById('loadDesignFolderState'); if(!el) return;
+  if(!canPickFolder()){ el.textContent='This browser cannot browse a folder — use Chrome or Edge on a PC.'; return; }
+  el.textContent=loadDesignDir?`Looking in ${loadDesignDir.name}`:`Not chosen yet — pick ${LOAD_DESIGN_FOLDER_HINT}`;
+}
+// recursive: "a few folders" of presets sit under the chosen root
+async function loadDesignScan(dir,prefix){
+  const out=[];
+  for await (const entry of dir.values()){
+    if(entry.kind==='directory'){
+      out.push(...await loadDesignScan(entry,prefix+entry.name+'/'));
+    }else if(entry.kind==='file'&&LOAD_DESIGN_ART.test(entry.name)){
+      out.push({name:entry.name,path:prefix+entry.name,folder:prefix.replace(/\/$/,'')||'—',handle:entry});
+    }
+  }
+  return out;
+}
+async function loadDesignRescan(){
+  loadDesignFiles=[];
+  const dir=await loadDesignDirGet();
+  if(!dir||!await loadDesignDirOk(dir,false)) return;
+  const out=await loadDesignScan(dir,'');
+  out.sort((a,b)=>a.path.localeCompare(b.path,undefined,{numeric:true,sensitivity:'base'}));
+  loadDesignFiles=out;
+}
+function loadDesignRenderList(){
+  const q=(document.getElementById('loadDesignSearch').value||'').trim().toLowerCase();
+  const items=loadDesignFiles.filter(it=>!q||it.path.toLowerCase().includes(q));
+  document.getElementById('loadDesignCount').textContent=
+    loadDesignFiles.length?`${items.length} of ${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'}`:'';
+  const listEl=document.getElementById('loadDesignList');
+  if(!loadDesignFiles.length){
+    listEl.innerHTML='<p class="hint" style="margin:4px 0 0;">— choose a folder to see designs —</p>';
+  }else if(!items.length){
+    listEl.innerHTML='<p class="hint" style="margin:4px 0 0;">— no matches —</p>';
+  }else{
+    listEl.innerHTML=items.map((it,i)=>
+      `<div class="ph-card" data-load-design-pick="${i}" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+         <span>${escapeHtml(it.name)}</span><span class="hint" style="margin:0;">${escapeHtml(it.folder)}</span>
+       </div>`).join('');
+  }
+  listEl.__items=items;
+}
+// the smallest grid that reaches the wanted quantity without overrunning the
+// sheet — favours the least wasted cells, and a squarer grid on a tie
+function computeGridForQty(qty){
+  qty=Math.max(1,Math.round(qty));
+  const L=layoutMm(),p=paperMm();
+  const maxCols=Math.max(1,Math.floor((p.w+L.slit)/(L.cardW+L.slit)));
+  const maxRows=Math.max(1,Math.floor((p.h+L.cut)/(L.cardH+L.cut)));
+  const maxPerSheet=maxCols*maxRows;
+  if(maxPerSheet<=qty) return {cols:maxCols,rows:maxRows,short:maxPerSheet<qty,maxPerSheet};
+  let best=null;
+  for(let cols=1;cols<=maxCols;cols++){
+    const rows=Math.min(maxRows,Math.ceil(qty/cols));
+    const total=cols*rows;
+    if(total<qty) continue;
+    const waste=total-qty;
+    if(!best||waste<best.waste||(waste===best.waste&&Math.abs(cols-rows)<Math.abs(best.cols-best.rows))) best={cols,rows,waste};
+  }
+  if(!best) best={cols:maxCols,rows:maxRows,waste:maxPerSheet-qty};
+  return {cols:best.cols,rows:best.rows,short:false,maxPerSheet};
+}
+async function openLoadDesignModal(){
+  document.getElementById('loadDesignModal').classList.add('open');
+  document.getElementById('loadDesignSearch').value='';
+  loadDesignSelected=null;
+  document.getElementById('loadDesignQtyRow').style.display='none';
+  document.getElementById('loadDesignMsg').innerHTML='';
+  loadDesignFolderState();
+  const dir=await loadDesignDirGet();
+  if(dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan(); else loadDesignFiles=[];
+  loadDesignRenderList();
+}
+function closeLoadDesignModal(){ document.getElementById('loadDesignModal').classList.remove('open'); }
+document.getElementById('loadDesignBtn').addEventListener('click',openLoadDesignModal);
+document.getElementById('loadDesignClose').addEventListener('click',closeLoadDesignModal);
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&document.getElementById('loadDesignModal').classList.contains('open')) closeLoadDesignModal();
+});
+document.getElementById('loadDesignPickFolderBtn').addEventListener('click',async()=>{
+  const out=document.getElementById('loadDesignMsg');
+  if(!canPickFolder()){ showMsg(out,'This browser cannot browse a folder — use Chrome or Edge on a PC.',false); return; }
+  try{
+    const dir=await window.showDirectoryPicker({mode:'read'});
+    if(!await loadDesignDirOk(dir,true)){ showMsg(out,'Permission to that folder was not given.',false); return; }
+    await loadDesignDirSet(dir); loadDesignFolderState();
+    await loadDesignRescan(); loadDesignRenderList();
+    showMsg(out,`✓ Looking in ${dir.name} — ${loadDesignFiles.length} design(s) found.`,true);
+  }catch(e){ /* cancelled */ }
+});
+document.getElementById('loadDesignForgetFolderBtn').addEventListener('click',async()=>{
+  loadDesignDir=null; loadDesignDirRead=true; await gtIdbPut('loadDesignDir',null);
+  loadDesignFiles=[]; loadDesignSelected=null;
+  document.getElementById('loadDesignQtyRow').style.display='none';
+  loadDesignFolderState(); loadDesignRenderList();
+});
+document.getElementById('loadDesignSearch').addEventListener('input',loadDesignRenderList);
+document.getElementById('loadDesignList').addEventListener('click',e=>{
+  const row=e.target.closest('[data-load-design-pick]'); if(!row) return;
+  const items=document.getElementById('loadDesignList').__items||[];
+  const it=items[parseInt(row.dataset.loadDesignPick,10)]; if(!it) return;
+  loadDesignSelected=it;
+  document.querySelectorAll('#loadDesignList [data-load-design-pick]').forEach(r=>r.style.borderColor='');
+  row.style.borderColor='var(--blueprint)';
+  document.getElementById('loadDesignSelected').textContent=it.path;
+  document.getElementById('loadDesignQtyRow').style.display='';
+  document.getElementById('loadDesignQty').focus();
+});
+document.getElementById('loadDesignConfirmBtn').addEventListener('click',async()=>{
+  if(!loadDesignSelected) return;
+  const qty=Math.max(1,Math.round(parseFloat(document.getElementById('loadDesignQty').value)||1));
+  const msgEl=document.getElementById('loadDesignMsg');
+  const btn=document.getElementById('loadDesignConfirmBtn');
+  btn.disabled=true;
+  try{
+    const file=await loadDesignSelected.handle.getFile();
+    // a clean canvas each time — refit + regenerate, the same steps behind the
+    // Reset button and Generate placeholder grid
+    await useArtFile('final','front',file);
+    const g=computeGridForQty(qty);
+    document.getElementById('gridCols').value=g.cols;
+    document.getElementById('gridRows').value=g.rows;
+    readLayoutInputs(); generateGrid();
+    fitArtToCard('front'); fitArtToCard('back');
+    renderPlaceholderList(); refreshArtInputs(); updateCalc(); drawAll();
+    if(g.short){
+      showMsg(msgEl,`Only ${g.maxPerSheet} fit on this sheet — used the max grid (${g.cols} × ${g.rows}) instead of ${qty}.`,false);
+    }else{
+      showMsg(msgEl,`✓ Loaded ${loadDesignSelected.name} — ${g.cols*g.rows} cards (${g.cols} × ${g.rows}).`,true);
+      setTimeout(closeLoadDesignModal,900);
+    }
+  }catch(err){
+    showMsg(msgEl,'Could not load that design: '+((err&&err.message)||'unknown error'),false);
+  }finally{
+    btn.disabled=false;
+  }
+});
+loadDesignDirGet().then(loadDesignFolderState);
 
 // ==================== Gift Tag ====================
 // The print tool repeats one artwork into every placeholder. A gift tag order
