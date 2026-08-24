@@ -933,6 +933,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
    whether the drawer can be shut yet are one fact, read in one glance. */
 .pl-focus-shelf{font-family:'Space Grotesk',sans-serif;font-weight:700;
   font-size:34px;line-height:1.05;overflow-wrap:anywhere;color:var(--ink);}
+/* The bundle's name is what somebody looks up to check the box in front of
+   them is the right one, so it is read at arm's length rather than squinted
+   at over a table. */
+#bundleFocusWho{font-size:24px;line-height:1.3;margin:-2px 0 12px;}
 .pl-focus-left{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:700;
   letter-spacing:.04em;color:var(--amber);white-space:nowrap;}
 .pl-focus-left.clear{color:var(--blueprint);}
@@ -2468,6 +2472,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <p class="hint" style="margin:-4px 0 12px;">A piece with one of these in its name is
         tagged <b>made to order</b> while it is packed — printed rather than picked, but still
         something that goes in the box.</p>
+
+      <label class="field" style="margin-bottom:8px;"><span>HIDDEN WORDS</span>
+        <input type="text" id="bundleRuleHide" placeholder="none" autocomplete="off"/></label>
+      <p class="hint" style="margin:-4px 0 12px;">A piece with one of these in its name is on
+        the card but greyed — not counted, not read out, and not waited for by a bundle that is
+        otherwise packed. This list is Bundle SKU's own; the pick list keeps its own separately.
+        Leave it empty and every piece is waited for.</p>
 
       <div class="toggle-row filter-opt">
         <span>PartyMonkey packs combinations only</span>
@@ -5771,7 +5782,7 @@ const bundleShopName=v=>v==='planttalks'?'Plant Talks':'PartyMonkey';
 // for the team, read when the screen opens and again whenever the day's jobs
 // are.
 const BUNDLE_RULES_DEFAULT={pt_word:'PT',seed_words:'seed, seeds',
-  made_to_order:'Custom',pm_combos_only:true};
+  made_to_order:'Custom',hidden_words:'',pm_combos_only:true};
 let bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT);
 const bundleWordList=v=>String(v==null?'':v).split(/[,\n]/).map(x=>x.trim()).filter(Boolean);
 // A word has to stand on its own -- beside a space, a dash, a dot or a digit,
@@ -5785,11 +5796,12 @@ function bundleWordRe(list){
   const ws=bundleWordList(list).map(bundleReEscape);
   return ws.length?new RegExp('(^|[^a-z])(?:'+ws.join('|')+')([^a-z]|$)','i'):null;
 }
-let bundleSeedRe=null,bundleNoteRe=null,bundlePtRe=null;
+let bundleSeedRe=null,bundleNoteRe=null,bundlePtRe=null,bundleHideRe=null;
 function bundleRulesReady(){
   bundleSeedRe=bundleWordRe(bundleRules.seed_words);
   bundleNoteRe=bundleWordRe(bundleRules.made_to_order);
   bundlePtRe=bundleWordRe(bundleRules.pt_word);
+  bundleHideRe=bundleWordRe(bundleRules.hidden_words);
 }
 bundleRulesReady();
 async function loadBundleRules(){
@@ -6192,6 +6204,7 @@ function renderBundleRules(){
   set('bundleRulePt',bundleRules.pt_word);
   set('bundleRuleSeed',bundleRules.seed_words);
   set('bundleRuleNote',bundleRules.made_to_order);
+  set('bundleRuleHide',bundleRules.hidden_words);
   const box=document.getElementById('bundleRuleCombos');
   if(box) box.checked=!!bundleRules.pm_combos_only;
 }
@@ -6204,6 +6217,7 @@ document.getElementById('bundleRuleSave').addEventListener('click',async()=>{
   const next={pt_word:val('bundleRulePt')||BUNDLE_RULES_DEFAULT.pt_word,
     seed_words:val('bundleRuleSeed'),
     made_to_order:val('bundleRuleNote'),
+    hidden_words:val('bundleRuleHide'),
     pm_combos_only:document.getElementById('bundleRuleCombos').checked};
   const session=await requireSession(msg); if(!session) return;
   try{
@@ -6510,7 +6524,8 @@ function openBundleOrder(){
       <div class="bundle-job-pieces">${j.pieces.map(x=>{
         return `<div class="bundle-sub">
           <span>${x.done?'✓ ':''}${escapeHtml(x.sku)}${
-            bundlePieceNoted(x)?' <span class="bundle-tag">made to order</span>':''}</span>
+            bundlePieceNoted(x)?' <span class="bundle-tag">made to order</span>':''}${
+            bundlePieceHidden(x)?' <span class="bundle-tag">hidden</span>':''}</span>
           <span class="hint">&times;${x.qty}${j.sets>1?` · ${x.qty*j.sets} in all`:''}</span>
         </div>`;
       }).join('')||'<p class="hint" style="margin:0;">-- nothing in this bundle --</p>'}</div>
@@ -6573,6 +6588,16 @@ document.getElementById('bundleOrderDoneBtn').addEventListener('click',bundleOrd
 // people packing one order between them actually have.
 document.getElementById('bundleOrderList').addEventListener('click',e=>{
   const b=e.target.closest('[data-job]'); if(!b) return;
+  // A bundle already packed is not a bundle to start: opening it would put
+  // somebody back inside a job that is done, which is how a box gets packed
+  // twice. It says so instead, and the tick stands.
+  const j=bundleJobById(b.dataset.job);
+  if(j&&j.status==='completed'){
+    const msg=document.getElementById('bundleOrderMsg');
+    showMsg(msg,`\u2713 "${escapeHtml(j.combo_name)}" — this set has been completed.`,true);
+    plSay('This set has been completed.');
+    return;
+  }
   bundleAskStart(b.dataset.job);
 });
 
@@ -6587,13 +6612,14 @@ let bundleFocusAt=0;
 let bundleStartFromId=null;    // which line the start sheet was opened on
 
 function bundleJobById(id){ return bundleJobs.find(j=>j.id===id)||null; }
-// The hidden list is the one pick list setting that does not carry over as
-// it stands. There it means somebody else prints this to order, so leave it
-// off the sheet. Here it is a piece of a bundle: a Custom insert is still
-// something that goes in the box, and a box packed without it is a box packed
-// wrong. So a hidden SKU is marked as one and otherwise treated like any
-// other piece -- shown, read out, and waited for.
-function bundlePieceHidden(piece){ return false; }
+// The pick list's hidden list does not carry over: there it means somebody
+// else prints this to order, and here a Custom insert is still something that
+// goes in the box. Bundle SKU keeps a list of its own instead, set on its own
+// settings screen -- a piece named by it is on the card but greyed, not
+// counted, not read out, and not waited for.
+function bundlePieceHidden(piece){
+  return !!bundleHideRe&&bundleHideRe.test(String(piece&&piece.sku||''));
+}
 // The whole hidden list was wearing this tag, which made it a label for
 // "something the pick list leaves off" rather than for what it says. Only a
 // piece with Custom in its name is made to order; the rest of that list means
@@ -6684,15 +6710,18 @@ function renderBundleFocus(){
   document.getElementById('bundleFocusLeft').textContent=piece
     ? `${piece.qty} per set` : '';
   document.getElementById('bundleFocusLeft').classList.toggle('clear',!left);
+  // Types rather than pieces: five lines each wanting three of something is
+  // five things to fetch, and calling that five pieces has somebody counting
+  // the wrong number.
   document.getElementById('bundleFocusWho').textContent=
-    `${j.combo_name} · ${left} piece${left===1?'':'s'} left`;
+    `${j.combo_name} · ${left} type${left===1?'':'s'} left to pack`;
   const el=document.getElementById('bundleFocusNow');
   if(!piece){ el.innerHTML='<p class="hint" style="margin:0;">-- nothing in this bundle --</p>'; return; }
   const path=bundleSkuPhoto(piece.sku);
   const cached=path&&photoUrlCache[path]?photoUrlCache[path]:'';
   // our own copy first, the supplier's address where there is no copy
   const shot=path?'':bundleSkuUrl(piece.sku);
-  const box=`style="width:76px;height:76px;flex-shrink:0;border-radius:12px;object-fit:cover;
+  const box=`style="width:152px;height:152px;flex-shrink:0;border-radius:16px;object-fit:cover;
                  background:rgba(255,255,255,.06);"`;
   el.innerHTML=`<div style="display:flex;gap:12px;align-items:center;">
       ${path?`<img data-sku-thumb="${escapeHtml(path)}" alt=""
@@ -6714,7 +6743,8 @@ function renderBundleFocus(){
         x.done?' is-ok':''}" data-focus-jump="${i}">
         <span style="min-width:0;">
           <b style="word-break:break-word;">${escapeHtml(x.sku)}</b>
-          <span class="hint" style="display:block;">${x.done?'✓ ticked':`×${x.qty} per set`}</span>
+          <span class="hint" style="display:block;">${bundlePieceHidden(x)?'hidden'
+            :x.done?'✓ ticked':`×${x.qty} per set`}</span>
         </span>
       </button>`;
     }).join('')}</div>`;

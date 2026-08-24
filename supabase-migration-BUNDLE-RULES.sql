@@ -47,3 +47,10 @@ create policy "team_insert" on public.bundle_settings
   for insert with check (public.on_team(auth.uid()));
 create policy "team_update" on public.bundle_settings
   for update using (public.on_team(auth.uid()));
+
+-- Added after the first four: a hidden list of Bundle SKU's own. The pick
+-- list's hidden list means somebody else prints this to order and it is left
+-- off the sheet; here a piece named by this one is on the card but greyed --
+-- not counted, not read out, and not waited for.
+alter table public.bundle_settings
+  add column if not exists hidden_words text not null default '';
