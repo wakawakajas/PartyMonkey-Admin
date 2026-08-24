@@ -1560,6 +1560,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   #appScreen > *{grid-column:1;min-width:0;}
   #appScreen > .preview-wrap{grid-column:2;grid-row:1 / span 999;align-self:start;
     position:sticky;top:16px;flex-direction:column;gap:12px;margin-bottom:0;}
+  /* download/save-folder row is moved under the Back sheet by JS at this
+     width (see layoutExportActions) — a grid-row of its own would have to
+     share the sticky rail's huge row-span, which sizes unpredictably */
+  .preview-card #exportActions{margin-top:14px;}
 }
 /* Desktop: room for front and back to each have their own sticky column, so
    both sheets stay in view while you work through the settings. */
@@ -3902,15 +3906,20 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     </div>
   </div>
 
-  <div class="grid2" style="margin-bottom:12px;">
-    <button class="btn-primary" id="exportFrontBtn" style="height:54px;font-size:14px;">Download front</button>
-    <button class="btn-primary" id="exportBackBtn" style="height:54px;font-size:14px;">Download back</button>
+  <!-- own block (rather than living inside .preview-wrap) so it can be pinned
+       under the sticky canvas column on wide screens without disturbing the
+       front/back sticky positioning itself -->
+  <div id="exportActions">
+    <div class="grid2" style="margin-bottom:12px;">
+      <button class="btn-primary" id="exportFrontBtn" style="height:54px;font-size:14px;">Download front</button>
+      <button class="btn-primary" id="exportBackBtn" style="height:54px;font-size:14px;">Download back</button>
+    </div>
+    <div class="chips" style="margin-bottom:10px;align-items:center;">
+      <button type="button" class="btn-outline btn-sm" id="exportFolderBtn">📁 Save folder…</button>
+      <span class="hint" id="exportFolderLbl" style="margin:0;"></span>
+    </div>
+    <div id="exportMsg"></div>
   </div>
-  <div class="chips" style="margin-bottom:10px;align-items:center;">
-    <button type="button" class="btn-outline btn-sm" id="exportFolderBtn">📁 Save folder…</button>
-    <span class="hint" id="exportFolderLbl" style="margin:0;"></span>
-  </div>
-  <div id="exportMsg"></div>
 
   <!-- 2 ARTWORK -->
   <div class="card" data-card>
@@ -4777,6 +4786,27 @@ function drawAll(){
   renderSide('back',document.getElementById('canvasBack'),dim);
   undoNote('print');
 }
+
+// Below the canvas, on the right: at >=1100px the sheets sit in a sticky
+// rail, and a CSS grid row of its own for this block sizes unpredictably
+// against that rail's huge row-span (it fights the sheets for track height).
+// Moving it into the Back card's own box sidesteps that entirely — it just
+// flows under the Back canvas, inside a box already sized by its own content.
+// Below 1100px it goes back to sitting under both sheets as a normal block.
+const exportActionsHome=document.getElementById('exportActions')?.nextElementSibling||null;
+function layoutExportActions(){
+  const ea=document.getElementById('exportActions');
+  const backCard=document.getElementById('canvasBack')&&document.getElementById('canvasBack').closest('.preview-card');
+  if(!ea||!backCard) return;
+  const wide=window.matchMedia('(min-width:1100px)').matches;
+  if(wide){
+    if(ea.parentElement!==backCard) backCard.appendChild(ea);
+  }else if(ea.parentElement===backCard&&exportActionsHome){
+    exportActionsHome.parentElement.insertBefore(ea,exportActionsHome);
+  }
+}
+layoutExportActions();
+window.addEventListener('resize',layoutExportActions);
 
 // ---------- layout controls ----------
 function readLayoutInputs(){
@@ -14374,6 +14404,12 @@ function renderRequests(){
   // Which of the four is being shown is on the Filter button, so an empty list
   // says the plain thing rather than guessing at which filter did it.
   const empty='— nothing here —';
+  // Typing a note on a card autosaves mid-sentence, and that autosave lands
+  // here. Rebuilding the card's HTML under a focused textarea would rip the
+  // node out from under the keyboard and close it — so the caret is noted
+  // before the rebuild and put back afterwards, on whichever new node carries
+  // the same request id.
+  const focus=captureReqRemarksFocus();
   inbox.innerHTML=inRows.length
     ? inRows.map(r=>requestCard(r,true)).join('')
     : `<p class="hint" style="margin:4px 0 0;">${empty}</p>`;
@@ -14389,9 +14425,27 @@ function renderRequests(){
       : `<p class="hint" style="margin:4px 0 0;">${empty}</p>`;
   }
   hydrateRequestPhotos();
+  restoreReqRemarksFocus(focus);
   // a note box is only as tall as the note — sized after the HTML lands, the
   // same way a pickup's remarks box is
   setTimeout(()=>inbox.querySelectorAll('[data-req-remarks]').forEach(growNote),0);
+}
+// The half of the keyboard-stays-open fix that runs before the rebuild: if a
+// note textarea is what has focus right now, remember which request it
+// belongs to and where the caret was, so typing through an autosave doesn't
+// feel like the keyboard slammed shut on its own.
+function captureReqRemarksFocus(){
+  const el=document.activeElement;
+  if(!el||!el.matches||!el.matches('[data-req-remarks]')) return null;
+  const card=el.closest('[data-req-id]'); if(!card) return null;
+  return {id:card.dataset.reqId,start:el.selectionStart,end:el.selectionEnd};
+}
+function restoreReqRemarksFocus(focus){
+  if(!focus) return;
+  const card=document.querySelector(`[data-req-id="${CSS.escape(focus.id)}"]`);
+  const el=card&&card.querySelector('[data-req-remarks]'); if(!el) return;
+  el.focus();
+  if(focus.start!=null) el.setSelectionRange(focus.start,focus.end);
 }
 // How the whole team's asks stand, in one line: only the statuses actually
 // there, so a quiet day says "4 completed" rather than three zeroes.
