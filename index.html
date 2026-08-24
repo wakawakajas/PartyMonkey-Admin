@@ -2524,6 +2524,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <p class="hint" style="margin:0 0 10px;">A piece whose SKU carries any of these anywhere
         in its name — no need for the whole word — is on the card but greyed: not counted, not
         read out, and not waited for by a bundle that is otherwise packed. Case does not matter.</p>
+      <!-- Whether a SKU would be hidden, and by what, without having to wait
+           for it to turn up hidden on a real order first -- the question this
+           whole list exists to answer, asked directly instead of by accident. -->
+      <label class="field" style="margin-bottom:4px;"><span>TRY A SKU</span>
+        <input type="text" id="bundleHideTest" placeholder="Paste or type a SKU name"
+          autocomplete="off"/></label>
+      <div id="bundleHideTestResult" style="margin:-2px 0 12px;"></div>
       <label class="field" style="margin-bottom:12px;"><span>SEARCH</span>
         <input type="text" id="bundleHideSearch" placeholder="Type part of a word" autocomplete="off"/></label>
       <form class="pk-add" id="bundleHideAdd" autocomplete="off" style="margin-bottom:8px;">
@@ -5923,10 +5930,15 @@ async function loadBundleHiddenWords(){
     bundleHiddenWords=data||[];
   }catch(e){ /* not set up yet -- nothing is hidden until it is */ }
 }
-function bundleHideMatch(sku){
+// The term itself, not just yes/no -- so a caller that wants to say which
+// word did it (a piece on a card, a SKU typed into the tester) can, without
+// its own copy of this same search.
+function bundleHideMatchTerm(sku){
   const s=String(sku||'').toLowerCase();
-  return bundleHiddenWords.some(r=>s.includes(String(r.term||'').trim().toLowerCase()));
+  const r=bundleHiddenWords.find(r=>s.includes(String(r.term||'').trim().toLowerCase()));
+  return r?r.term:'';
 }
+function bundleHideMatch(sku){ return !!bundleHideMatchTerm(sku); }
 bundleRulesReady();
 async function loadBundleRules(){
   if(!sb) return;
@@ -6357,6 +6369,21 @@ document.getElementById('bundleHideSearch').addEventListener('input',e=>{
   bundleHideSearch=e.target.value;
   renderBundleHideList();
 });
+// Same search bundleHideMatch itself runs, read out instead of applied --
+// answers "would this be hidden, and by what" for a SKU that has not been
+// packed yet, or one somebody is trying to work out after the fact.
+document.getElementById('bundleHideTest').addEventListener('input',e=>{
+  const sku=e.target.value.trim();
+  const out=document.getElementById('bundleHideTestResult');
+  if(!sku){ out.innerHTML=''; return; }
+  // Written directly rather than through showMsg: that helper fades a
+  // success banner out on a timer, and this one is meant to sit there and be
+  // read for as long as the SKU stays typed in.
+  const term=bundleHideMatchTerm(sku);
+  out.innerHTML=`<div class="banner ${term?'warn':'ok'}">${term
+    ? `⚠ Would be hidden — matches "${escapeHtml(term)}"`
+    : '✓ Not hidden by any word on this list'}</div>`;
+});
 document.getElementById('bundleHideAdd').addEventListener('submit',async e=>{
   e.preventDefault();
   const msg=document.getElementById('bundleHideMsg');
@@ -6742,7 +6769,8 @@ function openBundleOrder(){
         return `<div class="bundle-sub">
           <span>${x.done?'✓ ':''}${escapeHtml(x.sku)}${
             bundlePieceNoted(x)?' <span class="bundle-tag">made to order</span>':''}${
-            bundlePieceHidden(x)?' <span class="bundle-tag">hidden</span>':''}</span>
+            bundlePieceHidden(x)?` <span class="bundle-tag" title="Hidden by &quot;${
+              escapeHtml(bundlePieceHiddenWord(x))}&quot;">hidden</span>`:''}</span>
           <span class="hint">&times;${x.qty}${j.sets>1?` · ${x.qty*j.sets} in all`:''}</span>
         </div>`;
       }).join('')||'<p class="hint" style="margin:0;">-- nothing in this bundle --</p>'}</div>
@@ -6840,6 +6868,12 @@ function bundleJobById(id){ return bundleJobs.find(j=>j.id===id)||null; }
 function bundlePieceHidden(piece){
   return bundleHideMatch(piece&&piece.sku);
 }
+// Which word did it -- for when the word that caught this piece was never
+// meant to. Matched the same fuzzy, anywhere-in-the-name way bundleHideMatch
+// itself matches, so the word named here is really the one responsible.
+function bundlePieceHiddenWord(piece){
+  return bundleHideMatchTerm(piece&&piece.sku);
+}
 // Off the card, not greyed on it: a bundle of four with two hidden reads as a
 // bundle of two, which is what the person packing it has to do. The filter is
 // there for when somebody wants to see what is being left out -- and a piece
@@ -6847,7 +6881,12 @@ function bundlePieceHidden(piece){
 let bundleShowHidden=false;
 const bundleHiddenCount=j=>(j&&j.pieces||[]).filter(bundlePieceHidden).length;
 function bundleHiddenChip(n){
-  return `<button type="button" class="chip${bundleShowHidden?' on':''}" data-show-hidden>${
+  // The words themselves, on the chip that says how many they caught -- so
+  // whoever is looking at a piece that should not have been hidden does not
+  // have to leave this screen to see what the list currently says.
+  const words=bundleHiddenWords.map(r=>r.term).filter(Boolean).join(', ');
+  return `<button type="button" class="chip${bundleShowHidden?' on':''}" data-show-hidden${
+    words?` title="Hidden words: ${escapeHtml(words)}"`:''}>${
     bundleShowHidden?'Hide':'Show'} ${n} hidden</button>`;
 }
 // The whole hidden list was wearing this tag, which made it a label for
@@ -6999,7 +7038,8 @@ function renderBundleFocus(){
         <span style="min-width:0;">
           <b style="word-break:break-word;">${escapeHtml(x.sku)}</b>
           <span class="hint" style="display:block;">${bundlePieceHidden(x)
-            ?(x.done?'✓ ticked · hidden':'hidden · not waited for')
+            ?(x.done?`✓ ticked · hidden by "${escapeHtml(bundlePieceHiddenWord(x))}"`
+              :`hidden by "${escapeHtml(bundlePieceHiddenWord(x))}" · not waited for`)
             :x.done?'✓ ticked':`×${x.qty} per set`}</span>
         </span>
       </button>`;
