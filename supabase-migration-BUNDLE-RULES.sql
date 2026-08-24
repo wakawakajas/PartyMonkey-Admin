@@ -54,3 +54,38 @@ create policy "team_update" on public.bundle_settings
 -- not counted, not read out, and not waited for.
 alter table public.bundle_settings
   add column if not exists hidden_words text not null default '';
+
+-- ============================================================
+-- Hidden words, as a list rather than a comma-separated field
+-- One row per word, matched fuzzy -- anywhere in a piece's SKU name, not
+-- bounded to a whole word -- so "cust" hides "Custom", "Customized" and
+-- anything else carrying it. Add, search and edit as a list on Bundle SKU
+-- Settings; this is Bundle SKU's own and the pick list keeps its own
+-- separately.
+-- ============================================================
+
+create table if not exists public.bundle_hidden_words (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  term text not null,
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists bundle_hidden_words_term_key
+  on public.bundle_hidden_words (lower(term));
+
+alter table public.bundle_hidden_words enable row level security;
+
+drop policy if exists "team_select" on public.bundle_hidden_words;
+drop policy if exists "team_insert" on public.bundle_hidden_words;
+drop policy if exists "team_update" on public.bundle_hidden_words;
+drop policy if exists "team_delete" on public.bundle_hidden_words;
+
+create policy "team_select" on public.bundle_hidden_words
+  for select using (public.on_team(auth.uid()));
+create policy "team_insert" on public.bundle_hidden_words
+  for insert with check (public.on_team(auth.uid()) and auth.uid() = user_id);
+create policy "team_update" on public.bundle_hidden_words
+  for update using (public.on_team(auth.uid()));
+create policy "team_delete" on public.bundle_hidden_words
+  for delete using (public.on_team(auth.uid()));

@@ -2501,13 +2501,6 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         tagged <b>made to order</b> while it is packed — printed rather than picked, but still
         something that goes in the box.</p>
 
-      <label class="field" style="margin-bottom:8px;"><span>HIDDEN WORDS</span>
-        <input type="text" id="bundleRuleHide" placeholder="none" autocomplete="off"/></label>
-      <p class="hint" style="margin:-4px 0 12px;">A piece with one of these in its name is on
-        the card but greyed — not counted, not read out, and not waited for by a bundle that is
-        otherwise packed. This list is Bundle SKU's own; the pick list keeps its own separately.
-        Leave it empty and every piece is waited for.</p>
-
       <div class="toggle-row filter-opt">
         <span>PartyMonkey packs combinations only</span>
         <label class="switch"><input type="checkbox" id="bundleRuleCombos"/>
@@ -2518,6 +2511,28 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 
       <button class="btn-primary" id="bundleRuleSave" style="width:100%;">Save rules</button>
       <div id="bundleRuleMsg"></div>
+    </div></div>
+
+    <!-- A word each, rather than one field of them: several hundred is
+         normal, and a word typed wrong in the middle of a long list is easier
+         to fix by finding it than by re-reading the whole line. Matched fuzzy
+         -- anywhere in a SKU's name, not a whole word on its own -- so "cust"
+         hides "Custom" and "Customized" alike. Bundle SKU's own list; the
+         pick list keeps its separately. -->
+    <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
+      <div class="sect-label lg">Hidden words</div>
+      <p class="hint" style="margin:0 0 10px;">A piece whose SKU carries any of these anywhere
+        in its name — no need for the whole word — is on the card but greyed: not counted, not
+        read out, and not waited for by a bundle that is otherwise packed. Case does not matter.</p>
+      <label class="field" style="margin-bottom:12px;"><span>SEARCH</span>
+        <input type="text" id="bundleHideSearch" placeholder="Type part of a word" autocomplete="off"/></label>
+      <form class="pk-add" id="bundleHideAdd" autocomplete="off" style="margin-bottom:8px;">
+        <label class="field" style="margin-bottom:6px;"><span>ADD A WORD TO HIDE</span>
+          <input type="text" id="bundleHideNew" placeholder="e.g. Custom" maxlength="60" required/></label>
+        <button class="btn-outline btn-sm" type="submit" style="width:100%;">Add</button>
+      </form>
+      <div id="bundleHideList"></div>
+      <div id="bundleHideMsg"></div>
     </div></div>
 
     <!-- Everything the Daily Pick List is set by, on this screen as well: the
@@ -5873,7 +5888,7 @@ const bundleShopName=v=>v==='planttalks'?'Plant Talks':'PartyMonkey';
 // for the team, read when the screen opens and again whenever the day's jobs
 // are.
 const BUNDLE_RULES_DEFAULT={pt_word:'PT',seed_words:'seed, seeds',
-  made_to_order:'Custom',hidden_words:'',pm_combos_only:true};
+  made_to_order:'Custom',pm_combos_only:true};
 let bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT);
 const bundleWordList=v=>String(v==null?'':v).split(/[,\n]/).map(x=>x.trim()).filter(Boolean);
 // A word has to stand on its own -- beside a space, a dash, a dot or a digit,
@@ -5887,12 +5902,30 @@ function bundleWordRe(list){
   const ws=bundleWordList(list).map(bundleReEscape);
   return ws.length?new RegExp('(^|[^a-z])(?:'+ws.join('|')+')([^a-z]|$)','i'):null;
 }
-let bundleSeedRe=null,bundleNoteRe=null,bundlePtRe=null,bundleHideRe=null;
+let bundleSeedRe=null,bundleNoteRe=null,bundlePtRe=null;
 function bundleRulesReady(){
   bundleSeedRe=bundleWordRe(bundleRules.seed_words);
   bundleNoteRe=bundleWordRe(bundleRules.made_to_order);
   bundlePtRe=bundleWordRe(bundleRules.pt_word);
-  bundleHideRe=bundleWordRe(bundleRules.hidden_words);
+}
+// ---- hidden words: a list of their own, matched fuzzy ----
+// Not a whole-word rule like the other three: a hidden word is meant to catch
+// a typo or a shortened version of itself, so it matches anywhere in a SKU's
+// name rather than only beside a space or a dash.
+let bundleHiddenWords=[];               // {id,term}
+let bundleHideSearch='';
+async function loadBundleHiddenWords(){
+  if(!sb) return;
+  try{
+    const {data,error}=await sb.from('bundle_hidden_words')
+      .select('*').order('term',{ascending:true});
+    if(error) throw error;
+    bundleHiddenWords=data||[];
+  }catch(e){ /* not set up yet -- nothing is hidden until it is */ }
+}
+function bundleHideMatch(sku){
+  const s=String(sku||'').toLowerCase();
+  return bundleHiddenWords.some(r=>s.includes(String(r.term||'').trim().toLowerCase()));
 }
 bundleRulesReady();
 async function loadBundleRules(){
@@ -6283,28 +6316,122 @@ document.getElementById('bundleSettingsBtn').addEventListener('click',()=>
 async function openBundleSettings(){
   refreshBundles();
   refreshPlHidden();          // the block that has just been carried over here
-  await loadBundleRules();
+  await Promise.all([loadBundleRules(),loadBundleHiddenWords()]);
   renderBundleRules();
+  renderBundleHideList();
 }
 function renderBundleRules(){
   const set=(id,v)=>{ const el=document.getElementById(id); if(el) el.value=v||''; };
   set('bundleRulePt',bundleRules.pt_word);
   set('bundleRuleSeed',bundleRules.seed_words);
   set('bundleRuleNote',bundleRules.made_to_order);
-  set('bundleRuleHide',bundleRules.hidden_words);
   const box=document.getElementById('bundleRuleCombos');
   if(box) box.checked=!!bundleRules.pm_combos_only;
 }
 // Saved whole and on a press rather than a field at a time: a rule half
 // written is a rule that matches the wrong things, and typing one is exactly
 // when it is half written.
+// ---- the hidden-words list itself ----
+function renderBundleHideList(){
+  const el=document.getElementById('bundleHideList');
+  if(!el) return;
+  const q=bundleHideSearch.trim().toLowerCase();
+  const rows=q?bundleHiddenWords.filter(r=>String(r.term||'').toLowerCase().includes(q))
+    :bundleHiddenWords;
+  if(!bundleHiddenWords.length){
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">-- nothing hidden, so every '
+      +'piece is waited for --</p>';
+    return;
+  }
+  if(!rows.length){
+    el.innerHTML=`<p class="hint" style="margin:4px 0 0;">-- nothing matches `
+      +`"${escapeHtml(bundleHideSearch.trim())}" --</p>`;
+    return;
+  }
+  el.innerHTML=rows.map(r=>`<div class="ph-card pl-hidden-row" data-hide-id="${escapeHtml(String(r.id))}">
+      <input type="text" data-hide-box value="${escapeHtml(r.term||'')}" maxlength="60" aria-label="Word"/>
+      <button class="del-btn" data-hide-del title="Remove" aria-label="Remove">×</button>
+    </div>`).join('');
+}
+document.getElementById('bundleHideSearch').addEventListener('input',e=>{
+  bundleHideSearch=e.target.value;
+  renderBundleHideList();
+});
+document.getElementById('bundleHideAdd').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const msg=document.getElementById('bundleHideMsg');
+  const box=document.getElementById('bundleHideNew');
+  const term=box.value.trim();
+  if(!term) return;
+  const session=await requireSession(msg); if(!session) return;
+  if(bundleHiddenWords.some(r=>String(r.term||'').trim().toLowerCase()===term.toLowerCase())){
+    showMsg(msg,'That one is already on the list.',false); return;
+  }
+  try{
+    const {error}=await sb.from('bundle_hidden_words').insert({user_id:session.user.id,term});
+    if(error) throw error;
+    box.value='';
+    msg.innerHTML='';
+    await loadBundleHiddenWords();
+    renderBundleHideList();
+    renderBundles();
+  }catch(err){
+    showMsg(msg,/relation|does not exist|schema cache/i.test(err.message||'')
+      ? 'Run supabase-migration-BUNDLE-RULES.sql in Supabase first.'
+      : 'Could not add it: '+escapeHtml(err.message||String(err)),false);
+  }
+});
+// deleted on a press, edited on leaving the box -- the same bargain the pick
+// list's own hidden-word lists make
+document.getElementById('bundleHideList').addEventListener('click',async e=>{
+  const del=e.target.closest('[data-hide-del]'); if(!del) return;
+  const row=del.closest('[data-hide-id]');
+  const id=row.getAttribute('data-hide-id');
+  const r=bundleHiddenWords.find(x=>String(x.id)===id); if(!r) return;
+  if(!confirm(`Are you sure?\n\nStop hiding pieces containing "${r.term}"?\n\n`
+    +'They will be counted, read out, and waited for from now on.')) return;
+  const msg=document.getElementById('bundleHideMsg');
+  try{
+    const {error}=await sb.from('bundle_hidden_words').delete().eq('id',id);
+    if(error) throw error;
+    await loadBundleHiddenWords();
+    renderBundleHideList();
+    renderBundles();
+    showMsg(msg,'✓ Removed.',true);
+  }catch(err){
+    showMsg(msg,'Could not remove it: '+escapeHtml(err.message||String(err)),false);
+  }
+});
+document.getElementById('bundleHideList').addEventListener('focusout',async e=>{
+  const box=e.target.closest('[data-hide-box]'); if(!box) return;
+  const row=box.closest('[data-hide-id]');
+  const id=row.getAttribute('data-hide-id');
+  const r=bundleHiddenWords.find(x=>String(x.id)===id); if(!r) return;
+  const term=box.value.trim();
+  const msg=document.getElementById('bundleHideMsg');
+  if(!term||term===r.term){ box.value=r.term||''; return; }
+  if(bundleHiddenWords.some(x=>x!==r&&String(x.term||'').trim().toLowerCase()===term.toLowerCase())){
+    showMsg(msg,'That one is already on the list.',false);
+    box.value=r.term||''; return;
+  }
+  try{
+    const {error}=await sb.from('bundle_hidden_words').update({term}).eq('id',id);
+    if(error) throw error;
+    r.term=term;
+    msg.innerHTML='';
+    renderBundles();
+  }catch(err){
+    showMsg(msg,'Could not save that: '+escapeHtml(err.message||String(err)),false);
+    box.value=r.term||'';
+  }
+});
+
 document.getElementById('bundleRuleSave').addEventListener('click',async()=>{
   const msg=document.getElementById('bundleRuleMsg');
   const val=id=>(document.getElementById(id).value||'').trim();
   const next={pt_word:val('bundleRulePt')||BUNDLE_RULES_DEFAULT.pt_word,
     seed_words:val('bundleRuleSeed'),
     made_to_order:val('bundleRuleNote'),
-    hidden_words:val('bundleRuleHide'),
     pm_combos_only:document.getElementById('bundleRuleCombos').checked};
   const session=await requireSession(msg); if(!session) return;
   try{
@@ -6389,7 +6516,8 @@ async function refreshBundleJobs(){
   // at all, and which SKUs are somebody else's job. Read afresh here for the
   // same reason the pick list reads them afresh -- a word added on Settings
   // should be in force by the time anybody picks up a box.
-  try{ await Promise.all([loadPlHidden(),loadPlVoice(),loadBundleRules()]); }catch(e){}
+  try{ await Promise.all([loadPlHidden(),loadPlVoice(),loadBundleRules(),
+    loadBundleHiddenWords()]); }catch(e){}
   let orders,jobs,items;
   try{
     [orders,jobs,items]=await Promise.all([
@@ -6710,7 +6838,7 @@ function bundleJobById(id){ return bundleJobs.find(j=>j.id===id)||null; }
 // settings screen -- a piece named by it is on the card but greyed, not
 // counted, not read out, and not waited for.
 function bundlePieceHidden(piece){
-  return !!bundleHideRe&&bundleHideRe.test(String(piece&&piece.sku||''));
+  return bundleHideMatch(piece&&piece.sku);
 }
 // Off the card, not greyed on it: a bundle of four with two hidden reads as a
 // bundle of two, which is what the person packing it has to do. The filter is
