@@ -5978,6 +5978,9 @@ function showScreen(name,viaBack){
   // a batch that lent its sheet to the Gift Tag screen takes it back on
   // the way out, whichever way somebody leaves
   if(name!=='tool-gift-tag'&&name!=='tool-gift-tag-design') mcGtReturn();
+  // walking off the builder any other way spends the batch's ticket back, so
+  // a Back pressed much later somewhere else is not sent to a stale batch
+  mcDropBatchTicket(name);
   mcBackSync(name);
   if(name==='tool-gift-tag-design') gtDesignOpen();
   if(name==='shipment') refreshShipmentList(); else if(selectMode) exitSelectMode();
@@ -9568,14 +9571,11 @@ function goBack(){
   }
   // Another one. The static tree has tool-custom / tool-gift-tag's parent as
   // the Print template hub, which is right when they were opened from a tile
-  // there — but Magic Create opens them too, from a line's own popup, and
-  // Back from there means back to that line's batch, not up to the hub.
-  if((currentScreen==='tool-custom'||currentScreen==='tool-gift-tag'
-      ||currentScreen==='tool-gift-tag-design')&&mcBatch&&(mcWinItem||mcGtHome)){
-    mcCommit().finally(()=>{
-      if(mcWinItem) mcRepaintRow(mcItem(mcWinItem));
-      showScreen('magic-batch',true);
-    });
+  // there — but Magic Create opens them too: from a line's own popup, from the
+  // gift tag loan, or from the batch's SKU summary. Back from any of those
+  // means back to the batch it came from, not up to the hub.
+  if(mcIsBuilderScreen(currentScreen)&&mcCanReturn()){
+    mcCommit().finally(mcReturnToBatch);
     return;
   }
   showScreen(SCREEN_PARENT[currentScreen]||'home',true);
@@ -23716,6 +23716,10 @@ document.getElementById('mcMadeNext').addEventListener('click',()=>{mcMadePage++
 document.getElementById('mcMadeDownload').addEventListener('click',()=>exportSide('front','mcMadeMsg'));
 document.getElementById('mcMadeOpen').addEventListener('click',()=>{
   document.getElementById('mcMadeSheet').classList.remove('open');
+  // no line is live on this trip — the sheet belongs to the whole batch — so
+  // the batch is what Back is told to come back to, and the summary is what
+  // it reopens, because that is the list this came off
+  if(mcBatch) mcFromBatch={summary:true};
   showScreen('tool-custom');
 });
 function mcSummaryFolderState(){
@@ -23834,6 +23838,11 @@ const mcWinRect={x:null,y:null,w:560,h:620};
 let mcWinItem=null;              // exactly ONE line is live at a time
 let mcWinMin=false;              // minimised to the bubble rather than closed
 let mcHomeState=null;            // the operator's own builder, put back on close
+// The batch itself can send you to the builder without any line being live —
+// the SKU summary builds one sheet for the whole batch. mcWinItem is null on
+// that trip, so without its own token Back read the static tree and went up to
+// the Print template hub instead of back to the batch.
+let mcFromBatch=null;            // {summary:true} — and what to reopen on return
 
 try{
   const saved=JSON.parse(localStorage.getItem('pigu.mcWin')||'null');
@@ -24421,16 +24430,35 @@ function mcGiftWire(it){
 // Working a line takes you onto a whole screen — the builder, or the gift tag
 // sheet — and from there the batch is several taps away through a drawer. This
 // is the one tap, and it is only there while there is something to go back to.
+// Whether there is a batch to go back to, however the builder was reached —
+// a line's own popup, the gift tag loan, or the batch's SKU summary. Both are
+// function declarations rather than consts: showScreen calls them, and it runs
+// long before this far down the file has been reached.
+function mcIsBuilderScreen(n){
+  return n==='tool-custom'||n==='tool-gift-tag'||n==='tool-gift-tag-design';
+}
+function mcCanReturn(){ return !!mcBatch&&(!!mcWinItem||!!mcGtHome||!!mcFromBatch); }
+// spent on the way out of the builder by any route other than going back
+function mcDropBatchTicket(name){ if(!mcIsBuilderScreen(name)) mcFromBatch=null; }
 function mcBackSync(name){
   const chip=document.getElementById('mcBackChip');
   if(!chip) return;
-  const on=(name==='tool-custom'||name==='tool-gift-tag'||name==='tool-gift-tag-design')
-    &&!!mcBatch&&(!!mcWinItem||!!mcGtHome);
+  const on=mcIsBuilderScreen(name)&&mcCanReturn();
   chip.style.display=on?'':'none';
   if(!on) return;
   const it=mcWinItem?mcItem(mcWinItem):null;
   document.getElementById('mcBackWhat').textContent=
     it?`Back to ${it.order_id||'the batch'}`:'Back to the batch';
+}
+// One way back, used by the chip, the top-bar Back and the edge swipe alike,
+// so the three cannot drift apart about what "back" means.
+function mcReturnToBatch(){
+  const reopenSummary=!!(mcFromBatch&&mcFromBatch.summary);
+  mcFromBatch=null;
+  if(mcWinItem) mcRepaintRow(mcItem(mcWinItem));
+  showScreen('magic-batch',true);
+  // and onto the list that sent you, not the batch behind it
+  if(reopenSummary) setTimeout(mcOpenSummary,0);
 }
 document.getElementById('mcBackChip').addEventListener('click',async()=>{
   // The ✕ on the popup already commits whatever was built in the full
@@ -24439,8 +24467,7 @@ document.getElementById('mcBackChip').addEventListener('click',async()=>{
   // trip rather than what was just built — indistinguishable from having
   // been dumped back at the batch instead of the exact line.
   await mcCommit();
-  if(mcWinItem) mcRepaintRow(mcItem(mcWinItem));
-  showScreen('magic-batch',true);
+  mcReturnToBatch();
 });
 
 // ---------- the batch's sheet, on the screen built for sheets ----------
