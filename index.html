@@ -24385,6 +24385,11 @@ function mcSummaryRows(){
     if(!row.img&&it.image_url) row.img=it.image_url;
     map.set(key,row);
   });
+  // What else each SKU is called. A custom tag's SKU is the shop's own
+  // — Custom Gift Tag-TD-1 — and the design in the library is filed under the
+  // variation printed on it, "1". The per-line window has always matched on
+  // both; this is how the summary knows the same.
+  mcSkuAlias=new Map([...map.values()].map(r=>[String(r.sku),r.name||'']));
   // By SKU rather than by quantity: this is read against a shelf, and the
   // shelf is in SKU order. Numeric-aware, so SKU 2 comes before SKU 12.
   return [...map.values()].sort((a,b)=>
@@ -24433,7 +24438,9 @@ function mcRenderSummary(){
       ? `<span class="mc-sum-on">✓ on the ${on.on==='gift'
           ?escapeHtml(mcGtPage(on.mode).name)+' gift tag':'print'} sheet${
           on.qty!==r.qty?` ×${on.qty}`:''}</span>`
-      : (gift?`<span class="mc-sum-name">${escapeHtml(gift.page.name)} gift tag design</span>`:'');
+      : (gift?`<span class="mc-sum-name">${escapeHtml(gift.page.name)} gift tag${
+          String(gift.name||'').trim().toLowerCase()!==String(r.sku).trim().toLowerCase()
+            ?` — design “${escapeHtml(gift.name)}”`:''}</span>`:'');
     // Add takes the SKU's own PNG where there is one. Choose is for the rest —
     // and for the times the right artwork is simply filed under another name.
     const pick=`<button type="button" class="btn-outline" data-mc-sum-pick="${escapeHtml(r.sku)}"
@@ -24495,15 +24502,25 @@ const mcGtPages=()=>[...GT_PAGES].sort((a,b)=>
   (a.mode===gtMode?0:1)-(b.mode===gtMode?0:1));
 const mcGtPage=m=>GT_PAGES.find(p=>p.mode===m)||GT_PAGES[0];
 let mcGtNames={};                // mode -> [{id,name}], as of the last look
+let mcSkuAlias=new Map();        // SKU -> the Variation its lines carry
+let mcGtShut={};                 // mode -> true where the folder would not open
 // The names in one page's library, without opening it: its folder if that is
 // connected, and this browser's copy if it is not — the same two places the
-// page itself reads, in the same order.
+// page itself reads, in the same order. A folder that is connected but will
+// not open without a tap is said so rather than read as an empty library:
+// "no design of that name" and "nobody has opened that page yet" are not the
+// same answer, and only one of them is the operator's problem.
 async function mcGtReadNames(page){
+  mcGtShut[page.mode]=false;
   try{
     const dir=await gtIdbGet(page.dir).catch(()=>null);
-    if(dir&&await gtDirOk(dir)){
-      const man=JSON.parse(await (await gtDirRead(dir,'library.json')).text());
-      return (man.designs||[]).map(d=>({id:d.id,name:d.name}));
+    if(dir){
+      if(await gtDirOk(dir)){
+        const man=JSON.parse(await (await gtDirRead(dir,'library.json')).text());
+        return (man.designs||[]).map(d=>({id:d.id,name:d.name}));
+      }
+      mcGtShut[page.mode]=true;
+      return [];
     }
     const rec=await gtIdbGet(page.lib).catch(()=>null);
     return ((rec&&rec.manifest&&rec.manifest.designs)||[]).map(d=>({id:d.id,name:d.name}));
@@ -24521,15 +24538,25 @@ async function mcGtIndex(){
   mcGtNames=out;
   return out;
 }
-// the design of this exact name, and which page it is on. By that name
-// exactly, the same rule the print sheet matches <SKU>.png by.
+// The design of this exact name, and which page it is on. The SKU first and
+// then the Variation the batch's lines carry — a design is matched by its
+// whole name either way, never by a near miss: guessing here puts the wrong
+// artwork on somebody's order.
+const mcGtNamesFor=sku=>{
+  const key=String(sku||'');
+  const alias=mcSkuAlias.get(key)||'';
+  return [key,alias].filter(Boolean);
+};
 function mcGiftHit(sku){
-  const want=String(sku||'').trim().toLowerCase();
-  if(!want) return null;
-  for(const p of mcGtPages()){
-    const d=(mcGtNames[p.mode]||[]).find(x=>String(x.name||'').trim().toLowerCase()===want);
-    if(d) return {mode:p.mode,page:p,design:d};
-  }
+  const wants=mcGtNamesFor(sku).map(n=>String(n).trim().toLowerCase()).filter(Boolean);
+  if(!wants.length) return null;
+  // the SKU is asked of both pages before the variation is asked of either:
+  // the SKU is the exact thing, the variation is what it is also called
+  for(const want of wants)
+    for(const p of mcGtPages()){
+      const d=(mcGtNames[p.mode]||[]).find(x=>String(x.name||'').trim().toLowerCase()===want);
+      if(d) return {mode:p.mode,page:p,design:d,name:d.name};
+    }
   return null;
 }
 // one page's order: the live one where that page is on screen, the copy it was
@@ -24797,7 +24824,7 @@ async function mcAddSkusToGiftTag(rows,opts){
     const hit=mcGiftHit(r.sku);
     if(!hit){ missing.push(r.sku); return; }
     const list=byPage.get(hit.mode)||[];
-    list.push({row:r,design:hit.design});
+    list.push({row:r,design:hit.design,name:hit.name});
     byPage.set(hit.mode,list);
   });
   if(!byPage.size){
@@ -24816,11 +24843,11 @@ async function mcAddSkusToGiftTag(rows,opts){
     // order left behind is kept, not merged
     if(m!==gtMode) await gtSetMode(m);
     let a=0,u=0;
-    byPage.get(m).forEach(({row,design})=>{
+    byPage.get(m).forEach(({row,design,name})=>{
       const qty=Math.max(1,Math.round(Number(row.qty)||1));
-      // the library is in hand now, so the design is taken from it — the id
-      // read off disk is only the index's shorthand for the same entry
-      const d=(typeof gtDesignForName==='function'&&gtDesignForName(row.sku))||design;
+      // the library is in hand now, so the design is taken from it by the name
+      // that matched — the id read off disk is only the index's shorthand
+      const d=(typeof gtDesignForName==='function'&&gtDesignForName(name||row.sku))||design;
       // already on the order: set it to the batch's figure rather than doubling,
       // the same rule the print sheet follows
       const had=gtOrder.find(l=>(l.sku&&l.sku===row.sku)||l.designId===d.id);
@@ -24848,12 +24875,13 @@ function mcSummaryFolderState(){
   // what is searchable, all three libraries of it — the designs folder and
   // both gift tag pages, so an empty one is read as empty rather than as a
   // batch with no artwork
-  const tags=GT_PAGES.map(p=>({p,n:(mcGtNames[p.mode]||[]).length}))
-    .filter(x=>x.n).map(x=>`${x.n} ${x.p.name}`).join(' · ');
+  const tags=GT_PAGES.map(p=>mcGtShut[p.mode]
+    ? `${p.name} folder not open — visit that page once`
+    : `${(mcGtNames[p.mode]||[]).length} ${p.name}`).join(' · ');
   el.textContent=[loadDesignFiles.length
     ? `${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'} in the folder`
     : 'No designs folder chosen — set one under Load design.',
-    tags?`gift tags: ${tags}`:''].filter(Boolean).join(' · ');
+    `gift tags: ${tags}`].filter(Boolean).join(' · ');
 }
 async function mcOpenSummary(){
   document.getElementById('mcSummarySearch').value='';   // a fresh look, not the last search
