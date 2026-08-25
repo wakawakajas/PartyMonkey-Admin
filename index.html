@@ -1790,6 +1790,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   overflow:hidden;text-overflow:ellipsis;}
 .mc-order-count{flex:0 0 auto;font-size:11px;color:var(--faint);
   font-variant-numeric:tabular-nums;white-space:nowrap;}
+/* quiet until it has something to do: an order with nothing laid out has
+   nothing to take off */
+.mc-ord-clear{flex:0 0 auto;height:26px;min-height:26px;padding:0 10px;font-size:10.5px;
+  letter-spacing:.04em;text-transform:uppercase;border-radius:999px;
+  border:1px solid var(--border-strong);background:transparent;color:var(--muted);}
+.mc-ord-clear:disabled{opacity:.32;}
+.mc-ord-clear:not(:disabled):active{background:var(--card);color:var(--ink);}
 .mc-order.all-done .mc-order-count{color:var(--blueprint);}
 
 /* One line to a row. At arm's length it reads left to right: the picture the
@@ -24608,11 +24615,17 @@ function mcRenderItems(){
     const done=g.items.filter(i=>i.status).length;
     const all=done===g.items.length;
     const buyer=(g.items.find(i=>i.buyer)||{}).buyer||'';
+    // An order is put on a sheet as a whole and is taken off as one: line by
+    // line is the same tap ten times, and the summary's Remove is by SKU,
+    // which is the wrong grouping when the same card is on two orders.
+    const laid=g.items.filter(i=>i.tile||i.sheet_item||i.design).length;
     return `<div class="mc-order${all?' all-done':''}">
       <div class="mc-order-head">
         <span class="mc-order-id">${escapeHtml(g.order_id)}</span>
         ${buyer?`<span class="mc-order-buyer">${escapeHtml(buyer)}</span>`:''}
         <span class="mc-order-count">${done} of ${g.items.length} done</span>
+        <button type="button" class="mc-ord-clear" data-mc-ord-clear="${escapeHtml(g.order_id)}"
+          title="Take this order off the sheets"${laid?'':' disabled'}>Clear</button>
       </div>
       ${g.shown.map(mcLineHtml).join('')}
     </div>`;
@@ -24690,7 +24703,47 @@ document.getElementById('mcItems').addEventListener('click',async e=>{
   if(cr){ await mcWinOpen(cr.dataset.mcCreate); return; }
   const pd=e.target.closest('[data-mc-pdf]');
   if(pd){ await mcDownloadOne(pd.dataset.mcPdf); return; }
+  const cl=e.target.closest('[data-mc-ord-clear]');
+  if(cl&&!cl.disabled){ await mcClearOrder(cl.dataset.mcOrdClear); return; }
 });
+// A whole order off the sheets. What goes is where it was put and the layout
+// it was given; the order itself stays on the batch, and artwork uploaded to a
+// line is a file somebody chose and is left where it is.
+async function mcClearOrder(orderId){
+  const out=document.getElementById('mcBatchMsg');
+  if(!mcBatch||mcBatch.status!=='open'){
+    showMsg(out,'This batch is completed — re-open it to change it.',false); return;
+  }
+  const on=mcItems.filter(i=>String(i.order_id||'')===String(orderId)
+    &&(i.tile||i.sheet_item||i.design));
+  if(!on.length){ showMsg(out,`Nothing on ${orderId} is on a sheet.`,false); return; }
+  if(!confirm(`Take order ${orderId} off the sheets?\n\n`
+    +`${on.length} line${on.length===1?'':'s'} — the page each was put on and the layout `
+    +'it was given.\n\nThe order stays on the batch, and any artwork uploaded to a line '
+    +'is kept.')) return;
+  let print=0,gift=0;
+  for(const it of on){
+    // off the sheet being looked at as well — but only where no other order is
+    // still asking for that same card
+    const sku=String(it.sku||'');
+    const shared=mcItems.some(x=>x!==it&&String(x.sku||'')===sku
+      &&String(x.order_id||'')!==String(orderId)
+      &&(x.tile==='sheetPrint'||x.tile==='giftTag'));
+    if(!shared){
+      const w=mcRemoveSku(sku);
+      if(w==='print') print++; else if(w==='gift') gift++;
+    }
+    it.tile=null; it.sheet_item=null; it.design=null;
+    await mcSave(it,{tile:null,sheet_item:null,design:null});
+  }
+  if(print){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
+  if(gift&&typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
+  mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
+  // a line open in the window has just had its layout taken away; it should
+  // not go on showing it
+  if(mcWinItem&&on.some(i=>i.id===mcWinItem)) mcWinRender();
+  showMsg(out,`Took ${on.length} line${on.length===1?'':'s'} of ${orderId} off the sheets.`,true);
+}
 async function mcToggleDone(id){
   const it=mcItem(id); if(!it||!sb) return;
   if(mcBatch&&mcBatch.status!=='open'){
