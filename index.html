@@ -17002,6 +17002,7 @@ async function gtLoadLib(){
   gtAssets.clear(); gtImgs.clear();
   // the sheet's own files come from the manifest as well, so they go with it
   gtLayout=null; gtBaseImg=null; gtLayoutFrom=''; gtBaseFrom='';
+  gtLibFolderName='';                 // belongs to the library being left
   gtSheet.layoutFile=''; gtSheet.baseFile=''; gtSheet.slots=[];
   gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   let man=null;
@@ -17518,11 +17519,15 @@ function gtDropPiguFolders(){
 // designs are held the ordinary way, with no pigu path on them — they still
 // belong to that folder, and still bring its shape.
 let gtLibFolderName='';
+// Only artwork actually read out of a Pigu product folder belongs to one. A
+// design in the page's own library folder belongs to no product folder at all:
+// answering with the library's name here handed it whatever cutting file that
+// name happened to be mapped to, and put the wrong shape on the sheet the
+// moment a design was picked.
 const gtPiguFolderOf=d=>{
   if(!d) return '';
   const m=/^adhoc\/pigu\/([^/]+)\//.exec(d.file||'');
-  if(m) return m[1];
-  return d.adhoc?'':gtLibFolderName;
+  return m?m[1]:'';
 };
 // Choosing a design is choosing what is being printed; the shape it is cut to
 // follows from it. Applies that folder's cutting file unless the sheet is on
@@ -24404,7 +24409,10 @@ function mcRenderSummary(){
   // whether a SKU can be put on a sheet is knowable before the button is
   // pressed, so it says so rather than failing on the tap
   body.innerHTML=rows.map(r=>{
-    const has=!!designFileForSku(r.sku);
+    // a PNG in the designs folder, or a design of that name on either gift tag
+    // page — both are artwork this SKU can be put on a sheet with
+    const gift=mcGiftHit(r.sku);
+    const has=!!designFileForSku(r.sku)||!!gift;
     const where=mcWhereIsSku(r.sku);
     const on=where;
     const shot=r.img
@@ -24413,20 +24421,28 @@ function mcRenderSummary(){
       : '<span class="mc-sum-shot blank">◻</span>';
     // what is on the sheet is read off the sheet itself, so it is still right
     // after the window has been shut and opened again
+    // and it says which gift tag page it went on: two of them means "on the
+    // gift tag sheet" is no longer an answer somebody can act on
     const badge=on
-      ? `<span class="mc-sum-on">✓ on the ${on.on==='gift'?'gift tag':'print'} sheet${
+      ? `<span class="mc-sum-on">✓ on the ${on.on==='gift'
+          ?escapeHtml(mcGtPage(on.mode).name)+' gift tag':'print'} sheet${
           on.qty!==r.qty?` ×${on.qty}`:''}</span>`
-      : '';
+      : (gift?`<span class="mc-sum-name">${escapeHtml(gift.page.name)} gift tag design</span>`:'');
     // Add takes the SKU's own PNG where there is one. Choose is for the rest —
     // and for the times the right artwork is simply filed under another name.
     const pick=`<button type="button" class="btn-outline" data-mc-sum-pick="${escapeHtml(r.sku)}"
            title="Search the designs folder and pick one for ${escapeHtml(r.sku)}">Choose…</button>`;
+    const png=!!designFileForSku(r.sku);
+    const addTitle=png
+      ? `Put ${r.sku}.png on a print sheet, ${r.qty} up`
+      : `Put ${r.sku} on the ${gift?gift.page.name:''} gift tag sheet, ${r.qty} up`;
     const btn=on
       ? `<button type="button" class="btn-danger" data-mc-sum-del="${escapeHtml(r.sku)}"
-           title="Take ${escapeHtml(r.sku)} off the print sheet">Remove</button>`
+           title="Take ${escapeHtml(r.sku)} off the ${on.on==='gift'
+             ?escapeHtml(mcGtPage(on.mode).name)+' gift tag':'print'} sheet">Remove</button>`
       : (has
         ? `<button type="button" class="btn-outline" data-mc-sum-add="${escapeHtml(r.sku)}"
-             title="Put ${escapeHtml(r.sku)}.png on a print sheet, ${r.qty} up">Add</button>`+pick
+             title="${escapeHtml(addTitle)}">Add</button>`+pick
         : pick);
     return `<div class="mc-sum-row${on?' is-on':''}">
       ${shot}
@@ -24458,20 +24474,84 @@ function mcLineForSku(sku){
   const pick=designFileForSku(key); if(!pick) return null;
   return state.designs.find(d=>d.source&&d.source.path===pick.path)||null;
 }
-// the same question of the gift tag order: tagged with the SKU it was added
-// for, or carrying the design of that name
+// ---------- both gift tag pages ----------
+// Gift Tag is two pages now — Festive and Custom — each with its own folder,
+// its own library.json and its own order, and the tool holds one of them at a
+// time. A summary that asked only the page that happens to be open would call
+// half the batch artwork-less. So both libraries are read here for their
+// design names alone: nothing is loaded, nothing is switched, and a page
+// added next to these two is a name on the list below.
+const GT_PAGES=[{mode:'festive',name:'Festive',dir:'dir',lib:'lib'},
+                {mode:'custom', name:'Custom', dir:'dir:custom',lib:'lib:custom'}];
+// the page on screen answers first, so a design of the same name on both goes
+// where the operator is already standing
+const mcGtPages=()=>[...GT_PAGES].sort((a,b)=>
+  (a.mode===gtMode?0:1)-(b.mode===gtMode?0:1));
+const mcGtPage=m=>GT_PAGES.find(p=>p.mode===m)||GT_PAGES[0];
+let mcGtNames={};                // mode -> [{id,name}], as of the last look
+// The names in one page's library, without opening it: its folder if that is
+// connected, and this browser's copy if it is not — the same two places the
+// page itself reads, in the same order.
+async function mcGtReadNames(page){
+  try{
+    const dir=await gtIdbGet(page.dir).catch(()=>null);
+    if(dir&&await gtDirOk(dir)){
+      const man=JSON.parse(await (await gtDirRead(dir,'library.json')).text());
+      return (man.designs||[]).map(d=>({id:d.id,name:d.name}));
+    }
+    const rec=await gtIdbGet(page.lib).catch(()=>null);
+    return ((rec&&rec.manifest&&rec.manifest.designs)||[]).map(d=>({id:d.id,name:d.name}));
+  }catch(e){ return []; }
+}
+// Read on the way into the summary and again after anything is added, so the
+// rows say what is true of both pages rather than of the last one visited.
+async function mcGtIndex(){
+  const out={};
+  for(const p of GT_PAGES){
+    out[p.mode]=(gtLoaded&&p.mode===gtMode)
+      ? ((typeof gtLib!=='undefined'&&gtLib.designs)||[]).map(d=>({id:d.id,name:d.name}))
+      : await mcGtReadNames(p);
+  }
+  mcGtNames=out;
+  return out;
+}
+// the design of this exact name, and which page it is on. By that name
+// exactly, the same rule the print sheet matches <SKU>.png by.
+function mcGiftHit(sku){
+  const want=String(sku||'').trim().toLowerCase();
+  if(!want) return null;
+  for(const p of mcGtPages()){
+    const d=(mcGtNames[p.mode]||[]).find(x=>String(x.name||'').trim().toLowerCase()===want);
+    if(d) return {mode:p.mode,page:p,design:d};
+  }
+  return null;
+}
+// one page's order: the live one where that page is on screen, the copy it was
+// left as where it is not
+const mcGtOrderFor=m=>(m===gtMode
+  ? ((typeof gtOrder!=='undefined'&&gtOrder)||[])
+  : (gtOrders[m]||[]));
+// the same question of the gift tag orders: tagged with the SKU it was added
+// for, or carrying the design of that name — on either page
 function mcGiftLineForSku(sku){
   const key=String(sku||'');
-  const order=(typeof gtOrder!=='undefined'&&gtOrder)||[];
-  const tagged=order.find(l=>l.sku&&l.sku===key);
-  if(tagged) return tagged;
-  const d=gtDesignForName(key); if(!d) return null;
-  return order.find(l=>l.designId===d.id)||null;
+  const hit=mcGiftHit(key);
+  for(const p of mcGtPages()){
+    const order=mcGtOrderFor(p.mode);
+    const tagged=order.find(l=>l.sku&&l.sku===key);
+    if(tagged) return {mode:p.mode,line:tagged};
+    if(hit&&hit.mode===p.mode){
+      const l=order.find(l=>l.designId===hit.design.id);
+      if(l) return {mode:p.mode,line:l};
+    }
+  }
+  return null;
 }
 // where this SKU already is, if anywhere
 function mcWhereIsSku(sku){
   const p=mcLineForSku(sku); if(p) return {on:'print',line:p,qty:p.qty};
-  const g=mcGiftLineForSku(sku); if(g) return {on:'gift',line:g,qty:g.qty};
+  const g=mcGiftLineForSku(sku);
+  if(g) return {on:'gift',mode:g.mode,line:g.line,qty:g.line.qty};
   return null;
 }
 // Which saved template these designs belong on. A folder of designs is one
@@ -24503,7 +24583,13 @@ function mcTemplateFor(rows){
 // repaint the sheet once, not a hundred times.
 function mcRemoveSku(sku){
   const at=mcWhereIsSku(sku); if(!at) return '';
-  if(at.on==='gift'){ gtOrder=gtOrder.filter(l=>l.id!==at.line.id); return 'gift'; }
+  if(at.on==='gift'){
+    // the page it is on may not be the page on screen, and taking it off the
+    // one that is would leave it exactly where it was
+    if(at.mode===gtMode) gtOrder=gtOrder.filter(l=>l.id!==at.line.id);
+    else gtOrders[at.mode]=(gtOrders[at.mode]||[]).filter(l=>l.id!==at.line.id);
+    return 'gift';
+  }
   state.designs=state.designs.filter(d=>d.id!==at.line.id);
   return 'print';
 }
