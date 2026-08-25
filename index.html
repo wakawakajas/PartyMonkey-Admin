@@ -16787,12 +16787,8 @@ let gtLayout=null;                 // {vb,mm,shapes:[{path,bbox}]} read off the 
 let gtBaseImg=null;                // the sheet's base layer, printed under everything
 let gtLayoutFrom='', gtBaseFrom=''; // which file each was built from, so neither is rebuilt for nothing
 const gtDesign=id=>gtLib.designs.find(d=>d.id===id)||null;
-// What the page on screen offers to pick from. Both libraries are always in
-// gtLib.designs — an order line already built, and Magic Create matching a SKU
-// by name, must not depend on which page happens to be open — but only one of
-// them is ever shown: the library's own designs on Festive, the Pigu folders'
-// one-offs on Custom.
-const gtDesignsInView=()=>gtLib.designs.filter(d=>gtMode==='custom'?d.adhoc:!d.adhoc);
+// The page's library is the whole of what it offers: the two do not share one.
+const gtDesignsInView=()=>gtLib.designs;
 const gtFont=id=>gtLib.fonts.find(f=>f.id===id)||null;
 // a font that failed to load, or a field left on the default, falls back to the
 // app's own face rather than to whatever the browser feels like
@@ -16875,7 +16871,7 @@ async function gtDirRead(dir,path){
 let gtFolderPending=false;
 async function gtEnsureDir(ask){
   if(gtDir) return await gtDirOk(gtDir,ask);
-  const saved=await gtIdbGet('dir').catch(()=>null);
+  const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
   if(!saved) return false;
   if(!await gtDirOk(saved,ask)){ gtFolderPending=true; return false; }
   gtDir=saved; gtFolderPending=false;
@@ -16992,7 +16988,7 @@ async function gtSaveLib(){
     await gtDirWrite(gtDir,'library.json',new Blob([JSON.stringify(man,null,2)],{type:'application/json'}));
     return;
   }
-  await gtIdbPut('lib',{manifest:man,
+  await gtIdbPut(gtLibKey(),{manifest:man,
     assets:Object.fromEntries([...gtAssets].filter(([k])=>!gtIsAdhoc(k)))});
 }
 // The sheet, the layout and the placeholders are changed a keystroke at a time,
@@ -17044,7 +17040,7 @@ async function gtLoadLib(){
       }
     }
   }else{
-    const rec=await gtIdbGet('lib').catch(()=>null);
+    const rec=await gtIdbGet(gtLibKey()).catch(()=>null);
     if(rec){ man=rec.manifest; Object.entries(rec.assets||{}).forEach(([k,v])=>gtAssets.set(k,v)); }
     // the browser's own copy: there either is one or there never was, and
     // neither is a failed read of somebody's folder
@@ -17333,10 +17329,16 @@ let gtPiguLoaded=false;           // the mapped folders' designs are in the libr
 // the file every time and keeps nothing. Two lists, one at a time, and no
 // question about which a design belongs to.
 let gtMode='festive';
+// Two pages, two libraries, nothing in common: its own folder, its own
+// library.json inside it, its own copy in this browser when no folder is
+// connected, and its own order. Festive keeps the original keys so the library
+// that is already there stays where it is.
+const gtDirKey=()=>gtMode==='custom'?'dir:custom':'dir';
+const gtLibKey=()=>gtMode==='custom'?'lib:custom':'lib';
+const gtOrders={festive:null,custom:null};
 const GT_MODE_HINT={
-  festive:'The designs in your library folder. Words set on one are saved and come back.',
-  custom:'Artwork in the Pigu product folders, each cut to its folder\u2019s shape. '
-        +'These are one-offs \u2014 they carry no saved words.'};
+  festive:'Your festive library folder \u2014 its designs, fonts, shapes and saved words.',
+  custom:'Your custom tag folder \u2014 a library of its own, nothing shared with Festive.'};
 function gtPaintMode(){
   const t=document.getElementById('gtTitle');
   if(t) t.textContent=gtMode==='custom'?'Custom Gift Tag':'Festive Gift Tag';
@@ -17348,17 +17350,37 @@ function gtPaintMode(){
 // Puts the chosen library on screen. Festive drops the folders' artwork and
 // leaves the library's own; custom reads the mapped folders in. Either way the
 // order already built is untouched — a line keeps the design it was given.
+// Neither page reads the Pigu product folders any more. Each has a folder of
+// its own, and a design that is in it is a design like any other — saved, with
+// its words kept. The mapping is still there under the settings screen for
+// whoever wants to apply it by hand; nothing applies it on its own.
 async function gtApplyMode(){
   gtPaintMode();
-  // the folders are read the first time Custom is asked for, and then left in
-  // hand: taking them back out again is what used to lose the library with them
-  if(gtMode==='custom'&&!gtPiguLoaded) await gtLoadMappedFolders().catch(()=>{});
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
 }
 async function gtSetMode(m,save){
-  gtMode=(m==='custom')?'custom':'festive';
+  const next=(m==='custom')?'custom':'festive';
+  if(next===gtMode&&gtLoaded){ await gtApplyMode(); return; }
+  // the order was built out of the page being left, and belongs to it
+  gtOrders[gtMode]=gtOrder;
+  gtMode=next;
   if(save!==false) await gtIdbPut('gtMode',gtMode).catch(()=>{});
+  gtOrder=gtOrders[gtMode]||[];
+  gtPage=0;
+  await gtSwitchFolder();
   await gtApplyMode();
+}
+// This page's folder, and the library inside it. Nothing of the other page is
+// left behind: gtLoadLib empties the library before it reads, and what it
+// reads is this page's own file.
+async function gtSwitchFolder(){
+  gtDir=null; gtFolderPending=false;
+  const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
+  if(saved&&await gtDirOk(saved)) gtDir=saved;
+  else if(saved) gtFolderPending=true;
+  await gtLoadLib().catch(()=>{});
+  if(!gtSheet.slots.length) gtRebuildSlots();
+  gtWriteSheetInputs();
 }
 async function gtPiguDirGet(){
   if(!gtPiguRead){ gtPiguDir=await gtIdbGet('piguDir').catch(()=>null)||null; gtPiguRead=true; }
@@ -19195,10 +19217,14 @@ function gtSyncFolderState(){
     return;
   }
   pick.disabled=false;
-  el.innerHTML=gtDir?`Folder: <strong>${escapeHtml(gtDir.name)}</strong>`
+  // which page's folder this is: the two are separate libraries, and a folder
+  // chosen here belongs to the page that is open
+  const page=`<span class="hint" style="margin:0 0 6px;display:block;">${
+    gtMode==='custom'?'Custom Gift Tag':'Festive Gift Tag'} — this page’s own folder</span>`;
+  el.innerHTML=page+(gtDir?`Folder: <strong>${escapeHtml(gtDir.name)}</strong>`
     :(gtFolderPending
       ?'⚠ A folder is remembered but not connected yet — the browser asks again each visit. Choose folder, or upload anything, and it reconnects. Until then new files are kept in this browser only.'
-      :'No folder chosen — the library is kept in this browser.');
+      :'No folder chosen — the library is kept in this browser.'));
   el.style.borderColor=(!gtDir&&gtFolderPending)?'var(--amber)':'';
   el.style.color=(!gtDir&&gtFolderPending)?'var(--amber)':'';
 }
@@ -19367,11 +19393,11 @@ document.getElementById('gtPickFolderBtn').addEventListener('click',async()=>{
     const dir=await window.showDirectoryPicker({mode:'readwrite'});
     if(!await gtDirOk(dir,true)){ showMsg(msg,'Permission to that folder was not given.',false); return; }
     gtDir=dir; gtFolderPending=false;
-    await gtIdbPut('dir',dir);
+    await gtIdbPut(gtDirKey(),dir);
     await gtLoadLib();
     // a folder chosen with nothing in it takes over whatever was in the browser
     if(!gtLib.designs.length&&!gtLib.fonts.length){
-      const rec=await gtIdbGet('lib').catch(()=>null);
+      const rec=await gtIdbGet(gtLibKey()).catch(()=>null);
       if(rec&&rec.manifest&&(rec.manifest.designs||[]).length){
         gtLib.designs=(rec.manifest.designs||[]).map(gtNormalizeDesign);
         gtLib.fonts=rec.manifest.fonts||[];
@@ -19394,7 +19420,7 @@ document.getElementById('gtPickFolderBtn').addEventListener('click',async()=>{
 });
 document.getElementById('gtForgetFolderBtn').addEventListener('click',async()=>{
   gtDir=null;
-  await gtIdbPut('dir',null);
+  await gtIdbPut(gtDirKey(),null);
   await gtSaveLib();   // keep working from the browser copy rather than losing the library
   gtRefreshLibraryUi();
   showMsg(document.getElementById('gtLibMsg'),'✓ Folder forgotten — the library stays in this browser.',true);
@@ -20445,12 +20471,12 @@ async function gtOpen(){
   if(!gtLoaded){
     gtLoaded=true;
     try{
-      const saved=await gtIdbGet('dir').catch(()=>null);
+      gtMode=(await gtIdbGet('gtMode').catch(()=>null))==='custom'?'custom':'festive';
+      const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
       // the handle survives a reload but its permission may not, and asking
       // again cannot happen here — that takes a tap, which the button is for
       if(saved&&await gtDirOk(saved)) gtDir=saved;
       else if(saved) gtFolderPending=true;
-      gtMode=(await gtIdbGet('gtMode').catch(()=>null))==='custom'?'custom':'festive';
       await gtLoadLib();
     }catch(e){}
     if(!gtSheet.slots.length) gtRebuildSlots();
