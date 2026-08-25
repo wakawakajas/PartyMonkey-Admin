@@ -4514,10 +4514,12 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <p class="hint" style="margin:0 0 4px;">Every line on this batch, added up by SKU
       and in SKU order — what to pull, not what order it is for.</p>
     <p class="hint" style="margin:0 0 4px;">Add puts a SKU on a sheet at the quantity
-      shown and finds its own way there: <strong>&lt;SKU&gt;.png</strong> in the designs
-      folder is a print job, on the template that folder belongs to; a design called
-      <strong>&lt;SKU&gt;</strong> on either gift tag page — Festive or Custom — is a gift
-      tag, and goes on that page's own sheet. The sheet opens when they are on it.</p>
+      shown and follows the tile its lines were given: <b>Gift Tag</b> lines go on the
+      gift tag page their design is on — Festive or Custom, matched on the SKU or the
+      variation — and <b>Custom Template</b> lines go on the print sheet, on the template
+      their folder belongs to. Where the lines say nothing, <strong>&lt;SKU&gt;.png</strong>
+      in the designs folder is a print job and a design of that name is a gift tag; a SKU
+      with both is asked about. The sheet opens when they are on it.</p>
     <input type="text" id="mcSummarySearch" class="pl-find" placeholder="🔍 Find a SKU"
            autocomplete="off" aria-label="Find a SKU in this summary"/>
     <div class="chips" style="margin:8px 0 4px;align-items:center;">
@@ -24377,14 +24379,23 @@ function mcSummaryRows(){
   const map=new Map();
   mcItems.forEach(it=>{
     const key=it.sku||it.product||it.design_name||'—';
-    const row=map.get(key)||{sku:key,name:it.design_name||it.product||'',qty:0,img:''};
+    const row=map.get(key)||{sku:key,name:it.design_name||it.product||'',qty:0,img:'',
+      tiles:new Set()};
     row.qty+=Number(it.qty)||0;
     if(!row.name) row.name=it.design_name||it.product||'';
+    // Which tool this SKU's lines were put on. The operator picked that tile on
+    // the line itself, and it beats anything worked out from where artwork
+    // happens to sit: a SKU with a PNG of its name and a tag design of its
+    // variation is only ambiguous to us, never to them.
+    if(it.tile) row.tiles.add(it.tile);
     // the first picture any of this SKU's lines carries — the row is then
     // recognised at a glance rather than read
     if(!row.img&&it.image_url) row.img=it.image_url;
     map.set(key,row);
   });
+  // one tile, said by every line that says anything, or none: lines that
+  // disagree are not an instruction, they are two jobs sharing a SKU
+  map.forEach(r=>{ r.tile=r.tiles.size===1?[...r.tiles][0]:''; delete r.tiles; });
   // What else each SKU is called. A custom tag's SKU is the shop's own
   // — Custom Gift Tag-TD-1 — and the design in the library is filed under the
   // variation printed on it, "1". The per-line window has always matched on
@@ -24421,9 +24432,11 @@ function mcRenderSummary(){
   // pressed, so it says so rather than failing on the tap
   body.innerHTML=rows.map(r=>{
     // a PNG in the designs folder, or a design of that name on either gift tag
-    // page — both are artwork this SKU can be put on a sheet with
+    // page — both are artwork this SKU can be put on a sheet with, and the
+    // tile on its lines says which of the two it is for
     const gift=mcGiftHit(r.sku);
-    const has=!!designFileForSku(r.sku)||!!gift;
+    const tool=mcToolFor(r);
+    const has=!!tool;
     const where=mcWhereIsSku(r.sku);
     const on=where;
     const shot=r.img
@@ -24438,17 +24451,22 @@ function mcRenderSummary(){
       ? `<span class="mc-sum-on">✓ on the ${on.on==='gift'
           ?escapeHtml(mcGtPage(on.mode).name)+' gift tag':'print'} sheet${
           on.qty!==r.qty?` ×${on.qty}`:''}</span>`
-      : (gift?`<span class="mc-sum-name">${escapeHtml(gift.page.name)} gift tag${
-          String(gift.name||'').trim().toLowerCase()!==String(r.sku).trim().toLowerCase()
-            ?` — design “${escapeHtml(gift.name)}”`:''}</span>`:'');
+      : ((gift&&tool!=='print')
+        ? `<span class="mc-sum-name">${escapeHtml(gift.page.name)} gift tag${
+            String(gift.name||'').trim().toLowerCase()!==String(r.sku).trim().toLowerCase()
+              ?` — design “${escapeHtml(gift.name)}”`:''}${
+            tool==='both'?' · and a print design':''}</span>`
+        : '');
     // Add takes the SKU's own PNG where there is one. Choose is for the rest —
     // and for the times the right artwork is simply filed under another name.
     const pick=`<button type="button" class="btn-outline" data-mc-sum-pick="${escapeHtml(r.sku)}"
            title="Search the designs folder and pick one for ${escapeHtml(r.sku)}">Choose…</button>`;
-    const png=!!designFileForSku(r.sku);
-    const addTitle=png
-      ? `Put ${r.sku}.png on a print sheet, ${r.qty} up`
-      : `Put ${r.sku} on the ${gift?gift.page.name:''} gift tag sheet, ${r.qty} up`;
+    const addTitle=tool==='gift'
+      ? `Put ${r.sku} on the ${gift?gift.page.name+' ':''}gift tag sheet, ${r.qty} up`
+      : tool==='both'
+        ? `Put ${r.sku} on a sheet, ${r.qty} up — it has both a print design and a `
+          +`${gift?gift.page.name+' ':''}gift tag design, so Add asks which`
+        : `Put ${r.sku}.png on a print sheet, ${r.qty} up`;
     const btn=on
       ? `<button type="button" class="btn-danger" data-mc-sum-del="${escapeHtml(r.sku)}"
            title="Take ${escapeHtml(r.sku)} off the ${on.on==='gift'
@@ -24768,13 +24786,20 @@ document.getElementById('mcMadeOpen').addEventListener('click',()=>{
 // ---------- print sheet, or gift tag ----------
 // Both tools can take a SKU and both match it by name, so which one is asked
 // once and then applied to everything in that press of the button.
-// Which tool a SKU goes on is a matter of where its artwork is, not a question
-// worth asking: <SKU>.png in the designs folder is a print job, a design of
-// that name on either gift tag page is a gift tag. A SKU with both is a print
-// job — that is the folder with the templates on it.
-function mcToolFor(sku){
-  if(designFileForSku(sku)) return 'print';
-  if(mcGiftHit(sku)) return 'gift';
+// Which tool a SKU goes on. The batch's own lines answer first: the tile on a
+// line is what the operator picked for it, and a SKU whose lines say Gift Tag
+// is a gift tag even where a PNG of that name is sitting in the designs
+// folder. Only where the lines say nothing is it worked out from the artwork —
+// <SKU>.png in the designs folder is a print job, a design of that name on
+// either gift tag page is a gift tag — and a SKU with both then asks.
+function mcToolFor(row){
+  const r=(row&&typeof row==='object')?row:{sku:row};
+  const png=!!designFileForSku(r.sku), tag=!!mcGiftHit(r.sku);
+  if(r.tile==='giftTag') return tag?'gift':'';
+  if(r.tile==='custom') return png?'print':'';
+  if(png&&tag) return 'both';
+  if(png) return 'print';
+  if(tag) return 'gift';
   return '';
 }
 // Sends each SKU to the tool its artwork says, and does not come back to ask.
@@ -24789,9 +24814,23 @@ async function mcRouteRows(rows){
     showMsg(out,'Looking in the gift tag libraries…',true);
     await mcGtIndex();
   }
-  const print=rows.filter(r=>mcToolFor(r.sku)==='print');
-  const gift=rows.filter(r=>mcToolFor(r.sku)==='gift');
-  const none=rows.filter(r=>!mcToolFor(r.sku)).map(r=>r.sku);
+  const tool=new Map(rows.map(r=>[r,mcToolFor(r)]));
+  // A SKU with a PNG of its name and a tag design of its variation, and no
+  // tile on its lines to settle it. Asked once for the whole press rather than
+  // guessed: guessing sent a batch of gift tags onto a print template, which
+  // is the wrong card, the wrong paper and a hundred of them.
+  const both=rows.filter(r=>tool.get(r)==='both');
+  if(both.length){
+    const which=confirm(`${both.length===1
+      ?`“${both[0].sku}” has both a print design and a gift tag design`
+      :`${both.length} of these have both a print design and a gift tag design`}.\n\n`
+      +'OK — put them on the gift tag sheet.\n'
+      +'Cancel — put them on the print sheet.');
+    both.forEach(r=>tool.set(r,which?'gift':'print'));
+  }
+  const print=rows.filter(r=>tool.get(r)==='print');
+  const gift=rows.filter(r=>tool.get(r)==='gift');
+  const none=rows.filter(r=>!tool.get(r)).map(r=>r.sku);
   if(!print.length&&!gift.length){
     showMsg(out,none.length===1
       ? `Nothing called “${escapeHtml(none[0])}” in the designs folder or either gift tag library.`
