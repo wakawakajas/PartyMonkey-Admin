@@ -1823,7 +1823,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
    anything carrying it goes. Wide enough to read as a sentence on a laptop
    and wrapped into three lines on a phone rather than squeezed. */
 #mcRouteSheet > .sheet{max-width:630px;}
-.mc-route-row{display:flex;align-items:center;gap:8px;padding:6px 0;
+.mc-route-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 0;
   border-bottom:1px solid var(--paper-line);}
 .mc-route-row:last-child{border-bottom:0;}
 .mc-route-row .field{margin:0;}
@@ -1832,6 +1832,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .mc-route-row .d{flex:0 0 168px;}
 .mc-route-row .sku{flex:1;min-width:0;font-family:'Space Grotesk',sans-serif;
   font-weight:700;font-size:12.5px;overflow-wrap:anywhere;}
+/* why the rule is there, on its own line under it */
+.mc-route-row .note{flex:1 1 100%;}
+.mc-route-row .note input{font-size:12px;color:var(--muted);}
 .sheet .mc-route-row button{width:auto;height:32px;min-height:32px;padding:0 10px;
   font-size:12px;flex:0 0 auto;}
 .sheet .mc-route-row input,.sheet .mc-route-row select{height:36px;min-height:36px;}
@@ -4590,6 +4593,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       top to bottom and the first one that fits wins; a SKU named outright below beats
       every rule. Anything nothing here mentions goes by its line's tile, and then by
       where its artwork is.</p>
+    <div class="chips" style="margin:8px 0 4px;align-items:center;">
+      <button type="button" class="btn-outline btn-sm" id="mcRouteExport">⬇ Export</button>
+      <button type="button" class="btn-outline btn-sm" id="mcRouteImport">⬆ Import</button>
+      <span class="hint" id="mcRouteCount" style="margin:0;"></span>
+    </div>
+    <p class="hint" style="margin:0 0 4px;">An import replaces the whole of this —
+      every rule and every SKU below — with what is in the file. Export first if what
+      is here is worth keeping.</p>
     <div class="sect-label">RULES</div>
     <div id="mcRouteRules"></div>
     <button type="button" class="btn-outline btn-sm" id="mcRouteAdd"
@@ -24966,6 +24977,11 @@ function mcRenderRoutes(){
     skus.innerHTML='';
     return;
   }
+  // the remark is on a line of its own under each one: a rule is read as a
+  // sentence across the top, and why it is there is a different question
+  const note=r=>`<label class="field note"><input type="text" data-mc-r="remarks"
+         value="${escapeHtml(r.remarks||'')}" placeholder="remarks — why this is here"
+         aria-label="Remarks"/></label>`;
   const rows=mcRuleRows();
   rules.innerHTML=rows.length?rows.map((r,i)=>`
     <div class="mc-route-row" data-mc-route="${r.id}">
@@ -24981,16 +24997,26 @@ function mcRenderRoutes(){
       <button type="button" class="icon-btn" data-mc-r-move="down"
               aria-label="Move down"${i===rows.length-1?' disabled':''}>↓</button>
       <button type="button" class="btn-danger" data-mc-r-del aria-label="Delete rule">×</button>
+      ${note(r)}
     </div>`).join(''):none('no rules yet — everything goes by its tile');
   const own=mcSkuRows();
+  // the SKU itself is an input rather than a label: one arrives here from a
+  // summary row, and a shop that renames a listing should not have to delete
+  // the override and set it again from a batch that has the new name on it
   skus.innerHTML=own.length?own.map(r=>`
     <div class="mc-route-row" data-mc-route="${r.id}">
-      <span class="sku">${escapeHtml(r.match||'')}</span>
+      <label class="field m"><input type="text" data-mc-r="match"
+             value="${escapeHtml(r.match||'')}" placeholder="the SKU, exactly"
+             aria-label="The SKU"/></label>
       <label class="field d"><select data-mc-r="dest"
              aria-label="Where ${escapeHtml(r.match||'')} goes">${
              mcOptsHtml(MC_DESTS,r.dest)}</select></label>
       <button type="button" class="btn-danger" data-mc-r-del aria-label="Delete override">×</button>
+      ${note(r)}
     </div>`).join(''):none('none set');
+  const el=document.getElementById('mcRouteCount');
+  if(el) el.textContent=`${rows.length} rule${rows.length===1?'':'s'} · `
+    +`${own.length} SKU${own.length===1?'':'s'}`;
 }
 async function mcRouteWrite(id,patch){
   const row=mcRoutes.find(r=>r.id===id); if(!row) return;
@@ -25073,6 +25099,65 @@ document.getElementById('mcRouteDone').addEventListener('click',()=>{
 });
 document.getElementById('mcRouteSheet').addEventListener('click',e=>{
   if(e.target.id==='mcRouteSheet') e.currentTarget.classList.remove('open');
+});
+// ---------- routing as one file ----------
+// The whole of it, rules and named SKUs alike, in the order they are read in.
+// Ids and who wrote them are left out: a file taken to another account has to
+// land there as that account's own rows.
+const MC_ROUTE_FILE='pigu-magic-routing';
+document.getElementById('mcRouteExport').addEventListener('click',async()=>{
+  const out=document.getElementById('mcRouteMsg');
+  try{
+    await mcRoutesLoad(true);
+    const routes=mcRoutes.map(r=>({kind:r.kind,match:r.match||'',how:r.how||'contains',
+      dest:r.dest,sort_order:Number(r.sort_order)||0,remarks:r.remarks||''}));
+    downloadBlob(new Blob([JSON.stringify({kind:MC_ROUTE_FILE,
+      at:new Date().toISOString(),routes},null,2)],{type:'application/json'}),
+      'magic-routing.json');
+    showMsg(out,`✓ Exported ${routes.length} row${routes.length===1?'':'s'} `
+      +'as magic-routing.json',true);
+  }catch(err){ showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false); }
+});
+// Replaces, rather than merges. Two half-lists dovetailed is a rule order
+// nobody wrote and cannot read back; a file is the whole answer or it is not
+// worth importing. Said plainly before anything is deleted.
+document.getElementById('mcRouteImport').addEventListener('click',async()=>{
+  const out=document.getElementById('mcRouteMsg');
+  const file=await gtPickFile('application/json,.json');
+  if(!file) return;
+  try{
+    const data=JSON.parse(await file.text());
+    if(!data||data.kind!==MC_ROUTE_FILE) throw new Error('that is not a routing file');
+    const rows=(Array.isArray(data.routes)?data.routes:[])
+      .filter(r=>r&&MC_DESTS.some(d=>d.v===r.dest))
+      .map((r,i)=>({kind:r.kind==='sku'?'sku':'rule',
+        match:String(r.match||'').slice(0,200),
+        how:MC_HOWS.some(h=>h.v===r.how)?r.how:'contains',
+        dest:r.dest,sort_order:Number.isFinite(Number(r.sort_order))?Number(r.sort_order):i,
+        remarks:String(r.remarks||'').slice(0,500)}));
+    if(!rows.length) throw new Error('there are no usable rows in that file');
+    await mcRoutesLoad(true);
+    const had=mcRoutes.length;
+    if(!confirm(`Import ${rows.length} row${rows.length===1?'':'s'}?\n\n`
+      +`This replaces everything here${had?(had===1?' — the one already here'
+        :` — all ${had} of them`):''}, and it replaces `
+      +'it for everybody working these batches.\n\nExport first if it is worth keeping.'))
+      return;
+    showMsg(out,'Importing…',true);
+    if(!sb) throw new Error('no connection');
+    const uid=await mcWhoAmI();
+    if(mcRoutes.length){
+      const {error}=await sb.from('magic_routes').delete()
+        .in('id',mcRoutes.map(r=>r.id));
+      if(error) throw error;
+    }
+    const {data:made,error:err2}=await sb.from('magic_routes')
+      .insert(rows.map(r=>({user_id:uid,...r}))).select();
+    if(err2) throw err2;
+    mcRoutes=made||[]; mcRoutesRead=true;
+    mcRenderRoutes(); mcRenderSummary();
+    showMsg(out,`✓ Imported ${mcRoutes.length} row${mcRoutes.length===1?'':'s'}.`,true);
+  }catch(err){ showMsg(out,'Import failed: '+((err&&err.message)||'unknown error'),false); }
 });
 document.getElementById('mcRouteAdd').addEventListener('click',async()=>{
   await mcRouteInsert({});

@@ -16,7 +16,7 @@
 -- working the same morning's batch must add the same SKU to the same sheet.
 -- ============================================================
 
--- ---------- PART 1 of 3 : the table ----------
+-- ---------- PART 1 of 4 : the table ----------
 -- kind   'rule'  match is looked for inside the SKU (or the variation)
 --        'sku'   match is one SKU exactly, and is the last word on it
 -- how    how a rule's text is compared. Ignored for an override.
@@ -47,7 +47,7 @@ create index if not exists magic_routes_order_idx
 alter table public.magic_routes enable row level security;
 
 
--- ---------- PART 2 of 3 : shared with the team ----------
+-- ---------- PART 2 of 4 : shared with the team ----------
 -- The same decision as the batches themselves: everyone with an account
 -- works the same morning, and can_print is what decides who is shown the
 -- tile at all.
@@ -66,7 +66,7 @@ create policy "team_delete" on public.magic_routes
   for delete using (public.on_team(auth.uid()));
 
 
--- ---------- PART 3 of 3 : live updates between devices ----------
+-- ---------- PART 3 of 4 : live updates between devices ----------
 -- A rule written on the office machine has to reach the one in the packing
 -- room before the next Add all, or the two of them lay out different sheets.
 alter table public.magic_routes replica identity full;
@@ -82,3 +82,13 @@ begin
     alter publication supabase_realtime add table public.magic_routes;
   end if;
 end $$;
+
+
+-- ---------- PART 4 of 4 : why the rule is there ----------
+-- A rule read six months later is a piece of text and a destination, and
+-- nothing about the morning it was written for. Remarks is that morning: the
+-- shop it is for, the listing that changed, the person to ask. Added
+-- separately so a routing table set up before this file grew keeps its rules
+-- and simply gains the column.
+alter table public.magic_routes
+  add column if not exists remarks text not null default '';
