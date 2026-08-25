@@ -16851,7 +16851,33 @@ async function gtEnsureDir(ask){
   gtRefreshLibraryUi(); gtRenderOrder(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
   return true;
 }
+// A design read out of a Pigu folder is built fresh from the file every time
+// the folders are loaded — a new id and no fields — and it is left out of
+// library.json on purpose, the file itself being the design. That left the
+// words set on one with nowhere to live: they were gone by the next visit.
+// They are kept here against the design's own path, which is the one thing
+// about it that does not change from one scan to the next.
+let gtPiguFields=null;
+const gtIsPiguFile=f=>/^adhoc\/pigu\//.test(String(f||''));
+async function gtPiguFieldsGet(){
+  if(!gtPiguFields) gtPiguFields=await gtIdbGet('piguFields').catch(()=>null)||{};
+  return gtPiguFields;
+}
+// written alongside the library, so every place that already saves the library
+// after an edit saves these too and none of them has to know about it
+async function gtPiguFieldsSave(){
+  const map=await gtPiguFieldsGet();
+  let changed=false;
+  (gtLib.designs||[]).forEach(d=>{
+    if(!d.adhoc||!gtIsPiguFile(d.file)) return;
+    const keep={fields:d.fields||[],hole:d.hole||null};
+    const now=JSON.stringify(keep);
+    if(JSON.stringify(map[d.file]||null)!==now){ map[d.file]=JSON.parse(now); changed=true; }
+  });
+  if(changed) await gtIdbPut('piguFields',Object.assign({},map));
+}
 async function gtSaveLib(){
+  try{ await gtPiguFieldsSave(); }catch(e){}
   const man=gtManifest();
   if(gtDir&&await gtDirOk(gtDir)){
     for(const [file,blob] of gtAssets){
@@ -17227,6 +17253,7 @@ async function gtReadPiguFolder(dir,folderName,keep){
     } }catch(e){}
   }
   files.sort((a,b)=>a.rel.localeCompare(b.rel,undefined,{numeric:true}));
+  const saved=await gtPiguFieldsGet();
   const made=[];
   for(const f of files){
     const path='adhoc/pigu/'+folderName+'/'+f.rel;
@@ -17234,8 +17261,10 @@ async function gtReadPiguFolder(dir,folderName,keep){
     let blob; try{ blob=await f.entry.getFile(); }catch(err){ continue; }
     const id=gtId('d');
     gtAssets.set(path,blob);
+    // the words, the hole and where they sit, as they were left last time
+    const was=saved[path]||null;
     const d=gtNormalizeDesign({id,name:f.entry.name.replace(/\.[^.]+$/,''),file:path,
-      adhoc:true,fields:[]});
+      adhoc:true,fields:(was&&was.fields)||[],hole:was&&was.hole});
     try{ gtImgs.set(id,await loadImage(await fileToDataURL(blob))); }catch(err){}
     made.push(d);
   }
