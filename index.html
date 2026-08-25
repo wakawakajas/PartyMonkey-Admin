@@ -24179,6 +24179,11 @@ const MC_TILES={
     ready:it=>!!(it.sheet_item&&it.sheet_item.designId),
     body:mcGiftBody,
     wire:mcGiftWire,
+    // Gift Tag is two pages, each with its own library, and will be three the
+    // day somebody adds one. A tile that is more than one page says so here
+    // rather than the picker knowing the names of any of them.
+    choices:()=>GT_PAGES.map(p=>({value:'giftTag:'+p.mode,
+      label:p.name+' Gift Tag',page:p.mode})),
     bundles:mcGiftBundles,
     make:e=>mcGiftBundle(e.set,e.meta&&e.meta.mode),
     preview:(e,c,dim,page)=>mcGiftPreview(e.set,e.meta&&e.meta.mode,c,dim,page)
@@ -24201,6 +24206,34 @@ const MC_TILES={
 };
 const mcTile=it=>(it&&it.tile&&MC_TILES[it.tile])||null;
 const mcReady=it=>{ const t=mcTile(it); return !!(t&&t.ready(it)); };
+// Every page a line can be built on, flattened into one list for the picker.
+// A tile that is several pages hands them over itself, so one added next year
+// appears in the list without the picker being touched.
+function mcChoices(){
+  const out=[];
+  Object.entries(MC_TILES).forEach(([k,v])=>{
+    if(typeof v.choices==='function')
+      (v.choices()||[]).forEach(c=>out.push({...c,tile:k,mode:v.mode}));
+    else out.push({value:k,label:v.name,tile:k,mode:v.mode,page:''});
+  });
+  return out;
+}
+// which page a gift tag line is on: what it was told, and failing that the
+// page its design turns out to be in
+const mcLinePage=it=>String((it&&it.sheet_item&&it.sheet_item.page)
+  ||mcGtModeOfDesign(it&&it.sheet_item&&it.sheet_item.designId)||'');
+// and which entry of the list that line is sitting on now
+function mcChoiceOf(it){
+  if(!it||!it.tile) return '';
+  const t=MC_TILES[it.tile];
+  if(t&&typeof t.choices==='function'){
+    const list=t.choices()||[];
+    const page=mcLinePage(it);
+    const hit=list.find(c=>c.page===page)||list[0];
+    return hit?hit.value:it.tile;
+  }
+  return it.tile;
+}
 
 // ---------- three days on ----------
 // Whoever opens the overview first does the clearing up. The function hands
@@ -25853,17 +25886,21 @@ async function mcUnmarkLines(sku){
   if(n){ mcRenderItems(); mcSyncBatchButtons(); }
   return n;
 }
-async function mcMarkLinesOnSheet(laid){
+async function mcMarkLinesOnSheet(laid,page){
   if(!laid||!laid.length||!mcBatch||mcBatch.status!=='open') return 0;
   let n=0;
   for(const {sku,designId} of laid){
     for(const it of mcItems.filter(i=>String(i.sku||'')===String(sku))){
       const was=it.sheet_item||{};
       // words already typed into the line's own window are its own and are
-      // never written over from here
+      // never written over from here. The page is written down rather than
+      // worked out later: it is known now, and a design deleted from a library
+      // afterwards would leave nothing to work it out from.
       const si={...was,designId,qty:Math.max(1,Math.round(Number(it.qty)||1)),
-        vals:was.vals||{},finish:was.finish||(typeof gtFinish!=='undefined'?gtFinish:'Matte')};
-      if(it.tile==='giftTag'&&was.designId===designId&&was.qty===si.qty) continue;
+        vals:was.vals||{},page:String(page||gtMode||''),
+        finish:was.finish||(typeof gtFinish!=='undefined'?gtFinish:'Matte')};
+      if(it.tile==='giftTag'&&was.designId===designId&&was.qty===si.qty
+        &&String(was.page||'')===si.page) continue;
       it.tile='giftTag'; it.sheet_item=si;
       await mcSave(it,{tile:'giftTag',sheet_item:si});
       n++;
@@ -25921,7 +25958,7 @@ async function mcAddSkusToGiftTag(rows,opts){
       else { gtOrder.push({id:gtId('l'),designId:d.id,qty,vals:{},sku:row.sku}); a++; }
       laid.push({sku:row.sku,designId:d.id});
     });
-    await mcMarkLinesOnSheet(laid);
+    await mcMarkLinesOnSheet(laid,m);
     added+=a; updated+=u;
     per.push(`${a+u} on ${mcGtPage(m).name}`);
   }
@@ -26265,17 +26302,18 @@ function mcWinRender(){
   const head=`<p class="hint" style="margin:0 0 10px;">
       <b>${escapeHtml(it.product||it.sku||'—')}</b> · ${it.qty} off${
       it.message?` · “${escapeHtml(it.message)}”`:''}</p>`;
-  const picker=`<div class="sect-label">Which tile builds this?</div>
-    <div class="mc-pick" id="mcPick">
-      <button type="button" data-mc-pick=""${!t?' class="on"':''}>
-        <span>None — finish it with OK</span>
-        <span class="mc-pick-mode">no PDF</span></button>
-      ${Object.entries(MC_TILES).map(([k,v])=>
-        `<button type="button" data-mc-pick="${k}"${it.tile===k?' class="on"':''}>
-          <span>${escapeHtml(v.name)}</span>
-          <span class="mc-pick-mode">${v.mode==='per-order'?'own PDF':'shared sheet'}</span>
-        </button>`).join('')}
-    </div>`;
+  // One list rather than a row of tiles: Gift Tag alone is two pages now and
+  // will be three the day another is added, and a picker that grows a button
+  // a page is a picker nobody can see past.
+  const now=mcChoiceOf(it);
+  const picker=`<div class="sect-label">Which page builds this?</div>
+    <label class="field" style="margin-bottom:10px;">
+      <select id="mcPick" aria-label="Which page builds this line">
+        <option value=""${!t?' selected':''}>None — finish it with OK</option>
+        ${mcChoices().map(c=>`<option value="${escapeHtml(c.value)}"${
+          c.value===now?' selected':''}>${escapeHtml(c.label)} — ${
+          c.mode==='per-order'?'own PDF':'shared sheet'}</option>`).join('')}
+      </select></label>`;
   // Gift Tag's library lives on disk and used to need a visit to Print
   // template › Gift Tag to fetch it before a line here could use it — one
   // extra trip multiplied by every line. It is fetched right here instead,
@@ -26286,6 +26324,17 @@ function mcWinRender(){
     gtOpen().then(()=>{ if(mcWinItem===it.id) mcWinRender(); });
     return;
   }
+  // and on the page this line is on rather than whichever was last open: the
+  // designs offered below come out of the library in hand
+  if(it.tile==='giftTag'&&mcLinePage(it)&&mcLinePage(it)!==gtMode
+    &&typeof gtSetMode==='function'){
+    const page=mcLinePage(it);
+    const body=`<p class="hint" style="margin:12px 0 0;">Opening the ${
+      escapeHtml(mcGtPage(page).name)} library…</p>`;
+    document.getElementById('mcWinBody').innerHTML=head+picker+body+'<div id="mcWinMsg"></div>';
+    gtSetMode(page).then(()=>{ if(mcWinItem===it.id) mcWinRender(); });
+    return;
+  }
   const body=t?t.body(it):'<p class="hint" style="margin:12px 0 0;">Pick a tile above to '
     +'work on this line, or leave it as it is and mark it done from the list.</p>';
   // whatever the last render hung on the document goes with it: the body is
@@ -26294,13 +26343,25 @@ function mcWinRender(){
   const oldCombo=document.getElementById('mcGtCombo');
   if(oldCombo&&oldCombo._mcAway) document.removeEventListener('pointerdown',oldCombo._mcAway);
   document.getElementById('mcWinBody').innerHTML=head+picker+body+'<div id="mcWinMsg"></div>';
-  document.getElementById('mcPick').addEventListener('click',async e=>{
-    const b=e.target.closest('[data-mc-pick]'); if(!b) return;
-    const key=b.dataset.mcPick||null;
-    if(key===it.tile) return;
+  document.getElementById('mcPick').addEventListener('change',async e=>{
+    const val=e.target.value;
+    if(val===mcChoiceOf(it)) return;
     await mcCommit();
-    it.tile=key;
-    await mcSave(it,{tile:key});
+    const c=mcChoices().find(x=>x.value===val)||null;
+    const patch={tile:c?c.tile:null};
+    it.tile=patch.tile;
+    if(c&&c.page){
+      const si={...(it.sheet_item||{}),page:c.page};
+      // a design picked out of the other page's library is not this page's
+      // design, and carrying it across would lay out nothing
+      const was=si.designId?mcGtModeOfDesign(si.designId):'';
+      if(was&&was!==c.page){ delete si.designId; si.vals={}; }
+      it.sheet_item=si; patch.sheet_item=si;
+      // and the library on hand has to be that page's, or the picker below
+      // would be offering the other one's designs
+      if(typeof gtSetMode==='function'&&gtMode!==c.page) await gtSetMode(c.page);
+    }
+    await mcSave(it,patch);
     mcWinRender(); mcRepaintRow(it);
   });
   if(t) t.wire(it);
@@ -27112,7 +27173,8 @@ function mcGiftBundles(lines){
   const by=new Map();
   lines.forEach(it=>{
     const f=(it.sheet_item&&it.sheet_item.finish)||'Matte';
-    const m=mcGtModeOfDesign(it.sheet_item&&it.sheet_item.designId)||gtMode;
+    // what the line was told it is on comes before what its design looks like
+    const m=mcLinePage(it)||gtMode;
     const k=m+'|'+f;
     (by.get(k)||by.set(k,[]).get(k)).push(it);
   });
