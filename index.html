@@ -647,6 +647,30 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .to-top[hidden]{display:none;}
 .to-top:active{background:var(--nest);}
 
+/* A batch with sheets waiting says so out in the margin, where a wide screen
+   has nothing else. Download All is at the foot of a list that can be two
+   hundred lines long, and on a long batch nobody scrolls down to find out
+   whether there is anything to fetch. */
+.mc-pdf-bubble{position:fixed;right:16px;top:50%;transform:translateY(-50%);z-index:52;
+  display:none;flex-direction:column;align-items:center;gap:1px;width:78px;padding:11px 6px;
+  border-radius:16px;border:1px solid var(--blueprint);background:var(--card);color:var(--ink);
+  box-shadow:0 8px 22px rgba(0,0,0,.45);cursor:pointer;line-height:1.1;}
+.mc-pdf-bubble.on{display:flex;}
+.mc-pdf-bubble .ic{font-size:20px;}
+.mc-pdf-bubble .n{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px;
+  color:var(--blueprint);}
+.mc-pdf-bubble .t{font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--faint);}
+.mc-pdf-bubble:active{background:var(--nest);}
+/* on a phone there is no margin to sit in, so it goes where the thumb is,
+   above the home bar and clear of the to-top button */
+@media (max-width:900px){
+  .mc-pdf-bubble{top:auto;transform:none;width:auto;flex-direction:row;gap:6px;
+    right:14px;bottom:calc(150px + env(safe-area-inset-bottom));padding:9px 13px;
+    border-radius:999px;}
+  .mc-pdf-bubble .t{display:none;}
+}
+
 /* Add opens the form rather than the form sitting there taking up the top of
    the screen — most visits are to tick something off, not to add */
 /* Add sits where a phone expects it: bottom right, over the list, reachable
@@ -2026,6 +2050,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <!-- always within thumb reach, on every screen, so there is one way out that
        never depends on how deep you drilled in -->
   <button class="to-top" id="toTopBtn" title="Back to top" aria-label="Back to top" hidden>↑</button>
+  <!-- A batch with sheets waiting, said out in the margin. Download All is at
+       the foot of a list that can be two hundred lines long. -->
+  <button type="button" class="mc-pdf-bubble" id="mcPdfBubble">
+    <span class="ic" aria-hidden="true">📄</span>
+    <span class="n" id="mcPdfBubbleN">0</span>
+    <span class="t">ready</span>
+  </button>
 
   <!-- ---- Daily Pick List: the two things that follow you down the page ---- -->
   <!-- Both live out here rather than inside the screen, because the screens
@@ -6181,6 +6212,8 @@ function showScreen(name,viaBack){
   if(name==='magic-batch') mcOpenBatch();
   // the batch's live channel belongs to the batch, and to nothing after it
   if(name!=='magic-batch') mcUnwatch();
+  // and so does the bubble in the margin, which is that screen's own
+  if(typeof mcPdfBubbleSync==='function') mcPdfBubbleSync();
   // a batch that lent its sheet to the Gift Tag screen takes it back on
   // the way out, whichever way somebody leaves
   if(name!=='tool-gift-tag'&&name!=='tool-gift-tag-design') mcGtReturn();
@@ -24492,7 +24525,12 @@ function mcSyncBatchButtons(){
   done.title=all?'Finish this batch. It moves to Completed and is deleted three days later.'
                 :'Every line has to be done first.';
   re.style.display=open?'none':'';
-  dl.disabled=mcBusy||!mcItems.some(mcReady);
+  const ready=mcItems.filter(mcReady).length;
+  dl.disabled=mcBusy||!ready;
+  dl.title=ready?`${ready} line${ready===1?'':'s'} ready to export`
+    :'Nothing is ready yet — a line is ready once its tile has a design on it, '
+     +'which is what Create on the line, or Add on the SKU summary, does.';
+  mcPdfBubbleSync(ready);
   const sub=document.getElementById('mcBatchSub');
   if(mcBatch){
     const d=mcItems.filter(i=>i.status).length;
@@ -24502,6 +24540,23 @@ function mcSyncBatchButtons(){
         +`deleted ${mcDaysLeftWord(mcBatch.completed_at)}`;
   }
 }
+
+// The bubble out in the margin. It is only ever on the batch screen, only
+// while something is actually waiting, and it does what the button at the foot
+// of the list does — it is that button, brought to where it can be seen.
+function mcPdfBubbleSync(n){
+  const b=document.getElementById('mcPdfBubble'); if(!b) return;
+  const ready=(typeof n==='number')?n:mcItems.filter(mcReady).length;
+  const show=ready>0&&!mcBusy&&currentScreen==='magic-batch';
+  b.classList.toggle('on',show);
+  document.getElementById('mcPdfBubbleN').textContent=ready;
+  b.title=`${ready} line${ready===1?'':'s'} ready — download the PDFs`;
+  b.setAttribute('aria-label',b.title);
+}
+document.getElementById('mcPdfBubble').addEventListener('click',()=>{
+  const dl=document.getElementById('mcDownloadAllBtn');
+  if(dl&&!dl.disabled) dl.click();
+});
 
 // ---------- the whole batch, added up by SKU ----------
 // Every order groups the same lines by Order No; this is the same lines
@@ -25550,6 +25605,31 @@ async function mcRouteRows(rows){
     :`${g.added+g.updated} on the gift tag sheet`):'';
   await mcAddSkusToSheet(print,[gPart,nonePart].filter(Boolean).join(' · '));
 }
+// The batch's own lines are told they are on a sheet. The summary builds the
+// sheet, but Download All reads the lines — and a line that never learned it
+// had a design left the button greyed out with no reason given, which is
+// exactly what a batch laid out entirely from the summary looked like.
+// Each line keeps its own quantity: the summary's figure is that SKU added up
+// across every order, and an order is owed what it ordered.
+async function mcMarkLinesOnSheet(laid){
+  if(!laid||!laid.length||!mcBatch||mcBatch.status!=='open') return 0;
+  let n=0;
+  for(const {sku,designId} of laid){
+    for(const it of mcItems.filter(i=>String(i.sku||'')===String(sku))){
+      const was=it.sheet_item||{};
+      // words already typed into the line's own window are its own and are
+      // never written over from here
+      const si={...was,designId,qty:Math.max(1,Math.round(Number(it.qty)||1)),
+        vals:was.vals||{},finish:was.finish||(typeof gtFinish!=='undefined'?gtFinish:'Matte')};
+      if(it.tile==='giftTag'&&was.designId===designId&&was.qty===si.qty) continue;
+      it.tile='giftTag'; it.sheet_item=si;
+      await mcSave(it,{tile:'giftTag',sheet_item:si});
+      n++;
+    }
+  }
+  if(n){ mcRenderItems(); mcSyncBatchButtons(); }
+  return n;
+}
 // Onto the gift tag orders, matched by name the way the print sheet matches a
 // PNG. The line is the tool's own shape, so everything downstream reads it
 // exactly as one added on that screen. A batch that is half Festive and half
@@ -25586,6 +25666,7 @@ async function mcAddSkusToGiftTag(rows,opts){
     // order left behind is kept, not merged
     if(m!==gtMode) await gtSetMode(m);
     let a=0,u=0;
+    const laid=[];
     byPage.get(m).forEach(({row,design,name})=>{
       const qty=Math.max(1,Math.round(Number(row.qty)||1));
       // the library is in hand now, so the design is taken from it by the name
@@ -25596,7 +25677,9 @@ async function mcAddSkusToGiftTag(rows,opts){
       const had=gtOrder.find(l=>(l.sku&&l.sku===row.sku)||l.designId===d.id);
       if(had){ had.qty=qty; had.sku=row.sku; u++; }
       else { gtOrder.push({id:gtId('l'),designId:d.id,qty,vals:{},sku:row.sku}); a++; }
+      laid.push({sku:row.sku,designId:d.id});
     });
+    await mcMarkLinesOnSheet(laid);
     added+=a; updated+=u;
     per.push(`${a+u} on ${mcGtPage(m).name}`);
   }
