@@ -24723,6 +24723,14 @@ const mcGtNamesFor=sku=>{
   const alias=mcSkuAlias.get(key)||'';
   return [key,alias].filter(Boolean);
 };
+// Which page a design id belongs to — the question the export asks, where what
+// is in hand is not a name but the id a line was built with.
+const mcGtModeOfDesign=id=>{
+  const want=String(id||''); if(!want) return '';
+  for(const p of mcGtPages())
+    if((mcGtNames[p.mode]||[]).some(d=>String(d.id)===want)) return p.mode;
+  return '';
+};
 function mcGiftHit(sku,onlyMode){
   const wants=mcGtNamesFor(sku).map(n=>String(n).trim().toLowerCase()).filter(Boolean);
   if(!wants.length) return null;
@@ -26637,18 +26645,26 @@ document.getElementById('mcDownloadAllBtn').addEventListener('click',async()=>{
             await mcSave(it,{exported_at:it.exported_at});
           }
         }else{
-          // matte and gloss are two runs through the machine, so they are two
-          // sheets and two files even when the designs on them are the same
+          // Matte and gloss are two runs through the machine, so they are two
+          // sheets and two files even when the designs on them are the same.
+          // And a line's design belongs to one of the two gift tag pages, so a
+          // batch worked across both comes out as a sheet each rather than one
+          // built out of a library that has never heard of half of it.
+          await mcGtIndex();
           const byFinish={};
           lines.forEach(it=>{
             const f=(it.sheet_item&&it.sheet_item.finish)||'Matte';
-            (byFinish[f]||(byFinish[f]=[])).push(it);
+            const m=mcGtModeOfDesign(it.sheet_item&&it.sheet_item.designId)||gtMode;
+            const k=m+'|'+f;
+            (byFinish[k]||(byFinish[k]=[])).push(it);
           });
-          for(const [finish,set] of Object.entries(byFinish)){
-            showMsg(out,`Building the ${tile.name} ${finish} sheet…`,true);
+          for(const [k,set] of Object.entries(byFinish)){
+            const mode=k.slice(0,k.indexOf('|')), finish=k.slice(k.indexOf('|')+1);
+            const page=mcGtPage(mode).name;
+            showMsg(out,`Building the ${page} ${tile.name} ${finish} sheet…`,true);
             await new Promise(r=>setTimeout(r));
-            const name=`${tile.name}_${finish}_${mcBatchDate()}.pdf`;
-            await mcPut(dir,name,await mcGiftBundle(set));
+            const name=`${tile.name}_${page}_${finish}_${mcBatchDate()}.pdf`;
+            await mcPut(dir,name,await mcGiftBundle(set,mode));
             bundles++;
             for(const it of set){
               it.exported_at=new Date().toISOString();
@@ -26683,19 +26699,36 @@ async function mcWinCommitAndPark(){
 // reads the order off one module-level list. The batch's lines are lent to it
 // for the length of the render and taken back afterwards, so a sheet somebody
 // was building over there is not disturbed by a batch being exported here.
-async function mcGiftBundle(lines){
+async function mcGiftBundle(lines,mode){
   if(typeof gtBuildPdf!=='function') throw new Error('the gift tag tool has not loaded');
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
+  // The page these designs are on, before anything is drawn. Gift Tag is two
+  // libraries now, and a sheet built on the wrong one is built out of a
+  // library that has never heard of half the batch — no design found, nothing
+  // laid out, and an export that failed on "nothing landed on the sheet".
+  if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
+  const where=mcGtPage(gtMode).name;
   if(!gtSheet.slots||!gtSheet.slots.length)
-    throw new Error('the gift tag sheet has no places on it — set the layout up on the Gift Tag screen first');
+    throw new Error(`the ${where} gift tag sheet has no places on it — set its layout up `
+      +'on the Gift Tag screen first');
+  // taken after the switch: the order to put back is that page's own
   const keep=gtOrder;
   gtOrder=lines.map(it=>({id:'mc-'+it.id,
     designId:it.sheet_item.designId,
     qty:it.sheet_item.qty||it.qty||1,
     vals:it.sheet_item.vals||{}}));
   try{
+    // A line whose design is not in this library lays out as nothing, and the
+    // sheet then builds as a blank page rather than failing — a PDF of empty
+    // paper is worse than an error, so it is one. Said with the page's name on
+    // it, because this is what a line built on the other page looks like.
+    const lost=gtOrder.filter(l=>!gtDesign(l.designId)).length;
+    if(lost===gtOrder.length)
+      throw new Error(`${gtOrder.length===1?'this line has no design'
+        :`none of these ${gtOrder.length} lines has a design`} in the ${where} library `
+        +'— built on the other gift tag page');
     const pages=gtPageCount();
-    if(!pages) throw new Error('nothing landed on the sheet');
+    if(!pages) throw new Error(`nothing landed on the ${where} sheet`);
     const px=Math.min(6000,Math.round(Math.max(gtSheet.paperW,gtSheet.paperH)/25.4*300));
     return await gtBuildPdf(pages,async i=>{
       const c=document.createElement('canvas');
