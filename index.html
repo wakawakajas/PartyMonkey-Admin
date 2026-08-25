@@ -4624,6 +4624,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="sheet-title">Where does <span id="mcDestSku">this SKU</span> go?</div>
     <p class="hint" style="margin:0 0 8px;">Kept for this SKU on every batch, and shared
       with everybody working them.</p>
+    <p class="hint" id="mcDestWhy" style="margin:0 0 10px;"></p>
     <div id="mcDestOpts"></div>
     <div id="mcDestMsg"></div>
     <button class="btn-outline" id="mcDestClear">Leave it to work itself out</button>
@@ -24554,6 +24555,7 @@ function mcRenderSummary(){
     // tile on its lines says which of the two it is for
     const gift=mcGiftHit(r.sku);
     const tool=mcToolFor(r);
+    const routed=mcRouteFor(r);
     const has=!!tool;
     const where=mcWhereIsSku(r.sku);
     const on=where;
@@ -24569,7 +24571,13 @@ function mcRenderSummary(){
       ? `<span class="mc-sum-on">✓ on the ${on.on==='gift'
           ?escapeHtml(mcGtPage(on.mode).name)+' gift tag':'print'} sheet${
           on.qty!==r.qty?` ×${on.qty}`:''}</span>`
-      : ((gift&&tool!=='print')
+      // and where a route names a page that has nothing of this name, the row
+      // says so: an Add that never appears is otherwise a mystery
+      : ((routed==='festive'||routed==='custom')&&!mcGiftHit(r.sku,routed)
+        ? `<span class="mc-sum-name">Nothing called ${gift?`“${escapeHtml(gift.name)}”`
+            :'this'} on ${escapeHtml(mcGtPage(routed).name)}${
+            gift?` — it is on ${escapeHtml(gift.page.name)}`:''}</span>`
+      : (gift&&tool!=='print')
         ? `<span class="mc-sum-name">${escapeHtml(gift.page.name)} gift tag${
             String(gift.name||'').trim().toLowerCase()!==String(r.sku).trim().toLowerCase()
               ?` — design “${escapeHtml(gift.name)}”`:''}${
@@ -24577,8 +24585,14 @@ function mcRenderSummary(){
         : '');
     // Add takes the SKU's own PNG where there is one. Choose is for the rest —
     // and for the times the right artwork is simply filed under another name.
-    const pick=`<button type="button" class="btn-outline" data-mc-sum-pick="${escapeHtml(r.sku)}"
-           title="Search the designs folder and pick one for ${escapeHtml(r.sku)}">Choose…</button>`;
+    // It searches the designs folder and lands on the print sheet, so it is
+    // not offered for a SKU that is meant to be a gift tag: pressing it there
+    // was how a batch of tags ended up on a print template.
+    const printable=tool!=='gift'&&routed!=='festive'&&routed!=='custom'&&routed!=='skip';
+    const pick=printable
+      ? `<button type="button" class="btn-outline" data-mc-sum-pick="${escapeHtml(r.sku)}"
+           title="Search the designs folder and pick one for ${escapeHtml(r.sku)}">Choose…</button>`
+      : '';
     const addTitle=tool==='gift'
       ? `Put ${r.sku} on the ${gift?gift.page.name+' ':''}gift tag sheet, ${r.qty} up`
       : tool==='both'
@@ -24949,19 +24963,24 @@ const mcSkuRow=sku=>mcSkuRows().find(r=>
 // Where this SKU is sent, or '' where nothing here mentions it. The SKU and
 // the variation its lines carry are both looked at, because a rule about
 // "Gift Tag" is written to catch whichever of the two the shop writes it in.
-function mcRouteFor(row){
+function mcRuleMatching(row){
   const r=(row&&typeof row==='object')?row:{sku:row};
-  const own=mcSkuRow(r.sku);
-  if(own) return own.dest;
   const names=mcGtNamesFor(r.sku).concat(r.name?[r.name]:[])
     .map(n=>String(n).trim().toLowerCase()).filter(Boolean);
   for(const rule of mcRuleRows()){
     const m=String(rule.match||'').trim().toLowerCase();
     if(!m) continue;
     if(names.some(n=>rule.how==='exact'?n===m
-      :rule.how==='starts'?n.startsWith(m):n.includes(m))) return rule.dest;
+      :rule.how==='starts'?n.startsWith(m):n.includes(m))) return rule;
   }
-  return '';
+  return null;
+}
+function mcRouteFor(row){
+  const r=(row&&typeof row==='object')?row:{sku:row};
+  const own=mcSkuRow(r.sku);
+  if(own) return own.dest;
+  const rule=mcRuleMatching(r);
+  return rule?rule.dest:'';
 }
 // a route that names one of the two gift tag pages also settles which page,
 // so a design of that name on the other one is not what gets added
@@ -25279,16 +25298,53 @@ function mcOpenDest(sku){
   mcDestFor=String(sku||'');
   document.getElementById('mcDestSku').textContent=mcDestFor;
   document.getElementById('mcDestMsg').innerHTML='';
-  const now=mcSkuRow(mcDestFor), auto=mcRouteFor({sku:mcDestFor});
+  const row=mcSummaryRows().find(r=>String(r.sku)===mcDestFor)||{sku:mcDestFor};
+  const now=mcSkuRow(mcDestFor);          // set for this SKU alone
+  const rule=mcRuleMatching(row);         // and the rule it would fall to
+  const dest=now?now.dest:(rule?rule.dest:'');
   document.getElementById('mcDestOpts').innerHTML=MC_DESTS.map(d=>
-    `<button type="button" class="btn-outline${now&&now.dest===d.v?' mc-dest-on':''}"
-       data-mc-dest="${d.v}">${escapeHtml(d.label)}${
-       now&&now.dest===d.v?' ✓':''}</button>`).join('');
+    `<button type="button" class="btn-outline${dest===d.v?' mc-dest-on':''}"
+       data-mc-dest="${d.v}">${escapeHtml(d.label)}${dest===d.v?' ✓':''}</button>`).join('');
+  // Why it goes where it goes, said outright. Nothing here is a guess the
+  // operator can see from the row, and "the rule you wrote for something else
+  // caught this too" is the answer nine times out of ten.
+  const tool=mcToolFor(row), tag=mcGiftHit(mcDestFor), png=designFileForSku(mcDestFor);
+  const how=h=>(MC_HOWS.find(x=>x.v===h)||MC_HOWS[0]).label;
+  const why=now
+    ? `Set for this SKU: <b>${escapeHtml(mcDestLabel(now.dest))}</b>.`
+    : rule
+      ? `The rule <b>${escapeHtml(how(rule.how))} “${escapeHtml(rule.match)}”</b> catches `
+        +`this one, and sends it to <b>${escapeHtml(mcDestLabel(rule.dest))}</b>.`
+      : row.tile
+        ? `Its lines are on the <b>${escapeHtml(row.tile==='giftTag'?'Gift Tag':'Custom Template')}`
+          +`</b> tile, and that is what it follows.`
+        : 'Nothing says where this one goes, so it follows its artwork.';
+  // and what is actually on the shelf for it, which is the other half of a
+  // rule that looks right and does nothing
+  const found=[png?'a PNG in the designs folder':'',
+    tag?`a design called “${tag.name}” on ${tag.page.name}`:'']
+    .filter(Boolean).join(' · ')||'no artwork of that name anywhere';
+  const willName=tool==='gift'
+    ? `${(mcGiftHit(mcDestFor,mcForcedPage(row))||tag||{}).page
+        ?(mcGiftHit(mcDestFor,mcForcedPage(row))||tag).page.name+' gift tag sheet'
+        :'gift tag sheet'}`
+    : tool==='print'?'print sheet'
+    : tool==='both'?'sheet it asks you to pick'
+    : '';
+  const will=willName
+    ? `Add puts it on the <b>${escapeHtml(willName)}</b>.`
+    : (dest&&dest!=='skip')
+      ? `<b>Add cannot: ${escapeHtml(mcDestLabel(dest))} has nothing of this name.</b> `
+        +'Point it somewhere else, or file the design there under this name.'
+      : dest==='skip'?'It is left off both sheets.'
+      : '<b>Nothing to add</b> — there is no artwork of this name.';
+  document.getElementById('mcDestWhy').innerHTML=
+    `${why}<br/>Artwork: ${escapeHtml(found)}.<br/>${will}`;
   // what it does today with nothing said about it — so "leave it alone" is a
   // choice made knowing the answer, not a shrug
   const clear=document.getElementById('mcDestClear');
   clear.textContent=now
-    ? `Leave it to work itself out${auto&&!now?` (${mcDestLabel(auto)})`:''}`
+    ? `Leave it to the rules${rule?` (${mcDestLabel(rule.dest)})`:''}`
     : 'It already works itself out';
   clear.disabled=!now;
   document.getElementById('mcDestSheet').classList.add('open');
