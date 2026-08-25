@@ -27087,9 +27087,14 @@ function mcGiftWire(it){
       v[key]=key==='size'?(Number(el.value)||undefined):el.value;
     });
     const fin=document.querySelector('#mcGtFinish [data-mc-fin].on');
-    return {designId:mcGtPick,
+    // built onto what the line already carries rather than in place of it:
+    // which gift tag page this line is on is not asked here, and a fresh
+    // object dropped it — two orders on one page then came out as two sheets
+    return {...(it.sheet_item||{}),
+      designId:mcGtPick,
       qty:Math.max(1,Math.round(Number(document.getElementById('mcGtQty').value)||1)),
       finish:fin?fin.dataset.mcFin:'Matte',
+      page:(it.sheet_item&&it.sheet_item.page)||gtMode,
       vals};
   }
   document.getElementById('mcGtSaveBtn').addEventListener('click',async()=>{
@@ -27108,7 +27113,7 @@ function mcGiftWire(it){
     it.sheet_item=collect();
     if(!await mcSave(it,{sheet_item:it.sheet_item})) return;
     mcRepaintRow(it);
-    await mcGtOpenFull();
+    await mcGtOpenFull(it.sheet_item.page||mcLinePage(it));
   });
 }
 
@@ -27162,12 +27167,23 @@ document.getElementById('mcBackChip').addEventListener('click',async()=>{
 // on the way out — so a sheet being built on the Gift Tag screen is not lost
 // to a batch borrowing it, and edits made there land on the batch's rows.
 let mcGtHome=null;
-async function mcGtOpenFull(){
+async function mcGtOpenFull(page){
   const msg=document.getElementById('mcWinMsg')||document.getElementById('mcBatchMsg');
-  const lines=mcItems.filter(x=>x.tile==='giftTag'&&x.sheet_item&&x.sheet_item.designId);
-  if(!lines.length){ if(msg) showMsg(msg,'Nothing is on this batch\'s sheet yet.',false); return; }
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
-  if(!mcGtHome) mcGtHome={order:gtOrder,ids:lines.map(l=>l.id)};
+  // The page this line is on, and that page's lines alone. Lending the whole
+  // batch's tags to whichever library happened to be loaded put half of them
+  // in front of a library that has never heard of them: no design, no text
+  // boxes, and words typed against a line that was never going to be saved.
+  const here=mcItem(mcWinItem);
+  const want=page||mcLinePage(here)||gtMode;
+  if(want!==gtMode&&typeof gtSetMode==='function') await gtSetMode(want);
+  const lines=mcItems.filter(x=>x.tile==='giftTag'&&x.sheet_item&&x.sheet_item.designId
+    &&(mcLinePage(x)||want)===want);
+  if(!lines.length){
+    if(msg) showMsg(msg,`Nothing is on the ${mcGtPage(want).name} sheet yet.`,false);
+    return;
+  }
+  if(!mcGtHome) mcGtHome={order:gtOrder,ids:lines.map(l=>l.id),page:want};
   gtOrder=lines.map(mcGtLine);
   if(typeof gtRenderOrder==='function') gtRenderOrder();
   showScreen('tool-gift-tag');
@@ -27183,7 +27199,13 @@ async function mcGtReturn(){
     const id=String(l.id||'').startsWith('mc-')?String(l.id).slice(3):null;
     const it=id?mcItem(id):null;
     if(!it) continue;
-    it.sheet_item={designId:l.designId,qty:l.qty,vals:l.vals||{}};
+    // what was changed over there, onto what the line already carries. Written
+    // as a fresh object it lost the finish and the page every trip: the line
+    // came back Matte and page-less, and two orders on one page then built two
+    // sheets instead of sharing one.
+    it.sheet_item={...(it.sheet_item||{}),
+      designId:l.designId,qty:l.qty,vals:l.vals||{},
+      page:(it.sheet_item&&it.sheet_item.page)||home.page||gtMode};
     await mcSave(it,{sheet_item:it.sheet_item});
   }
   if(currentScreen==='magic-batch') mcRenderItems();
