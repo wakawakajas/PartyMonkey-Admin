@@ -1816,7 +1816,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 #mcSummarySearch{display:block;width:100%;flex:none;margin:8px 0 4px;}
 /* These three carry lists and a sheet, not a question with two answers, so
    they are given half again the width the ordinary pop-up is shaped for. */
-#mcSummarySheet > .sheet,#mcWhereSheet > .sheet,#mcMadeSheet > .sheet{max-width:630px;}
+#mcSummarySheet > .sheet,#mcMadeSheet > .sheet{max-width:630px;}
 .mc-sum-row{display:flex;align-items:center;gap:9px;padding:7px 0;
   border-bottom:1px solid var(--paper-line);}
 /* .sheet's blanket rule stretches every button inside it to a full-width 50px
@@ -4497,33 +4497,20 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="sheet-title">SKU summary</div>
     <p class="hint" style="margin:0 0 4px;">Every line on this batch, added up by SKU
       and in SKU order — what to pull, not what order it is for.</p>
-    <p class="hint" style="margin:0 0 4px;">Add puts a SKU onto a print sheet at the
-      quantity shown, taking <strong>&lt;SKU&gt;.png</strong> from the designs folder.
-      The sheet opens when they are on it.</p>
+    <p class="hint" style="margin:0 0 4px;">Add puts a SKU on a sheet at the quantity
+      shown and finds its own way there: <strong>&lt;SKU&gt;.png</strong> in the designs
+      folder is a print job, on the template that folder belongs to; a design called
+      <strong>&lt;SKU&gt;</strong> in the gift tag library is a gift tag. The sheet opens
+      when they are on it.</p>
     <input type="text" id="mcSummarySearch" class="pl-find" placeholder="🔍 Find a SKU"
            autocomplete="off" aria-label="Find a SKU in this summary"/>
     <div class="chips" style="margin:8px 0 4px;align-items:center;">
       <button type="button" class="btn-outline btn-sm" id="mcSummaryAddAll">＋ Add all shown</button>
+      <button type="button" class="btn-outline btn-sm" id="mcSummaryRemoveAll">－ Remove all shown</button>
       <span class="hint" id="mcSummaryFolderLbl" style="margin:0;"></span>
     </div>
     <div id="mcSummaryMsg"></div>
     <div id="mcSummaryBody"></div>
-  </div>
-</div>
-
-<!-- ---- Which tool a SKU is going onto. Both can take it; they are different
-     machines and different stock, so it is asked rather than assumed. ---- -->
-<div class="sheet-bg" id="mcWhereSheet">
-  <div class="sheet">
-    <button class="req-x" id="mcWhereClose" title="Close" aria-label="Close">×</button>
-    <div class="sheet-title">Put it on which sheet?</div>
-    <div class="calc" id="mcWhereWhat" style="margin:0;"></div>
-    <button class="btn-primary" id="mcWherePrint">🖨️ Print template</button>
-    <button class="btn-primary" id="mcWhereGift">🏷️ Gift tag</button>
-    <div id="mcWhereMsg"></div>
-    <p class="hint" style="margin:2px 0 0;">Either one looks for artwork of the same
-      name — <strong>&lt;SKU&gt;.png</strong> in the print designs folder, or a design
-      called <strong>&lt;SKU&gt;</strong> in the gift tag library.</p>
   </div>
 </div>
 
@@ -24162,12 +24149,19 @@ function mcSummaryRows(){
   return [...map.values()].sort((a,b)=>
     String(a.sku).localeCompare(String(b.sku),undefined,{numeric:true,sensitivity:'base'}));
 }
+// what the search box is actually showing — Add all and Remove all act on
+// this, and so does the list itself, so the three cannot disagree
+function mcSummaryShownRows(){
+  const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
+  const all=mcSummaryRows();
+  return q?all.filter(r=>
+    String(r.sku).toLowerCase().includes(q)||String(r.name||'').toLowerCase().includes(q)):all;
+}
 function mcRenderSummary(){
   const body=document.getElementById('mcSummaryBody');
   const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
   const all=mcSummaryRows();
-  const rows=q?all.filter(r=>
-    String(r.sku).toLowerCase().includes(q)||String(r.name||'').toLowerCase().includes(q)):all;
+  const rows=mcSummaryShownRows();
   if(!all.length){
     body.innerHTML='<p class="hint" style="margin:4px 0 0;">— no lines on this batch —</p>';
     return;
@@ -24274,10 +24268,19 @@ function mcTemplateFor(rows){
   const folder=pick&&pick.folder;
   return named(folder)||covers(folder)||named(rows0.sku)||covers(rows0.sku)||null;
 }
+// Takes a SKU off whichever sheet it went on. Says which one lost it and
+// leaves the redrawing to the caller — a hundred of them in a row should
+// repaint the sheet once, not a hundred times.
+function mcRemoveSku(sku){
+  const at=mcWhereIsSku(sku); if(!at) return '';
+  if(at.on==='gift'){ gtOrder=gtOrder.filter(l=>l.id!==at.line.id); return 'gift'; }
+  state.designs=state.designs.filter(d=>d.id!==at.line.id);
+  return 'print';
+}
 // Puts SKUs onto the print sheet at the quantities the batch adds up to, then
 // shows the sheet they made. A SKU already on the sheet is set to the batch's
 // figure rather than doubled — the sheet is meant to mirror the batch.
-async function mcAddSkusToSheet(rows){
+async function mcAddSkusToSheet(rows,extra){
   const out=document.getElementById('mcSummaryMsg');
   const usable=rows.filter(r=>designFileForSku(r.sku));
   const missing=rows.filter(r=>!designFileForSku(r.sku)).map(r=>r.sku);
@@ -24331,9 +24334,9 @@ async function mcAddSkusToSheet(rows){
   document.getElementById('mcSummarySheet').classList.remove('open');
   const note=[tplName?`on ${tplName}`:'',`${added} added`,updated?`${updated} updated`:'',
     missing.length?`${missing.length} without a PNG: ${missing.slice(0,4).join(', ')}`
-      +(missing.length>4?'…':''):'']
+      +(missing.length>4?'…':''):'',extra||'']
     .filter(Boolean).join(' · ');
-  mcOpenMade(note,!missing.length);
+  mcOpenMade(note,!missing.length&&!extra);
 }
 
 // ---------- the sheet those SKUs made ----------
@@ -24414,40 +24417,50 @@ document.getElementById('mcMadeOpen').addEventListener('click',()=>{
 // ---------- print sheet, or gift tag ----------
 // Both tools can take a SKU and both match it by name, so which one is asked
 // once and then applied to everything in that press of the button.
-let mcWhereRows=null;
-function mcAskWhere(rows){
-  if(!rows||!rows.length) return;
-  mcWhereRows=rows;
-  const n=rows.length, total=rows.reduce((s,r)=>s+(Number(r.qty)||0),0);
-  document.getElementById('mcWhereWhat').textContent=
-    n===1?`${rows[0].sku} · ${rows[0].qty}`
-         :`${n} SKUs · ${total} in total`;
-  document.getElementById('mcWhereMsg').innerHTML='';
-  document.getElementById('mcSummarySheet').classList.remove('open');
-  document.getElementById('mcWhereSheet').classList.add('open');
+// Which tool a SKU goes on is a matter of where its artwork is, not a question
+// worth asking: <SKU>.png in the designs folder is a print job, a design of
+// that name in the gift tag library is a gift tag. A SKU with both is a print
+// job — that is the folder with the templates on it.
+function mcToolFor(sku){
+  if(designFileForSku(sku)) return 'print';
+  if(typeof gtDesignForName==='function'&&gtDesignForName(sku)) return 'gift';
+  return '';
 }
-const mcWhereClose=()=>{ mcWhereRows=null;
-  document.getElementById('mcWhereSheet').classList.remove('open'); };
-document.getElementById('mcWhereClose').addEventListener('click',mcWhereClose);
-document.getElementById('mcWhereSheet').addEventListener('click',e=>{
-  if(e.target.id==='mcWhereSheet') mcWhereClose();
-});
-document.getElementById('mcWherePrint').addEventListener('click',async()=>{
-  const rows=mcWhereRows; if(!rows) return;
-  mcWhereRows=null;
-  document.getElementById('mcWhereSheet').classList.remove('open');
-  document.getElementById('mcSummarySheet').classList.add('open');
-  await mcAddSkusToSheet(rows);
-});
-document.getElementById('mcWhereGift').addEventListener('click',async()=>{
-  const rows=mcWhereRows; if(!rows) return;
-  await mcAddSkusToGiftTag(rows);
-});
+// Sends each SKU to the tool its artwork says, and does not come back to ask.
+// Where a batch is of both kinds the tags go on quietly and the print sheet —
+// the one being looked at — is what opens, saying both.
+async function mcRouteRows(rows){
+  if(!rows||!rows.length) return;
+  const out=document.getElementById('mcSummaryMsg');
+  // a SKU with no PNG may still be a tag, and the tag library is only
+  // searchable once it has been loaded
+  if(rows.some(r=>!designFileForSku(r.sku))&&typeof gtOpen==='function'&&!gtLoaded){
+    showMsg(out,'Looking in the gift tag library…',true);
+    await gtOpen();
+  }
+  const print=rows.filter(r=>mcToolFor(r.sku)==='print');
+  const gift=rows.filter(r=>mcToolFor(r.sku)==='gift');
+  const none=rows.filter(r=>!mcToolFor(r.sku)).map(r=>r.sku);
+  if(!print.length&&!gift.length){
+    showMsg(out,none.length===1
+      ? `Nothing called “${escapeHtml(none[0])}” in the designs folder or the gift tag library.`
+      : `None of these ${none.length} SKUs has artwork of the same name.`,false);
+    return;
+  }
+  const nonePart=none.length
+    ? `${none.length} with no artwork: ${none.slice(0,3).join(', ')}`+(none.length>3?'…':'')
+    : '';
+  if(!print.length){ await mcAddSkusToGiftTag(gift,{extra:nonePart}); return; }
+  const g=gift.length?await mcAddSkusToGiftTag(gift,{quiet:true}):null;
+  const gPart=g?`${g.added+g.updated} on the gift tag sheet`:'';
+  await mcAddSkusToSheet(print,[gPart,nonePart].filter(Boolean).join(' · '));
+}
 // Onto the gift tag order, matched by name the way the print sheet matches a
 // PNG. The line is the tool's own shape, so everything downstream reads it
 // exactly as one added on that screen.
-async function mcAddSkusToGiftTag(rows){
-  const out=document.getElementById('mcWhereMsg');
+async function mcAddSkusToGiftTag(rows,opts){
+  const o=opts||{};
+  const out=document.getElementById('mcSummaryMsg');
   showMsg(out,'Looking in the gift tag library…',true);
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   const found=[], missing=[];
@@ -24459,7 +24472,7 @@ async function mcAddSkusToGiftTag(rows){
     showMsg(out,missing.length===1
       ? `No design called “${escapeHtml(missing[0])}” in the gift tag library.`
       : `None of these ${missing.length} SKUs has a design of the same name.`,false);
-    return;
+    return {added:0,updated:0,missing};
   }
   let added=0,updated=0;
   found.forEach(({row,design})=>{
@@ -24470,15 +24483,17 @@ async function mcAddSkusToGiftTag(rows){
     if(had){ had.qty=qty; had.sku=row.sku; updated++; }
     else { gtOrder.push({id:gtId('l'),designId:design.id,qty,vals:{},sku:row.sku}); added++; }
   });
-  mcWhereRows=null;
-  document.getElementById('mcWhereSheet').classList.remove('open');
   gtRenderOrder(); gtDraw();
+  // called alongside a print sheet, the tags are a line in that sheet's note
+  // rather than a pop-up of their own opening over it
+  if(o.quiet) return {added,updated,missing};
   const note=[`${added} added`,updated?`${updated} updated`:'',
     missing.length?`${missing.length} with no design of that name: ${missing.slice(0,3).join(', ')}`
-      +(missing.length>3?'…':''):''].filter(Boolean).join(' · ');
+      +(missing.length>3?'…':''):'',o.extra||''].filter(Boolean).join(' · ');
   // the sheet it made, in the pop-up — the same as the print side, rather than
   // being dropped into the builder with no sight of what was done
-  mcOpenMade(note,!missing.length,'gift');
+  mcOpenMade(note,!missing.length&&!o.extra,'gift');
+  return {added,updated,missing};
 }
 function mcSummaryFolderState(){
   const el=document.getElementById('mcSummaryFolderLbl'); if(!el) return;
@@ -24506,16 +24521,14 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
   const del=e.target.closest('[data-mc-sum-del]');
   if(del){
     const sku=del.dataset.mcSumDel;
-    const at=mcWhereIsSku(sku); if(!at) return;
-    if(at.on==='gift'){
-      gtOrder=gtOrder.filter(l=>l.id!==at.line.id);
+    const gone=mcRemoveSku(sku); if(!gone) return;
+    if(gone==='gift'){
       if(typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
       mcRenderSummary();
       showMsg(document.getElementById('mcSummaryMsg'),
         `Took ${sku} off the gift tag sheet.`,true);
       return;
     }
-    state.designs=state.designs.filter(d=>d.id!==at.line.id);
     state.page=0;
     renderDesignLines(); refreshArtInputs(); drawAll(); mcRenderSummary();
     showMsg(document.getElementById('mcSummaryMsg'),
@@ -24538,17 +24551,29 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
   }
   const b=e.target.closest('[data-mc-sum-add]'); if(!b||b.disabled) return;
   const row=mcSummaryRows().find(r=>String(r.sku)===b.dataset.mcSumAdd); if(!row) return;
-  mcAskWhere([row]);            // print sheet or gift tag — both match by name
+  mcRouteRows([row]);           // print sheet or gift tag — whichever has its artwork
 });
 document.getElementById('mcSummaryAddAll').addEventListener('click',async()=>{
-  const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
-  const all=mcSummaryRows();
-  const rows=q?all.filter(r=>
-    String(r.sku).toLowerCase().includes(q)||String(r.name||'').toLowerCase().includes(q)):all;
+  const rows=mcSummaryShownRows();
   if(!rows.length) return;
-  // which tool takes them is asked once, and whichever it is says for itself
-  // how many of them it could match — the two match against different folders
-  mcAskWhere(rows);
+  await mcRouteRows(rows);
+});
+// The other way round: everything on show that is on a sheet comes off it,
+// print and gift tag alike. Asked first — it is one tap against a whole
+// batch's work, and there is no putting it back.
+document.getElementById('mcSummaryRemoveAll').addEventListener('click',()=>{
+  const out=document.getElementById('mcSummaryMsg');
+  const on=mcSummaryShownRows().filter(r=>mcWhereIsSku(r.sku));
+  if(!on.length){ showMsg(out,'None of these is on a sheet.',false); return; }
+  if(!confirm(`Take ${on.length} SKU${on.length===1?'':'s'} off the sheet?\n\n`
+    +'The batch is not touched — only what has been laid out.')) return;
+  let p=0,g=0;
+  on.forEach(r=>{ const w=mcRemoveSku(r.sku); if(w==='print') p++; else if(w==='gift') g++; });
+  if(p){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
+  if(g&&typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
+  mcRenderSummary();
+  showMsg(out,[p?`${p} off the print sheet`:'',g?`${g} off the gift tag sheet`:'']
+    .filter(Boolean).join(' · '),true);
 });
 document.getElementById('mcSummaryClose').addEventListener('click',()=>
   document.getElementById('mcSummarySheet').classList.remove('open'));
