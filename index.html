@@ -6107,6 +6107,32 @@ const SCREEN_PARENT={
   warehouse:'home',request:'home',calculator:'home','macro-studio':'home',
   'bundle-sku':'home','bundle-order':'bundle-sku','bundle-settings':'bundle-sku',
   'pick-lists':'home','pick-list':'pick-lists','pick-list-settings':'pick-lists'};
+// Procurement & Shipping is the one section where the tree is the wrong shape.
+// An order can be reached from the order list or from the freight number it
+// travels under, and Back from it means the door it was opened by — the tree
+// only knows the list, so opening an order from a consolidation and stepping
+// back threw you out of the consolidation altogether.
+//
+// So this section retraces the walk instead. The screen being arrived at is
+// dropped from the trail before the screen being left is pushed, which is what
+// keeps a circle from growing: walking order → freight → order leaves one entry
+// per screen, so Back can never cost more presses than there are screens.
+// Everywhere else still climbs SCREEN_PARENT, and an empty trail falls back to
+// it here too — a reload landing deep in the section is not a dead end.
+let shipTrail=[];
+function shipTrailStep(from,to,viaBack){
+  const inTo=SCREEN_SECTION[to]==='shipping',
+        inFrom=!!from&&SCREEN_SECTION[from]==='shipping';
+  // stepping into the section, or out of it, starts a fresh journey
+  if(!inTo||!inFrom){ shipTrail=[]; return; }
+  // goBack peeks rather than pops, so a step it offered is only spent once the
+  // screen has actually changed — an unsaved-work question answered "stay"
+  // must not quietly eat the way back
+  if(viaBack){ if(shipTrail[shipTrail.length-1]===to) shipTrail.pop(); return; }
+  if(from===to) return;
+  const at=shipTrail.indexOf(to); if(at>=0) shipTrail.splice(at,1);
+  shipTrail.push(from);
+}
 // The shop chosen for Ad-Hoc Picking, remembered between visits. It is declared
 // up here because showScreen reads it, and read inside a try because a browser
 // with storage switched off throws on the very first touch — which would take
@@ -6195,6 +6221,7 @@ function showScreen(name,viaBack){
   if(!may(SCREEN_SECTION[name])) name='home';
   // and a shop has to be chosen before any of its screens mean anything
   if(!currentStore&&['adhoc-list','adhoc-detail','adhoc-trash','skus'].includes(name)) name='adhoc';
+  shipTrailStep(currentScreen,name,viaBack);
   const moving=currentScreen!==name;   // a refresh is not a journey
   // where the screen being left was standing, so a step back can put it back
   if(moving&&currentScreen) scrollMemo[currentScreen]=window.scrollY||0;
@@ -9874,6 +9901,13 @@ function goBack(){
   // means back to the batch it came from, not up to the hub.
   if(mcIsBuilderScreen(currentScreen)&&mcCanReturn()){
     mcCommit().finally(mcReturnToBatch);
+    return;
+  }
+  // And Procurement & Shipping, which remembers the way it came rather than
+  // climbing the tree — see shipTrailStep. Peeked, not popped: the step is
+  // spent inside showScreen, once the move is certain.
+  if(shipTrail.length&&SCREEN_SECTION[currentScreen]==='shipping'){
+    showScreen(shipTrail[shipTrail.length-1],true);
     return;
   }
   showScreen(SCREEN_PARENT[currentScreen]||'home',true);
