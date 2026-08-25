@@ -3504,6 +3504,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         </span>
         <span class="tile-name">Custom Template</span>
       </button>
+      <!-- Two ways in, because there are two libraries and mixing them was
+           the whole trouble: the designs kept in the library folder, which
+           carry their words from one day to the next, and the artwork sitting
+           in the Pigu product folders, which is a one-off by nature. -->
       <button class="tile" id="goToGiftTagBtn">
         <span class="tile-top">
           <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true">
@@ -3512,7 +3516,18 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
           </svg>
           <span class="tile-go">→</span>
         </span>
-        <span class="tile-name">Gift Tag</span>
+        <span class="tile-name">Festive Gift Tag</span>
+      </button>
+      <button class="tile" id="goToCustomTagBtn">
+        <span class="tile-top">
+          <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12.5 3H20a1 1 0 0 1 1 1v7.5a1 1 0 0 1-.3.7l-8.5 8.5a1 1 0 0 1-1.4 0l-7.5-7.5a1 1 0 0 1 0-1.4l8.5-8.5a1 1 0 0 1 .7-.3z"/>
+            <circle cx="17" cy="7" r="1.5"/>
+            <path d="M8 16l8-8"/>
+          </svg>
+          <span class="tile-go">→</span>
+        </span>
+        <span class="tile-name">Custom Gift Tag</span>
       </button>
       <button class="tile" id="goToMagicCreateBtn">
         <span class="tile-top">
@@ -3677,10 +3692,16 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   <div class="wrap" id="giftTagScreen" style="display:none;">
     <div class="eyebrow">PRINT TEMPLATE</div>
     <div class="pl-head">
-      <h1>Gift Tag</h1>
+      <h1 id="gtTitle">Festive Gift Tag</h1>
       <button class="icon-btn" id="gtSettingsBtn" aria-label="Gift Tag settings"
               title="Which folder each shape takes its designs from">⚙</button>
     </div>
+    <!-- one list at a time, and it always says which -->
+    <div class="seg" id="gtModeSeg" style="margin:0 0 10px;">
+      <button type="button" data-gt-mode="festive" class="on">Festive · the library</button>
+      <button type="button" data-gt-mode="custom">Custom · Pigu folders</button>
+    </div>
+    <p class="hint" id="gtModeHint" style="margin:0 0 10px;"></p>
     <p class="sub">Pick a design, type the words, set the quantity. The sheet fills itself and starts another page when it runs out of room. Tap a tag to work on that line, then drag its words to move them or the corner to resize the box — that line only. Zoom in fills the view with the tag being worked on; + and − or the wheel take it closer or further out, and dragging the paper between the tags moves the view about. Words too long for their box wrap onto a second line, and shrink from there. Click a text and press space to hold the sheet to it — nothing else can be picked up until space is pressed again.</p>
 
     <div class="preview-wrap">
@@ -6338,8 +6359,15 @@ document.getElementById('goToToolBtn').addEventListener('click',()=>showScreen('
 // opens everything that used to be on the print template screen itself
 document.getElementById('goToCustomTemplateBtn')
   .addEventListener('click',()=>showScreen('tool-custom'));
+// each tile is its own library; the screen is the same screen
 document.getElementById('goToGiftTagBtn')
-  .addEventListener('click',()=>showScreen('tool-gift-tag'));
+  .addEventListener('click',async()=>{ await gtSetMode('festive'); showScreen('tool-gift-tag'); });
+document.getElementById('goToCustomTagBtn')
+  .addEventListener('click',async()=>{ await gtSetMode('custom'); showScreen('tool-gift-tag'); });
+document.getElementById('gtModeSeg').addEventListener('click',async e=>{
+  const b=e.target.closest('[data-gt-mode]'); if(!b||b.dataset.gtMode===gtMode) return;
+  await gtSetMode(b.dataset.gtMode);
+});
 document.getElementById('goToMagicCreateBtn')
   .addEventListener('click',()=>showScreen('magic'));
 document.getElementById('goToShipmentBtn').addEventListener('click',()=>showScreen('shipment'));
@@ -16759,6 +16787,12 @@ let gtLayout=null;                 // {vb,mm,shapes:[{path,bbox}]} read off the 
 let gtBaseImg=null;                // the sheet's base layer, printed under everything
 let gtLayoutFrom='', gtBaseFrom=''; // which file each was built from, so neither is rebuilt for nothing
 const gtDesign=id=>gtLib.designs.find(d=>d.id===id)||null;
+// What the page on screen offers to pick from. Both libraries are always in
+// gtLib.designs — an order line already built, and Magic Create matching a SKU
+// by name, must not depend on which page happens to be open — but only one of
+// them is ever shown: the library's own designs on Festive, the Pigu folders'
+// one-offs on Custom.
+const gtDesignsInView=()=>gtLib.designs.filter(d=>gtMode==='custom'?d.adhoc:!d.adhoc);
 const gtFont=id=>gtLib.fonts.find(f=>f.id===id)||null;
 // a font that failed to load, or a field left on the default, falls back to the
 // app's own face rather than to whatever the browser feels like
@@ -17293,6 +17327,39 @@ function gtApplyCut(file,path,text){
 let gtPiguDir=null, gtPiguRead=false;
 let gtFolderShapes={};            // folder name inside Pigu -> cutting file path
 let gtPiguLoaded=false;           // the mapped folders' designs are in the library
+// Which of the two libraries is on screen. They were one list before, and a
+// design could not be told from a one-off in it: the library's own designs
+// keep their words in library.json, the Pigu folders' artwork is rebuilt from
+// the file every time and keeps nothing. Two lists, one at a time, and no
+// question about which a design belongs to.
+let gtMode='festive';
+const GT_MODE_HINT={
+  festive:'The designs in your library folder. Words set on one are saved and come back.',
+  custom:'Artwork in the Pigu product folders, each cut to its folder\u2019s shape. '
+        +'These are one-offs \u2014 they carry no saved words.'};
+function gtPaintMode(){
+  const t=document.getElementById('gtTitle');
+  if(t) t.textContent=gtMode==='custom'?'Custom Gift Tag':'Festive Gift Tag';
+  const h=document.getElementById('gtModeHint');
+  if(h) h.textContent=GT_MODE_HINT[gtMode]||'';
+  document.querySelectorAll('#gtModeSeg [data-gt-mode]').forEach(b=>
+    b.classList.toggle('on',b.dataset.gtMode===gtMode));
+}
+// Puts the chosen library on screen. Festive drops the folders' artwork and
+// leaves the library's own; custom reads the mapped folders in. Either way the
+// order already built is untouched — a line keeps the design it was given.
+async function gtApplyMode(){
+  gtPaintMode();
+  // the folders are read the first time Custom is asked for, and then left in
+  // hand: taking them back out again is what used to lose the library with them
+  if(gtMode==='custom'&&!gtPiguLoaded) await gtLoadMappedFolders().catch(()=>{});
+  gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+}
+async function gtSetMode(m,save){
+  gtMode=(m==='custom')?'custom':'festive';
+  if(save!==false) await gtIdbPut('gtMode',gtMode).catch(()=>{});
+  await gtApplyMode();
+}
 async function gtPiguDirGet(){
   if(!gtPiguRead){ gtPiguDir=await gtIdbGet('piguDir').catch(()=>null)||null; gtPiguRead=true; }
   return gtPiguDir;
@@ -17406,7 +17473,11 @@ async function gtLoadMappedFolders(){
   // folders — its designs belong on the list, they are simply already there as
   // the library's own. Stashing them out of sight would be losing exactly the
   // designs the mapping was meant to bring.
-  const base=skipped.length?gtOwnDesigns.slice():[];
+  // Always the library's own designs first. They used to be left out unless a
+  // mapped folder happened to be the library folder itself, which took a
+  // hundred designs and their words off the screen the moment a product folder
+  // was read — the page they belong on now decides what is shown, not this.
+  const base=gtOwnDesigns.slice();
   const byId=new Set(base.map(d=>d.id));
   const merged=base.concat(keep.filter(d=>!byId.has(d.id)));
   const seenId=new Set(merged.map(d=>d.id));
@@ -18681,12 +18752,13 @@ function gtArt(id,cls){
 function gtDesignPanel(q,sel){
   gtSortDesigns();
   const s=(q||'').trim().toLowerCase();
-  const hits=gtLib.designs.filter(d=>!s||d.name.toLowerCase().includes(s));
+  const all=gtDesignsInView();
+  const hits=all.filter(d=>!s||d.name.toLowerCase().includes(s));
   return hits.length?hits.map(d=>`<div class="combo-opt${d.id===sel?' active':''}" data-gt-design-opt="${d.id}">
       ${gtArt(d.id)}<span class="nm">${escapeHtml(d.name)}</span>
       <button class="icon-btn" data-gt-open-design="${d.id}" title="Open this design">✎</button>
     </div>`).join('')
-    :`<div class="combo-empty">${gtLib.designs.length?'nothing matches':'no designs yet'}</div>`;
+    :`<div class="combo-empty">${all.length?'nothing matches':'no designs on this page'}</div>`;
 }
 // the artwork rect one tag gives a design, for turning the fractions a field is
 // held in into the millimetres the form is keyed in
@@ -19156,17 +19228,20 @@ function gtRenderDesignList(){
   const count=document.getElementById('gtDesignCount');
   const box=document.getElementById('gtDesignSearch');
   const q=((box&&box.value)||'').trim().toLowerCase();
-  if(!gtLib.designs.length){
-    el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet —</p>';
+  const mine=gtDesignsInView();
+  if(!mine.length){
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">'
+      +(gtMode==='custom'
+        ? '— nothing in the Pigu folders yet · give a folder a shape under ⚙ —'
+        : '— none yet —')+'</p>';
     if(count) count.textContent='';
     return;
   }
-  const shown=gtLib.designs.filter(d=>!q||d.name.toLowerCase().includes(q));
+  const shown=mine.filter(d=>!q||d.name.toLowerCase().includes(q));
   if(count) count.textContent=q
-    ? `${shown.length} of ${gtLib.designs.length} design${gtLib.designs.length===1?'':'s'}`
-    : `${gtLib.designs.length} design${gtLib.designs.length===1?'':'s'}`
-      +((n=>n?` · ${n} one-off, gone when this page is reloaded`:'')
-        (gtLib.designs.filter(d=>d.adhoc).length));
+    ? `${shown.length} of ${mine.length} design${mine.length===1?'':'s'}`
+    : `${mine.length} design${mine.length===1?'':'s'}`
+      +(gtMode==='custom'?' · one-off, from the Pigu folders':'');
   if(!shown.length){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing matches —</p>';
     return;
@@ -20375,6 +20450,7 @@ async function gtOpen(){
       // again cannot happen here — that takes a tap, which the button is for
       if(saved&&await gtDirOk(saved)) gtDir=saved;
       else if(saved) gtFolderPending=true;
+      gtMode=(await gtIdbGet('gtMode').catch(()=>null))==='custom'?'custom':'festive';
       await gtLoadLib();
     }catch(e){}
     if(!gtSheet.slots.length) gtRebuildSlots();
@@ -20384,9 +20460,9 @@ async function gtOpen(){
   // anything dropped into the folder since the last look is taken on quietly —
   // arriving on the screen is not the moment to be told about housekeeping
   await gtPickUpNew(true);
-  // and the designs from every folder that has been given a shape, so any of
-  // them can be picked and each brings its own shape with it
-  if(!gtPiguLoaded) await gtLoadMappedFolders().catch(()=>{});
+  // and whichever of the two libraries was last on screen — the folders' own
+  // artwork is read only where it is the one being asked for
+  await gtApplyMode();
 }
 
 // ==================== One filter, for every list that has one ====================
