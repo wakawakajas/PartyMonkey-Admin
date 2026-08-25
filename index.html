@@ -1813,7 +1813,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* Every line on the batch, added up by SKU rather than by order — what to
    pull off the shelf, not what it is going out to. */
 /* .pl-find is shaped for a flex row; here it is a block on its own line */
-#mcSummarySearch{display:block;width:100%;flex:none;margin:8px 0 4px;}
+#mcSummarySearch,#mcRouteSearch{display:block;width:100%;flex:none;margin:8px 0 4px;}
 /* These three carry lists and a sheet, not a question with two answers, so
    they are given half again the width the ordinary pop-up is shaped for. */
 #mcSummarySheet > .sheet,#mcMadeSheet > .sheet{max-width:630px;}
@@ -4594,13 +4594,17 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       every rule. Anything nothing here mentions goes by its line's tile, and then by
       where its artwork is.</p>
     <div class="chips" style="margin:8px 0 4px;align-items:center;">
-      <button type="button" class="btn-outline btn-sm" id="mcRouteExport">⬇ Export</button>
+      <button type="button" class="btn-outline btn-sm" id="mcRouteExport">⬇ Export Excel</button>
       <button type="button" class="btn-outline btn-sm" id="mcRouteImport">⬆ Import</button>
       <span class="hint" id="mcRouteCount" style="margin:0;"></span>
     </div>
-    <p class="hint" style="margin:0 0 4px;">An import replaces the whole of this —
-      every rule and every SKU below — with what is in the file. Export first if what
-      is here is worth keeping.</p>
+    <p class="hint" style="margin:0 0 4px;">Export writes a spreadsheet — one row to a
+      rule, the same words as the boxes below — to be worked in Excel and brought back.
+      An import replaces the whole of this, every rule and every SKU, with what is in
+      the file (.xlsx, .csv or an exported .json). Export first if what is here is worth
+      keeping.</p>
+    <input type="text" id="mcRouteSearch" class="pl-find" placeholder="🔍 Find a rule"
+           autocomplete="off" aria-label="Find a rule, a SKU or a remark"/>
     <div class="sect-label">RULES</div>
     <div id="mcRouteRules"></div>
     <button type="button" class="btn-outline btn-sm" id="mcRouteAdd"
@@ -24982,8 +24986,14 @@ function mcRenderRoutes(){
   const note=r=>`<label class="field note"><input type="text" data-mc-r="remarks"
          value="${escapeHtml(r.remarks||'')}" placeholder="remarks — why this is here"
          aria-label="Remarks"/></label>`;
-  const rows=mcRuleRows();
-  rules.innerHTML=rows.length?rows.map((r,i)=>`
+  const all=mcRuleRows();
+  const rows=mcRoutesShown(all);
+  // ↑ and ↓ move a rule against the whole list, not against what the search
+  // is showing — a rule cannot be above one it is not being shown beside — so
+  // the ends they stop at are the ends of the list itself
+  rules.innerHTML=rows.length?rows.map(r=>{
+    const i=all.indexOf(r);
+    return `
     <div class="mc-route-row" data-mc-route="${r.id}">
       <label class="field m"><input type="text" data-mc-r="match"
              value="${escapeHtml(r.match||'')}" placeholder="the text to look for"
@@ -24993,13 +25003,14 @@ function mcRenderRoutes(){
       <label class="field d"><select data-mc-r="dest"
              aria-label="Where it goes">${mcOptsHtml(MC_DESTS,r.dest)}</select></label>
       <button type="button" class="icon-btn" data-mc-r-move="up"
-              aria-label="Move up"${i?'':' disabled'}>↑</button>
+              aria-label="Move up"${i>0?'':' disabled'}>↑</button>
       <button type="button" class="icon-btn" data-mc-r-move="down"
-              aria-label="Move down"${i===rows.length-1?' disabled':''}>↓</button>
+              aria-label="Move down"${i===all.length-1?' disabled':''}>↓</button>
       <button type="button" class="btn-danger" data-mc-r-del aria-label="Delete rule">×</button>
       ${note(r)}
-    </div>`).join(''):none('no rules yet — everything goes by its tile');
-  const own=mcSkuRows();
+    </div>`;}).join('')
+    :none(all.length?'nothing here matches that':'no rules yet — everything goes by its tile');
+  const owned=mcSkuRows(), own=mcRoutesShown(owned);
   // the SKU itself is an input rather than a label: one arrives here from a
   // summary row, and a shop that renames a listing should not have to delete
   // the override and set it again from a batch that has the new name on it
@@ -25013,10 +25024,27 @@ function mcRenderRoutes(){
              mcOptsHtml(MC_DESTS,r.dest)}</select></label>
       <button type="button" class="btn-danger" data-mc-r-del aria-label="Delete override">×</button>
       ${note(r)}
-    </div>`).join(''):none('none set');
+    </div>`).join(''):none(owned.length?'nothing here matches that':'none set');
   const el=document.getElementById('mcRouteCount');
-  if(el) el.textContent=`${rows.length} rule${rows.length===1?'':'s'} · `
-    +`${own.length} SKU${own.length===1?'':'s'}`;
+  const q=mcRouteQuery();
+  if(el) el.textContent=q
+    ? `${rows.length} of ${all.length} rule${all.length===1?'':'s'} · `
+      +`${own.length} of ${owned.length} SKU${owned.length===1?'':'s'}`
+    : `${all.length} rule${all.length===1?'':'s'} · `
+      +`${owned.length} SKU${owned.length===1?'':'s'}`;
+}
+// the search box, and what it leaves on screen. A remark is searched as well
+// as the text and the SKU: "the one Ana set up for the school orders" is how
+// somebody looks for a rule they did not write.
+const mcRouteQuery=()=>{
+  const el=document.getElementById('mcRouteSearch');
+  return el?(el.value||'').trim().toLowerCase():'';
+};
+function mcRoutesShown(list){
+  const q=mcRouteQuery();
+  if(!q) return list;
+  return list.filter(r=>[r.match,r.remarks,mcDestLabel(r.dest)]
+    .some(v=>String(v||'').toLowerCase().includes(q)));
 }
 async function mcRouteWrite(id,patch){
   const row=mcRoutes.find(r=>r.id===id); if(!row) return;
@@ -25086,11 +25114,13 @@ async function mcSetDest(sku,dest){
 }
 async function mcOpenRoutes(){
   document.getElementById('mcRouteMsg').innerHTML='';
+  document.getElementById('mcRouteSearch').value='';   // a fresh look, not the last search
   document.getElementById('mcRouteSheet').classList.add('open');
   await mcRoutesLoad(true);
   mcRenderRoutes();
 }
 document.getElementById('mcRoutesBtn').addEventListener('click',mcOpenRoutes);
+document.getElementById('mcRouteSearch').addEventListener('input',mcRenderRoutes);
 document.getElementById('mcRouteClose').addEventListener('click',()=>
   document.getElementById('mcRouteSheet').classList.remove('open'));
 document.getElementById('mcRouteDone').addEventListener('click',()=>{
@@ -25105,17 +25135,63 @@ document.getElementById('mcRouteSheet').addEventListener('click',e=>{
 // Ids and who wrote them are left out: a file taken to another account has to
 // land there as that account's own rows.
 const MC_ROUTE_FILE='pigu-magic-routing';
+// The spreadsheet's own columns, in the words the sheet uses on screen — the
+// file is meant to be worked in Excel by somebody who has only ever seen this
+// pop-up, so "Where" says Custom gift tag rather than 'custom'.
+const MC_ROUTE_COLS=['Kind','Match','How','Where','Remarks','Order'];
+const mcHowLabel=v=>(MC_HOWS.find(h=>h.v===v)||MC_HOWS[0]).label;
+// Read back tolerantly: a column typed over by hand comes back as "Custom",
+// "custom gift tag", "CUSTOM " or the raw value, and all four mean the page.
+const mcCellDest=v=>{
+  const s=String(v||'').trim().toLowerCase();
+  const exact=MC_DESTS.find(d=>d.v===s||d.label.toLowerCase()===s);
+  if(exact) return exact.v;
+  if(/festive/.test(s)) return 'festive';
+  if(/custom/.test(s)) return 'custom';
+  if(/print/.test(s)) return 'print';
+  if(/skip|not added|ignore|nothing|no sheet/.test(s)) return 'skip';
+  return '';
+};
+const mcCellHow=v=>{
+  const s=String(v||'').trim().toLowerCase();
+  const exact=MC_HOWS.find(h=>h.v===s||h.label.toLowerCase()===s);
+  if(exact) return exact.v;
+  if(/start|begin|prefix/.test(s)) return 'starts';
+  if(/exact|equal|is$/.test(s)) return 'exact';
+  return 'contains';
+};
+const mcCellKind=v=>/sku|override|one/.test(String(v||'').trim().toLowerCase())?'sku':'rule';
+// a row off a spreadsheet or out of a .json, in the shape the table takes
+const mcRouteFromCells=(c,i)=>{
+  const dest=mcCellDest(c.dest);
+  if(!dest) return null;
+  const match=String(c.match==null?'':c.match).trim().slice(0,200);
+  if(!match) return null;
+  const kind=mcCellKind(c.kind);
+  // a named SKU is matched whole and only whole, whatever the How column of a
+  // hand-worked sheet ended up saying
+  return {kind,match,how:kind==='sku'?'exact':mcCellHow(c.how),dest,
+    sort_order:Number.isFinite(Number(c.sort_order))?Number(c.sort_order):i,
+    remarks:String(c.remarks==null?'':c.remarks).slice(0,500)};
+};
 document.getElementById('mcRouteExport').addEventListener('click',async()=>{
   const out=document.getElementById('mcRouteMsg');
   try{
+    if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
     await mcRoutesLoad(true);
-    const routes=mcRoutes.map(r=>({kind:r.kind,match:r.match||'',how:r.how||'contains',
-      dest:r.dest,sort_order:Number(r.sort_order)||0,remarks:r.remarks||''}));
-    downloadBlob(new Blob([JSON.stringify({kind:MC_ROUTE_FILE,
-      at:new Date().toISOString(),routes},null,2)],{type:'application/json'}),
-      'magic-routing.json');
-    showMsg(out,`✓ Exported ${routes.length} row${routes.length===1?'':'s'} `
-      +'as magic-routing.json',true);
+    const rows=mcRoutes.map(r=>({Kind:r.kind==='sku'?'SKU':'Rule',Match:r.match||'',
+      How:mcHowLabel(r.how),Where:mcDestLabel(r.dest),Remarks:r.remarks||'',
+      Order:Number(r.sort_order)||0}));
+    const ws=XLSX.utils.json_to_sheet(rows,{header:MC_ROUTE_COLS});
+    // wide enough to read the rule without dragging every column out first
+    ws['!cols']=[{wch:7},{wch:30},{wch:12},{wch:18},{wch:40},{wch:7}];
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,'Routing');
+    const buf=XLSX.write(wb,{bookType:'xlsx',type:'array'});
+    downloadBlob(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument'
+      +'.spreadsheetml.sheet'}),'magic-routing.xlsx');
+    showMsg(out,`✓ Exported ${rows.length} row${rows.length===1?'':'s'} `
+      +'as magic-routing.xlsx',true);
   }catch(err){ showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false); }
 });
 // Replaces, rather than merges. Two half-lists dovetailed is a rule order
@@ -25123,18 +25199,32 @@ document.getElementById('mcRouteExport').addEventListener('click',async()=>{
 // worth importing. Said plainly before anything is deleted.
 document.getElementById('mcRouteImport').addEventListener('click',async()=>{
   const out=document.getElementById('mcRouteMsg');
-  const file=await gtPickFile('application/json,.json');
+  const file=await gtPickFile('.xlsx,.xls,.csv,.json,application/json');
   if(!file) return;
   try{
-    const data=JSON.parse(await file.text());
-    if(!data||data.kind!==MC_ROUTE_FILE) throw new Error('that is not a routing file');
-    const rows=(Array.isArray(data.routes)?data.routes:[])
-      .filter(r=>r&&MC_DESTS.some(d=>d.v===r.dest))
-      .map((r,i)=>({kind:r.kind==='sku'?'sku':'rule',
-        match:String(r.match||'').slice(0,200),
-        how:MC_HOWS.some(h=>h.v===r.how)?r.how:'contains',
-        dest:r.dest,sort_order:Number.isFinite(Number(r.sort_order))?Number(r.sort_order):i,
-        remarks:String(r.remarks||'').slice(0,500)}));
+    let cells=[];
+    if(/\.json$/i.test(file.name)){
+      const data=JSON.parse(await file.text());
+      if(!data||data.kind!==MC_ROUTE_FILE) throw new Error('that is not a routing file');
+      cells=(Array.isArray(data.routes)?data.routes:[]);
+    }else{
+      // A sheet worked in Excel: the columns are found by their headings
+      // rather than by where they sit, because a column moved or a spare one
+      // added is what a spreadsheet somebody has been working in looks like.
+      if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
+      const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      if(!ws) throw new Error('there are no sheets in that file');
+      const grid=XLSX.utils.sheet_to_json(ws,{defval:''});
+      const key=(o,want)=>{
+        const k=Object.keys(o).find(x=>x.trim().toLowerCase()===want);
+        return k?o[k]:'';
+      };
+      cells=grid.map(o=>({kind:key(o,'kind'),match:key(o,'match'),how:key(o,'how'),
+        dest:key(o,'where')||key(o,'dest'),remarks:key(o,'remarks'),
+        sort_order:key(o,'order')}));
+    }
+    const rows=cells.map(mcRouteFromCells).filter(Boolean);
     if(!rows.length) throw new Error('there are no usable rows in that file');
     await mcRoutesLoad(true);
     const had=mcRoutes.length;
