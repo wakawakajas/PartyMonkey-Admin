@@ -1779,10 +1779,15 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   overflow:hidden;background:var(--card);}
 .mc-order-head{display:flex;align-items:center;gap:9px;padding:9px 12px;
   background:var(--nest);border-bottom:1px solid var(--border);}
-.mc-order-id{flex:1;min-width:0;font-family:'Space Grotesk',sans-serif;font-weight:700;
+.mc-order-id{flex:0 0 auto;min-width:0;font-family:'Space Grotesk',sans-serif;font-weight:700;
   font-size:12.5px;letter-spacing:.02em;overflow-wrap:anywhere;}
-.mc-order-buyer{font-size:11.5px;color:var(--faint);white-space:nowrap;
-  overflow:hidden;text-overflow:ellipsis;max-width:40%;}
+/* Who ordered it, beside the number rather than off at the far end: the two
+   are read together — "which order" is the number and the name at once — and
+   a name in the quiet grey read as a note about the order rather than part of
+   its name. Same size and colour as the number it stands next to.  */
+.mc-order-buyer{flex:1;min-width:0;font-family:'Space Grotesk',sans-serif;font-weight:700;
+  font-size:12.5px;letter-spacing:.02em;color:var(--ink);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;}
 .mc-order-count{flex:0 0 auto;font-size:11px;color:var(--faint);
   font-variant-numeric:tabular-nums;white-space:nowrap;}
 .mc-order.all-done .mc-order-count{color:var(--blueprint);}
@@ -1840,7 +1845,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 #mcSummarySearch,#mcRouteSearch{display:block;width:100%;flex:none;margin:8px 0 4px;}
 /* These three carry lists and a sheet, not a question with two answers, so
    they are given half again the width the ordinary pop-up is shaped for. */
-#mcSummarySheet > .sheet,#mcMadeSheet > .sheet{max-width:630px;}
+#mcSummarySheet > .sheet{max-width:630px;}
+/* The sheet that was just built is looked at, not glanced at — it is given
+   the width a sheet needs, and the drawing fills it. */
+#mcMadeSheet > .sheet{max-width:940px;}
+#mcMadeSheet .mc-made-stage canvas{max-width:100%;max-height:64vh;}
 /* The look before the download is a look at a sheet, so it is given the width
    a sheet needs rather than the width a question needs. */
 #mcPlanSheet > .sheet{max-width:900px;}
@@ -4711,6 +4720,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button type="button" class="icon-btn" id="mcMadeNext" aria-label="Next sheet">›</button>
     </div>
     <div id="mcMadeMsg"></div>
+    <button class="btn-outline" id="mcMadeBig">⤢ Enlarge — 300% on the first card</button>
     <button class="btn-primary" id="mcMadeDownload">⬇ Download front PDF</button>
     <button class="btn-outline" id="mcMadeOpen">Open the builder</button>
   </div>
@@ -5761,14 +5771,85 @@ function renderModal(){
   document.getElementById('modalPrevPage').disabled=modalPage<=0;
   document.getElementById('modalNextPage').disabled=modalPage>=n-1;
 }
-function openEnlarge(side,page){
+function openEnlarge(side,page,onSlot){
   // opens already magnified — you enlarge to inspect detail, not to see the sheet small
   modalSide=side; modalZoom=DEFAULT_ENLARGE_ZOOM;
   modalPage=page!=null?page:clampPage();     // the sheet being looked at, not the first
   document.getElementById('modalTitle').textContent=side==='front'?'Front':'Back';
   document.getElementById('modalMsg').innerHTML='';
   renderModal(); modalBg.classList.add('open');
+  // and looking at the first card rather than at the middle of the paper: at
+  // 300% the middle of an A4 is white space, and the card is off the edge
+  // twice: once now, and once after the box has been laid out — a canvas that
+  // has just changed size has not been measured yet, and a tab that is not on
+  // screen never gets its animation frame at all
+  if(onSlot){ modalScrollToFirstSlot();
+    setTimeout(modalScrollToFirstSlot,60); setTimeout(modalScrollToFirstSlot,220); }
 }
+// The bottom-left placeholder — where a sheet starts filling — centred in the
+// view. Placeholders are held in millimetres and the canvas is the paper at
+// scale, so one is the other times canvas over paper.
+function modalScrollToFirstSlot(){
+  const wrap=document.querySelector('#modalBg .modal-scroll');
+  const c=document.getElementById('modalCanvas');
+  if(!wrap||!c) return;
+  // a box that measures nothing has not been laid out yet, and scrolling it
+  // now would only be clamped to nothing — it is asked again in a moment
+  if(!wrap.clientHeight){ setTimeout(modalScrollToFirstSlot,120); return; }
+  const list=(state.placeholders||[]).slice();
+  if(!list.length){ wrap.scrollLeft=0; wrap.scrollTop=wrap.scrollHeight; return; }
+  const first=list.sort((a,b)=>(b.y-a.y)||(a.x-b.x))[0];
+  const p=paperMm();
+  const sx=c.width/p.w, sy=c.height/p.h;
+  // the canvas is centred in a wider box, so its own left edge counts
+  const off=Math.max(0,(wrap.scrollWidth-c.width)/2);
+  wrap.scrollLeft=Math.max(0,off+(first.x+first.w/2)*sx-wrap.clientWidth/2);
+  wrap.scrollTop=Math.max(0,(first.y+first.h/2)*sy-wrap.clientHeight/2);
+}
+// Dragged about rather than scrolled: at 300% the sheet is bigger than the
+// window in both directions, and a scrollbar in each hand is not how anybody
+// looks at a proof.
+(function modalPan(){
+  const wrap=document.querySelector('#modalBg .modal-scroll');
+  if(!wrap) return;
+  let from=null;
+  wrap.style.cursor='grab';
+  wrap.addEventListener('pointerdown',e=>{
+    if(e.button>0) return;
+    from={x:e.clientX,y:e.clientY,l:wrap.scrollLeft,t:wrap.scrollTop};
+    // a capture that will not take is not worth losing the drag over
+    try{ wrap.setPointerCapture(e.pointerId); }catch(err){}
+    wrap.style.cursor='grabbing';
+  });
+  wrap.addEventListener('pointermove',e=>{
+    if(!from) return;
+    wrap.scrollLeft=from.l-(e.clientX-from.x);
+    wrap.scrollTop=from.t-(e.clientY-from.y);
+  });
+  const done=e=>{
+    if(!from) return;
+    from=null; wrap.style.cursor='grab';
+    try{ wrap.releasePointerCapture(e.pointerId); }catch(err){}
+  };
+  wrap.addEventListener('pointerup',done);
+  wrap.addEventListener('pointercancel',done);
+  // and the wheel takes it closer or further out, about where it already is
+  wrap.addEventListener('wheel',e=>{
+    if(!modalBg.classList.contains('open')) return;
+    e.preventDefault();
+    const was=modalZoom;
+    modalZoom=Math.max(0.5,Math.min(8,modalZoom+(e.deltaY<0?0.5:-0.5)));
+    if(modalZoom===was) return;
+    const fx=(wrap.scrollLeft+wrap.clientWidth/2)/Math.max(1,wrap.scrollWidth);
+    const fy=(wrap.scrollTop+wrap.clientHeight/2)/Math.max(1,wrap.scrollHeight);
+    renderModal();
+    const back=()=>{
+      wrap.scrollLeft=Math.max(0,fx*wrap.scrollWidth-wrap.clientWidth/2);
+      wrap.scrollTop=Math.max(0,fy*wrap.scrollHeight-wrap.clientHeight/2);
+    };
+    back(); setTimeout(back,60);
+  },{passive:false});
+})();
 document.querySelectorAll('[data-enlarge]').forEach(b=>{
   b.addEventListener('click',()=>openEnlarge(b.dataset.enlarge));
 });
@@ -25213,13 +25294,15 @@ function mcRenderMade(){
   if(mcMadePage<0) mcMadePage=0;
   // sized to the box it sits in, so it is the whole sheet at 100% and never
   // a corner of a magnified one
-  const stage=document.querySelector('.mc-made-stage');
-  const w=Math.max(120,(stage?stage.clientWidth:320)-20);
-  const h=Math.max(160,Math.round(window.innerHeight*0.44));
+  const stage=document.querySelector('#mcMadeSheet .mc-made-stage');
+  const w=Math.max(280,(stage?stage.clientWidth:640)-20);
+  const h=Math.max(320,Math.round(window.innerHeight*0.64));
   const gift=mcMadeMode==='gift';
   const p=gift?{w:gtSheet.paperW,h:gtSheet.paperH}:paperMm();
-  // whichever of the two limits the sheet hits first
-  const dim=Math.max(160,Math.min(w*Math.max(p.w,p.h)/p.w,h*Math.max(p.w,p.h)/p.h));
+  // whichever of the two limits the sheet hits first. Drawn well past what the
+  // box can show and let down to fit by the CSS: a sheet read at a thumbnail's
+  // size tells you nothing about the card on it.
+  const dim=Math.max(420,Math.min(w*Math.max(p.w,p.h)/p.w,h*Math.max(p.w,p.h)/p.h))*1.6;
   const c=document.getElementById('mcMadeCanvas');
   if(gift) gtRenderPage(c,mcMadePage,dim,false);
   else renderSide('front',c,dim,{page:mcMadePage});
@@ -25243,6 +25326,8 @@ function mcOpenMade(note,ok,mode){
     gift?'⬇ Save gift tag PDF':'⬇ Download front PDF';
   document.getElementById('mcMadeOpen').textContent=
     gift?'Open the gift tag builder':'Open the builder';
+  document.getElementById('mcMadeBig').textContent=
+    gift?'⤢ Open it on the gift tag screen':'⤢ Enlarge — 300% on the first card';
   const per=gift?gtSheet.slots.length:state.placeholders.length;
   const total=gift?gtQueue().length:designTotal();
   document.getElementById('mcMadeTally').textContent=
@@ -25251,10 +25336,27 @@ function mcOpenMade(note,ok,mode){
   document.getElementById('mcMadeTally').style.color=ok?'':'var(--rust)';
   mcRenderMade();
 }
-document.getElementById('mcMadeClose').addEventListener('click',()=>
-  document.getElementById('mcMadeSheet').classList.remove('open'));
+// The summary is still open behind this, and it was drawn before any of this
+// was added — so closing onto it showed Add against SKUs that are on the sheet.
+// It is drawn again on the way out.
+function mcMadeShut(){
+  document.getElementById('mcMadeSheet').classList.remove('open');
+  mcRenderSummary();
+}
+document.getElementById('mcMadeClose').addEventListener('click',mcMadeShut);
 document.getElementById('mcMadeSheet').addEventListener('click',e=>{
-  if(e.target.id==='mcMadeSheet') e.currentTarget.classList.remove('open');
+  if(e.target.id==='mcMadeSheet') mcMadeShut();
+});
+// The whole sheet at 300%, opened on the first card. The gift tag sheet has
+// its own screen with its own zoom, so that side is sent there instead.
+document.getElementById('mcMadeBig').addEventListener('click',()=>{
+  if(mcMadeMode==='gift'){
+    document.getElementById('mcMadeSheet').classList.remove('open');
+    if(mcBatch) mcFromBatch={summary:true};
+    showScreen('tool-gift-tag');
+    return;
+  }
+  openEnlarge('front',mcMadePage,true);
 });
 document.getElementById('mcMadePrev').addEventListener('click',()=>{mcMadePage--;mcRenderMade();});
 document.getElementById('mcMadeNext').addEventListener('click',()=>{mcMadePage++;mcRenderMade();});
@@ -26246,12 +26348,15 @@ function mcBubbleSync(){
   document.getElementById('mcBubbleN').textContent=
     it?(it.order_id||it.sku||''):'';
 }
-document.getElementById('mcWinMin').addEventListener('click',()=>{
+// Out of the way but still going: the line stays live in the bubble, which is
+// what the minimise button does and what Save to line does once it has saved.
+function mcWinToBubble(){
   if(!mcWinItem) return;
   mcWinMin=true;
   mcWinEl.classList.remove('open');
   mcBubbleSync();
-});
+}
+document.getElementById('mcWinMin').addEventListener('click',mcWinToBubble);
 plDraggable(document.getElementById('mcBubble'),()=>{
   if(!mcWinItem) return;
   mcWinMin=false;
@@ -26573,6 +26678,9 @@ function mcCustomWire(it){
     if(await mcSave(it,{design:it.design})){
       showMsg(msg,'✓ Saved to this line',true);
       mcRepaintRow(it);
+      // saved is finished with, and the next line is on the list behind this
+      // window — so it gets out of the way by itself, still going in the bubble
+      mcWinToBubble();
     }
   });
 }
@@ -26896,6 +27004,7 @@ function mcGiftWire(it){
     if(await mcSave(it,{sheet_item:it.sheet_item})){
       showMsg(msg,'✓ On the sheet',true);
       mcRepaintRow(it);
+      mcWinToBubble();          // the same as the print side: saved is done with
     }
   });
   document.getElementById('mcGtFullBtn').addEventListener('click',async()=>{
