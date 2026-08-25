@@ -1841,6 +1841,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* These three carry lists and a sheet, not a question with two answers, so
    they are given half again the width the ordinary pop-up is shaped for. */
 #mcSummarySheet > .sheet,#mcMadeSheet > .sheet{max-width:630px;}
+/* The look before the download is a look at a sheet, so it is given the width
+   a sheet needs rather than the width a question needs. */
+#mcPlanSheet > .sheet{max-width:900px;}
+.mc-plan-stage{min-height:44vh;}
+.mc-plan-stage canvas{max-width:100%;max-height:66vh;}
 .mc-sum-row{display:flex;align-items:center;gap:9px;padding:7px 0;
   border-bottom:1px solid var(--paper-line);}
 /* one routing rule: the text to look for, how to look for it, and where
@@ -4625,8 +4630,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <p class="hint" style="margin:0 0 4px;">Every file this batch would produce, in the
       order it is written. Tap one to see the sheet it makes before any of it is saved.</p>
     <div id="mcPlanList"></div>
-    <div class="mc-made-stage" id="mcPlanStage" style="display:none;">
+    <div class="mc-made-stage mc-plan-stage" id="mcPlanStage" style="display:none;">
       <canvas id="mcPlanCanvas"></canvas>
+    </div>
+    <div class="mc-made-pager" id="mcPlanPager" style="display:none;">
+      <button type="button" class="icon-btn" id="mcPlanPrev" aria-label="Previous sheet">‹</button>
+      <span id="mcPlanLbl">SHEET 1 OF 1</span>
+      <button type="button" class="icon-btn" id="mcPlanNext" aria-label="Next sheet">›</button>
     </div>
     <div id="mcPlanMsg"></div>
     <button class="btn-primary" id="mcPlanDownload">⬇ Download all</button>
@@ -24171,7 +24181,7 @@ const MC_TILES={
     wire:mcGiftWire,
     bundles:mcGiftBundles,
     make:e=>mcGiftBundle(e.set,e.meta&&e.meta.mode),
-    preview:(e,c,dim)=>mcGiftPreview(e.set,e.meta&&e.meta.mode,c,dim)
+    preview:(e,c,dim,page)=>mcGiftPreview(e.set,e.meta&&e.meta.mode,c,dim,page)
   },
   // The batch's own print sheet: one design off the designs folder to a line,
   // at that line's quantity, all of them on one template. It is what the SKU
@@ -24186,7 +24196,7 @@ const MC_TILES={
     wire:mcSheetPrintWire,
     bundles:mcPrintBundles,
     make:e=>mcPrintBundle(e.set,e.meta&&e.meta.template),
-    preview:(e,c,dim)=>mcPrintPreview(e.set,e.meta&&e.meta.template,c,dim)
+    preview:(e,c,dim,page)=>mcPrintPreview(e.set,e.meta&&e.meta.template,c,dim,page)
   }
 };
 const mcTile=it=>(it&&it.tile&&MC_TILES[it.tile])||null;
@@ -24632,7 +24642,8 @@ async function mcOpenPlan(){
   if(mcBusy) return;
   document.getElementById('mcPlanMsg').innerHTML='';
   document.getElementById('mcPlanStage').style.display='none';
-  mcPlanAt=-1;
+  mcPlanAt=-1; mcPlanPage=0; mcPlanPages=1;
+  document.getElementById('mcPlanPager').style.display='none';
   document.getElementById('mcPlanSheet').classList.add('open');
   document.getElementById('mcPlanList').innerHTML=
     '<p class="hint" style="margin:4px 0 0;">Working out what there is…</p>';
@@ -24661,17 +24672,26 @@ function mcRenderPlan(){
     `⬇ Download all ${mcPlan.length} file${mcPlan.length===1?'':'s'}`;
 }
 // Drawn through the same code the export uses, on the builder lent for the
-// length of the look and given straight back.
-async function mcShowPlanEntry(i){
-  const e=mcPlan[i]; if(!e) return;
+// length of the look and given straight back. The page count comes back from
+// the drawing rather than being worked out separately: what is being paged
+// through is the layout that was just built, not a second opinion about it.
+let mcPlanPage=0, mcPlanPages=1, mcPlanDrawing=false;
+async function mcShowPlanEntry(i,page){
+  const e=mcPlan[i]; if(!e||mcPlanDrawing) return;
   const msg=document.getElementById('mcPlanMsg');
   const stage=document.getElementById('mcPlanStage');
   const c=document.getElementById('mcPlanCanvas');
+  if(i!==mcPlanAt) mcPlanPage=0;
+  if(typeof page==='number') mcPlanPage=Math.max(0,page);
   mcPlanAt=i; mcRenderPlan();
   stage.style.display='';
   showMsg(msg,'Laying it out…',true);
-  const w=Math.max(120,(stage.clientWidth||320)-20);
-  const dim=Math.max(200,Math.min(w,Math.round(window.innerHeight*0.42)))*1.6;
+  // as big as the pop-up and the window allow: this is a proof, and a proof
+  // read at postage-stamp size proves nothing
+  const w=Math.max(240,(stage.clientWidth||640)-20);
+  const h=Math.round(window.innerHeight*0.62);
+  const dim=Math.max(360,Math.max(w,h));
+  mcPlanDrawing=true;
   try{
     await mcBorrowBuilder(async()=>{
       if(e.kind==='line'){
@@ -24679,16 +24699,32 @@ async function mcShowPlanEntry(i){
         state.orderId=e.it.order_id;
         await mcApplyArt(e.it);
         renderSide(e.side,c,dim,{page:0});
+        mcPlanPages=1; mcPlanPage=0;
       }else{
-        await MC_TILES[e.tile].preview(e,c,dim);
+        mcPlanPages=Math.max(1,await MC_TILES[e.tile].preview(e,c,dim,mcPlanPage)||1);
+        if(mcPlanPage>=mcPlanPages) mcPlanPage=mcPlanPages-1;
       }
     });
     msg.innerHTML='';
   }catch(err){
     stage.style.display='none';
+    mcPlanPages=1;
     showMsg(msg,'Could not draw that one: '+((err&&err.message)||'unknown error'),false);
-  }
+  }finally{ mcPlanDrawing=false; mcPlanPager(); }
 }
+function mcPlanPager(){
+  const bar=document.getElementById('mcPlanPager');
+  const on=mcPlanAt>=0&&mcPlanPages>1
+    &&document.getElementById('mcPlanStage').style.display!=='none';
+  bar.style.display=on?'':'none';
+  document.getElementById('mcPlanLbl').textContent=`SHEET ${mcPlanPage+1} OF ${mcPlanPages}`;
+  document.getElementById('mcPlanPrev').disabled=mcPlanPage<=0||mcPlanDrawing;
+  document.getElementById('mcPlanNext').disabled=mcPlanPage>=mcPlanPages-1||mcPlanDrawing;
+}
+document.getElementById('mcPlanPrev').addEventListener('click',()=>
+  mcShowPlanEntry(mcPlanAt,mcPlanPage-1));
+document.getElementById('mcPlanNext').addEventListener('click',()=>
+  mcShowPlanEntry(mcPlanAt,mcPlanPage+1));
 document.getElementById('mcPlanList').addEventListener('click',e=>{
   const b=e.target.closest('[data-mc-plan]'); if(!b) return;
   mcShowPlanEntry(Number(b.dataset.mcPlan));
@@ -27062,9 +27098,13 @@ async function mcPrintBundle(lines,template){
   if(!pages) throw new Error('nothing landed on the print sheet');
   return await renderSidePdfAll('front',pages);
 }
-async function mcPrintPreview(lines,template,canvas,dim){
-  await mcPrintLay(lines,template);
-  renderSide('front',canvas,dim,{page:0});
+// hands back how many sheets there are, so the pager is counting the layout
+// that was just built
+async function mcPrintPreview(lines,template,canvas,dim,page){
+  const {pages}=await mcPrintLay(lines,template);
+  const at=Math.max(0,Math.min(pages-1,Number(page)||0));
+  renderSide('front',canvas,dim,{page:at});
+  return pages;
 }
 // and the same two for the gift tag side, so the plan can ask every tile the
 // same questions
@@ -27082,14 +27122,23 @@ function mcGiftBundles(lines){
     return {name:`Gift Tag_${page}_${finish}_${mcBatchDate()}.pdf`,set,meta:{mode,finish}};
   });
 }
-async function mcGiftPreview(lines,mode,canvas,dim){
+async function mcGiftPreview(lines,mode,canvas,dim,page){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
-  const keep=gtOrder;
+  const keep=gtOrder, keepPage=gtPage;
   gtOrder=lines.map(it=>({id:'mc-'+it.id,designId:it.sheet_item.designId,
     qty:it.sheet_item.qty||it.qty||1,vals:it.sheet_item.vals||{}}));
-  try{ gtRenderPage(canvas,0,dim,false); }
-  finally{ gtOrder=keep; }
+  try{
+    const pages=Math.max(1,gtPageCount());
+    const at=Math.max(0,Math.min(pages-1,Number(page)||0));
+    // a sheet of another shape is another sheet: the page has to be turned to
+    // properly, the way the tool turns it, or the tags land on the wrong cuts
+    gtPage=at;
+    if(typeof gtGoPage==='function') await gtGoPage(at);
+    gtRenderPage(canvas,at,dim,false);
+    return pages;
+  }
+  finally{ gtOrder=keep; gtPage=keepPage; }
 }
 async function mcGiftBundle(lines,mode){
   if(typeof gtBuildPdf!=='function') throw new Error('the gift tag tool has not loaded');
