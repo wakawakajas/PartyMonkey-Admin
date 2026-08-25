@@ -16876,10 +16876,59 @@ async function gtPiguFieldsSave(){
   });
   if(changed) await gtIdbPut('piguFields',Object.assign({},map));
 }
+// True once the library on disk has actually been read — or once it is known
+// there is none to read. A read that fails (the NAS asleep, permission not
+// given back after a reload) leaves the library empty, and a save on top of
+// that writes an empty manifest over a good file: every design's words and
+// every saved phrase, gone in one write. So nothing is saved until this says
+// what is in hand is the library and not the wreck of a failed load.
+let gtLibLoaded=false;
+// A copy of library.json before it is written over, at most one an hour, and
+// the last two dozen kept. Cheap against what it is insuring.
+let gtLibBackupAt=0;
+const GT_BACKUPS_KEPT=24;
+async function gtBackupLib(){
+  if(!gtDir) return;
+  if(gtLibBackupAt&&Date.now()-gtLibBackupAt<36e5) return;
+  let old=null;
+  try{ old=await gtDirRead(gtDir,'library.json'); }catch(e){ gtLibBackupAt=Date.now(); return; }
+  if(!old||!old.size){ gtLibBackupAt=Date.now(); return; }
+  const d=new Date(), z=n=>String(n).padStart(2,'0');
+  const stamp=`${d.getFullYear()}${z(d.getMonth()+1)}${z(d.getDate())}`
+    +`-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
+  try{
+    await gtDirWrite(gtDir,`library.backup-${stamp}.json`,old);
+    gtLibBackupAt=Date.now();
+  }catch(e){ return; }
+  // the oldest go, newest kept — a folder is not a filing cabinet
+  try{
+    const names=[];
+    for await (const e of gtDir.values())
+      if(e.kind==='file'&&/^library\.backup-\d{8}-\d{6}\.json$/.test(e.name)) names.push(e.name);
+    names.sort();
+    // the newest are the useful ones, but the very first is never thrown away:
+    // the copy that saves a library is usually the one from before the trouble
+    // started, which by then is the oldest thing in the folder
+    for(const n of names.slice(1,Math.max(1,names.length-GT_BACKUPS_KEPT)))
+      await gtDir.removeEntry(n).catch(()=>{});
+  }catch(e){}
+}
+let gtSaveWarned=false;
 async function gtSaveLib(){
+  // see gtLibLoaded — never save over a library that could not be read
+  if(!gtLibLoaded){
+    if(!gtSaveWarned){
+      gtSaveWarned=true;
+      const m=document.getElementById('gtLibMsg');
+      if(m) showMsg(m,'Not saving: the library folder could not be read, and writing now '
+        +'would put an empty library over it. Reconnect the folder under Choose folder.',false);
+    }
+    return;
+  }
   try{ await gtPiguFieldsSave(); }catch(e){}
   const man=gtManifest();
   if(gtDir&&await gtDirOk(gtDir)){
+    await gtBackupLib();
     for(const [file,blob] of gtAssets){
       if(gtIsAdhoc(file)) continue;              // a one-off is nobody's file but this session's
       // already on disk is the normal case — only what is new gets written
@@ -16909,8 +16958,18 @@ async function gtLoadLib(){
   gtSheet.layoutFile=''; gtSheet.baseFile=''; gtSheet.slots=[];
   gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   let man=null;
+  gtLibLoaded=false; gtSaveWarned=false;
   if(gtDir&&await gtDirOk(gtDir)){
-    try{ man=JSON.parse(await (await gtDirRead(gtDir,'library.json')).text()); }catch(e){ man=null; }
+    // A folder with no library.json yet is a new library and saving into it is
+    // right. A folder that has one and would not give it up is the dangerous
+    // case, and the difference between the two is the error it throws.
+    try{
+      man=JSON.parse(await (await gtDirRead(gtDir,'library.json')).text());
+      gtLibLoaded=true;
+    }catch(e){
+      man=null;
+      gtLibLoaded=(e&&e.name==='NotFoundError');
+    }
     if(man){
       const files=[...(man.designs||[]),...(man.fonts||[])].map(x=>x.file);
       if(man.sheet){ files.push(man.sheet.layoutFile,man.sheet.baseFile); }
@@ -16922,6 +16981,9 @@ async function gtLoadLib(){
   }else{
     const rec=await gtIdbGet('lib').catch(()=>null);
     if(rec){ man=rec.manifest; Object.entries(rec.assets||{}).forEach(([k,v])=>gtAssets.set(k,v)); }
+    // the browser's own copy: there either is one or there never was, and
+    // neither is a failed read of somebody's folder
+    gtLibLoaded=true;
   }
   if(!man) return;
   gtLib.designs=(man.designs||[]).map(gtNormalizeDesign);
@@ -19376,6 +19438,9 @@ document.getElementById('gtImportLibBtn').addEventListener('click',async()=>{
     take(data.fonts,gtLib.fonts);
     take(data.designs,gtLib.designs,gtNormalizeDesign);
     take(data.texts,gtLib.texts);
+    // whatever the folder did or did not give up, what is in hand now came out
+    // of a file the user chose — it is safe to write
+    gtLibLoaded=true; gtSaveWarned=false;
     // the sheet comes over only when there is none here to overwrite
     const sh=data.sheet;
     if(sh&&!gtSheet.layoutFile&&sh.layoutFile&&data.assets&&data.assets[sh.layoutFile]){
