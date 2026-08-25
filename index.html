@@ -4516,8 +4516,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <p class="hint" style="margin:0 0 4px;">Add puts a SKU on a sheet at the quantity
       shown and finds its own way there: <strong>&lt;SKU&gt;.png</strong> in the designs
       folder is a print job, on the template that folder belongs to; a design called
-      <strong>&lt;SKU&gt;</strong> in the gift tag library is a gift tag. The sheet opens
-      when they are on it.</p>
+      <strong>&lt;SKU&gt;</strong> on either gift tag page — Festive or Custom — is a gift
+      tag, and goes on that page's own sheet. The sheet opens when they are on it.</p>
     <input type="text" id="mcSummarySearch" class="pl-find" placeholder="🔍 Find a SKU"
            autocomplete="off" aria-label="Find a SKU in this summary"/>
     <div class="chips" style="margin:8px 0 4px;align-items:center;">
@@ -17003,6 +17003,12 @@ async function gtLoadLib(){
   // the sheet's own files come from the manifest as well, so they go with it
   gtLayout=null; gtBaseImg=null; gtLayoutFrom=''; gtBaseFrom='';
   gtLibFolderName='';                 // belongs to the library being left
+  // and so do these two. gtDefaultShape is the path lines go on when their
+  // design names no shape, and gtShapeSlots holds each shape's placeholders;
+  // both kept the shape of the library that was closed. A line then planned
+  // onto a cutting file this library has never heard of, whose placeholders
+  // are nobody's — no placeholders, so nothing was laid into them.
+  gtDefaultShape=null; gtShapeSlots.clear();
   gtSheet.layoutFile=''; gtSheet.baseFile=''; gtSheet.slots=[];
   gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   let man=null;
@@ -24690,8 +24696,10 @@ function mcOpenMade(note,ok,mode){
   document.getElementById('mcMadeSheet').classList.add('open');
   const gift=mcMadeMode==='gift';
   const n=mcMadePages();
+  // which of the two gift tag pages this sheet is, since the pop-up draws the
+  // one the tool is holding and the note may mention both
   document.querySelector('#mcMadeSheet .sheet-title').textContent=
-    gift?'Gift tag sheet':'Print sheet';
+    gift?`${mcGtPage(gtMode).name} gift tag sheet`:'Print sheet';
   document.getElementById('mcMadeDownload').textContent=
     gift?'⬇ Save gift tag PDF':'⬇ Download front PDF';
   document.getElementById('mcMadeOpen').textContent=
@@ -24735,11 +24743,11 @@ document.getElementById('mcMadeOpen').addEventListener('click',()=>{
 // once and then applied to everything in that press of the button.
 // Which tool a SKU goes on is a matter of where its artwork is, not a question
 // worth asking: <SKU>.png in the designs folder is a print job, a design of
-// that name in the gift tag library is a gift tag. A SKU with both is a print
+// that name on either gift tag page is a gift tag. A SKU with both is a print
 // job — that is the folder with the templates on it.
 function mcToolFor(sku){
   if(designFileForSku(sku)) return 'print';
-  if(typeof gtDesignForName==='function'&&gtDesignForName(sku)) return 'gift';
+  if(mcGiftHit(sku)) return 'gift';
   return '';
 }
 // Sends each SKU to the tool its artwork says, and does not come back to ask.
@@ -24748,18 +24756,18 @@ function mcToolFor(sku){
 async function mcRouteRows(rows){
   if(!rows||!rows.length) return;
   const out=document.getElementById('mcSummaryMsg');
-  // a SKU with no PNG may still be a tag, and the tag library is only
-  // searchable once it has been loaded
-  if(rows.some(r=>!designFileForSku(r.sku))&&typeof gtOpen==='function'&&!gtLoaded){
-    showMsg(out,'Looking in the gift tag library…',true);
-    await gtOpen();
+  // a SKU with no PNG may still be a tag, and both pages' libraries are read
+  // before anything is sorted — the page that is open is not the whole answer
+  if(rows.some(r=>!designFileForSku(r.sku))){
+    showMsg(out,'Looking in the gift tag libraries…',true);
+    await mcGtIndex();
   }
   const print=rows.filter(r=>mcToolFor(r.sku)==='print');
   const gift=rows.filter(r=>mcToolFor(r.sku)==='gift');
   const none=rows.filter(r=>!mcToolFor(r.sku)).map(r=>r.sku);
   if(!print.length&&!gift.length){
     showMsg(out,none.length===1
-      ? `Nothing called “${escapeHtml(none[0])}” in the designs folder or the gift tag library.`
+      ? `Nothing called “${escapeHtml(none[0])}” in the designs folder or either gift tag library.`
       : `None of these ${none.length} SKUs has artwork of the same name.`,false);
     return;
   }
@@ -24768,54 +24776,84 @@ async function mcRouteRows(rows){
     : '';
   if(!print.length){ await mcAddSkusToGiftTag(gift,{extra:nonePart}); return; }
   const g=gift.length?await mcAddSkusToGiftTag(gift,{quiet:true}):null;
-  const gPart=g?`${g.added+g.updated} on the gift tag sheet`:'';
+  // named by page, because "on the gift tag sheet" is two sheets now
+  const gPart=g?(g.per&&g.per.length?g.per.join(' · ')
+    :`${g.added+g.updated} on the gift tag sheet`):'';
   await mcAddSkusToSheet(print,[gPart,nonePart].filter(Boolean).join(' · '));
 }
-// Onto the gift tag order, matched by name the way the print sheet matches a
+// Onto the gift tag orders, matched by name the way the print sheet matches a
 // PNG. The line is the tool's own shape, so everything downstream reads it
-// exactly as one added on that screen.
+// exactly as one added on that screen. A batch that is half Festive and half
+// Custom is two orders, and each SKU goes on the page its design is on — the
+// operator is never asked which, because the library already answered.
 async function mcAddSkusToGiftTag(rows,opts){
   const o=opts||{};
   const out=document.getElementById('mcSummaryMsg');
-  showMsg(out,'Looking in the gift tag library…',true);
+  showMsg(out,'Looking in the gift tag libraries…',true);
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
-  const found=[], missing=[];
+  await mcGtIndex();
+  const missing=[], byPage=new Map();
   rows.forEach(r=>{
-    const d=gtDesignForName(r.sku);
-    if(d) found.push({row:r,design:d}); else missing.push(r.sku);
+    const hit=mcGiftHit(r.sku);
+    if(!hit){ missing.push(r.sku); return; }
+    const list=byPage.get(hit.mode)||[];
+    list.push({row:r,design:hit.design});
+    byPage.set(hit.mode,list);
   });
-  if(!found.length){
+  if(!byPage.size){
     showMsg(out,missing.length===1
-      ? `No design called “${escapeHtml(missing[0])}” in the gift tag library.`
+      ? `No design called “${escapeHtml(missing[0])}” on either gift tag page.`
       : `None of these ${missing.length} SKUs has a design of the same name.`,false);
-    return {added:0,updated:0,missing};
+    return {added:0,updated:0,missing,per:[]};
   }
-  let added=0,updated=0;
-  found.forEach(({row,design})=>{
-    const qty=Math.max(1,Math.round(Number(row.qty)||1));
-    // already on the order: set it to the batch's figure rather than doubling,
-    // the same rule the print sheet follows
-    const had=gtOrder.find(l=>(l.sku&&l.sku===row.sku)||l.designId===design.id);
-    if(had){ had.qty=qty; had.sku=row.sku; updated++; }
-    else { gtOrder.push({id:gtId('l'),designId:design.id,qty,vals:{},sku:row.sku}); added++; }
-  });
+  // The page already on screen is done last, so a run that touches only the
+  // other one ends there — on the sheet it just built — and a run that touches
+  // both leaves the tool where it started.
+  const modes=[...byPage.keys()].sort((a,b)=>(a===gtMode?1:0)-(b===gtMode?1:0));
+  let added=0,updated=0; const per=[];
+  for(const m of modes){
+    // switching loads that page's library and swaps in its own order; the
+    // order left behind is kept, not merged
+    if(m!==gtMode) await gtSetMode(m);
+    let a=0,u=0;
+    byPage.get(m).forEach(({row,design})=>{
+      const qty=Math.max(1,Math.round(Number(row.qty)||1));
+      // the library is in hand now, so the design is taken from it — the id
+      // read off disk is only the index's shorthand for the same entry
+      const d=(typeof gtDesignForName==='function'&&gtDesignForName(row.sku))||design;
+      // already on the order: set it to the batch's figure rather than doubling,
+      // the same rule the print sheet follows
+      const had=gtOrder.find(l=>(l.sku&&l.sku===row.sku)||l.designId===d.id);
+      if(had){ had.qty=qty; had.sku=row.sku; u++; }
+      else { gtOrder.push({id:gtId('l'),designId:d.id,qty,vals:{},sku:row.sku}); a++; }
+    });
+    added+=a; updated+=u;
+    per.push(`${a+u} on ${mcGtPage(m).name}`);
+  }
   gtRenderOrder(); gtDraw();
+  await mcGtIndex();          // the page on screen may have changed under it
   // called alongside a print sheet, the tags are a line in that sheet's note
   // rather than a pop-up of their own opening over it
-  if(o.quiet) return {added,updated,missing};
-  const note=[`${added} added`,updated?`${updated} updated`:'',
+  if(o.quiet) return {added,updated,missing,per};
+  const note=[per.join(' · '),added?`${added} added`:'',updated?`${updated} updated`:'',
     missing.length?`${missing.length} with no design of that name: ${missing.slice(0,3).join(', ')}`
       +(missing.length>3?'…':''):'',o.extra||''].filter(Boolean).join(' · ');
   // the sheet it made, in the pop-up — the same as the print side, rather than
   // being dropped into the builder with no sight of what was done
   mcOpenMade(note,!missing.length&&!o.extra,'gift');
-  return {added,updated,missing};
+  return {added,updated,missing,per};
 }
 function mcSummaryFolderState(){
   const el=document.getElementById('mcSummaryFolderLbl'); if(!el) return;
-  el.textContent=loadDesignFiles.length
+  // what is searchable, all three libraries of it — the designs folder and
+  // both gift tag pages, so an empty one is read as empty rather than as a
+  // batch with no artwork
+  const tags=GT_PAGES.map(p=>({p,n:(mcGtNames[p.mode]||[]).length}))
+    .filter(x=>x.n).map(x=>`${x.n} ${x.p.name}`).join(' · ');
+  el.textContent=[loadDesignFiles.length
     ? `${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'} in the folder`
-    : 'No designs folder chosen — set one under Load design.';
+    : 'No designs folder chosen — set one under Load design.',
+    tags?`gift tags: ${tags}`:''].filter(Boolean).join(' · ');
 }
 async function mcOpenSummary(){
   document.getElementById('mcSummarySearch').value='';   // a fresh look, not the last search
@@ -24827,6 +24865,10 @@ async function mcOpenSummary(){
     const dir=await loadDesignDirGet();
     if(dir&&await loadDesignDirOk(dir,false)){ await loadDesignRescan(); mcRenderSummary(); }
   }
+  // and so are both gift tag libraries — a tag SKU should say Add on the way
+  // in, not only once something has been to the page it lives on
+  await mcGtIndex().catch(()=>{});
+  mcRenderSummary();
   mcSummaryFolderState();
 }
 document.getElementById('mcSummaryBtn').addEventListener('click',mcOpenSummary);
