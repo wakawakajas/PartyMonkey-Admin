@@ -1845,6 +1845,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
    a sheet needs rather than the width a question needs. */
 #mcPlanSheet > .sheet{max-width:900px;}
 .mc-plan-stage{min-height:44vh;}
+/* the line's own sheet inside its window, as big as the window allows */
+.mc-line-stage{display:flex;align-items:center;justify-content:center;margin:10px 0 0;
+  padding:8px;border:1px solid var(--border);border-radius:12px;background:var(--nest);}
+.mc-line-stage canvas{max-width:100%;max-height:52vh;border-radius:4px;}
 .mc-plan-stage canvas{max-width:100%;max-height:66vh;}
 .mc-sum-row{display:flex;align-items:center;gap:9px;padding:7px 0;
   border-bottom:1px solid var(--paper-line);}
@@ -24472,6 +24476,12 @@ async function mcOpenBatch(){
   // the shop's routing is read once a batch is open, so the summary and the
   // Routing sheet are both answering out of the same list
   mcRoutesLoad().catch(()=>{});
+  // and the two lists a line's own window offers. Both belong to other screens
+  // — Template library and Print paper — and a batch worked without ever
+  // visiting them showed a template picker with nothing in it and paper and
+  // GSM stuck on "—", with no way to pick either.
+  if(!(templateRows||[]).length) refreshTemplateList().catch(()=>{});
+  if(typeof ppLoad==='function') ppLoad().catch(()=>{});
   mcWatch();
 }
 async function mcLoadItems(){
@@ -26195,6 +26205,10 @@ async function mcWinOpen(id){
   mcWinPlace();
   mcWinRender();
   mcBubbleSync();
+  // Routing already says where this SKU goes, so being asked again on every
+  // line is the same answer given two hundred times. A line that has not been
+  // told what it is takes the answer the shop already wrote down.
+  if(!it.tile) mcAutoTile(it).then(()=>{ if(mcWinItem===id) mcWinRender(); });
 }
 function mcWinClose(){
   // checked on mcWinItem rather than the 'open' class, so a window closed
@@ -26366,6 +26380,27 @@ function mcWinRender(){
   });
   if(t) t.wire(it);
 }
+// What the shop's routing says this line is, applied without asking. The rule
+// is read against the same two names the summary reads it against, so a line
+// opened here and the same SKU added from the summary cannot disagree.
+async function mcAutoTile(it){
+  if(!it||it.tile) return '';
+  if(!mcBatch||mcBatch.status!=='open') return '';
+  await mcRoutesLoad().catch(()=>{});
+  const dest=mcRouteFor({sku:it.sku,name:it.design_name||it.product||''});
+  if(!dest||dest==='skip') return '';
+  if(dest==='print'){
+    // the line's own card, on the line's own sheet: Custom Template is what a
+    // per-order print job is, and the template comes with it
+    it.tile='custom';
+    await mcSave(it,{tile:'custom'});
+    return 'custom';
+  }
+  const si={...(it.sheet_item||{}),page:dest};
+  it.tile='giftTag'; it.sheet_item=si;
+  await mcSave(it,{tile:'giftTag',sheet_item:si});
+  return 'giftTag';
+}
 // Whatever the open line has been given, written back to its row.
 async function mcCommit(){
   const it=mcItem(mcWinItem); if(!it) return;
@@ -26404,6 +26439,11 @@ function mcCustomBody(it){
     </div>
     <p class="hint" style="margin:6px 0 0;">Choosing one loads it into the builder for
       this line. ${it.design?'This line already has a layout of its own.':''}</p>
+    <!-- the sheet as it stands, here rather than a trip to the full builder:
+         paper and GSM are chosen by looking at the card, not at a form -->
+    <div class="mc-line-stage" id="mcLineStage" style="display:none;">
+      <canvas id="mcLineCanvas"></canvas>
+    </div>
 
     <div class="sect-label" style="margin-top:16px;">Artwork</div>
     <div class="grid2">
@@ -26451,10 +26491,35 @@ async function mcAutoLayoutFor(it,sel){
     mcWinLive=true;
   }
   if(msg) showMsg(msg,[tpl?`Layout: ${tpl.name}`:'',pick?`Artwork: ${pick.name}`:'']
-    .filter(Boolean).join(' · ')+' — matched by name.',true);
+    .filter(Boolean).join(' · ')+(mcRouteTemplate({sku:sku||names[0]||''})
+      ?' — from Routing.':' — matched by name.'),true);
+  if(typeof mcLinePreview==='function') mcLinePreview();
+}
+// The line's sheet, drawn in its own window. Paper and GSM are chosen by
+// looking at the card, and a trip to the full builder to see it is a trip
+// taken on every line of the batch.
+function mcLinePreview(){
+  const stage=document.getElementById('mcLineStage'); if(!stage) return;
+  const c=document.getElementById('mcLineCanvas'); if(!c) return;
+  if(!mcWinLive||!(state.placeholders||[]).length){ stage.style.display='none'; return; }
+  stage.style.display='';
+  const w=Math.max(220,(stage.clientWidth||320)-18);
+  const h=Math.round(window.innerHeight*0.5);
+  try{ renderSide('front',c,Math.max(360,Math.max(w,h)),{page:0}); }
+  catch(e){ stage.style.display='none'; }
 }
 function mcCustomWire(it){
   mcWinLive=false;
+  // The two lists this body is made of live on other screens. Where a batch is
+  // worked without ever visiting them the selects come up empty — paper and
+  // GSM stuck on "—" with nothing to pick — so they are fetched here and the
+  // body is drawn again once they are in.
+  if(!(templateRows||[]).length||!(typeof ppRows!=='undefined'&&ppRows.length)){
+    const want=it.id;
+    Promise.all([(templateRows||[]).length?null:refreshTemplateList().catch(()=>{}),
+      (typeof ppLoad==='function'&&!(ppRows||[]).length)?ppLoad().catch(()=>{}):null])
+      .then(()=>{ if(mcWinItem===want) mcWinRender(); });
+  }
   // both are in the file name, so both are saved the moment they are chosen
   // rather than waiting for Save to be pressed and be forgotten
   [['mcPaperSel','paper_type'],['mcGsmSel','gsm']].forEach(([id,key])=>{
@@ -26477,6 +26542,7 @@ function mcCustomWire(it){
     ppFillSelects();
     mcWinLive=true;
     await mcApplyArt(it);
+    mcLinePreview();
   });
   // a line that already has a layout puts it back the moment it is opened
   if(it.design){
@@ -26485,7 +26551,7 @@ function mcCustomWire(it){
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
     ppFillSelects();
     mcWinLive=true;
-    mcApplyArt(it);
+    mcApplyArt(it).then(mcLinePreview);
   }else{
     // Nothing saved on it yet, and the line's own name already says what it
     // wants: the template named after this SKU's designs folder, and the
@@ -26539,6 +26605,7 @@ async function mcPickArt(it,side){
       const th=document.getElementById('mcThumb-'+side);
       if(th) th.innerHTML='<span class="ico">✓</span>';
       mcRepaintRow(it);
+      if(typeof mcLinePreview==='function') mcLinePreview();
       if(msg) showMsg(msg,'✓ Artwork saved to this line',true);
     }catch(err){
       if(info) info.textContent='No file';
