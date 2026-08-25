@@ -1832,8 +1832,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .mc-route-row .d{flex:0 0 168px;}
 .mc-route-row .sku{flex:1;min-width:0;font-family:'Space Grotesk',sans-serif;
   font-weight:700;font-size:12.5px;overflow-wrap:anywhere;}
-/* why the rule is there, on its own line under it */
+/* why the rule is there, on its own line under it — and, for a rule that
+   sends work to the print sheet, which template it goes on */
 .mc-route-row .note{flex:1 1 100%;}
+.mc-route-row .t{flex:1 1 100%;}
+.mc-route-row .t select{font-size:12px;}
 .mc-route-row .note input{font-size:12px;color:var(--muted);}
 .sheet .mc-route-row button{width:auto;height:32px;min-height:32px;padding:0 10px;
   font-size:12px;flex:0 0 auto;}
@@ -4626,6 +4629,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       with everybody working them.</p>
     <p class="hint" id="mcDestWhy" style="margin:0 0 10px;"></p>
     <div id="mcDestOpts"></div>
+    <div id="mcDestTpl"></div>
     <div id="mcDestMsg"></div>
     <button class="btn-outline" id="mcDestClear">Leave it to work itself out</button>
   </div>
@@ -24782,6 +24786,10 @@ function mcTemplateFor(rows){
     return (templateRows||[]).find(t=>(Array.isArray(t.folders)?t.folders:[])
       .some(f=>String(f||'').trim().toLowerCase()===want))||null;
   };
+  // what the shop said under Routing comes first: it is the only one of these
+  // that is somebody's decision rather than a reading of a folder name
+  const said=mcRouteTemplate(rows0);
+  if(said) return said;
   const pick=designFileForSku(rows0.sku);
   const folder=pick&&pick.folder;
   return named(folder)||covers(folder)||named(rows0.sku)||covers(rows0.sku)||null;
@@ -24839,6 +24847,26 @@ async function mcAddSkusToSheet(rows,extra){
   // loading a template replaces the design list, so it has to come first.
   const tpl=mcTemplateFor(usable);
   let tplName='';
+  // Nothing says which template these go on. Whatever was open used to be
+  // used, which is how a batch came out on the wrong card size — so it is
+  // asked, by name, and the way to stop being asked is said with it.
+  if(!tpl){
+    const open=mcTemplateById(selectedTemplate);
+    if(!open){
+      showMsg(out,'No template says it covers these, and none is open. Set the template '
+        +'for them under Routing — the ⚙ on the Magic Create page.',false);
+      return;
+    }
+    if(!confirm(`Nothing says which template ${usable.length===1
+      ?'this design prints':`these ${usable.length} designs print`} on.\n\n`
+      +`OK — use the one open now: ${open.name}.\n`
+      +'Cancel — stop, and name the template under Routing (the ⚙ on Magic Create).')){
+      showMsg(out,'Stopped — nothing was put on the sheet.',false);
+      return;
+    }
+    tplName=`${open.name} (the one that was open)`;
+  }
+  if(tpl) tplName=tpl.name;
   if(tpl&&String(selectedTemplate||'')!==String(tpl.id)){
     await loadTemplate(tpl.id);
     setSelectedTemplate(tpl.id);
@@ -24994,6 +25022,22 @@ function mcRouteFor(row){
 // a route that names one of the two gift tag pages also settles which page,
 // so a design of that name on the other one is not what gets added
 const mcForcedPage=r=>{ const d=mcRouteFor(r); return (d==='festive'||d==='custom')?d:''; };
+// the route that answers for this SKU, whichever kind it is: the named SKU
+// first, then the rule that catches it
+const mcRouteRowFor=row=>{
+  const r=(row&&typeof row==='object')?row:{sku:row};
+  return mcSkuRow(r.sku)||mcRuleMatching(r);
+};
+const mcTemplateById=id=>(templateRows||[]).find(t=>String(t.id)===String(id||''))||null;
+// The print side has one more question than the tag side: which saved template
+// the job is printed on. Worked out from the designs folder's name before, and
+// where nothing matched, whatever template happened to be open was used — the
+// wrong card size and the wrong cuts. A route can name it outright. Held as an
+// id, because two people may each have an "A6 postcard".
+const mcRouteTemplate=row=>{
+  const rt=mcRouteRowFor(row);
+  return rt&&rt.template?mcTemplateById(rt.template):null;
+};
 
 // ---------- the routing sheet ----------
 const mcOptsHtml=(list,val)=>list.map(o=>
@@ -25014,6 +25058,13 @@ function mcRenderRoutes(){
   const note=r=>`<label class="field note"><input type="text" data-mc-r="remarks"
          value="${escapeHtml(r.remarks||'')}" placeholder="remarks — why this is here"
          aria-label="Remarks"/></label>`;
+  // and the print sheet has a second question the tag pages do not: which
+  // saved template. Only asked of the rows that send anything there.
+  const tplPick=r=>r.dest!=='print'?'':`<label class="field t"><select data-mc-r="template"
+         aria-label="Which template"><option value="">— work it out —</option>${
+         (templateRows||[]).map(t=>`<option value="${escapeHtml(String(t.id))}"${
+           String(t.id)===String(r.template||'')?' selected':''
+         }>${escapeHtml(t.name||'')}</option>`).join('')}</select></label>`;
   const all=mcRuleRows();
   const rows=mcRoutesShown(all);
   // ↑ and ↓ move a rule against the whole list, not against what the search
@@ -25035,7 +25086,7 @@ function mcRenderRoutes(){
       <button type="button" class="icon-btn" data-mc-r-move="down"
               aria-label="Move down"${i===all.length-1?' disabled':''}>↓</button>
       <button type="button" class="btn-danger" data-mc-r-del aria-label="Delete rule">×</button>
-      ${note(r)}
+      ${tplPick(r)}${note(r)}
     </div>`;}).join('')
     :none(all.length?'nothing here matches that':'no rules yet — everything goes by its tile');
   const owned=mcSkuRows(), own=mcRoutesShown(owned);
@@ -25051,7 +25102,7 @@ function mcRenderRoutes(){
              aria-label="Where ${escapeHtml(r.match||'')} goes">${
              mcOptsHtml(MC_DESTS,r.dest)}</select></label>
       <button type="button" class="btn-danger" data-mc-r-del aria-label="Delete override">×</button>
-      ${note(r)}
+      ${tplPick(r)}${note(r)}
     </div>`).join(''):none(owned.length?'nothing here matches that':'none set');
   const el=document.getElementById('mcRouteCount');
   const q=mcRouteQuery();
@@ -25082,6 +25133,9 @@ async function mcRouteWrite(id,patch){
   const {error}=await sb.from('magic_routes').update(patch).eq('id',id);
   if(error) showMsg(out,'Could not save that — '+error.message,false);
   else showMsg(out,'Saved.',true);
+  // where it is sent decides whether it is asked which template, so that row
+  // is drawn again rather than left saying the wrong thing
+  if('dest' in patch) mcRenderRoutes();
   mcRenderSummary();
 }
 async function mcRouteInsert(fields){
@@ -25144,6 +25198,9 @@ async function mcOpenRoutes(){
   document.getElementById('mcRouteMsg').innerHTML='';
   document.getElementById('mcRouteSearch').value='';   // a fresh look, not the last search
   document.getElementById('mcRouteSheet').classList.add('open');
+  // the saved templates are what a print rule chooses from, and this screen
+  // can be reached without the print tool ever having been opened
+  if(!(templateRows||[]).length) await refreshTemplateList().catch(()=>{});
   await mcRoutesLoad(true);
   mcRenderRoutes();
 }
@@ -25166,7 +25223,16 @@ const MC_ROUTE_FILE='pigu-magic-routing';
 // The spreadsheet's own columns, in the words the sheet uses on screen — the
 // file is meant to be worked in Excel by somebody who has only ever seen this
 // pop-up, so "Where" says Custom gift tag rather than 'custom'.
-const MC_ROUTE_COLS=['Kind','Match','How','Where','Remarks','Order'];
+const MC_ROUTE_COLS=['Kind','Match','How','Where','Template','Remarks','Order'];
+// The template travels by name, which is what somebody working the sheet in
+// Excel can read and type; it is matched back by that name on the way in. Two
+// templates of one name is the case the app itself picks between, so an
+// import takes the first and the row can be set here afterwards.
+const mcTemplateByName=n=>{
+  const want=String(n||'').trim().toLowerCase();
+  if(!want) return null;
+  return (templateRows||[]).find(t=>String(t.name||'').trim().toLowerCase()===want)||null;
+};
 const mcHowLabel=v=>(MC_HOWS.find(h=>h.v===v)||MC_HOWS[0]).label;
 // Read back tolerantly: a column typed over by hand comes back as "Custom",
 // "custom gift tag", "CUSTOM " or the raw value, and all four mean the page.
@@ -25196,9 +25262,15 @@ const mcRouteFromCells=(c,i)=>{
   const match=String(c.match==null?'':c.match).trim().slice(0,200);
   if(!match) return null;
   const kind=mcCellKind(c.kind);
+  // the template comes in as a name and is kept as an id; an id typed in
+  // outright is taken as one too, and anything unrecognised is left unset
+  // rather than guessed at
+  const tpl=c.template
+    ?(mcTemplateById(c.template)||mcTemplateByName(c.template)):null;
   // a named SKU is matched whole and only whole, whatever the How column of a
   // hand-worked sheet ended up saying
   return {kind,match,how:kind==='sku'?'exact':mcCellHow(c.how),dest,
+    template:dest==='print'&&tpl?String(tpl.id):'',
     sort_order:Number.isFinite(Number(c.sort_order))?Number(c.sort_order):i,
     remarks:String(c.remarks==null?'':c.remarks).slice(0,500)};
 };
@@ -25207,12 +25279,14 @@ document.getElementById('mcRouteExport').addEventListener('click',async()=>{
   try{
     if(typeof XLSX==='undefined') throw new Error('spreadsheet library did not load');
     await mcRoutesLoad(true);
+    if(!(templateRows||[]).length) await refreshTemplateList().catch(()=>{});
     const rows=mcRoutes.map(r=>({Kind:r.kind==='sku'?'SKU':'Rule',Match:r.match||'',
-      How:mcHowLabel(r.how),Where:mcDestLabel(r.dest),Remarks:r.remarks||'',
-      Order:Number(r.sort_order)||0}));
+      How:mcHowLabel(r.how),Where:mcDestLabel(r.dest),
+      Template:(mcTemplateById(r.template)||{}).name||'',
+      Remarks:r.remarks||'',Order:Number(r.sort_order)||0}));
     const ws=XLSX.utils.json_to_sheet(rows,{header:MC_ROUTE_COLS});
     // wide enough to read the rule without dragging every column out first
-    ws['!cols']=[{wch:7},{wch:30},{wch:12},{wch:18},{wch:40},{wch:7}];
+    ws['!cols']=[{wch:7},{wch:30},{wch:12},{wch:18},{wch:24},{wch:40},{wch:7}];
     const wb=XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb,ws,'Routing');
     const buf=XLSX.write(wb,{bookType:'xlsx',type:'array'});
@@ -25249,9 +25323,12 @@ document.getElementById('mcRouteImport').addEventListener('click',async()=>{
         return k?o[k]:'';
       };
       cells=grid.map(o=>({kind:key(o,'kind'),match:key(o,'match'),how:key(o,'how'),
-        dest:key(o,'where')||key(o,'dest'),remarks:key(o,'remarks'),
-        sort_order:key(o,'order')}));
+        dest:key(o,'where')||key(o,'dest'),template:key(o,'template'),
+        remarks:key(o,'remarks'),sort_order:key(o,'order')}));
     }
+    // the Template column comes in by name, so the saved templates have to be
+    // in hand before the rows are read
+    if(!(templateRows||[]).length) await refreshTemplateList().catch(()=>{});
     const rows=cells.map(mcRouteFromCells).filter(Boolean);
     if(!rows.length) throw new Error('there are no usable rows in that file');
     await mcRoutesLoad(true);
@@ -25349,6 +25426,17 @@ function mcOpenDest(sku){
       : '<b>Nothing to add</b> — there is no artwork of this name.';
   document.getElementById('mcDestWhy').innerHTML=
     `${why}<br/>Artwork: ${escapeHtml(found)}.<br/>${will}`;
+  // a print job has a second question: which saved template. Asked here only
+  // when this SKU is going to the print sheet at all.
+  const tplBox=document.getElementById('mcDestTpl');
+  const routeRow=mcRouteRowFor(row);
+  tplBox.innerHTML=dest==='print'
+    ? `<label class="field" style="margin:8px 0 0;"><span>TEMPLATE</span>
+         <select data-mc-dest-tpl><option value="">— work it out from the folder —</option>${
+         (templateRows||[]).map(t=>`<option value="${escapeHtml(String(t.id))}"${
+           routeRow&&String(routeRow.template||'')===String(t.id)?' selected':''
+         }>${escapeHtml(t.name||'')}</option>`).join('')}</select></label>`
+    : '';
   // what it does today with nothing said about it — so "leave it alone" is a
   // choice made knowing the answer, not a shrug
   const clear=document.getElementById('mcDestClear');
@@ -25362,6 +25450,15 @@ document.getElementById('mcDestOpts').addEventListener('click',async e=>{
   const b=e.target.closest('[data-mc-dest]'); if(!b) return;
   await mcSetDest(mcDestFor,b.dataset.mcDest);
   document.getElementById('mcDestSheet').classList.remove('open');
+  mcRenderSummary();
+});
+// Naming the template for one SKU is a decision about that SKU, so it is kept
+// on its own row rather than written into whichever rule happened to catch it.
+document.getElementById('mcDestTpl').addEventListener('change',async e=>{
+  const sel=e.target.closest('[data-mc-dest-tpl]'); if(!sel) return;
+  let own=mcSkuRow(mcDestFor);
+  if(!own){ await mcSetDest(mcDestFor,'print'); own=mcSkuRow(mcDestFor); }
+  if(own) await mcRouteWrite(own.id,{template:sel.value});
   mcRenderSummary();
 });
 document.getElementById('mcDestClear').addEventListener('click',async()=>{

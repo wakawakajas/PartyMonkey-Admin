@@ -84,7 +84,7 @@ begin
 end $$;
 
 
--- ---------- PART 4 of 4 : why the rule is there ----------
+-- ---------- PART 4 of 5 : why the rule is there ----------
 -- A rule read six months later is a piece of text and a destination, and
 -- nothing about the morning it was written for. Remarks is that morning: the
 -- shop it is for, the listing that changed, the person to ask. Added
@@ -92,3 +92,15 @@ end $$;
 -- and simply gains the column.
 alter table public.magic_routes
   add column if not exists remarks text not null default '';
+
+
+-- ---------- PART 5 of 5 : which template a print job goes on ----------
+-- The print side has one more question than the tag side: not only that this
+-- is a print job, but which saved template it is printed on. It was worked
+-- out from the designs folder's name, and where nothing matched, whatever
+-- template happened to be open was used — the wrong card size and the wrong
+-- cuts, a hundred at a time. A route can name the template outright now.
+-- Holds the template's id: two people may each have an "A6 postcard", so the
+-- name does not pick out one row.
+alter table public.magic_routes
+  add column if not exists template text not null default '';
