@@ -22,13 +22,14 @@ click fails that step clearly rather than guessing.
 from __future__ import annotations
 
 import re
+import shutil
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from agent import actions, cdp, config, run_reports, self_exclusion, toast, uia, video, winapi
+from agent import actions, cdp, config, run_reports, self_exclusion, sheets, toast, uia, video, winapi
 
 _replay_lock = threading.Lock()
 
@@ -149,6 +150,49 @@ def _coords_for(step: dict, resolved: dict) -> tuple[int, int]:
     if rect and step.get("relative_x") is not None:
         return rect["left"] + step["relative_x"], rect["top"] + step["relative_y"]
     return step.get("x", 0), step.get("y", 0)
+
+
+def sub_label(step: dict) -> str:
+    """What to call the thing that was clicked, when the page didn't say."""
+    return step.get("text") or step.get("selector") or "it"
+
+
+def _row_text(value) -> str:
+    """A row as one line, for the run report and for {{row}} itself.
+
+    A dict can't be substituted into a URL sensibly, and str(dict) in a
+    report is unreadable -- but the cells with something in them, in
+    order, reads exactly like the row does in the spreadsheet."""
+    if isinstance(value, dict):
+        if sheets.ROW_TEXT in value:
+            return str(value[sheets.ROW_TEXT])
+        return " | ".join(str(v) for v in value.values() if str(v))
+    return str(value)
+
+
+_WHOLE_VARIABLE = re.compile(r"^\s*\{\{\s*([A-Za-z0-9_]+)\s*\}\}\s*$")
+
+
+def _path_list(raw, variables: dict) -> list:
+    """One field, one or several files.
+
+    A File search step stores its matches as a list, and {{files}} written
+    inside a sentence flattens that to "a.jpg, b.jpg" -- readable, useless
+    as a path, and not safely splittable back since a filename may itself
+    contain a comma. So when the field is nothing but the variable, the
+    list is taken as it stands and never stringified. Anything else is one
+    path per line."""
+    if isinstance(raw, list):
+        parts = [str(item) for item in raw]
+    else:
+        text = str(raw or "")
+        whole = _WHOLE_VARIABLE.match(text)
+        value = variables.get(whole.group(1)) if whole else None
+        if isinstance(value, list):
+            parts = [str(item) for item in value]
+        else:
+            parts = actions.substitute(text, variables).splitlines()
+    return [actions.expand_path(part.strip().strip('"')) for part in parts if part.strip()]
 
 
 class ReplayEngine:
@@ -339,9 +383,15 @@ class ReplayEngine:
         condition_met = _compare(actual_value, operator, compare_value)
 
         branch_name = "then" if condition_met else "else"
+        # The variable being tested is often a whole page read into one
+        # string -- printing it in full turns the run report into a wall
+        # of text, and the first line is the part that identifies it.
+        shown = repr(actual_value)
+        if len(shown) > 70:
+            shown = shown[:70] + "..."
         self._emit_meta_result(
             results, exec_counter, step,
-            f'If {var_name!r} {operator} {compare_value!r}: {actual_value!r} -> {condition_met} (running "{branch_name}").',
+            f'If {var_name!r} {operator} {compare_value!r}: {shown} -> {condition_met} (running "{branch_name}").',
         )
         branch = step.get("then_steps" if condition_met else "else_steps", [])
         return self._run_step_list(branch, allow_foreground, context, results, exec_counter)
@@ -351,11 +401,42 @@ class ReplayEngine:
         mode = step.get("mode", "count")
         body = step.get("body_steps", [])
         max_iterations = min(max(1, step.get("max_iterations", 100)), 1000)
-        iterations = min(max(0, step.get("count", 0)), max_iterations) if mode == "count" else max_iterations
+        items: list = []
+        if mode == "each":
+            # The list a File search or a spreadsheet read left behind. A
+            # count loop can't do this job: the number of rows isn't known
+            # when the macro is written, and it's different tomorrow.
+            source = context["variables"].get(step.get("list_variable", ""), [])
+            items = list(source) if isinstance(source, list) else [source]
+            iterations = min(len(items), max_iterations)
+        elif mode == "count":
+            iterations = min(max(0, step.get("count", 0)), max_iterations)
+        else:
+            iterations = max_iterations
 
+        if mode == "each" and not iterations:
+            self._emit_meta_result(results, exec_counter, step,
+                                    f'Loop: {step.get("list_variable", "")!r} is empty -- nothing to repeat over.')
+            return True
+
+        item_as = (step.get("item_as") or "item").strip() or "item"
         for i in range(iterations):
             if self._stop_event.is_set():
                 return False
+
+            if mode == "each":
+                item = items[i]
+                # A row arrives as a dict of cells. The body needs them one
+                # at a time -- {{row_A}} to type into a search box,
+                # {{row_C}} to check against what the page says -- so each
+                # cell becomes its own variable for this iteration, under
+                # both its column letter and its heading.
+                if isinstance(item, dict):
+                    for key, cell in item.items():
+                        if key != sheets.ROW_TEXT:
+                            context["variables"][f"{item_as}_{key}"] = cell
+                context["variables"][item_as] = _row_text(item)
+                context["variables"][item_as + "_number"] = i + 1
 
             if mode == "until":
                 var_name = step.get("variable", "")
@@ -367,7 +448,10 @@ class ReplayEngine:
                                             f'Loop: {var_name!r} {operator} {compare_value!r} already true -- stopping after {i} iteration(s).')
                     break
 
-            self._emit_meta_result(results, exec_counter, step, f"Loop iteration {i + 1}/{iterations}.")
+            note = f"Loop iteration {i + 1}/{iterations}."
+            if mode == "each":
+                note += f' {{{{{item_as}}}}} = "{_row_text(items[i])}"'
+            self._emit_meta_result(results, exec_counter, step, note)
             if not self._run_step_list(body, allow_foreground, context, results, exec_counter):
                 return False
         return True
@@ -427,10 +511,16 @@ class ReplayEngine:
                 outcome = self._run_find_click_text(step, context, expect_window_title)
             elif step_type == "open_url":
                 outcome = self._run_open_url(step, context)
+            elif step_type == "open_file":
+                outcome = self._run_open_file(step, context)
+            elif step_type == "sheet_read":
+                outcome = self._run_sheet_read(step, context)
             elif step_type == "file_search":
                 outcome = self._run_file_search(step, context)
             elif step_type == "file_op":
                 outcome = self._run_file_op(step, context)
+            elif step_type == "file_wait":
+                outcome = self._run_file_wait(step, context)
             elif step_type == "clipboard":
                 outcome = self._run_clipboard(step, context)
             elif step_type == "get_cursor_position":
@@ -438,7 +528,9 @@ class ReplayEngine:
             elif step_type == "read_control_value":
                 outcome = self._run_read_control_value(step, context)
             elif step_type in ("cdp_launch", "web_goto", "web_click", "web_hover",
-                               "web_wait_for", "web_type", "web_read", "web_print_pdf",
+                               "web_download",
+                               "web_wait_for", "web_type", "web_upload", "web_drop_files",
+                               "web_read", "web_print_pdf",
                                "web_switch_tab", "web_close_tab", "cdp_close",
                                "web_wait_loaded", "web_reload"):
                 outcome = self._run_web_step(step_type, step, context)
@@ -664,16 +756,32 @@ class ReplayEngine:
 
             if step_type == "web_click":
                 button = str(step.get("button") or "left")
-                result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.click(
+                until_selector, until_text = sub("until_selector"), sub("until_text")
+                press = lambda: cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.click(
                     p, selector=sub("selector"), text=sub("text"),
                     exact=bool(step.get("exact")), timeout_ms=timeout_ms or 8000,
                     match_index=match_index, button=button,
                     hover_selector=sub("hover_selector"), hover_text=sub("hover_text"),
                     hover_exact=bool(step.get("hover_exact", True))))
+
+                if until_selector or until_text:
+                    outcome = self._click_until(step, context, page, press, until_selector,
+                                                until_text, timeout_ms or 15000)
+                    if outcome is not None:
+                        return outcome
+                result = press()
                 label = result.get("label") or sub("text") or sub("selector")
                 verb = "Right-clicked" if button.lower().startswith("r") else "Clicked"
+                note = ""
+                if result.get("covered"):
+                    # Worth saying out loud: a page can tell this apart from
+                    # a real press, and the ones that gate a download on a
+                    # real gesture will have ignored it.
+                    note = (" Something was over it, so the click was dispatched on the element"
+                            " rather than pressed -- if nothing happened, close whatever is"
+                            " covering it first.")
                 return {"status": "success", "tier": "cdp",
-                        "reason": f'{verb} <{result.get("tag")}> "{label}".'}
+                        "reason": f'{verb} <{result.get("tag")}> "{label}".{note}'}
 
             if step_type == "web_print_pdf":
                 destination = actions.expand_path(sub("destination"))
@@ -708,8 +816,11 @@ class ReplayEngine:
                 info = cdp.through_navigation(port, page, timeout_ms or 30000, lambda p: cdp.wait_loaded(
                     p, quiet_ms=int(step.get("quiet_ms") or 800), timeout_ms=timeout_ms or 30000,
                     min_ms=int(step.get("min_ms") or 0)))
+                still = "" if info.get("state") == "complete" else \
+                    f' It is still fetching something (readyState {info.get("state")}), but nothing has changed.'
                 return {"status": "success", "tier": "cdp",
-                        "reason": f'Page settled after {info.get("waited")}ms ({info.get("resources")} resources).'}
+                        "reason": f'Page settled after {info.get("waited")}ms '
+                                  f'({info.get("resources")} resources).{still}'}
 
             if step_type == "web_hover":
                 result = cdp.through_navigation(port, page, timeout_ms or 8000, lambda p: cdp.hover(
@@ -734,6 +845,76 @@ class ReplayEngine:
                     p, selector, sub("value"), submit=bool(step.get("submit"))))
                 return {"status": "success", "tier": "cdp", "reason": f'Typed into "{selector}".'}
 
+            if step_type == "web_download":
+                folder = actions.expand_path(sub("folder"))
+                if not folder:
+                    return {"status": "failed", "tier": None,
+                            "reason": "No folder given for the download to go to."}
+                result = cdp.download_by_clicking(
+                    port, page, folder, selector=sub("selector"), text=sub("text"),
+                    exact=bool(step.get("exact")), match_index=match_index,
+                    timeout_ms=timeout_ms or 60000,
+                    hover_selector=sub("hover_selector"), hover_text=sub("hover_text"),
+                    hover_exact=bool(step.get("hover_exact", True)))
+                landed = Path(result["file"])
+                save_as = actions.expand_path(sub("save_as"))
+                if save_as:
+                    # The site names the file; the macro renames it. An
+                    # account number and today's date twice is not a name
+                    # anyone can find an order by.
+                    wanted = Path(save_as)
+                    if not wanted.is_absolute():
+                        wanted = landed.parent / wanted
+                    if wanted.suffix == "":
+                        wanted = wanted.with_suffix(landed.suffix)
+                    wanted.parent.mkdir(parents=True, exist_ok=True)
+                    if wanted != landed:
+                        if wanted.exists():
+                            wanted.unlink()
+                        landed = Path(shutil.move(str(landed), str(wanted)))
+                store_as = step.get("store_as")
+                if store_as:
+                    context["variables"][store_as] = str(landed)
+                size = landed.stat().st_size
+                return {"status": "success", "tier": "cdp",
+                        "reason": f'Downloaded "{landed.name}" ({size:,} bytes) to "{landed.parent}".'}
+
+            if step_type == "web_upload":
+                paths = _path_list(step.get("files", ""), context["variables"])
+                if not paths:
+                    return {"status": "failed", "tier": None, "reason": "No file given to upload."}
+                missing = [p for p in paths if not Path(p).is_file()]
+                if missing:
+                    return {"status": "failed", "tier": None,
+                            "reason": f'There is no file at "{missing[0]}" -- nothing was attached.'}
+                result = cdp.through_navigation(port, page, timeout_ms or 10000, lambda p: cdp.upload_files(
+                    p, paths, selector=sub("selector"), timeout_ms=timeout_ms or 10000,
+                    match_index=match_index))
+                names = result.get("names") or [Path(p).name for p in paths]
+                shown = ", ".join(f'"{n}"' for n in names[:3])
+                more = f" (+{len(names) - 3} more)" if len(names) > 3 else ""
+                return {"status": "success", "tier": "cdp",
+                        "reason": f"Attached {len(names)} file(s): {shown}{more}."}
+
+            if step_type == "web_drop_files":
+                paths = _path_list(step.get("files", ""), context["variables"])
+                if not paths:
+                    return {"status": "failed", "tier": None, "reason": "No file given to drop."}
+                missing = [p for p in paths if not Path(p).is_file()]
+                if missing:
+                    return {"status": "failed", "tier": None,
+                            "reason": f'There is no file at "{missing[0]}" -- nothing was dropped.'}
+                result = cdp.through_navigation(port, page, timeout_ms or 10000, lambda p: cdp.drop_files(
+                    p, paths, selector=sub("selector"), text=sub("text"),
+                    exact=bool(step.get("exact")), timeout_ms=timeout_ms or 10000,
+                    match_index=match_index))
+                names = [Path(p).name for p in paths]
+                shown = ", ".join(f'"{n}"' for n in names[:3])
+                more = f" (+{len(names) - 3} more)" if len(names) > 3 else ""
+                where = result.get("label") or sub("selector") or sub("text")
+                return {"status": "success", "tier": "cdp",
+                        "reason": f'Dropped {len(names)} file(s) on "{where}": {shown}{more}.'}
+
             # web_read
             selector = sub("selector")
             if not selector:
@@ -749,6 +930,53 @@ class ReplayEngine:
         except RuntimeError as exc:
             return {"status": "failed", "tier": None, "reason": str(exc)}
 
+    def _click_until(self, step: dict, context: dict, page: dict, press, until_selector: str,
+                     until_text: str, timeout_ms: int):
+        """Presses until the thing the press was for shows up.
+
+        The expectation is checked before each press as well as after: a
+        click that worked but took its time would otherwise be repeated,
+        and a second press on a button now behind a modal is at best
+        wasted."""
+        port = int(step.get("port") or cdp.DEFAULT_PORT)
+        exact = bool(step.get("until_exact"))
+        deadline = time.time() + min(max(1000, timeout_ms), 120_000) / 1000.0
+        wanted = f'"{until_selector or until_text}"'
+        presses, last = 0, None
+
+        def appeared(window_ms: int) -> bool:
+            try:
+                cdp.through_navigation(port, page, window_ms, lambda p: cdp.wait_for(
+                    p, selector=until_selector, text=until_text, exact=exact,
+                    timeout_ms=window_ms))
+                return True
+            except RuntimeError:
+                return False
+
+        while True:
+            if self._stop_event.is_set():
+                return {"status": "stopped", "tier": None, "reason": "Stopped by user."}
+            if appeared(400 if not presses else 250):
+                label = (last or {}).get("label") or sub_label(step)
+                tries = "" if presses <= 1 else f" (took {presses} presses)"
+                return {"status": "success", "tier": "cdp",
+                        "reason": f'Clicked "{label}" and {wanted} appeared{tries}.'}
+            if time.time() >= deadline:
+                if last is None:
+                    return None  # never got as far as pressing; let the caller report the miss
+                covered = " Something was covering it, so the press was dispatched rather than"\
+                          " real -- which some pages ignore." if last.get("covered") else ""
+                return {"status": "failed", "tier": None,
+                        "reason": f'Clicked "{last.get("label") or sub_label(step)}" {presses} time(s) '
+                                  f'but {wanted} never appeared.{covered}'}
+            try:
+                last = press()
+            except RuntimeError as exc:
+                return {"status": "failed", "tier": None, "reason": str(exc)}
+            presses += 1
+            remaining = max(0.0, deadline - time.time())
+            appeared(int(min(2500, remaining * 1000)))
+
     def _run_open_url(self, step: dict, context: dict) -> dict:
         url = actions.substitute(step.get("url", ""), context["variables"])
         if not url:
@@ -760,6 +988,93 @@ class ReplayEngine:
             return {"status": "success", "tier": None, "reason": f"Opened {url} {where}."}
         except RuntimeError as exc:
             return {"status": "failed", "tier": None, "reason": str(exc)}
+
+    def _run_open_file(self, step: dict, context: dict) -> dict:
+        """Opens the file, then waits for the window it opened in and
+        points the run's keystrokes at it.
+
+        Key and shortcut steps type into "the window the last click landed
+        in", which is a problem for an app that wasn't running a moment
+        ago -- there is nothing to click at yet, and clicking Excel's grid
+        by coordinate would be exactly the fragile thing this replaces. So
+        opening a file counts as establishing the window, the same way a
+        click does. The title is matched, not the process: two workbooks
+        open at once are two windows, and the one this step opened is the
+        one named after the file."""
+        paths = _path_list(step.get("path", ""), context["variables"])
+        if not paths:
+            return {"status": "failed", "tier": None, "reason": "No file given to open."}
+        # A File search's variable is a list even when it found one match,
+        # and opening five workbooks at once is nobody's intent -- the
+        # newest-first + keep 1 pairing means the first is the one meant.
+        path = paths[0]
+        try:
+            opened = actions.open_file(path)
+        except RuntimeError as exc:
+            return {"status": "failed", "tier": None, "reason": str(exc)}
+
+        # An app's title bar is the file's name without its extension --
+        # "Sales - Excel", not "Sales.xlsx - Excel" -- so that, and not the
+        # filename, is what a blank field looks for.
+        title = actions.substitute(step.get("window_title", ""), context["variables"]).strip() or Path(opened).stem
+        timeout = min(max(0, int(step.get("timeout_ms", 20000))) / 1000.0, 120.0)
+        if not timeout:
+            return {"status": "success", "tier": None, "reason": f'Opened "{opened}".'}
+
+        deadline = time.time() + timeout
+        while True:
+            if self._stop_event.is_set():
+                return {"status": "stopped", "tier": None, "reason": "Stopped by user."}
+            hwnd = _find_window_by_title_fragment(title)
+            if hwnd:
+                context["hwnd"] = hwnd
+                # The element the last click resolved to belongs to another
+                # window entirely, and typing into it now would put the
+                # keystrokes somewhere nobody is looking.
+                context["focus_element"] = None
+                return {"status": "success", "tier": None,
+                        "reason": f'Opened "{opened}" -- typing goes to "{winapi.window_title(hwnd)[:60]}" from here.'}
+            if time.time() >= deadline:
+                return {"status": "failed", "tier": None,
+                        "reason": f'Opened "{opened}", but no window with "{title}" in its title appeared '
+                                  f"within {round(timeout * 1000)}ms."}
+            time.sleep(0.3)
+
+    def _run_sheet_read(self, step: dict, context: dict) -> dict:
+        paths = _path_list(step.get("path", ""), context["variables"])
+        if not paths:
+            return {"status": "failed", "tier": None, "reason": "No spreadsheet given to read."}
+        column = actions.substitute(step.get("column", "A"), context["variables"])
+        common = dict(
+            sheet=actions.substitute(step.get("sheet", ""), context["variables"]),
+            first_row=max(1, int(step.get("first_row") or 1)),
+            limit=max(1, int(step.get("limit") or 500)),
+            encoding=(step.get("encoding") or "").strip(),
+        )
+        # "A" is one column and gives a list of values; "A-G" is a row and
+        # gives a list of rows. Same field, because the difference is
+        # visible in what was typed and asking for a mode as well would be
+        # asking twice.
+        whole_rows = not column.strip() or any(mark in column for mark in (",", "-", ":"))
+        try:
+            values = (sheets.read_rows(paths[0], columns=column, **common) if whole_rows
+                      else sheets.read_column(paths[0], column=column, **common))
+        except RuntimeError as exc:
+            return {"status": "failed", "tier": None, "reason": str(exc)}
+        store_as = step.get("store_as")
+        if store_as:
+            context["variables"][store_as] = values
+        what = f"columns {column}" if whole_rows else f"column {column}"
+        if not values:
+            return {"status": "failed", "tier": None,
+                    "reason": f'{what.capitalize()} of "{Path(paths[0]).name}" is empty from that row down.'}
+        shown = [_row_text(v) for v in values[:3]]
+        preview = ", ".join(f'"{v}"' for v in shown)
+        more = f" (+{len(values) - 3} more)" if len(values) > 3 else ""
+        into = f" into {{{{{store_as}}}}}" if store_as else ""
+        unit = "row(s)" if whole_rows else "value(s)"
+        return {"status": "success", "tier": None,
+                "reason": f"Read {len(values)} {unit} from {what}{into}: {preview}{more}."}
 
     def _run_file_search(self, step: dict, context: dict) -> dict:
         folder = actions.expand_path(actions.substitute(step.get("folder", ""), context["variables"]))
@@ -787,6 +1102,50 @@ class ReplayEngine:
             return {"status": "success", "tier": None, "reason": message}
         except (RuntimeError, OSError) as exc:
             return {"status": "failed", "tier": None, "reason": str(exc)}
+
+    def _run_file_wait(self, step: dict, context: dict) -> dict:
+        """Waits for a file to arrive in a folder, and to stop growing.
+
+        A download is not a step that finishes -- the click that starts it
+        returns immediately and the file appears some seconds later, so
+        anything that touches it next is racing. Chrome writes to
+        `name.pdf.crdownload` until it's done, which a `*.pdf` pattern
+        already skips, but a small file can appear complete while it is
+        still being written: the size has to hold still before this
+        answers."""
+        folder = actions.expand_path(actions.substitute(step.get("folder", ""), context["variables"]))
+        pattern = actions.substitute(step.get("pattern", "*"), context["variables"]) or "*"
+        if not folder:
+            return {"status": "failed", "tier": None, "reason": "No folder given to watch."}
+        timeout = min(max(1, int(step.get("timeout_ms") or 30000)) / 1000.0, 300.0)
+        deadline = time.time() + timeout
+        sizes: dict = {}
+        while True:
+            if self._stop_event.is_set():
+                return {"status": "stopped", "tier": None, "reason": "Stopped by user."}
+            try:
+                matches = actions.search_files(folder, pattern, newest_first=True, limit=1)
+            except RuntimeError:
+                matches = []  # the folder may not exist until the download creates it
+            if matches:
+                found = Path(matches[0])
+                try:
+                    size = found.stat().st_size
+                except OSError:
+                    size = -1
+                if size > 0 and sizes.get(str(found)) == size:
+                    store_as = step.get("store_as")
+                    if store_as:
+                        context["variables"][store_as] = str(found)
+                    into = f" into {{{{{store_as}}}}}" if store_as else ""
+                    return {"status": "success", "tier": None,
+                            "reason": f'"{found.name}" arrived ({size:,} bytes){into}.'}
+                sizes[str(found)] = size
+            if time.time() >= deadline:
+                return {"status": "failed", "tier": None,
+                        "reason": f'Nothing matching "{pattern}" finished downloading into '
+                                  f'"{folder}" within {round(timeout * 1000)}ms.'}
+            time.sleep(0.4)
 
     def _run_clipboard(self, step: dict, context: dict) -> dict:
         mode = step.get("mode", "write")

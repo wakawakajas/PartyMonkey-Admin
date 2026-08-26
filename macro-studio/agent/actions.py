@@ -10,6 +10,7 @@ messages here should already be the whole explanation.
 """
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shutil
@@ -20,12 +21,19 @@ from typing import Optional
 
 VAR_PATTERN = re.compile(r"\{\{([^}:]+)(?::([^}]+))?\}\}")
 
+# Stripping the leading zero off an hour is a C library flag, and the two
+# families spell it differently. Windows is the only one that matters here,
+# but a wrong flag silently prints "#I" into a filename, so both are named.
+_NO_PAD = "#" if os.name == "nt" else "-"
+
 # Friendly date tokens, because nobody should need strftime to name a file.
-# Longest first, so YYYY matches before YY.
+# Longest first, so YYYY matches before YY -- and "hh" before "h", or a
+# two-digit hour would come out as one digit followed by a stray "h".
 _DATE_TOKENS = [
     ("YYYY", "%Y"), ("YY", "%y"), ("MMMM", "%B"), ("MMM", "%b"), ("MM", "%m"),
     ("DDDD", "%A"), ("DDD", "%a"), ("DD", "%d"),
-    ("HH", "%H"), ("hh", "%I"), ("mm", "%M"), ("ss", "%S"), ("AP", "%p"),
+    ("HH", "%H"), ("hh", "%I"), ("h", f"%{_NO_PAD}I"),
+    ("mm", "%M"), ("ss", "%S"), ("AP", "%p"),
 ]
 DEFAULT_DATE_FORMAT = "YYYY-MM-DD"
 DEFAULT_TIME_FORMAT = "HH-mm-ss"
@@ -162,6 +170,24 @@ def open_url_in_chrome(url: str, new_window: bool = False) -> str:
 
 
 # -- file search / file ops --------------------------------------------------
+def open_file(path: str) -> str:
+    """Opens a file or folder with whatever Windows opens it with.
+
+    The same double-click the user would do, minus the double-click: a
+    folder full of files named after today's date can't be clicked at by
+    coordinates, and the association lookup is Windows' job anyway --
+    hard-coding a path to Excel would break on the machine that keeps it
+    somewhere else, or opens .csv in something different on purpose."""
+    target = Path(path)
+    if not target.exists():
+        raise RuntimeError(f'There is nothing at "{path}" to open.')
+    try:
+        os.startfile(str(target))
+    except OSError as exc:
+        raise RuntimeError(f'Windows would not open "{path}": {exc}')
+    return str(target)
+
+
 def search_files(folder: str, pattern: str, recursive: bool = False, limit: int = 500,
                  newest_first: bool = False) -> list[str]:
     """Newest-first exists for one job that comes up constantly: naming or
@@ -234,20 +260,45 @@ def file_op(operation: str, source: str, destination: Optional[str] = None, over
 # robust than ctypes' global-memory-ownership dance, at the cost of
 # ~200-500ms process-launch overhead per call, which is fine for a macro
 # step (not a hot loop).
+#
+# The clipboard is also where Chinese goes wrong. PowerShell's console pipes
+# use the machine's ANSI codepage, which cannot carry it at all: the text
+# arrives as question marks, or the call dies encoding it, and the failure
+# is silent enough to look like the copy simply didn't happen. Base64
+# sidesteps the console entirely -- the command line and the output are
+# both plain ASCII, whatever the text is, so no codepage is consulted at
+# any point. Lithuanian and every other accented alphabet ride along on
+# the same fix.
+def _powershell(script: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, encoding="ascii", errors="replace", timeout=5,
+    )
+
+
 def clipboard_write(text: str) -> None:
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", "$input | Set-Clipboard"],
-        input=text, capture_output=True, text=True, timeout=5,
+    payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    proc = _powershell(
+        "Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString("
+        f"[Convert]::FromBase64String('{payload}')))"
     )
     if proc.returncode != 0:
         raise RuntimeError(f"Clipboard write failed: {proc.stderr.strip() or 'unknown error'}")
 
 
 def clipboard_read() -> str:
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"],
-        capture_output=True, text=True, timeout=5,
+    proc = _powershell(
+        "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string](Get-Clipboard -Raw)))"
     )
     if proc.returncode != 0:
         raise RuntimeError(f"Clipboard read failed: {proc.stderr.strip() or 'unknown error'}")
-    return proc.stdout.rstrip("\r\n")
+    encoded = proc.stdout.strip()
+    if not encoded:
+        return ""
+    try:
+        text = base64.b64decode(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"Could not read the clipboard back: {exc}")
+    return text.rstrip("\r\n")
+
+

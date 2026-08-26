@@ -15,10 +15,12 @@ import ctypes
 import json
 import os
 import platform
+import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -26,7 +28,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import cdp, config, macro_store, run_reports, settings, video
+from agent import cdp, config, library, macro_store, run_reports, settings, video
 from agent.macro_store import MacroNotFoundError
 from agent.panic import PanicWatcher
 from agent.recorder import Recorder
@@ -486,6 +488,63 @@ def update_macro_video(macro_id: str, body: MacroVideoSettings) -> JSONResponse:
 def ffmpeg_status() -> dict:
     path = video.find_ffmpeg()
     return {"available": path is not None, "path": path, "download_url": video.FFMPEG_DOWNLOAD_URL}
+
+
+# -- how the library is arranged --------------------------------------------
+
+
+@app.get("/api/library/layout")
+def get_library_layout() -> dict:
+    return library.get_layout([m["id"] for m in macro_store.list_macros()])
+
+
+class LayoutUpdate(BaseModel):
+    categories: list[dict] = []
+    placement: dict = {}
+
+
+@app.put("/api/library/layout")
+def put_library_layout(body: LayoutUpdate) -> JSONResponse:
+    known = [m["id"] for m in macro_store.list_macros()]
+    return JSONResponse(content=library.save_layout(body.categories, body.placement, known))
+
+
+# -- after-the-run checks ---------------------------------------------------
+# The same checks Check.bat runs, on a button, because the person who wants
+# to know whether the PDFs arrived is already looking at this page.
+
+CHECKS_ROOT = Path(__file__).resolve().parent.parent
+
+
+@app.get("/api/checks")
+def list_checks() -> dict:
+    try:
+        from checks.__main__ import discover
+    except Exception as exc:  # no checks folder, or one of them won't import
+        return {"checks": [], "error": str(exc)}
+    return {"checks": [{"name": name, "title": title} for name, title in discover()]}
+
+
+@app.post("/api/checks/{name}/run")
+def run_check(name: str) -> JSONResponse:
+    """Runs one check in its own process.
+
+    Out-of-process on purpose: a check is ordinary code someone dropped in
+    a folder, and one that throws, hangs, or calls sys.exit must not take
+    the agent down with it."""
+    if not name.replace("_", "").isalnum():
+        return JSONResponse(status_code=400, content={"detail": "Not a check name."})
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "checks", name],
+            cwd=str(CHECKS_ROOT), capture_output=True, text=True, timeout=300,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        return JSONResponse(status_code=504,
+                            content={"detail": "That check took over 5 minutes and was stopped."})
+    output = (completed.stdout or "") + (completed.stderr or "")
+    return JSONResponse(content={"exit_code": completed.returncode, "output": output.rstrip()})
 
 
 class MacroStepsUpdate(BaseModel):

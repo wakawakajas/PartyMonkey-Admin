@@ -36,6 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 from websockets.sync.client import connect as ws_connect
 
@@ -255,6 +256,85 @@ def list_pages(port: int = DEFAULT_PORT) -> list:
     return [t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
 
 
+def _settled_file(folder: Path, since: float, seen: dict) -> Optional[Path]:
+    """The newest finished file in `folder`, or None if nothing is ready.
+
+    Chrome writes to `name.pdf.crdownload` and renames on completion, so a
+    partial file is easy to skip -- but a small one can appear complete
+    while it is still being written, which is why a size has to repeat
+    before it counts."""
+    best = None
+    for entry in folder.glob("*"):
+        if not entry.is_file() or entry.suffix.lower() in (".crdownload", ".tmp"):
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        if stat.st_mtime < since - 1 or not stat.st_size:
+            continue
+        if best is None or stat.st_mtime > best[1]:
+            best = (entry, stat.st_mtime, stat.st_size)
+    if best is None:
+        return None
+    entry, _, size = best
+    if seen.get(str(entry)) == size:
+        return entry
+    seen[str(entry)] = size
+    return None
+
+
+def download_by_clicking(port: int, page: dict, folder: str, selector: str = "", text: str = "",
+                         exact: bool = False, match_index: int = 0, timeout_ms: int = 60000,
+                         hover_selector: str = "", hover_text: str = "",
+                         hover_exact: bool = False) -> dict:
+    """Clicks something that starts a download, and puts the file where the
+    macro says.
+
+    Chrome's download folder is browser UI -- the same wall as the print
+    dialog -- so the only way to choose it is Browser.setDownloadBehavior.
+    That override belongs to the connection that set it and dies with it,
+    and every other call here opens a socket, sends one command and closes
+    it: set the folder that way and the file lands in Downloads anyway,
+    minutes later, with nothing to say why. So the socket stays open for
+    the whole thing -- folder, click, and the wait for the file to finish
+    being written -- and only then goes.
+
+    The click has to be a real press for this to work at all. A page that
+    starts a download from a synthetic event is refused by Chrome for
+    want of a user gesture, which looks exactly like a click that missed."""
+    if not folder:
+        raise RuntimeError("No folder given for the download to go to.")
+    target = Path(folder)
+    if target.exists() and not target.is_dir():
+        raise RuntimeError(f'"{folder}" is a file, not a folder.')
+    target.mkdir(parents=True, exist_ok=True)
+    deadline = time.time() + min(max(1000, timeout_ms), 600_000) / 1000.0
+
+    def body(call):
+        call("Browser.setDownloadBehavior", {"behavior": "allow", "downloadPath": str(target)})
+        started = time.time()
+        clicked = click(page, selector=selector, text=text, exact=exact,
+                        timeout_ms=min(15000, timeout_ms), match_index=match_index,
+                        hover_selector=hover_selector, hover_text=hover_text,
+                        hover_exact=hover_exact)
+        seen: dict = {}
+        while time.time() < deadline:
+            found = _settled_file(target, started, seen)
+            if found is not None:
+                return {"file": str(found), "label": clicked.get("label", ""),
+                        "covered": bool(clicked.get("covered"))}
+            time.sleep(0.4)
+        raise RuntimeError(
+            f'Clicked "{clicked.get("label") or selector or text}" but no file finished '
+            f'downloading into "{target}" within {round(timeout_ms / 1000)}s.'
+            + (" The click had to be dispatched rather than pressed, which Chrome refuses to"
+               " start a download from -- something was covering the button."
+               if clicked.get("covered") else ""))
+
+    return _conversation(_browser_socket(port), body, timeout=30.0)
+
+
 def open_tab(port: int, url: str) -> dict:
     """Opens a tab without bringing the window forward.
 
@@ -444,6 +524,46 @@ def _send(page: dict, method: str, params: dict, timeout: float = _WS_TIMEOUT) -
     raise RuntimeError(f"CDP call {method} timed out after {round(timeout)}s.")
 
 
+def _conversation(page: dict, body, timeout: float = _WS_TIMEOUT):
+    """Runs several commands down ONE socket, handing `body` the call to
+    do it with.
+
+    `_send` opens a fresh connection per command, which is right for calls
+    that stand alone. DOM node ids are not one of those: Chrome hands them
+    out per connection, so a nodeId from `DOM.querySelector` means nothing
+    to a `DOM.setFileInputFiles` sent down a different socket. Anything
+    that passes an id from one command to the next shares a session."""
+    ws_url = page.get("webSocketDebuggerUrl")
+    if not ws_url:
+        raise RuntimeError("That tab has no debugger socket -- it may have just closed.")
+    try:
+        socket = ws_connect(ws_url, open_timeout=5, close_timeout=2, max_size=None)
+    except Exception as exc:
+        raise RuntimeError(f"Could not open a debugger socket on that tab: {exc}")
+    counter = {"n": 0}
+    with socket as sock:
+        def call(method: str, params: dict | None = None) -> dict:
+            counter["n"] += 1
+            msg_id = counter["n"]
+            try:
+                sock.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    message = json.loads(sock.recv(timeout=max(0.5, deadline - time.time())))
+                    if message.get("id") != msg_id:
+                        continue
+                    if "error" in message:
+                        raise RuntimeError(f"Chrome rejected {method}: {message['error'].get('message')}")
+                    return message.get("result", {})
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(f"CDP call {method} failed: {exc}")
+            raise RuntimeError(f"CDP call {method} timed out after {round(timeout)}s.")
+
+        return body(call)
+
+
 def evaluate(page: dict, expression: str, timeout: float = _WS_TIMEOUT):
     """Runs JS in the page and returns its value. Promises are awaited, so
     the helpers below can poll with setTimeout and resolve when they're
@@ -466,6 +586,37 @@ def evaluate(page: dict, expression: str, timeout: float = _WS_TIMEOUT):
 # ship or keep in sync -- the whole driver is these few functions.
 _JS_HELPERS = r"""
 const __ms = {
+  // Every document on the page: the real one, plus every shadow root
+  // under it. Alibaba's workbench is 1100 custom elements deep and
+  // document.querySelector sees none of it -- an order list with a search
+  // box in it reports zero inputs and a blank innerText, which looks
+  // exactly like a page that failed to load. Everything below queries
+  // through here, so a shadow-DOM page behaves like any other.
+  roots() {
+    const out = [document];
+    const walk = (root) => {
+      for (const el of root.querySelectorAll("*")) {
+        if (el.shadowRoot) {
+          out.push(el.shadowRoot);
+          walk(el.shadowRoot);
+        }
+      }
+    };
+    walk(document);
+    return out;
+  },
+  queryAll(selector) {
+    const out = [];
+    for (const root of __ms.roots()) {
+      try {
+        out.push(...root.querySelectorAll(selector));
+      } catch (err) { /* invalid selector: the caller falls back to the label */ }
+    }
+    return out;
+  },
+  query(selector) {
+    return __ms.queryAll(selector)[0] || null;
+  },
   visible(el) {
     const r = el.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) return false;
@@ -479,7 +630,11 @@ const __ms = {
   byText(text, exact) {
     const want = String(text).trim().toLowerCase();
     const out = [];
-    for (const el of document.querySelectorAll("body *")) {
+    for (const el of __ms.queryAll("*")) {
+      // <html> and <body> hold every word on the page between them, and
+      // "deepest wins" only sorts them last -- it doesn't stop them being
+      // the answer when nothing else matched.
+      if (el === document.documentElement || el === document.body) continue;
       if (!__ms.visible(el)) continue;
       const own = String(el.innerText || el.value || el.getAttribute("aria-label") || "").trim().toLowerCase();
       if (!own) continue;
@@ -497,10 +652,7 @@ const __ms = {
   // still works on its own terms.
   find(selector, text, exact) {
     if (!selector) return __ms.byText(text, exact);
-    let els = [];
-    try {
-      els = [...document.querySelectorAll(selector)].filter(__ms.visible);
-    } catch (err) { /* invalid selector: fall through to the label */ }
+    const els = __ms.queryAll(selector).filter(__ms.visible);
     if (text) {
       const want = String(text).trim().toLowerCase();
       const matches = els.filter((el) => {
@@ -574,7 +726,13 @@ def _locate(page: dict, selector: str, text: str, exact: bool, timeout_ms: int,
         "for (let i = 0; i < 12 && !hit; i++) {"
         "  await new Promise((res) => setTimeout(res, 60));"
         "  r = el.getBoundingClientRect();"
-        "  const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);"
+        # elementFromPoint on the document returns the shadow *host*,
+        # which contains() then disagrees with -- a shadow tree is a
+        # separate tree, so a perfectly clickable element reports itself
+        # covered. Each shadow root answers for its own contents.
+        "  const scope = el.getRootNode();"
+        "  const from = scope.elementFromPoint ? scope : document;"
+        "  const at = from.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);"
         "  hit = !!at && (at === el || el.contains(at) || at.contains(el));"
         "}"
         "return { ok: true, hit, x: r.left + r.width / 2, y: r.top + r.height / 2,"
@@ -588,6 +746,40 @@ def _locate(page: dict, selector: str, text: str, exact: bool, timeout_ms: int,
             what += f" (match #{match_index + 1})"
         raise RuntimeError(f"Nothing matching {what} appeared on the page within {timeout_ms}ms.")
     return result
+
+
+def drop_files(page: dict, paths, selector: str = "", text: str = "",
+               exact: bool = False, timeout_ms: int = 10000, match_index: int = 0) -> dict:
+    """Drops files onto an element, as if they were dragged from Explorer.
+
+    The other way in is `upload_files`, which needs an `<input type=file>`
+    in the page. Plenty of drop zones don't have one: the button beside
+    them builds an input in JavaScript, clicks it to raise Windows' own
+    picker, and never puts it in the document -- so there is nothing for a
+    selector to find, and the only route left is the drop itself.
+
+    Chrome will synthesise that: a drag carrying real paths, which the page
+    receives as ordinary File objects on `dataTransfer.files`. It cannot
+    tell this apart from a drag off the desktop. The three events go down
+    one socket because a drag is a sequence, not three unrelated pokes."""
+    paths = [str(p) for p in paths]
+    if not paths:
+        raise RuntimeError("No file given to drop.")
+    spot = _locate(page, selector or "body", text, exact, timeout_ms, match_index)
+    data = {"items": [], "files": paths, "dragOperationsMask": 1}
+
+    def drag(call):
+        for kind in ("dragEnter", "dragOver", "drop"):
+            call("Input.dispatchDragEvent",
+                 {"type": kind, "x": spot["x"], "y": spot["y"], "data": data})
+
+    try:
+        _conversation(page, drag)
+    except RuntimeError as exc:
+        # Worth naming: the parameter is behind a flag in some builds, and
+        # "unknown command" tells you nothing about which command.
+        raise RuntimeError(f"This Chrome would not accept a synthesised file drop ({exc}).")
+    return {"tag": spot.get("tag"), "label": spot.get("label"), "names": paths}
 
 
 def hover(page: dict, selector: str = "", text: str = "", exact: bool = False,
@@ -624,7 +816,7 @@ def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
     if not spot.get("hit"):
         # The point doesn't resolve back to the element -- something is
         # over it, or it is still moving. Dispatch on the node itself.
-        return _dispatch_click(page, selector, text, exact, button)
+        return dict(_dispatch_click(page, selector, text, exact, button), covered=True)
     try:
         # Browser-level input, not a dispatched DOM event: it carries
         # isTrusted, it moves the pointer first (so hover state settles
@@ -641,7 +833,7 @@ def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
     except RuntimeError:
         # Some pages tear down and rebuild between locate and press; the
         # DOM-event path doesn't depend on coordinates staying valid.
-        return _dispatch_click(page, selector, text, exact, button)
+        return dict(_dispatch_click(page, selector, text, exact, button), covered=True)
 
 
 def _locate_reopening(page: dict, selector: str, text: str, exact: bool, timeout_ms: int,
@@ -728,7 +920,7 @@ def type_text(page: dict, selector: str, value: str, submit: bool = False) -> di
     args = json.dumps({"selector": selector, "value": value, "submit": submit})
     result = evaluate(page, _js(
         "const a = " + args + ";"
-        "const el = document.querySelector(a.selector);"
+        "const el = __ms.query(a.selector);"
         "if (!el) return { ok: false };"
         "el.focus();"
         # React and friends track the last value they set themselves, so
@@ -746,6 +938,104 @@ def type_text(page: dict, selector: str, value: str, submit: bool = False) -> di
     if not result or not result.get("ok"):
         raise RuntimeError(f'No element matched selector "{selector}" to type into.')
     return result
+
+
+# Marks the one input the files are going to, so the DOM-domain lookup
+# that follows lands on that exact node instead of repeating the guess.
+_UPLOAD_MARK = "data-macro-studio-upload"
+
+
+def upload_files(page: dict, paths: list, selector: str = "", timeout_ms: int = 10000,
+                 match_index: int = 0) -> dict:
+    """Hands files straight to a file input -- no file picker ever opens.
+
+    A page's upload control is almost never the input itself: the input is
+    `display:none` behind a styled button or a label. Clicking that button
+    opens Windows' own Open dialog, and driving a dialog means typing a
+    path into a window that appears whenever it appears, which is the part
+    that breaks. Setting the input's file list over CDP skips the dialog
+    entirely, so there is nothing left to race.
+
+    The lookup deliberately doesn't go through the visible-element finder:
+    a hidden input is the normal case here, not a broken one. Whatever the
+    selector matches is resolved to the file input it stands for -- the
+    element itself, one inside it, or the one a `<label for>` points at."""
+    if not paths:
+        raise RuntimeError("No file given to upload.")
+    selector = selector or "input[type=file]"
+    args = json.dumps({"selector": selector, "timeout": max(0, timeout_ms),
+                       "index": max(0, match_index), "mark": _UPLOAD_MARK})
+    found = evaluate(page, _js(
+        "const a = " + args + ";"
+        "const all = () => __ms.queryAll(a.selector);"
+        "const els = await __ms.poll(() => { const l = all(); return l.length > a.index ? l : null; }, a.timeout);"
+        "if (!els) return { ok: false };"
+        "let el = els[a.index];"
+        "const isFile = (n) => !!n && n.tagName === 'INPUT' && n.type === 'file';"
+        "if (!isFile(el)) {"
+        "  const label = el.closest('label');"
+        "  let found = el.querySelector('input[type=file]')"
+        "    || (el.htmlFor ? document.getElementById(el.htmlFor) : null)"
+        "    || (label ? label.control : null);"
+        # A styled button and the real input are usually siblings inside the
+        # same small wrapper, so a couple of levels up is worth a look. It
+        # stops short of <body> deliberately: from there every element on the
+        # page "contains" every input, and the step would attach the file to
+        # whichever one happened to be first.
+        "  let up = el.parentElement;"
+        "  for (let i = 0; !isFile(found) && i < 3 && up && up.tagName !== 'BODY' && up.tagName !== 'HTML'; i++) {"
+        "    found = up.querySelector('input[type=file]');"
+        "    up = up.parentElement;"
+        "  }"
+        "  el = found;"
+        "}"
+        "if (!isFile(el)) return { ok: false, wrong: true };"
+        "__ms.queryAll('[' + a.mark + ']').forEach((n) => n.removeAttribute(a.mark));"
+        "el.setAttribute(a.mark, '1');"
+        "return { ok: true, multiple: !!el.multiple };"
+    ), timeout=max(_WS_TIMEOUT, timeout_ms / 1000.0 + 5))
+    if not found or not found.get("ok"):
+        if found and found.get("wrong"):
+            raise RuntimeError(f'"{selector}" matched something on the page, but it is not an upload '
+                               "field and doesn't contain one.")
+        raise RuntimeError(f'No upload field matching "{selector}" appeared within {timeout_ms}ms.')
+    def attach(call):
+        # By object handle rather than by node id: DOM.querySelector does
+        # not reach into a shadow root, and on a page built out of custom
+        # elements the input is always inside one. Evaluating for the
+        # marked element hands back the node itself, which
+        # DOM.setFileInputFiles takes just as happily -- and the handle is
+        # only valid on this connection, which is why both calls share it.
+        found = call("Runtime.evaluate", {
+            "expression": _js("return __ms.query('[" + _UPLOAD_MARK + "]');"),
+            "awaitPromise": True,
+        })
+        node = (found.get("result") or {}).get("objectId")
+        if not node:
+            raise RuntimeError("The upload field went away before the files could be attached.")
+        # Chrome dispatches the field's own input and change events for
+        # this, which is what starts the upload -- the page can't tell the
+        # difference between this and someone picking the file by hand.
+        call("DOM.setFileInputFiles", {"objectId": node, "files": [str(p) for p in paths]})
+
+    try:
+        if len(paths) > 1 and not found.get("multiple"):
+            raise RuntimeError(f"That upload field takes one file at a time, and {len(paths)} were given.")
+        _conversation(page, attach)
+        names = evaluate(page, _js(
+            "const el = __ms.query('[" + _UPLOAD_MARK + "]');"
+            "return el && el.files ? [...el.files].map((f) => f.name) : [];"
+        )) or []
+    finally:
+        try:
+            evaluate(page, _js(
+                "__ms.queryAll('[" + _UPLOAD_MARK + "]')"
+                "  .forEach((n) => n.removeAttribute('" + _UPLOAD_MARK + "'));"
+                "return true;"
+            ))
+        except RuntimeError:
+            pass  # the mark is inert, and the page may have navigated away
+    return {"names": names}
 
 
 def wait_for(page: dict, selector: str = "", text: str = "", exact: bool = False,
@@ -766,7 +1056,7 @@ def read_text(page: dict, selector: str) -> str:
     args = json.dumps({"selector": selector})
     result = evaluate(page, _js(
         "const a = " + args + ";"
-        "const el = document.querySelector(a.selector);"
+        "const el = __ms.query(a.selector);"
         "return el ? { ok: true, value: String(el.innerText || el.value || '').trim() } : { ok: false };"
     ))
     if not result or not result.get("ok"):
@@ -901,19 +1191,25 @@ def wait_loaded(page: dict, quiet_ms: int = 800, timeout_ms: int = 30000,
         "      count = now; seenMutations = mutations; since = Date.now();"
         "    }"
         "    const held = Date.now() - started >= a.min;"
-        "    if (held && document.readyState === 'complete' && Date.now() - since >= a.quiet) {"
-        "      return { ok: true, resources: now, mutations: mutations, waited: Date.now() - started };"
+        "    const quiet = Date.now() - since >= a.quiet;"
+        # 'interactive' means the document is parsed and usable; only
+        # subresources are outstanding, and this page has been still for
+        # the quiet stretch regardless of what they are doing.
+        "    const usable = document.readyState === 'complete' || document.readyState === 'interactive';"
+        "    if (held && usable && quiet) {"
+        "      return { ok: true, resources: now, mutations: mutations,"
+        "               waited: Date.now() - started, state: document.readyState };"
         "    }"
         "    await new Promise((r) => setTimeout(r, 150));"
         "  }"
-        "  return { ok: false, resources: count, waited: Date.now() - started,"
-        "           state: document.readyState };"
+        "  return { ok: false, resources: count, mutations: mutations,"
+        "           waited: Date.now() - started, state: document.readyState };"
         "} finally { observer.disconnect(); }"
     ), timeout=max(_WS_TIMEOUT, timeout_ms / 1000.0 + 10))
     if not result or not result.get("ok"):
         state = (result or {}).get("state", "unknown")
         raise RuntimeError(
-            f"The page was still loading after {timeout_ms}ms (readyState {state}). "
+            f"The page never stopped changing in {timeout_ms}ms (readyState {state}). "
             "Give it a longer timeout, or wait for something on it instead."
         )
     return result
