@@ -2648,10 +2648,17 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <p class="hint" id="bundleOrdersInfo" style="margin:0 0 10px;" hidden>The day's order
         export, PDF or spreadsheet. Only the lines that are combinations are kept — what they
         hold, and how many of each, so packing knows what to put in the box. Each file uploaded
-        is an order of its own under Pending — orders already there are left alone. Which shop
+        is an order of its own under Pending — drop as many as you have and they are read
+        one after another; orders already there are left alone. Which shop
         an order belongs to is its file name: <b>PT</b> in the name is Plant Talks, anything
         else is PartyMonkey, and its lines are matched against that shop's list alone.</p>
       <button class="btn-primary" id="bundleOrdersBtn" style="width:100%;">⬆ Upload today's orders</button>
+      <!-- A real input in the page rather than one made on the fly, the same
+           way the pick list keeps its own: a file picker built in JavaScript
+           and never added to the document is invisible to anything but a
+           person with a mouse, which puts the morning's upload out of reach
+           of Macro Studio. Behaviour is identical either way. -->
+      <input type="file" id="bundleOrdersFile" accept=".pdf,.xlsx,.xls,.csv" multiple hidden/>
       <div id="bundleOrdersMsg"></div>
 
       <p class="hint" id="bundleOrdersOut" style="margin:10px 0 0;"></p>
@@ -2687,7 +2694,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         BigSeller — every combination with the sub-SKUs inside it. Uploading <b>adds what is
         new and updates what it names</b>; combinations not in the file are left alone, so a
         file of five is five, not a new catalogue. A file belongs to the card it is dropped on,
-        and nothing it says can reach Plant Talks' list. A PartyMonkey order packs
+        and nothing it says can reach Plant Talks' list. A list exported in parts can be
+        dropped here as several files at once, each read in turn. A PartyMonkey order packs
         <b>combinations only</b> — a row that names a SKU and nothing else stays on the list
         below but is never made into a bundle, because it is picked off a shelf rather than
         packed out of pieces. Delete a line from the list below when it has really gone.</p>
@@ -7148,8 +7156,10 @@ async function bundleTakeCatalogue(file,shop){
         +(alone?` ${alone} had no sub-SKUs and ${alone===1?'is':'are'} kept as `
           +`${alone===1?'itself':'themselves'}, one piece each.`:''),true);
       await refreshBundles();
+      return true;
     }catch(e){
       showMsg(msg,'Could not take that file in: '+escapeHtml(e.message||String(e)),false);
+      return false;
     }finally{
       btn.disabled=false; btn.textContent=label;
     }
@@ -7333,8 +7343,10 @@ async function bundleTakeOrders(file){
         : `No line on that file names a ${bundleShopName(shop)} combination -- `
           +`${lines} lines read.`,
         !!bundleToday.length);
+      return true;
     }catch(e){
       showMsg(msg,'Could not read that file: '+escapeHtml(e.message||String(e)),false);
+      return false;
     }finally{
       btn.disabled=false; btn.textContent=label;
     }
@@ -7345,13 +7357,32 @@ async function bundleTakeOrders(file){
 // it, and neither is more the real way in than the other. The card lights up
 // while something is over it, because a drop that lands on nothing looks
 // exactly like a drop that failed.
-function bundleFilePicker(accept,take){
+// A morning arrives as a handful of files rather than one -- a shop that
+// exports its list in parts, or an order file for each shop -- so a card takes
+// as many as are handed to it. They are read one after another rather than
+// together: the card has one message and one button, and both belong to the
+// file being read. The last word is about the set, because the message of the
+// third file says nothing about whether the first went in.
+async function bundleTakeEach(files,take,msgId){
+  const list=[...(files||[])];
+  if(!list.length) return;
+  if(list.length===1){ await take(list[0]); return; }
+  const failed=[];
+  for(const f of list){ if(!(await take(f))) failed.push(f.name); }
+  const msg=msgId&&document.getElementById(msgId);
+  if(!msg) return;
+  showMsg(msg,failed.length
+    ? `${list.length-failed.length} of ${list.length} files went in — `
+      +`${escapeHtml(failed.join(', '))} did not.`
+    : `✓ All ${list.length} files went in.`,!failed.length);
+}
+function bundleFilePicker(accept,take,msgId){
   const inp=document.createElement('input');
-  inp.type='file'; inp.accept=accept;
-  inp.onchange=()=>{ const f=inp.files[0]; if(f) take(f); };
+  inp.type='file'; inp.accept=accept; inp.multiple=true;
+  inp.onchange=()=>bundleTakeEach(inp.files,take,msgId);
   inp.click();
 }
-function bundleDropZone(cardId,accept,take){
+function bundleDropZone(cardId,accept,take,msgId){
   const card=document.getElementById(cardId);
   if(!card) return;
   ['dragenter','dragover'].forEach(ev=>card.addEventListener(ev,e=>{
@@ -7362,8 +7393,8 @@ function bundleDropZone(cardId,accept,take){
     e.preventDefault(); card.classList.remove('over');
   }));
   card.addEventListener('drop',e=>{
-    const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];
-    if(f) take(f);
+    const files=e.dataTransfer&&e.dataTransfer.files;
+    if(files&&files.length) bundleTakeEach(files,take,msgId);
   });
 }
 // The sentence that helps on the first day is in the way on the second, so a
@@ -7378,8 +7409,8 @@ document.querySelectorAll('[data-info]').forEach(dot=>{
 });
 BUNDLE_SHOP_CARDS.forEach(c=>{
   document.getElementById(c.btn).addEventListener('click',()=>
-    bundleFilePicker('.xlsx,.xls,.csv',f=>bundleTakeCatalogue(f,c.shop)));
-  bundleDropZone(c.card,'.xlsx,.xls,.csv',f=>bundleTakeCatalogue(f,c.shop));
+    bundleFilePicker('.xlsx,.xls,.csv',f=>bundleTakeCatalogue(f,c.shop),c.msg));
+  bundleDropZone(c.card,'.xlsx,.xls,.csv',f=>bundleTakeCatalogue(f,c.shop),c.msg);
 });
 // The file the two cards above read, empty. The header row is spelled the way
 // the reader spells it, so a filled-in copy goes back in without a rename, and
@@ -7418,9 +7449,13 @@ document.getElementById('bundleTemplateBtn').addEventListener('click',()=>{
     showMsg(msg,'Could not build the template: '+escapeHtml(e.message||String(e)),false);
   }
 });
-document.getElementById('bundleOrdersBtn').addEventListener('click',()=>
-  bundleFilePicker('.pdf,.xlsx,.xls,.csv',bundleTakeOrders));
-bundleDropZone('bundleOrdersCard','.pdf,.xlsx,.xls,.csv',bundleTakeOrders);
+const bundleOrdersFile=document.getElementById('bundleOrdersFile');
+document.getElementById('bundleOrdersBtn').addEventListener('click',()=>bundleOrdersFile.click());
+bundleOrdersFile.addEventListener('change',e=>{
+  bundleTakeEach(e.target.files,bundleTakeOrders,'bundleOrdersMsg');
+  e.target.value='';                       // so the same file can go in twice
+});
+bundleDropZone('bundleOrdersCard','.pdf,.xlsx,.xls,.csv',bundleTakeOrders,'bundleOrdersMsg');
 document.getElementById('bundleSettingsBtn').addEventListener('click',()=>
   showScreen('bundle-settings'));
 
