@@ -4776,7 +4776,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <button class="req-x" id="mcPlanClose" title="Close" aria-label="Close">×</button>
     <div class="sheet-title">Ready to download</div>
     <p class="hint" style="margin:0 0 4px;">Every file this batch would produce, in the
-      order it is written. Tap one to see the sheet it makes before any of it is saved.</p>
+      order it is written. Tap <b>Look</b> to see the sheet one makes before any of it is
+      saved, and <b>⬇</b> beside it to save that file on its own — for the one sheet
+      wanted again after the rest are already in the folder.</p>
     <div id="mcPlanList"></div>
     <div class="mc-made-stage mc-plan-stage" id="mcPlanStage" style="display:none;">
       <canvas id="mcPlanCanvas"></canvas>
@@ -25528,11 +25530,46 @@ function mcRenderPlan(){
         <span class="mc-sum-sku">${escapeHtml(e.name)}</span>
         <span class="mc-sum-name">${escapeHtml(e.what)}</span>
       </span>
-      <button type="button" class="btn-outline" data-mc-plan="${i}">${
-        i===mcPlanAt?'Showing':'Look'}</button>
+      <button type="button" class="btn-outline" data-mc-plan="${i}"${
+        mcBusy?' disabled':''}>${i===mcPlanAt?'Showing':'Look'}</button>
+      <button type="button" class="btn-outline" data-mc-dl="${i}"${
+        mcBusy?' disabled':''} title="Save this one file"
+        aria-label="Download ${escapeHtml(e.name)}">⬇</button>
     </div>`).join('');
-  document.getElementById('mcPlanDownload').textContent=
-    `⬇ Download all ${mcPlan.length} file${mcPlan.length===1?'':'s'}`;
+  const all=document.getElementById('mcPlanDownload');
+  all.disabled=mcBusy;
+  all.textContent=`⬇ Download all ${mcPlan.length} file${mcPlan.length===1?'':'s'}`;
+}
+// One file at a time, off the same list Download All reads. A morning is
+// rarely wrong all over — it is the one sheet that came out short, wanted
+// again after the rest are already in the folder — so every row carries the
+// button for its own file and nothing else is re-rendered or re-saved.
+async function mcDownloadPlanEntry(i){
+  const e=mcPlan[i]; if(!e||mcBusy||mcPlanDrawing) return;
+  const msg=document.getElementById('mcPlanMsg');
+  const dir=await exportFolderReady(true);       // first, while the tap is still ours
+  mcBusy=true; mcSyncBatchButtons(); mcRenderPlan();
+  showMsg(msg,'Rendering at print resolution…',true);
+  await new Promise(r=>setTimeout(r));           // let that message actually paint
+  try{
+    await mcWinCommitAndPark();
+    await mcBorrowBuilder(async()=>{
+      const bytes=e.kind==='line'
+        ? await mcRenderLine(e.it,e.side)
+        : await MC_TILES[e.tile].make(e);
+      await mcPut(dir,e.name,bytes);
+    });
+    // marked exported the way the whole run marks them, so a line fetched on
+    // its own is not asked for again by the batch it came from
+    for(const it of e.set){
+      it.exported_at=new Date().toISOString();
+      await mcSave(it,{exported_at:it.exported_at});
+    }
+    mcRenderItems();
+    showMsg(msg,`✓ ${escapeHtml(e.name)} ${dir?'saved into '+escapeHtml(dir.name):'downloaded'}`,true);
+  }catch(err){
+    showMsg(msg,'Export failed: '+((err&&err.message)||'unknown error'),false);
+  }finally{ mcBusy=false; mcSyncBatchButtons(); mcExportFolderLbl(); mcRenderPlan(); }
 }
 // Drawn through the same code the export uses, on the builder lent for the
 // length of the look and given straight back. The page count comes back from
@@ -25589,6 +25626,8 @@ document.getElementById('mcPlanPrev').addEventListener('click',()=>
 document.getElementById('mcPlanNext').addEventListener('click',()=>
   mcShowPlanEntry(mcPlanAt,mcPlanPage+1));
 document.getElementById('mcPlanList').addEventListener('click',e=>{
+  const d=e.target.closest('[data-mc-dl]');
+  if(d){ mcDownloadPlanEntry(Number(d.dataset.mcDl)); return; }
   const b=e.target.closest('[data-mc-plan]'); if(!b) return;
   mcShowPlanEntry(Number(b.dataset.mcPlan));
 });
