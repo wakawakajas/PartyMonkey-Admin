@@ -1858,6 +1858,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   border:1px solid var(--border-strong);background:transparent;color:var(--muted);}
 .mc-line-acts button[data-mc-create]{color:var(--french);border-color:var(--french);}
 .mc-line-acts button[data-mc-pdf]{color:var(--muted);}
+/* extras are the one figure on a line the customer did not ask for, so the
+   button that adds them wears the same colour as the count it changes */
+.mc-line-acts button[data-mc-extra]{color:var(--amber);border-color:var(--amber);}
+.mc-line-acts button[data-mc-extra].has{background:var(--amber);color:var(--lime-ink);}
 .mc-line-acts button[data-mc-ok]{color:var(--blueprint);border-color:var(--blueprint);}
 .mc-line.is-done .mc-line-acts button[data-mc-ok]{background:var(--blueprint);
   color:var(--lime-ink);}
@@ -1871,10 +1875,15 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* the title's own row, so the summary button sits beside it rather than
    pushing it onto a line of its own */
 .mc-batch-head{display:flex;align-items:center;justify-content:space-between;
-  gap:10px;}
+  gap:10px;flex-wrap:wrap;}
 .mc-batch-head h1{margin:0;min-width:0;}
 .mc-batch-head .btn-outline{flex:0 0 auto;width:auto;height:36px;padding:0 13px;
   font-size:12.5px;}
+/* a button that has opened something stays lit while it is open, so the box
+   below the head is accounted for rather than mysterious */
+.mc-batch-head .btn-outline.on{border-color:var(--blueprint);color:var(--blueprint);}
+/* .pl-find is shaped for a flex row; here it is the whole width of the list */
+#mcFindBox{display:block;width:100%;flex:none;margin:0 0 10px;}
 
 /* Every line on the batch, added up by SKU rather than by order — what to
    pull off the shelf, not what it is going out to. */
@@ -3828,9 +3837,20 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="eyebrow">MAGIC CREATE</div>
     <div class="mc-batch-head">
       <h1 id="mcBatchTitle">Batch</h1>
+      <!-- Two hundred lines is a scroll; the order somebody is holding in their
+           hand is a search. It sits beside the summary because both are ways of
+           asking the batch a question rather than working it. -->
+      <button type="button" class="btn-outline" id="mcFindBtn" aria-expanded="false"
+              title="Find an order, a buyer or a SKU on this batch">&#128269; Find</button>
+      <button type="button" class="btn-outline" id="mcShareBtn"
+              title="Put another open batch's lines on the same sheets as this one">&#8646; Shared sheet</button>
       <button type="button" class="btn-outline" id="mcSummaryBtn">SKU summary</button>
     </div>
     <p class="sub" id="mcBatchSub"></p>
+    <input type="text" id="mcFindBox" class="pl-find" style="display:none;"
+           placeholder="&#128269; Order no, buyer, SKU or the words on it" autocomplete="off"
+           aria-label="Find a line on this batch"/>
+    <p class="hint" id="mcShareLbl" style="margin:0 0 10px;display:none;"></p>
 
     <div class="seg" id="mcFilter" style="margin-bottom:12px;">
       <button type="button" class="on" data-mc-filter="all">All</button>
@@ -4698,6 +4718,28 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   </div>
 </div>
 
+<!-- ---- Magic Create: another open batch's lines, onto this batch's sheets ---- -->
+<div class="sheet-bg" id="mcShareSheet">
+  <div class="sheet">
+    <button class="req-x" id="mcShareClose" title="Close" aria-label="Close">&times;</button>
+    <div class="sheet-title">Shared sheet</div>
+    <p class="hint" style="margin:0 0 4px;">Two order sheets in one morning ask for the
+      same cards on the same paper, and running each on its own half-empty sheet throws
+      the other half away. Share with another open batch and this batch's sheets — and the
+      PDFs <b>Download All</b> writes — are built out of both.</p>
+    <p class="hint" style="margin:0 0 8px;">Every open batch shares by default, so a sheet
+      built here is already as full as the morning allows. Press <b>Stop sharing</b> on any
+      of them to leave it out, and that is remembered for this batch — a batch left out
+      stays left out, and one made afterwards joins on its own.</p>
+    <p class="hint" style="margin:0 0 8px;">Every line stays on the batch it came in on:
+      it is ticked there, deleted there, and marked exported there. This says what goes on
+      the sheet, not what belongs to whom. It is remembered for this batch on this device
+      alone, so nobody else's screen changes.</p>
+    <div id="mcShareMsg"></div>
+    <div id="mcShareBody"></div>
+  </div>
+</div>
+
 <!-- ---- Magic Create: what Download All would produce, before it does ---- -->
 <div class="sheet-bg" id="mcPlanSheet">
   <div class="sheet">
@@ -5383,8 +5425,9 @@ function renderSide(side,canvas,maxDim,opts){
 
   // order ID is anchored to the physical sheet corner, not the shift —
   // and once a job runs to several sheets it says which one this is, or a
-  // stack of them off the printer cannot be told apart
-  if(state.orderId){
+  // stack of them off the printer cannot be told apart. On screen only: the
+  // exported PDF is the artwork itself, and a job number does not belong on it
+  if(!opts.forExport && state.orderId){
     const sheets=sheetCount();
     const tag=state.orderId+(sheets>1?`  ·  sheet ${(opts.page||0)+1}/${sheets}`:'');
     ctx.save();
@@ -24339,11 +24382,18 @@ const MC_FIELDS=[
 ];
 const MC_CHUNK=100;              // rows per insert; one big write times out
 let mcBatches=[], mcTab='open', mcCounts={};
-let mcBatch=null, mcItems=[], mcFilter='all';
+let mcBatch=null, mcItems=[], mcFilter='all', mcFind='';
+// Another open batch's lines, lent to this one's sheets. See mcShareRestore
+// below: the lines are read, laid out and exported here, and stay theirs.
+let mcShareIds=[], mcShared=[];
 let mcChannel=null, mcPurged=false, mcMyId=null, mcPending=null;
 let mcBusy=false;                // an export is running; nothing else may start
 
-const mcItem=id=>mcItems.find(i=>i.id===id);
+// this batch's lines, and any lent to it by another open batch. A shared line
+// is laid out, exported and marked exactly like one of ours — it simply lives
+// on somebody else's batch, which is why it is never in the list on screen.
+const mcPool=()=>mcShared.length?mcItems.concat(mcShared):mcItems;
+const mcItem=id=>mcItems.find(i=>i.id===id)||mcShared.find(i=>i.id===id)||null;
 // "in 2 days", "tomorrow" — the number of sleeps left, which is what somebody
 // deciding whether to look at it again actually wants
 function mcDaysLeftWord(at){
@@ -24410,6 +24460,22 @@ const MC_TILES={
     preview:(e,c,dim,page)=>mcPrintPreview(e.set,e.meta&&e.meta.template,c,dim,page)
   }
 };
+// Spares, a reprint, one that came out of the machine wrong. What the customer
+// ordered stays the figure on the line and the extras are their own number
+// beside it — fold them together and a line quietly reads as an order for more
+// than was asked for. They are kept on the sheet_item, where everything else
+// about how this line prints already lives. Rows written before there was an
+// `extra_qty` said the same thing by carrying a bigger qty than the order, so
+// that is still read as extras rather than being lost.
+const mcExtra=it=>{
+  const si=(it&&it.sheet_item)||{};
+  const said=Number(si.extra_qty);
+  if(isFinite(said)&&said>0) return Math.round(said);
+  if(isFinite(said)&&said===0) return 0;
+  return Math.max(0,Math.round((Number(si.qty)||0)-(Number(it&&it.qty)||0)));
+};
+// what this line puts on the sheet: the order, plus whatever was added on top
+const mcQty=it=>Math.max(0,Math.round(Number(it&&it.qty)||0))+mcExtra(it);
 const mcTile=it=>(it&&it.tile&&MC_TILES[it.tile])||null;
 const mcReady=it=>{ const t=mcTile(it); return !!(t&&t.ready(it)); };
 // Every page a line can be built on, flattened into one list for the picker.
@@ -24745,7 +24811,12 @@ async function mcOpenBatch(){
   await mcWhoAmI();
   document.getElementById('mcBatchTitle').textContent=mcBatch.title;
   mcExportFolderLbl();
+  // a search is one person's question about one visit; it does not follow the
+  // next batch in, where it would silently hide most of it
+  mcFind=''; document.getElementById('mcFindBox').value=''; mcFindShow(false);
   await mcLoadItems();
+  // and what this batch was last told to share its sheets with
+  await mcShareRestore();
   // the shop's routing is read once a batch is open, so the summary and the
   // Routing sheet are both answering out of the same list
   mcRoutesLoad().catch(()=>{});
@@ -24789,11 +24860,22 @@ function mcRenderItems(){
     return;
   }
   const keep=it=>mcFilter==='all'||(mcFilter==='done'?!!it.status:!it.status);
+  // What somebody is holding is an order slip, a name, or a card, so all three
+  // are searched at once. An order whose own number or buyer matches keeps
+  // every line it has — found by its number, it is wanted whole.
+  const q=mcFind.trim().toLowerCase();
+  const has=v=>String(v||'').toLowerCase().includes(q);
+  const lineHit=it=>has(it.sku)||has(it.design_name)||has(it.product)||has(it.message);
   const groups=mcGroups()
-    .map(g=>({...g,shown:g.items.filter(keep)}))
+    .map(g=>{
+      const whole=!q||has(g.order_id)||g.items.some(i=>has(i.buyer));
+      return {...g,shown:g.items.filter(it=>keep(it)&&(whole||lineHit(it)))};
+    })
     .filter(g=>g.shown.length);
   if(!groups.length){
-    el.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing here under that filter —</p>';
+    el.innerHTML='<p class="hint" style="margin:4px 0 0;">— '+(q
+      ?'nothing on this batch matches “'+escapeHtml(mcFind.trim())+'”'
+      :'nothing here under that filter')+' —</p>';
     return;
   }
   el.innerHTML=groups.map(g=>{
@@ -24819,6 +24901,7 @@ function mcRenderItems(){
 }
 function mcLineHtml(it){
   const t=mcTile(it);
+  const more=mcExtra(it);
   const shot=it.image_url
     ? `<img class="mc-shot" src="${escapeHtml(it.image_url)}" alt="" loading="lazy"
          referrerpolicy="no-referrer"/>`
@@ -24841,13 +24924,18 @@ function mcLineHtml(it){
       ${it.message?`<span class="mc-line-msg">“${escapeHtml(it.message)}”</span>`:''}
       ${tag}
     </span>
-    <span class="mc-qty">${it.qty}${(()=>{
-      const more=Math.max(0,(Number((it.sheet_item||{}).qty)||0)-(Number(it.qty)||0));
-      return more?`<span class="mc-qty-more">+${more}</span>`:'';
-    })()}</span>
+    <span class="mc-qty">${it.qty}${more
+      ? `<span class="mc-qty-more" title="${more} extra on top of the ${it.qty} ordered — `
+        +`${mcQty(it)} in all">Extra ${more}</span>` : ''}</span>
     <span class="mc-line-acts">
       <button type="button" data-mc-create="${it.id}"
         title="Pick a print tile and work this line">Create</button>
+      <button type="button" data-mc-extra="${it.id}"${more?' class="has"':''}
+        title="${more?`${more} extra on top of the ${it.qty} ordered — ${mcQty(it)} in all. `
+                     +'Press to change or clear them.'
+                    :'Print more than the order asks for — spares, a reprint, or one that '
+                     +'came out of the machine wrong'}">${
+        more?`Extra ${more}`:'Add Extra'}</button>
       ${pdf}
       <button type="button" data-mc-ok="${it.id}"
         title="${it.status?'Mark this line as not done':'Mark this line done'}">${it.status?'Done':'OK'}</button>
@@ -24857,8 +24945,11 @@ function mcLineHtml(it){
 // One row back, rather than the table: a full redraw loses the scroll and,
 // on a tablet, the operator's place in two hundred lines.
 function mcRepaintRow(it){
+  if(!it) return;
   const row=document.querySelector(`[data-mc-row="${it.id}"]`);
-  if(!row){ mcRenderItems(); return; }
+  // a line lent by another batch is worked here but listed there — there is no
+  // row of its own to repaint, and redrawing this batch's list says nothing
+  if(!row){ if(!mcShared.some(x=>x.id===it.id)) mcRenderItems(); return; }
   const holder=document.createElement('div');
   holder.innerHTML=mcLineHtml(it);
   row.replaceWith(holder.firstElementChild);
@@ -24883,6 +24974,160 @@ document.getElementById('mcFilter').addEventListener('click',e=>{
     .forEach(x=>x.classList.toggle('on',x.dataset.mcFilter===mcFilter));
   mcRenderItems();
 });
+// The box is not there until it is asked for: a batch is worked by scrolling,
+// and a search box standing above the list is one more thing between the
+// operator and the lines. Pressing again puts it away and gives the list back
+// whole, so a search left on cannot hide half a batch from the next person.
+function mcFindShow(on){
+  const box=document.getElementById('mcFindBox');
+  const btn=document.getElementById('mcFindBtn');
+  if(!box||!btn) return;
+  box.style.display=on?'':'none';
+  btn.setAttribute('aria-expanded',on?'true':'false');
+  btn.classList.toggle('on',!!on);
+  if(on){ box.focus(); box.select(); return; }
+  if(mcFind){ mcFind=''; box.value=''; mcRenderItems(); }
+}
+document.getElementById('mcFindBtn').addEventListener('click',()=>
+  mcFindShow(document.getElementById('mcFindBox').style.display==='none'));
+document.getElementById('mcFindBox').addEventListener('input',e=>{
+  mcFind=e.target.value; mcRenderItems();
+});
+document.getElementById('mcFindBox').addEventListener('keydown',e=>{
+  if(e.key==='Escape'){ e.preventDefault(); mcFindShow(false); }
+});
+
+// ---------- one sheet, more than one batch ----------
+// Two order sheets in a morning ask for the same cards on the same paper, and
+// a half-empty sheet run twice is half a sheet thrown away twice. A batch can
+// be told to take another open batch's lines onto its sheets: the layout, the
+// preview and the PDFs are built out of both. Nothing is written to the other
+// batch by saying so — its lines are read, laid out beside these, and marked
+// exported when they are, on their own rows.
+const mcShareKey=()=>'mc-share:'+((mcBatch&&mcBatch.id)||'');
+async function mcShareRestore(){
+  mcShareIds=[]; mcShared=[];
+  let said=null;
+  try{
+    const raw=JSON.parse(localStorage.getItem(mcShareKey())||'null');
+    if(Array.isArray(raw)) said=raw.filter(Boolean).map(String);          // the older shape
+    else if(raw&&Array.isArray(raw.ids)) said=raw.ids.filter(Boolean).map(String);
+  }catch(e){ said=null; }
+  if(said) mcShareIds=said;
+  else{
+    // Nobody has said anything about this batch yet, and the answer that
+    // wastes no paper is yes: a morning's second order sheet is the same cards
+    // on the same stock, and two half-empty sheets are half a sheet thrown
+    // away twice. So every other open batch shares until somebody says not to
+    // — and because nothing is written until they do, a batch created this
+    // afternoon joins by itself the next time this one is opened.
+    if(!(mcBatches||[]).length) await mcRefreshBatches().catch(()=>{});
+    mcShareIds=(mcBatches||[]).filter(b=>b.status==='open'
+      &&String(b.id)!==String(mcBatch&&mcBatch.id)).map(b=>String(b.id));
+  }
+  if(mcShareIds.length) await mcShareLoad();
+  mcShareSync();
+}
+async function mcShareLoad(){
+  mcShared=[];
+  if(!sb||!mcShareIds.length) return;
+  // only the lines that are on a sheet: the rest of another batch is nothing
+  // to do with this one's paper, and reading two hundred rows to lay out four
+  // is a wait for nothing
+  const {data,error}=await sb.from('magic_items').select('*')
+    .in('batch_id',mcShareIds).not('tile','is',null)
+    .order('sort_order',{ascending:true});
+  // a batch finished and swept three days later is not an error, it is simply
+  // not there any more — dropped for now rather than complained about, and not
+  // written down, so a connection that came back does not find it un-shared
+  if(error){ mcShareIds=[]; return; }
+  mcShared=(data||[]).filter(i=>String(i.batch_id)!==String(mcBatch&&mcBatch.id));
+}
+// Written even when it is empty: "share with nobody" is somebody's decision
+// and has to outlast the default, which is to share with everything open.
+function mcShareWrite(){
+  try{ localStorage.setItem(mcShareKey(),JSON.stringify({ids:mcShareIds})); }
+  catch(e){ /* a browser that will not remember it still shares for now */ }
+}
+function mcShareName(id){
+  const b=(mcBatches||[]).find(x=>String(x.id)===String(id));
+  return (b&&b.title)||'another batch';
+}
+function mcShareSync(){
+  const btn=document.getElementById('mcShareBtn');
+  const lbl=document.getElementById('mcShareLbl');
+  const n=mcShareIds.length;
+  if(btn){
+    btn.textContent=n?`⇆ Sharing with ${n}`:'⇆ Shared sheet';
+    btn.classList.toggle('on',!!n);
+  }
+  if(!lbl) return;
+  lbl.style.display=n?'':'none';
+  if(!n) return;
+  lbl.innerHTML='⇆ Sharing sheets with <b>'
+    +mcShareIds.map(id=>escapeHtml(mcShareName(id))).join('</b>, <b>')+'</b> — '
+    +mcShared.length+(mcShared.length===1
+      ?' line of theirs is on this batch’s sheets and goes into its PDFs.'
+      :' lines of theirs are on this batch’s sheets and go into its PDFs.');
+}
+async function mcOpenShare(){
+  const sheet=document.getElementById('mcShareSheet');
+  document.getElementById('mcShareMsg').innerHTML='';
+  document.getElementById('mcShareBody').innerHTML=
+    '<p class="hint" style="margin:4px 0 0;">Looking for other open batches…</p>';
+  sheet.classList.add('open');
+  await mcRefreshBatches().catch(()=>{});
+  mcRenderShare();
+}
+function mcRenderShare(){
+  const body=document.getElementById('mcShareBody'); if(!body) return;
+  const rows=(mcBatches||[]).filter(b=>b.status==='open'
+    &&String(b.id)!==String(mcBatch&&mcBatch.id));
+  if(!rows.length){
+    body.innerHTML='<p class="hint" style="margin:4px 0 0;">'
+      +'— there is no other open batch to share with —</p>';
+    return;
+  }
+  body.innerHTML=rows.map(b=>{
+    const on=mcShareIds.includes(String(b.id));
+    const c=mcCounts[b.id];
+    const when=new Date(b.created_at||Date.now()).toLocaleDateString();
+    return `<div class="mc-sum-row${on?' is-on':''}">
+      <span class="mc-sum-shot blank" aria-hidden="true">▤</span>
+      <span class="mc-sum-main">
+        <span class="mc-sum-sku">${escapeHtml(b.title||'Batch')}</span>
+        <span class="mc-sum-name">${escapeHtml(when)}${c?` · ${c.done} of ${c.total} done`:''}</span>
+      </span>
+      <button type="button" class="${on?'btn-danger':'btn-outline'}"
+        data-mc-share="${escapeHtml(String(b.id))}"
+        title="${on?'Stop putting this batch’s lines on our sheets'
+                   :'Put this batch’s lines on our sheets too'}">${
+        on?'Stop sharing':'Share'}</button>
+    </div>`;
+  }).join('');
+}
+document.getElementById('mcShareBtn').addEventListener('click',mcOpenShare);
+document.getElementById('mcShareClose').addEventListener('click',()=>
+  document.getElementById('mcShareSheet').classList.remove('open'));
+document.getElementById('mcShareSheet').addEventListener('click',e=>{
+  if(e.target.id==='mcShareSheet') e.currentTarget.classList.remove('open');
+});
+document.getElementById('mcShareBody').addEventListener('click',async e=>{
+  const b=e.target.closest('[data-mc-share]'); if(!b||b.disabled) return;
+  const msg=document.getElementById('mcShareMsg');
+  if(mcBusy){ showMsg(msg,'An export is running — wait for it to finish.',false); return; }
+  const id=String(b.dataset.mcShare);
+  const off=mcShareIds.includes(id);
+  mcShareIds=off?mcShareIds.filter(x=>x!==id):mcShareIds.concat(id);
+  mcShareWrite();
+  b.disabled=true; b.textContent=off?'Stopping…':'Reading…';
+  await mcShareLoad();
+  mcShareSync(); mcRenderShare(); mcSyncBatchButtons();
+  const mine=mcShared.filter(i=>String(i.batch_id)===id).length;
+  showMsg(msg,off?`${mcShareName(id)} is off these sheets.`
+    :`${mcShareName(id)} shares these sheets — ${mine} line${mine===1?'':'s'} of theirs `
+     +'on a sheet.',true);
+});
 // One listener for every line on the screen. Re-rendering a row then costs
 // nothing and leaves nothing bound to an element that has gone.
 document.getElementById('mcItems').addEventListener('click',async e=>{
@@ -24892,9 +25137,72 @@ document.getElementById('mcItems').addEventListener('click',async e=>{
   if(cr){ await mcWinOpen(cr.dataset.mcCreate); return; }
   const pd=e.target.closest('[data-mc-pdf]');
   if(pd){ await mcDownloadOne(pd.dataset.mcPdf); return; }
+  const ex=e.target.closest('[data-mc-extra]');
+  if(ex){ await mcAddExtra(ex.dataset.mcExtra); return; }
   const cl=e.target.closest('[data-mc-ord-clear]');
   if(cl&&!cl.disabled){ await mcClearOrder(cl.dataset.mcOrdClear); return; }
 });
+// More than the order asks for, said on the line rather than only inside the
+// window a line was built in — the machine spoils a tag while the batch is
+// being worked, and the person holding it is looking at the list. What was
+// ordered is never typed over: the extras are their own figure, and typing 0
+// takes them off again.
+async function mcAddExtra(id){
+  const it=mcItem(id); if(!it) return;
+  const out=document.getElementById('mcBatchMsg');
+  if(mcBatch&&mcBatch.status!=='open'){
+    showMsg(out,'This batch is completed — re-open it to change it.',false); return;
+  }
+  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
+  const had=mcExtra(it);
+  const typed=prompt(`How many extra${it.sku?' of '+it.sku:''}, on top of the `
+    +`${it.qty} ordered?\n\n`
+    +(had?`${had} extra at the moment — type the new figure, or 0 for none.`
+        :'Spares, a reprint, or one that came out of the machine wrong.'),
+    String(had||1));
+  if(typed===null) return;
+  const want=Math.floor(Number(typed));
+  if(!isFinite(want)||want<0){ showMsg(out,'That is not a number of pieces.',false); return; }
+  const si={...(it.sheet_item||{}),extra_qty:want};
+  // a line already on a sheet prints from what its sheet_item says, so the
+  // figure the sheet reads moves with the extras rather than a step behind
+  if(si.designId||si.path) si.qty=Math.max(1,(Number(it.qty)||0)+want);
+  const was=it.sheet_item;
+  it.sheet_item=si;
+  if(!await mcSave(it,{sheet_item:si})){ it.sheet_item=was; return; }
+  mcExtraToSheet(it);
+  mcRepaintRow(it);
+  if(typeof mcRenderSummary==='function') mcRenderSummary();
+  if(mcWinItem===it.id) mcWinRender();
+  showMsg(out,want
+    ? `${it.design_name||it.sku||'This line'} — ${want} extra, ${mcQty(it)} in all.`
+    : `${it.design_name||it.sku||'This line'} — extras cleared, back to the ${it.qty} ordered.`,
+    true);
+}
+// And onto the sheet in the builder, where this line may already be laid out.
+// The export reads the line either way; this is so somebody standing in front
+// of the sheet sees the change they just made instead of the figure it had.
+function mcExtraToSheet(it){
+  if(it.tile==='giftTag'){
+    const l=(typeof gtOrder!=='undefined'&&gtOrder||[])
+      .find(x=>String(x.id||'')==='mc-'+it.id);
+    if(!l) return;
+    l.qty=Math.max(1,mcQty(it));
+    if(typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
+    return;
+  }
+  if(it.tile!=='sheetPrint') return;
+  // the print sheet holds one line to a SKU, at the total every order of it
+  // adds up to, so the whole SKU is added up again rather than one row nudged
+  const line=(typeof mcLineForSku==='function')?mcLineForSku(it.sku):null;
+  if(!line) return;
+  const total=mcPool().filter(x=>x.tile==='sheetPrint'&&String(x.sku||'')===String(it.sku||''))
+    .reduce((n,x)=>n+Math.max(1,Math.round(Number((x.sheet_item||{}).qty)||mcQty(x)||1)),0);
+  if(!total) return;
+  line.qty=total;
+  state.page=0;
+  renderDesignLines(); refreshArtInputs(); drawAll();
+}
 // A whole order off the sheets. What goes is where it was put and the layout
 // it was given; the order itself stays on the batch, and artwork uploaded to a
 // line is a file somebody chose and is left where it is.
@@ -25063,8 +25371,10 @@ function mcSyncBatchButtons(){
                 :'Every line has to be done first.';
   re.style.display=open?'none':'';
   const ready=mcItems.filter(mcReady).length;
+  const lent=mcShared.filter(mcReady).length;
   dl.disabled=mcBusy||!ready;
   dl.title=ready?`${ready} line${ready===1?'':'s'} ready to export`
+      +(lent?`, and ${lent} shared from another batch`:'')
     :'Nothing is ready yet — a line is ready once its tile has a design on it, '
      +'which is what Create on the line, or Add on the SKU summary, does.';
   mcPdfBubbleSync(ready);
@@ -25208,7 +25518,9 @@ function mcSummaryRows(){
     const key=it.sku||it.product||it.design_name||'—';
     const row=map.get(key)||{sku:key,name:it.design_name||it.product||'',qty:0,img:'',
       tiles:new Set()};
-    row.qty+=Number(it.qty)||0;
+    // the extras are pieces to be printed and pulled like any other, so the
+    // figure a shelf is read against is the order plus whatever was added
+    row.qty+=mcQty(it);
     if(!row.name) row.name=it.design_name||it.product||'';
     // Which tool this SKU's lines were put on. The operator picked that tile on
     // the line itself, and it beats anything worked out from where artwork
@@ -26352,7 +26664,7 @@ async function mcMarkPrintLines(rows,template){
     for(const it of mcItems.filter(i=>String(i.sku||'')===String(r.sku))){
       const was=it.sheet_item||{};
       const si={...was,path:pick.path,name:pick.name,
-        qty:Math.max(1,Math.round(Number(it.qty)||1)),template:String(template||'')};
+        qty:Math.max(1,mcQty(it)||1),template:String(template||'')};
       if(it.tile==='sheetPrint'&&was.path===si.path&&was.qty===si.qty
         &&String(was.template||'')===si.template){
         // already on the sheet, but perhaps not ticked — Add all run twice
@@ -26396,7 +26708,7 @@ async function mcMarkLinesOnSheet(laid,page){
       // never written over from here. The page is written down rather than
       // worked out later: it is known now, and a design deleted from a library
       // afterwards would leave nothing to work it out from.
-      const si={...was,designId,qty:Math.max(1,Math.round(Number(it.qty)||1)),
+      const si={...was,designId,qty:Math.max(1,mcQty(it)||1),
         vals:was.vals||{},page:String(page||gtMode||''),
         finish:was.finish||(typeof gtFinish!=='undefined'?gtFinish:'Matte')};
       if(it.tile==='giftTag'&&was.designId===designId&&was.qty===si.qty
@@ -27261,10 +27573,9 @@ function mcGiftBody(it){
     <canvas class="mc-gt-prev" id="mcGtPrev"></canvas>
     <div class="grid2" style="margin-bottom:8px;">
       <label class="field"><span>HOW MANY${
-        Math.max(0,(Number(si.qty)||0)-(Number(it.qty)||0))
-          ? ` · ${Math.max(0,(Number(si.qty)||0)-(Number(it.qty)||0))} over the order`:''}</span>
+        mcExtra(it)?` · ${mcExtra(it)} extra on top of the ${it.qty} ordered`:''}</span>
         <div class="mc-qty-row">
-          <input type="number" min="1" step="1" id="mcGtQty" value="${si.qty||it.qty||1}"/>
+          <input type="number" min="1" step="1" id="mcGtQty" value="${si.qty||mcQty(it)||1}"/>
           <button type="button" class="btn-outline" id="mcGtMore"
             title="Print more than the order asks for — spares, or a reprint">Add more</button>
         </div></label>
@@ -27303,10 +27614,15 @@ async function mcGtMoveToPage(it,mode,id){
 }
 // the sheet_item, shaped as the gift tag tool's own order line — so gtVal and
 // everything downstream of it read a line here exactly as they read one there
+// `extra` is the text boxes added to this line alone — "+ Text on this line
+// only" in the full builder. They live on the order line beside vals, and
+// leaving them out here is what made a box added over there invisible on the
+// panel, undrawn in its preview, and gone by the time the line was saved.
 const mcGtLine=it=>({id:'mc-'+it.id,
   designId:(it.sheet_item&&it.sheet_item.designId)||'',
-  qty:(it.sheet_item&&it.sheet_item.qty)||it.qty||1,
-  vals:(it.sheet_item&&it.sheet_item.vals)||{}});
+  qty:(it.sheet_item&&it.sheet_item.qty)||mcQty(it)||1,
+  vals:(it.sheet_item&&it.sheet_item.vals)||{},
+  extra:(((it.sheet_item&&it.sheet_item.extra)||[]).map(f=>({...f})))});
 
 function mcGiftWire(it){
   // the library is not open, and the note above it has the one button that
@@ -27475,7 +27791,7 @@ function mcGiftWire(it){
   // save both read this, so what is looked at and what is kept cannot differ
   function mcGtCollectLine(){
     const c=collect();
-    return {id:'mc-'+it.id,designId:c.designId,qty:c.qty,vals:c.vals};
+    return {id:'mc-'+it.id,designId:c.designId,qty:c.qty,vals:c.vals,extra:c.extra||[]};
   }
   function drawWords(){
     const d=mcGtDesign(mcGtPick);
@@ -27527,7 +27843,7 @@ function mcGiftWire(it){
       .find(l=>String(l.id||'')==='mc-'+it.id);
     if(!live) return;
     it.sheet_item={...(it.sheet_item||{}),designId:live.designId,
-      qty:live.qty||it.qty,vals:live.vals||{}};
+      qty:live.qty||it.qty,vals:live.vals||{},extra:live.extra||[]};
     if(mcGtPick!==live.designId){
       mcGtPick=live.designId||'';
       const d=mcGtDesign(mcGtPick);
@@ -27581,7 +27897,13 @@ function mcGiftWire(it){
       out.designId=live.designId||out.designId;
       out.qty=Math.max(1,Math.round(Number(live.qty)||out.qty));
       out.vals={...(out.vals||{}),...(live.vals||{})};
+      // and the boxes themselves, not only what was typed into them
+      out.extra=(live.extra||[]).map(f=>({...f}));
     }
+    // Add more here and Add Extra on the line are the same figure asked two
+    // ways, so what is over the order is written down rather than left to be
+    // worked out from a quantity that another screen may have changed since.
+    out.extra_qty=Math.max(0,out.qty-(Math.round(Number(it.qty))||0));
     return out;
   }
   // Spares, a reprint, a tag that came out of the machine wrong. The figure in
@@ -27701,7 +28023,7 @@ async function mcGtOpenFull(page){
   const here=mcItem(mcWinItem);
   const want=page||mcLinePage(here)||gtMode;
   if(want!==gtMode&&typeof gtSetMode==='function') await gtSetMode(want);
-  const lines=mcItems.filter(x=>x.tile==='giftTag'&&x.sheet_item&&x.sheet_item.designId
+  const lines=mcPool().filter(x=>x.tile==='giftTag'&&x.sheet_item&&x.sheet_item.designId
     &&(mcLinePage(x)||want)===want);
   if(!lines.length){
     if(msg) showMsg(msg,`Nothing is on the ${mcGtPage(want).name} sheet yet.`,false);
@@ -27728,7 +28050,7 @@ async function mcGtReturn(){
     // came back Matte and page-less, and two orders on one page then built two
     // sheets instead of sharing one.
     it.sheet_item={...(it.sheet_item||{}),
-      designId:l.designId,qty:l.qty,vals:l.vals||{},
+      designId:l.designId,qty:l.qty,vals:l.vals||{},extra:l.extra||[],
       page:(it.sheet_item&&it.sheet_item.page)||home.page||gtMode};
     await mcSave(it,{sheet_item:it.sheet_item});
   }
@@ -27827,9 +28149,14 @@ async function mcDownloadOne(id){
 // list, so what is shown is what is saved.
 async function mcExportPlan(){
   const ready=mcItems.filter(mcReady);
+  // A sheet is a sheet whoever's order is on it, so the bundles are built out
+  // of the shared pool. The per-order files are not: one line, one customer,
+  // one PDF — those stay this batch's own, and a shared batch writes its own
+  // when its turn comes.
+  const pool=mcPool().filter(mcReady);
   const plan=[];
   for(const [key,tile] of Object.entries(MC_TILES)){
-    const lines=ready.filter(i=>i.tile===key);
+    const lines=(tile.mode==='per-order'?ready:pool).filter(i=>i.tile===key);
     if(!lines.length) continue;
     if(tile.mode==='per-order'){
       lines.forEach(it=>['front','back'].forEach(side=>{
@@ -27959,7 +28286,7 @@ async function mcPrintLay(lines,template){
     const si=it.sheet_item||{};
     const pick=(loadDesignFiles||[]).find(f=>f.path===si.path)||designFileForSku(it.sku);
     if(!pick){ missing.push(it.sku||si.name||''); continue; }
-    const qty=Math.max(1,Math.round(Number(si.qty||it.qty)||1));
+    const qty=Math.max(1,Math.round(Number(si.qty||mcQty(it))||1));
     // two lines of one SKU are two orders for the same card: they add up
     const had=state.designs.find(d=>d.source&&d.source.path===pick.path);
     if(had) had.qty+=qty; else await addDesignLine(pick,qty,it.sku);
@@ -28005,8 +28332,7 @@ async function mcGiftPreview(lines,mode,canvas,dim,page){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
   const keep=gtOrder, keepPage=gtPage;
-  gtOrder=lines.map(it=>({id:'mc-'+it.id,designId:it.sheet_item.designId,
-    qty:it.sheet_item.qty||it.qty||1,vals:it.sheet_item.vals||{}}));
+  gtOrder=lines.map(mcGtLine);
   try{
     const pages=Math.max(1,gtPageCount());
     const at=Math.max(0,Math.min(pages-1,Number(page)||0));
@@ -28033,10 +28359,7 @@ async function mcGiftBundle(lines,mode){
       +'on the Gift Tag screen first');
   // taken after the switch: the order to put back is that page's own
   const keep=gtOrder;
-  gtOrder=lines.map(it=>({id:'mc-'+it.id,
-    designId:it.sheet_item.designId,
-    qty:it.sheet_item.qty||it.qty||1,
-    vals:it.sheet_item.vals||{}}));
+  gtOrder=lines.map(mcGtLine);
   try{
     // A line whose design is not in this library lays out as nothing, and the
     // sheet then builds as a blank page rather than failing — a PDF of empty
