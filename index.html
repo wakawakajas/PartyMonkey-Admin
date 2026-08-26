@@ -24839,7 +24839,7 @@ async function mcClearOrder(orderId){
       if(w==='print') print++; else if(w==='gift') gift++;
     }
     it.tile=null; it.sheet_item=null; it.design=null;
-    await mcSave(it,{tile:null,sheet_item:null,design:null});
+    await mcSave(it,{tile:null,sheet_item:null,design:null,...mcDonePatch(it,false)});
   }
   if(print){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
   if(gift&&typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
@@ -26245,6 +26245,21 @@ async function mcRouteRows(rows){
 // The same for the print sheet. A line marked this way carries the design it
 // was given and the template it is printed on, which is everything Download
 // All needs to build the sheet again without the summary being open.
+// A line that is on a sheet has been dealt with, and a line taken off one has
+// not. The tick was being used to mean exactly that and set by hand afterwards
+// — a batch laid out from the SKU summary came out with every line still open,
+// which is two hundred taps saying what the sheet already knew. So the tick
+// follows the sheet: put on marks it done, taken off marks it open again.
+// Returned as a patch rather than written here, so it rides along with the
+// write that put the line on the sheet instead of being a second round trip.
+function mcDonePatch(it,on){
+  const now=on?'done':null;
+  if((it.status||null)===now) return {};
+  it.status=now;
+  it.acted_by=now?mcMyId:null;
+  it.acted_at=now?new Date().toISOString():null;
+  return {status:now,acted_by:it.acted_by,acted_at:it.acted_at};
+}
 async function mcMarkPrintLines(rows,template){
   if(!rows||!rows.length||!mcBatch||mcBatch.status!=='open') return 0;
   let n=0;
@@ -26255,9 +26270,15 @@ async function mcMarkPrintLines(rows,template){
       const si={...was,path:pick.path,name:pick.name,
         qty:Math.max(1,Math.round(Number(it.qty)||1)),template:String(template||'')};
       if(it.tile==='sheetPrint'&&was.path===si.path&&was.qty===si.qty
-        &&String(was.template||'')===si.template) continue;
+        &&String(was.template||'')===si.template){
+        // already on the sheet, but perhaps not ticked — Add all run twice
+        // should still leave every line saying the same thing
+        const tick=mcDonePatch(it,true);
+        if(Object.keys(tick).length){ await mcSave(it,tick); n++; }
+        continue;
+      }
       it.tile='sheetPrint'; it.sheet_item=si;
-      await mcSave(it,{tile:'sheetPrint',sheet_item:si});
+      await mcSave(it,{tile:'sheetPrint',sheet_item:si,...mcDonePatch(it,true)});
       n++;
     }
   }
@@ -26275,7 +26296,7 @@ async function mcUnmarkLines(sku){
     if(it.tile!=='sheetPrint'&&it.tile!=='giftTag') continue;
     if(it.tile==='giftTag'&&it.sheet_item&&Object.keys(it.sheet_item.vals||{}).length) continue;
     it.tile=null; it.sheet_item=null;
-    await mcSave(it,{tile:null,sheet_item:null});
+    await mcSave(it,{tile:null,sheet_item:null,...mcDonePatch(it,false)});
     n++;
   }
   if(n){ mcRenderItems(); mcSyncBatchButtons(); }
@@ -26295,9 +26316,13 @@ async function mcMarkLinesOnSheet(laid,page){
         vals:was.vals||{},page:String(page||gtMode||''),
         finish:was.finish||(typeof gtFinish!=='undefined'?gtFinish:'Matte')};
       if(it.tile==='giftTag'&&was.designId===designId&&was.qty===si.qty
-        &&String(was.page||'')===si.page) continue;
+        &&String(was.page||'')===si.page){
+        const tick=mcDonePatch(it,true);
+        if(Object.keys(tick).length){ await mcSave(it,tick); n++; }
+        continue;
+      }
       it.tile='giftTag'; it.sheet_item=si;
-      await mcSave(it,{tile:'giftTag',sheet_item:si});
+      await mcSave(it,{tile:'giftTag',sheet_item:si,...mcDonePatch(it,true)});
       n++;
     }
   }
@@ -27008,7 +27033,7 @@ function mcCustomWire(it){
     const msg=document.getElementById('mcWinMsg');
     if(!mcWinLive){ showMsg(msg,'Choose a saved layout first.',false); return; }
     it.design=mcLineSnapshot();
-    if(await mcSave(it,{design:it.design})){
+    if(await mcSave(it,{design:it.design,...mcDonePatch(it,true)})){
       showMsg(msg,'✓ Saved to this line',true);
       mcRepaintRow(it);
       // saved is finished with, and the next line is on the list behind this
@@ -27443,7 +27468,7 @@ function mcGiftWire(it){
     const msg=document.getElementById('mcWinMsg');
     if(!mcGtPick){ showMsg(msg,'Search for a design and pick one first.',false); return; }
     it.sheet_item=collect();
-    if(await mcSave(it,{sheet_item:it.sheet_item})){
+    if(await mcSave(it,{sheet_item:it.sheet_item,...mcDonePatch(it,true)})){
       showMsg(msg,'✓ On the sheet',true);
       mcRepaintRow(it);
       mcWinToBubble();          // the same as the print side: saved is done with
