@@ -1764,6 +1764,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   padding:12px;color:var(--ink);font-family:'IBM Plex Sans',sans-serif;
   user-select:none;-webkit-user-select:none;}
 .mc-card:active{background:var(--blueprint-soft);border-color:var(--blueprint);}
+/* Held rather than pressed, a card is deleted. Same gesture as an order on the
+   batch screen, and for the same reason: there is no undo, so it is not given
+   a button sitting next to the one that opens it. */
+.mc-card{position:relative;overflow:hidden;}
+.mc-card::after{content:'';position:absolute;left:0;top:0;bottom:0;width:0;
+  background:var(--rust);opacity:.22;pointer-events:none;}
+.mc-card.mc-holding::after{width:100%;transition:width .62s linear;}
+.mc-card>*{position:relative;}
 .mc-card-main{flex:1;min-width:0;}
 .mc-card-name{font-weight:600;font-size:13.5px;overflow-wrap:anywhere;color:var(--pm-name);}
 .mc-card-meta{font-size:11.5px;color:var(--faint);margin-top:3px;}
@@ -3782,7 +3790,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <p class="hint" style="margin:4px 0 0;">Loading…</p>
     </div>
     <p class="hint" style="margin:10px 0 0;">Completed batches and their artwork are
-      permanently deleted after 3 days.</p>
+      permanently deleted after 3 days. Hold a batch to delete it now.</p>
     <div id="mcMsg"></div>
   </div>
 
@@ -24412,7 +24420,8 @@ function mcRenderBatches(){
     const bar=(b.status!=='completed'&&m.total&&m.done)
       ? `<span class="mc-card-bar"><span style="width:${pct}%;"></span></span>` : '';
     return `<div class="mc-card-wrap">
-      <button class="mc-card" data-mc-open="${b.id}">
+      <button class="mc-card" data-mc-open="${b.id}"
+        title="Hold to delete this batch">
         <span class="mc-card-main">
           <span class="mc-card-name">${escapeHtml(b.title)}</span>
           ${bar}
@@ -24429,8 +24438,78 @@ document.getElementById('mcTabs').addEventListener('click',e=>{
     .forEach(x=>x.classList.toggle('on',x.dataset.mcTab===mcTab));
   mcRefreshBatches();
 });
+// A card is opened by a press and deleted by a hold — the same gesture an
+// order answers to on the batch screen, so the two are learnt once. The hold
+// swallows the press that follows it, or the batch being deleted would open
+// behind the question.
+let mcRollHold=null;             // {el,id,x,y,t} while a card is held
+let mcRollHeld=false;            // a hold has just fired; eat the click
+function mcRollHoldStop(){
+  if(!mcRollHold) return;
+  clearTimeout(mcRollHold.t);
+  mcRollHold.el.classList.remove('mc-holding');
+  mcRollHold=null;
+}
+(function(){
+  const el=document.getElementById('mcRoll');
+  el.addEventListener('pointerdown',e=>{
+    if(e.button&&e.button!==0) return;
+    const card=e.target.closest('[data-mc-open]'); if(!card) return;
+    mcRollHeld=false;            // a hold that never got its click ends here
+    mcRollHoldStop();
+    card.classList.add('mc-holding');
+    mcRollHold={el:card,id:card.dataset.mcOpen,x:e.clientX,y:e.clientY,
+      t:setTimeout(()=>{
+        const id=mcRollHold&&mcRollHold.id;
+        mcRollHoldStop();
+        mcRollHeld=true;
+        try{ navigator.vibrate&&navigator.vibrate(18); }catch(_){}
+        if(id) mcDeleteBatch(id);
+      },MC_HOLD_MS)};
+  });
+  el.addEventListener('pointermove',e=>{
+    if(!mcRollHold) return;
+    if(Math.abs(e.clientX-mcRollHold.x)>10||Math.abs(e.clientY-mcRollHold.y)>10) mcRollHoldStop();
+  });
+  ['pointerup','pointercancel','pointerleave'].forEach(k=>el.addEventListener(k,mcRollHoldStop));
+  el.addEventListener('scroll',mcRollHoldStop,true);
+  window.addEventListener('scroll',mcRollHoldStop,true);
+  el.addEventListener('contextmenu',e=>{
+    mcRollHoldStop();
+    if(e.target.closest('[data-mc-open]')) e.preventDefault();
+  });
+})();
+// The batch, its lines, and the artwork uploaded to them. The rows go on the
+// cascade, but a deleted row is not a deleted file — the paths are read first
+// and taken to storage afterwards, which is what the three-day purge does too.
+async function mcDeleteBatch(id){
+  const out=document.getElementById('mcMsg');
+  const b=mcBatches.find(x=>x.id===id); if(!b||!sb) return;
+  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
+  const m=mcCounts[id]||{total:0,done:0};
+  if(!confirm(`Delete ${b.title}?\n\n`
+    +(m.total?`All ${m.total} line${m.total===1?'':'s'} go`:'The whole batch goes')
+    +', with the artwork uploaded to them. Nobody else on the team will see it '
+    +'again either.\n\nThis cannot be undone.')) return;
+  let paths=[];
+  try{
+    const {data}=await sb.from('magic_items').select('art').eq('batch_id',id);
+    (data||[]).forEach(r=>Object.values(r.art||{}).forEach(v=>{ if(v) paths.push(v); }));
+  }catch(e){ /* a stranded file is not worth stopping the delete for */ }
+  const {error}=await sb.from('magic_batches').delete().eq('id',id);
+  if(error){ showMsg(out,'Could not delete that: '+error.message,false); return; }
+  if(paths.length){
+    try{ await sb.storage.from(PHOTO_BUCKET).remove(paths); }catch(e){}
+  }
+  if(mcBatch&&mcBatch.id===id){ mcBatch=null; mcItems=[]; mcUnwatch(); mcWinClose(); }
+  mcBatches=mcBatches.filter(x=>x.id!==id);
+  delete mcCounts[id];
+  mcRenderBatches();
+  showMsg(out,`Deleted ${b.title}.`,true);
+}
 document.getElementById('mcRoll').addEventListener('click',e=>{
   const b=e.target.closest('[data-mc-open]'); if(!b) return;
+  if(mcRollHeld){ mcRollHeld=false; return; }   // that press was the hold ending
   mcBatch=mcBatches.find(x=>x.id===b.dataset.mcOpen)||null;
   showScreen('magic-batch');
 });
