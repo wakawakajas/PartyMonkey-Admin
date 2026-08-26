@@ -1798,6 +1798,17 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .mc-ord-clear:disabled{opacity:.32;}
 .mc-ord-clear:not(:disabled):active{background:var(--card);color:var(--ink);}
 .mc-order.all-done .mc-order-count{color:var(--blueprint);}
+/* Held, the header fills across from the left, and the order goes when the
+   fill reaches the end. Deleting an order is not a thing to be given a button
+   next to Clear — the two read alike and one of them cannot be undone — so it
+   is asked for in a way no thumb does by accident, and lifting early stops it
+   with nothing said. */
+.mc-order-head{position:relative;overflow:hidden;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;}
+.mc-order-head::after{content:'';position:absolute;left:0;top:0;bottom:0;width:0;
+  background:var(--rust);opacity:.22;pointer-events:none;}
+.mc-order-head.mc-holding::after{width:100%;transition:width .62s linear;}
+.mc-order-head>*{position:relative;}
 
 /* One line to a row. At arm's length it reads left to right: the picture the
    customer saw, what it is, how many, and the two things you can do to it. */
@@ -24628,7 +24639,8 @@ function mcRenderItems(){
     // which is the wrong grouping when the same card is on two orders.
     const laid=g.items.filter(i=>i.tile||i.sheet_item||i.design).length;
     return `<div class="mc-order${all?' all-done':''}">
-      <div class="mc-order-head">
+      <div class="mc-order-head" data-mc-ord-hold="${escapeHtml(g.order_id)}"
+        title="Hold to delete this order from the batch">
         <span class="mc-order-id">${escapeHtml(g.order_id)}</span>
         ${buyer?`<span class="mc-order-buyer">${escapeHtml(buyer)}</span>`:''}
         <span class="mc-order-count">${done} of ${g.items.length} done</span>
@@ -24751,6 +24763,99 @@ async function mcClearOrder(orderId){
   // not go on showing it
   if(mcWinItem&&on.some(i=>i.id===mcWinItem)) mcWinRender();
   showMsg(out,`Took ${on.length} line${on.length===1?'':'s'} of ${orderId} off the sheets.`,true);
+}
+// ---------- hold an order's header to delete it ----------
+// Clear takes an order off the sheets and leaves it on the batch. Delete takes
+// it off the batch altogether, which is the one thing on this screen that
+// pressing again does not undo — so it is not a button beside Clear, where a
+// thumb finds it by accident. It is a hold: the header fills while it is held,
+// and lifting early leaves everything as it was and says nothing.
+const MC_HOLD_MS=620;
+let mcHold=null;                 // {el,order,x,y,t} while a header is held
+function mcHoldStop(){
+  if(!mcHold) return;
+  clearTimeout(mcHold.t);
+  mcHold.el.classList.remove('mc-holding');
+  mcHold=null;
+}
+(function(){
+  const el=document.getElementById('mcItems');
+  el.addEventListener('pointerdown',e=>{
+    if(e.button&&e.button!==0) return;
+    const head=e.target.closest('[data-mc-ord-hold]');
+    // Clear sits in the header and is a press, not a hold
+    if(!head||e.target.closest('button')) return;
+    mcHoldStop();
+    head.classList.add('mc-holding');
+    mcHold={el:head,order:head.dataset.mcOrdHold,x:e.clientX,y:e.clientY,
+      t:setTimeout(()=>{
+        const order=mcHold&&mcHold.order;
+        mcHoldStop();
+        try{ navigator.vibrate&&navigator.vibrate(18); }catch(_){}
+        if(order!=null) mcDeleteOrder(order);
+      },MC_HOLD_MS)};
+  });
+  // a finger that has started to scroll the list is not asking for anything
+  el.addEventListener('pointermove',e=>{
+    if(!mcHold) return;
+    if(Math.abs(e.clientX-mcHold.x)>10||Math.abs(e.clientY-mcHold.y)>10) mcHoldStop();
+  });
+  ['pointerup','pointercancel','pointerleave','contextmenu']
+    .forEach(k=>el.addEventListener(k,mcHoldStop));
+  el.addEventListener('scroll',mcHoldStop,true);
+  window.addEventListener('scroll',mcHoldStop,true);
+  // the long-press menu on a phone would land on top of the fill
+  el.addEventListener('contextmenu',e=>{
+    if(e.target.closest('[data-mc-ord-hold]')) e.preventDefault();
+  });
+})();
+// The whole order off the batch: its lines, wherever they had been put, and
+// whatever layout they had been given. The batch's other orders are untouched,
+// and artwork already uploaded to a line is a file somebody chose — it stays
+// where it is.
+async function mcDeleteOrder(orderId){
+  const out=document.getElementById('mcBatchMsg');
+  if(!mcBatch||mcBatch.status!=='open'){
+    showMsg(out,'This batch is completed — re-open it to change it.',false); return;
+  }
+  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
+  const lines=mcItems.filter(i=>String(i.order_id||'—')===String(orderId));
+  if(!lines.length) return;
+  const buyer=(lines.find(i=>i.buyer)||{}).buyer||'';
+  if(!confirm(`Delete order ${orderId}${buyer?' — '+buyer:''} from this batch?\n\n`
+    +`${lines.length} line${lines.length===1?'':'s'} go, with wherever they had been put `
+    +'and the layout they were given. The rest of the batch is untouched, and any '
+    +'artwork uploaded to a line is kept.\n\nThis cannot be undone.')) return;
+  // off the sheets first, so a card nobody else is asking for stops being
+  // printed — the same rule Clear follows
+  let print=0,gift=0;
+  lines.forEach(it=>{
+    if(!(it.tile||it.sheet_item||it.design)) return;
+    const sku=String(it.sku||'');
+    const shared=mcItems.some(x=>x!==it&&String(x.sku||'')===sku
+      &&String(x.order_id||'—')!==String(orderId)
+      &&(x.tile==='sheetPrint'||x.tile==='giftTag'));
+    if(shared) return;
+    const w=mcRemoveSku(sku);
+    if(w==='print') print++; else if(w==='gift') gift++;
+  });
+  const ids=lines.map(i=>i.id);
+  for(let i=0;i<ids.length;i+=MC_CHUNK){
+    const {error}=await sb.from('magic_items').delete().in('id',ids.slice(i,i+MC_CHUNK));
+    if(error){
+      await mcLoadItems();                     // whatever went, went; read it back
+      showMsg(out,'Could not delete that: '+error.message,false);
+      return;
+    }
+  }
+  const gone=new Set(ids);
+  mcItems=mcItems.filter(i=>!gone.has(i.id));
+  if(print){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
+  if(gift&&typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
+  // a line open in the window has just stopped existing
+  if(mcWinItem&&gone.has(mcWinItem)) mcWinClose();
+  mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
+  showMsg(out,`Deleted ${orderId} — ${lines.length} line${lines.length===1?'':'s'} off the batch.`,true);
 }
 async function mcToggleDone(id){
   const it=mcItem(id); if(!it||!sb) return;
@@ -26323,6 +26428,15 @@ function mcWatch(){
       .on('postgres_changes',
           {event:'*',schema:'public',table:'magic_items',filter:'batch_id=eq.'+mcBatch.id},
           p=>{
+            // somebody else deleted an order; the rows under it are gone
+            if(p.eventType==='DELETE'){
+              const id=p.old&&p.old.id;
+              if(!id||!mcItems.some(x=>x.id===id)) return;
+              mcItems=mcItems.filter(x=>x.id!==id);
+              if(mcWinItem===id) mcWinClose();
+              mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
+              return;
+            }
             const row=p.new;
             if(!row||!row.id) return;
             // an echo of our own write would only make the row we just painted
