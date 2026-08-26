@@ -4696,9 +4696,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <button class="req-x" id="mcRouteClose" title="Close" aria-label="Close">×</button>
     <div class="sheet-title">Routing</div>
     <p class="hint" style="margin:0 0 4px;">Where a SKU goes when it is added from a
-      batch's SKU summary — these hold for every batch, and for everybody. Rules are read
-      top to bottom and the first one that fits wins; a SKU named outright below beats
-      every rule. Anything nothing here mentions goes by its line's tile, and then by
+      batch's SKU summary — these hold for every batch, and for everybody. The closest fit
+      wins: a SKU named outright beats every rule, <b>is exactly</b> beats <b>starts
+      with</b>, and that beats <b>contains</b>. Between two of the same kind it is read
+      top to bottom, which is what ↑ and ↓ are for. Anything nothing here mentions goes by its line's tile, and then by
       where its artwork is.</p>
     <div class="chips" style="margin:8px 0 4px;align-items:center;">
       <button type="button" class="btn-outline btn-sm" id="mcRouteExport">⬇ Export Excel</button>
@@ -18889,6 +18890,9 @@ function gtDraw(){
   sc.style.borderColor=per?'var(--border)':'var(--rust)';
   sc.style.color=per?'var(--muted)':'var(--rust)';
   undoNote('gift');
+  // a Magic Create line is being worked on this sheet with its panel over the
+  // top; what has just been drawn here is what the panel should be showing
+  if(typeof mcGtLiveSync==='function') mcGtLiveSync();
 }
 
 // ---------- moving the words on the sheet ----------
@@ -23203,7 +23207,9 @@ function plGoTo(id,lead){
   if(!lead){ plSpeakFor('on_start',it); return; }
   const mode=plVoiceFor().on_start||'off';
   const target=mode==='next'?plNextAfter(it):it;
-  const line=mode==='off'?'':plLineSpeech(target);
+  // the shelf has just been announced on its own, so the line does not say it
+  // again — one shelf, said once, is what a picker walking to it needs
+  const line=mode==='off'?'':plLineSpeech(target,plShelfSpoken(target.shelf||'')===lead);
   plSay([lead,line].filter(Boolean).join('. '));
 }
 // After a line is settled, the next one that still needs doing — which is the
@@ -23346,12 +23352,12 @@ const plShelfSpoken=v=>plSpoken(v)
   // voice left holding one reads it out or stumbles over it
   .replace(/-+/g,' ')
   .replace(/\d/g,' $& ').replace(/\s+/g,' ').trim();
-function plLineSpeech(it){
+function plLineSpeech(it,skipShelf){
   if(!it) return '';
   const c=plVoiceFor();
   const said=[];
   if(c.say_sku)   said.push(plSpoken(it.sku));
-  if(c.say_shelf) said.push(plShelfSpoken(it.shelf));
+  if(c.say_shelf&&!skipShelf) said.push(plShelfSpoken(it.shelf));
   if(c.say_qty)   said.push(plQtyWords(it.qty));
   // full stops between them, which is how a voice is asked for a pause
   return said.filter(Boolean).join('. ');
@@ -25680,11 +25686,23 @@ function mcRuleMatching(row){
   const r=(row&&typeof row==='object')?row:{sku:row};
   const names=mcGtNamesFor(r.sku).concat(r.name?[r.name]:[])
     .map(n=>String(n).trim().toLowerCase()).filter(Boolean);
-  for(const rule of mcRuleRows()){
+  const test=(rule,how)=>{
     const m=String(rule.match||'').trim().toLowerCase();
-    if(!m) continue;
-    if(names.some(n=>rule.how==='exact'?n===m
-      :rule.how==='starts'?n.startsWith(m):n.includes(m))) return rule;
+    if(!m) return false;
+    return names.some(n=>how==='exact'?n===m
+      :how==='starts'?n.startsWith(m):n.includes(m));
+  };
+  // How closely a rule names the thing decides before where it sits does. A
+  // rule that names a SKU outright is not in competition with one that catches
+  // a family of names: "Custom Gift Tag-Matte" written exactly was added
+  // because "Custom Gift Tag-" was already sending the family somewhere else,
+  // and read top to bottom the narrow one never fired — the shop wrote down
+  // the exception and the sheet went on ignoring it. The sheet's own order
+  // still decides between two rules of the same closeness, which is what ↑ and
+  // ↓ are for.
+  for(const how of ['exact','starts','contains']){
+    const hit=mcRuleRows().find(rule=>rule.how===how&&test(rule,how));
+    if(hit) return hit;
   }
   return null;
 }
@@ -26599,6 +26617,9 @@ async function mcWinOpen(id){
   // line is the same answer given two hundred times. A line that has not been
   // told what it is takes the answer the shop already wrote down.
   if(!it.tile) mcAutoTile(it).then(()=>{ if(mcWinItem===id) mcWinRender(); });
+  // and what both gift tag libraries are called, so the design picker can say
+  // "it is on the other page" instead of "no design matches"
+  if(!Object.keys(mcGtNames).length&&typeof mcGtIndex==='function') mcGtIndex().catch(()=>{});
 }
 function mcWinClose(){
   // checked on mcWinItem rather than the 'open' class, so a window closed
@@ -26701,6 +26722,7 @@ window.addEventListener('resize',()=>{ if(mcWinEl.classList.contains('open')) mc
 
 // ---------- what is inside it ----------
 function mcWinRender(){
+  mcGtLiveRefresh=null;          // whatever the last body registered goes with it
   const it=mcItem(mcWinItem);
   if(!it){ mcWinEl.classList.remove('open'); return; }
   document.getElementById('mcWinTitle').textContent=
@@ -26799,11 +26821,18 @@ async function mcCommit(){
   const it=mcItem(mcWinItem); if(!it) return;
   const t=mcTile(it);
   if(t&&t.mode==='per-order'&&mcWinLive){
-    it.design=mcSnapshot();
+    it.design=mcLineSnapshot();
     await mcSave(it,{design:it.design});
   }
 }
 let mcWinLive=false;             // has this line's layout been loaded into the builder
+// Which saved template the live line was built from. The snapshot is the
+// finished sheet, not the template it came off, so a line reopened had its
+// layout back and the picker above it blank — the second order of the same
+// card looked as though nothing had been matched for it. Kept alongside the
+// layout, where it belongs, and read back on the way in.
+let mcWinTplId='';
+const mcLineSnapshot=()=>({...mcSnapshot(),template:mcWinTplId||''});
 async function mcSave(it,patch){
   if(!sb) return;
   const {error}=await sb.from('magic_items').update(patch).eq('id',it.id);
@@ -26874,7 +26903,12 @@ async function mcAutoLayoutFor(it,sel){
       state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
       ppFillSelects();
       mcWinLive=true;
-      if(sel) sel.value=tpl.id;
+      mcWinTplId=String(tpl.id);
+      // the body may have been drawn again while that was being fetched —
+      // paper and GSM arriving does it — so the picker is found now rather
+      // than written to the one this started with, which is off the document
+      const now=document.getElementById('mcTplSel')||sel;
+      if(now&&now.querySelector(`option[value="${tpl.id}"]`)) now.value=tpl.id;
     }
   }
   if(pick){
@@ -26902,7 +26936,7 @@ function mcLinePreview(){
   catch(e){ stage.style.display='none'; }
 }
 function mcCustomWire(it){
-  mcWinLive=false;
+  mcWinLive=false; mcWinTplId='';
   // The two lists this body is made of live on other screens. Where a batch is
   // worked without ever visiting them the selects come up empty — paper and
   // GSM stuck on "—" with nothing to pick — so they are fetched here and the
@@ -26927,6 +26961,7 @@ function mcCustomWire(it){
   const sel=document.getElementById('mcTplSel');
   sel.addEventListener('change',async()=>{
     if(!sel.value) return;
+    mcWinTplId=sel.value;
     const {data,error}=await sb.from('templates').select('data').eq('id',sel.value).single();
     if(error||!data) return;
     applyPrintState(data.data);
@@ -26944,6 +26979,16 @@ function mcCustomWire(it){
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
     ppFillSelects();
     mcWinLive=true;
+    // and the picker says which layout that is. A line saved before this was
+    // kept has no name on it, so the one its own SKU matches is offered rather
+    // than a blank — the same answer the line was given the first time.
+    mcWinTplId=(it.design&&it.design.template)||'';
+    if(!mcWinTplId){
+      const guess=mcTemplateFor([{sku:mcNamesOf(it)[0]||''}]);
+      if(guess) mcWinTplId=String(guess.id);
+    }
+    if(sel&&mcWinTplId&&sel.querySelector(`option[value="${mcWinTplId}"]`))
+      sel.value=mcWinTplId;
     mcApplyArt(it).then(mcLinePreview);
   }else{
     // Nothing saved on it yet, and the line's own name already says what it
@@ -26962,7 +27007,7 @@ function mcCustomWire(it){
   document.getElementById('mcSaveLineBtn').addEventListener('click',async()=>{
     const msg=document.getElementById('mcWinMsg');
     if(!mcWinLive){ showMsg(msg,'Choose a saved layout first.',false); return; }
-    it.design=mcSnapshot();
+    it.design=mcLineSnapshot();
     if(await mcSave(it,{design:it.design})){
       showMsg(msg,'✓ Saved to this line',true);
       mcRepaintRow(it);
@@ -27057,9 +27102,19 @@ const mcGtMatch=it=>{ for(const n of mcNamesOf(it)){ const d=gtDesignForName(n);
 function mcGiftBody(it){
   const designs=(typeof gtLib!=='undefined'&&gtLib.designs)||[];
   if(!designs.length){
-    return '<p class="hint" style="margin:14px 0 0;">The gift tag library has not been '
-      +'opened yet on this device. Open <b>Print template › Gift Tag</b> once, then come '
-      +'back — the designs and the sheet it prints on come from there.</p>';
+    // Two different things were being said with one sentence. A folder chosen
+    // once is remembered, but the browser drops its permission on a reload and
+    // asking again has to come off a tap — the library was there all along and
+    // the panel called it never opened, with nothing to press either way. The
+    // tap is offered here rather than sending anybody to another screen for it.
+    const pending=(typeof gtFolderPending!=='undefined'&&gtFolderPending);
+    return `<p class="hint" style="margin:14px 0 0;">${pending
+      ? 'This page’s design folder is remembered but not connected — a browser gives '
+        +'its permission back only when somebody asks for it. One tap and the designs are here.'
+      : 'The gift tag library has not been opened yet on this device — the designs and the '
+        +'sheet it prints on come from the folder <b>Print template › Gift Tag</b> holds.'}</p>
+      <button type="button" class="btn-outline" id="mcGtConnect" style="margin-top:10px;">${
+        pending?'Connect the folder':'Open the design library'}</button>`;
   }
   const si=it.sheet_item||{};
   // nothing chosen yet: the design named after this line's SKU, where the
@@ -27102,6 +27157,19 @@ function mcGiftBody(it){
 }
 const mcGtDesign=id=>((typeof gtLib!=='undefined'&&gtLib.designs)||[])
   .find(d=>d.id===id)||null;
+// Move a line to the gift tag page its design is actually on, and give it that
+// design. Routing sends a line to a page by its name — "Custom Gift Tag-TD-1"
+// is caught by a rule about gift tags and lands on Festive — and the design
+// drawn for it can be sitting in the other page's library, where the picker
+// here never looked. Taking it is the operator saying which page is right.
+async function mcGtMoveToPage(it,mode,id){
+  const si={...(it.sheet_item||{}),page:mode,designId:id,vals:{}};
+  it.tile='giftTag'; it.sheet_item=si;
+  await mcSave(it,{tile:'giftTag',sheet_item:si});
+  if(typeof gtSetMode==='function'&&gtMode!==mode) await gtSetMode(mode);
+  if(mcWinItem===it.id) mcWinRender();
+  mcRepaintRow(it);
+}
 // the sheet_item, shaped as the gift tag tool's own order line — so gtVal and
 // everything downstream of it read a line here exactly as they read one there
 const mcGtLine=it=>({id:'mc-'+it.id,
@@ -27110,8 +27178,29 @@ const mcGtLine=it=>({id:'mc-'+it.id,
   vals:(it.sheet_item&&it.sheet_item.vals)||{}});
 
 function mcGiftWire(it){
+  // the library is not open, and the note above it has the one button that
+  // opens it — which is the whole of this body
+  const conn=document.getElementById('mcGtConnect');
+  if(conn) conn.addEventListener('click',async()=>{
+    const msg=document.getElementById('mcWinMsg');
+    conn.disabled=true; conn.textContent='Opening…';
+    try{
+      if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
+      const page=mcLinePage(it);
+      if(page&&page!==gtMode&&typeof gtSetMode==='function') await gtSetMode(page);
+      // the page is settled before the folder is asked for: the two pages keep
+      // their handles under their own keys, and asking under the wrong one
+      // connects the wrong library
+      if(typeof gtEnsureDir==='function') await gtEnsureDir(true);
+    }catch(e){}
+    if(typeof mcGtIndex==='function') mcGtIndex().catch(()=>{});
+    const got=((typeof gtLib!=='undefined'&&gtLib.designs)||[]).length;
+    if(mcWinItem===it.id) mcWinRender();
+    if(!got) showMsg(document.getElementById('mcWinMsg')||msg,
+      'Still nothing on this page — choose the folder on Print template › Gift Tag.',false);
+  });
   const combo=document.getElementById('mcGtCombo');
-  if(!combo) return;                      // the library is not open; the note is all there is
+  if(!combo) return;
   const box=document.getElementById('mcGtSearch');
   const panel=document.getElementById('mcGtPanel');
   const words=document.getElementById('mcGtWords');
@@ -27128,9 +27217,15 @@ function mcGiftWire(it){
     // the box — an empty search means everything, which is what the caret is for
     const rows=q&&!(mcGtDesign(mcGtPick)&&q===String(mcGtDesign(mcGtPick).name||'').toLowerCase())
       ? all.filter(d=>String(d.name||'').toLowerCase().includes(q)) : all;
-    if(!all.length){ panel.innerHTML='<div class="combo-empty">The library is empty.</div>'; return; }
+    if(!all.length){
+      panel.innerHTML='<div class="combo-empty">This page’s library is empty.</div>'
+        +elsewhere(term);
+      return;
+    }
     if(!rows.length){
-      panel.innerHTML='<div class="combo-empty">No design matches “'+escapeHtml(term)+'”.</div>';
+      panel.innerHTML='<div class="combo-empty">No design matches “'+escapeHtml(term)
+        +'” on the '+escapeHtml(mcGtPage(mcLinePage(it)||gtMode).name)+' page.</div>'
+        +elsewhere(term);
       return;
     }
     // artwork on the row: a design is recognised by what it looks like long
@@ -27148,6 +27243,32 @@ function mcGiftWire(it){
            (d.fields||[]).length===1?'':'s'}</span>
        </div>`;}).join('');
   }
+  // What the other pages have of that name. Asked only once this page has
+  // nothing to show, so the list an operator normally reads is untouched — and
+  // a design that exists, on a page this line was not sent to, stops being
+  // invisible from here. Names only: the thumbnails belong to the library in
+  // hand, and this one is not loaded.
+  function elsewhere(term){
+    const q=String(term||'').trim().toLowerCase();
+    const here=mcLinePage(it)||gtMode;
+    const out=[];
+    GT_PAGES.forEach(pg=>{
+      if(pg.mode===here) return;
+      (mcGtNames[pg.mode]||[]).forEach(d=>{
+        if(q&&!String(d.name||'').toLowerCase().includes(q)) return;
+        out.push({pg,d});
+      });
+    });
+    if(!out.length) return '';
+    return '<div class="combo-empty">On another page — taking one moves this line there</div>'
+      +out.slice(0,40).map(({pg,d})=>
+        `<div class="combo-opt" role="option" data-mc-gtother="${escapeHtml(pg.mode)}"
+            data-mc-gtoid="${escapeHtml(String(d.id))}">
+           <span class="mc-gt-shot blank">◻</span>
+           <span class="nm">${escapeHtml(d.name||'Design')}</span>
+           <span class="mc-pick-mode">${escapeHtml(pg.name)} page</span>
+         </div>`).join('');
+  }
   box.addEventListener('focus',()=>openPanel(true));
   box.addEventListener('input',()=>{ openPanel(true); drawPanel(box.value); });
   document.getElementById('mcGtCaret').addEventListener('click',()=>{
@@ -27157,6 +27278,12 @@ function mcGiftWire(it){
     if(on) box.focus();
   });
   panel.addEventListener('click',async e=>{
+    const away=e.target.closest('[data-mc-gtother]');
+    if(away){
+      openPanel(false);
+      await mcGtMoveToPage(it,away.dataset.mcGtother,away.dataset.mcGtoid);
+      return;
+    }
     const o=e.target.closest('[data-mc-gtd]'); if(!o) return;
     mcGtPick=o.dataset.mcGtd;
     const d=mcGtDesign(mcGtPick);
@@ -27258,6 +27385,28 @@ function mcGiftWire(it){
   }
   drawWords();
   drawPrev();
+  // The panel is not closed when Open full builder is pressed — it sits over
+  // that screen with this same line on it, and used to go on showing what the
+  // line looked like on the way in until the trip back. What is changed over
+  // there is pulled in as it happens instead: the design, how many, and every
+  // word. Nothing is written to the batch here — mcGtReturn still does that on
+  // the way out, and a keystroke is not a decision.
+  mcGtLiveRefresh=()=>{
+    const live=(typeof gtOrder!=='undefined'&&gtOrder||[])
+      .find(l=>String(l.id||'')==='mc-'+it.id);
+    if(!live) return;
+    it.sheet_item={...(it.sheet_item||{}),designId:live.designId,
+      qty:live.qty||it.qty,vals:live.vals||{}};
+    if(mcGtPick!==live.designId){
+      mcGtPick=live.designId||'';
+      const d=mcGtDesign(mcGtPick);
+      box.value=d?(d.name||''):'';
+    }
+    const q=document.getElementById('mcGtQty');
+    if(q&&live.qty&&Number(q.value)!==Number(live.qty)) q.value=live.qty;
+    drawWords();                 // the inputs are rewritten from the line
+    drawPrev();                  // and the tag is drawn from the inputs
+  };
   // a design matched by name on the way in has a shape as surely as one picked
   // by hand, and the sheet is as likely to be on the wrong one
   (async()=>{ const d0=mcGtDesign(mcGtPick); if(d0){ await mcGtShape(d0); drawPrev(); } })();
@@ -27308,6 +27457,17 @@ function mcGiftWire(it){
     mcRepaintRow(it);
     await mcGtOpenFull(it.sheet_item.page||mcLinePage(it));
   });
+}
+
+// Set by the gift tag panel while it is the thing on screen, and cleared on
+// every render of the window — a refresh bound to a body that has been
+// replaced would be drawing into elements that are gone.
+let mcGtLiveRefresh=null;
+function mcGtLiveSync(){
+  try{
+    if(!mcGtHome||!mcWinItem||typeof mcGtLiveRefresh!=='function') return;
+    mcGtLiveRefresh();
+  }catch(e){ /* the sheet's own redraw is not the panel's to break */ }
 }
 
 // ---------- the way back ----------
