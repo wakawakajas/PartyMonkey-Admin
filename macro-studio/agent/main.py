@@ -346,10 +346,14 @@ def set_hotkey(body: HotkeyUpdate) -> JSONResponse:
 
 class ReplayRequest(BaseModel):
     allow_foreground: bool = False
+    # Which step to begin at. 0 is the whole macro, which is what every
+    # caller that doesn't care gets.
+    start_at: int = 0
 
 
 def _run_replay(steps: list[dict], allow_foreground: bool, macro_id: Optional[str] = None,
-                 macro_name: str = "(unsaved recording)", video_config: Optional[dict] = None) -> JSONResponse:
+                 macro_name: str = "(unsaved recording)", video_config: Optional[dict] = None,
+                 start_at: int = 0) -> JSONResponse:
     """Shared by "replay the current recording" and "replay a saved
     macro" -- same guards, same engine, same error shapes."""
     if recorder.state in ("recording", "paused"):
@@ -360,9 +364,15 @@ def _run_replay(steps: list[dict], allow_foreground: bool, macro_id: Optional[st
         return JSONResponse(status_code=400, content={
             "error": "no_steps", "detail": "This macro has no steps to replay.",
         })
+    if start_at and start_at >= len(steps):
+        return JSONResponse(status_code=400, content={
+            "error": "start_past_end",
+            "detail": f"This macro has {len(steps)} step(s), so there is nothing at #{start_at}.",
+        })
     try:
         result = replay_engine.run(steps, allow_foreground=allow_foreground, macro_id=macro_id,
-                                    macro_name=macro_name, video_config=video_config)
+                                    macro_name=macro_name, video_config=video_config,
+                                    start_at=start_at)
     except ReplayBusyError as exc:
         return JSONResponse(status_code=409, content={"error": "replay_busy", "detail": str(exc)})
     return JSONResponse(content=result)
@@ -601,7 +611,8 @@ def replay_macro(macro_id: str, body: ReplayRequest) -> JSONResponse:
     except (MacroNotFoundError, ValueError) as exc:
         return _macro_error(exc)
     response = _run_replay(macro.get("steps", []), body.allow_foreground, macro_id=macro_id,
-                            macro_name=macro.get("name", macro_id), video_config=macro.get("video"))
+                            macro_name=macro.get("name", macro_id), video_config=macro.get("video"),
+                            start_at=body.start_at)
     if response.status_code == 200:
         result = json.loads(response.body)
         macro_store.record_run_result(macro_id, result["summary"])

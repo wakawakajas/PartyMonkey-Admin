@@ -73,7 +73,13 @@ def get_layout(known_ids: list[str]) -> dict:
 
     placement = {}
     for macro_id in known:
-        entry = data["placement"].get(macro_id) or {}
+        entry = data["placement"].get(macro_id)
+        if not entry:
+            # Never filed: order is unknown rather than zero, which is what
+            # lets a macro saved a minute ago sit at the top instead of
+            # tying with everything else that has never been dragged.
+            placement[macro_id] = {"category": UNCATEGORISED, "order": None}
+            continue
         category = entry.get("category") or UNCATEGORISED
         if category not in valid_cats:
             category = UNCATEGORISED

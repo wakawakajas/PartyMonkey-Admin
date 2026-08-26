@@ -203,12 +203,13 @@ class ReplayEngine:
 
     def run(self, steps: list[dict], allow_foreground: bool = False,
             macro_id: Optional[str] = None, macro_name: str = "(unsaved recording)",
-            video_config: Optional[dict] = None) -> dict:
+            video_config: Optional[dict] = None, start_at: int = 0) -> dict:
         if not _replay_lock.acquire(blocking=False):
             raise ReplayBusyError("A replay is already in progress -- wait for it to finish or stop it first.")
         self._stop_event.clear()
         try:
-            return self._run_locked(steps, allow_foreground, macro_id, macro_name, video_config)
+            return self._run_locked(steps, allow_foreground, macro_id, macro_name, video_config,
+                                    start_at=start_at)
         finally:
             _replay_lock.release()
 
@@ -231,14 +232,21 @@ class ReplayEngine:
         return not self._stop_event.is_set()
 
     def _run_locked(self, steps: list[dict], allow_foreground: bool, macro_id: Optional[str], macro_name: str,
-                     video_config: Optional[dict] = None) -> dict:
+                     video_config: Optional[dict] = None, start_at: int = 0) -> dict:
         run_id = run_reports.new_run_id()
         self._run_id = run_id  # read by _run_step_list for failure screenshots, incl. from nested blocks
         started_at = datetime.now(timezone.utc).isoformat()
         results: list[dict] = []
         context = {"hwnd": None, "variables": {}}
-        exec_counter = [0]  # shared mutable counter -- results are numbered by actual execution
-        self._broadcast({"type": "run_state", "state": "running", "step_count": len(steps), "run_id": run_id})
+        # Starting part-way down is for the third attempt at a macro whose
+        # first twenty steps already worked: skipping them saves the minutes,
+        # and the numbering carries on from where the editor says it should,
+        # so a result labelled #31 is the step labelled #31.
+        start_at = max(0, min(int(start_at or 0), len(steps)))
+        steps = steps[start_at:]
+        exec_counter = [start_at]  # shared mutable counter -- results are numbered by actual execution
+        self._broadcast({"type": "run_state", "state": "running", "step_count": len(steps),
+                         "start_at": start_at, "run_id": run_id})
 
         video_path, video_error = self._start_video(run_id, video_config)
         if video_error:

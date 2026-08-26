@@ -468,7 +468,7 @@ let layout = { categories: [], placement: {} };
 let layoutSeen = false;
 
 function placementOf(id) {
-  return layout.placement[id] || { category: "", order: 0 };
+  return layout.placement[id] || { category: "", order: null };
 }
 
 async function loadLayout() {
@@ -502,10 +502,22 @@ async function saveLayout() {
 }
 
 function macrosIn(categoryId) {
+  // A macro nobody has dragged yet has no order at all, and those come
+  // first, newest first -- so the one you saved a minute ago is at the top
+  // where you are looking for it, rather than alphabetically buried.
+  const rank = (m) => placementOf(m.id).order;
   return macros
     .filter((m) => placementOf(m.id).category === categoryId)
-    .sort((a, b) => (placementOf(a.id).order - placementOf(b.id).order)
-                    || a.name.localeCompare(b.name));
+    .sort((a, b) => {
+      const ra = rank(a), rb = rank(b);
+      if (ra === null && rb === null) {
+        return String(b.created_at || "").localeCompare(String(a.created_at || ""))
+               || a.name.localeCompare(b.name);
+      }
+      if (ra === null) return -1;
+      if (rb === null) return 1;
+      return (ra - rb) || a.name.localeCompare(b.name);
+    });
 }
 
 // Drag state lives up here because the drop can land on a row in one
@@ -861,11 +873,13 @@ if (logMinimiseBtn) {
   stopRunBtn.addEventListener("click", () => stopActiveReplay(stopRunBtn));
 }
 
-async function runMacro(id, name, allowForeground) {
+async function runMacro(id, name, allowForeground, startAt = 0) {
   activeRunTarget = id;
   runFinished = false;
   logList.innerHTML = "";
-  logTitle.textContent = `Current Logs · ${name}`;
+  logTitle.textContent = startAt
+    ? `Current Logs · ${name} — from #${startAt}`
+    : `Current Logs · ${name}`;
   logChip.className = "chip warn";
   logChip.textContent = "running";
   logPip.className = "pip now";
@@ -880,7 +894,7 @@ async function runMacro(id, name, allowForeground) {
     const res = await fetch(`/api/macros/${id}/replay`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ allow_foreground: allowForeground }),
+      body: JSON.stringify({ allow_foreground: allowForeground, start_at: startAt }),
     });
     const body = await res.json();
     if (!res.ok) {
@@ -894,7 +908,7 @@ async function runMacro(id, name, allowForeground) {
       finishLogs("bad", `Stopped after ${body.results.length} step(s).`, "warn");
     } else if (failed > 0 && !allowForeground) {
       finishLogs("bad", `${passed}/${total} succeeded, ${failed} failed.`, "warn");
-      showForegroundConfirm(logNote, () => runMacro(id, name, true));
+      showForegroundConfirm(logNote, () => runMacro(id, name, true, startAt));
     } else if (failed > 0) {
       finishLogs("bad", `${passed}/${total} succeeded, ${failed} still failed with foreground control.`, "error");
     } else {
@@ -1370,6 +1384,9 @@ const RECIPES = {
 
 let editingMacroId = null;
 let editingSteps = [];
+// What the file holds, so "run from here" can tell you when what you are
+// looking at is not what would actually run.
+let savedSteps = [];
 
 async function openEditor(id, name) {
   try {
@@ -1381,6 +1398,7 @@ async function openEditor(id, name) {
     }
     editingMacroId = id;
     editingSteps = (macro.steps || []).map((s) => JSON.parse(JSON.stringify(s))); // working copy
+    savedSteps = JSON.parse(JSON.stringify(editingSteps));
     editorMacroName.textContent = name;
     showEditScreen(true);
     macroEditorPanel.style.display = "block";
@@ -1950,6 +1968,16 @@ function buildStepRow(step, index, stepsArray, containerEl) {
 
   actions.append(upBtn, downBtn, copyBtn, delBtn);
 
+  // Only for top-level steps of the macro being edited: "start at #31" means
+  // the thirty-first step of the run, and a step inside a loop body does not
+  // have one of those numbers.
+  if (stepsArray === editingSteps && editingMacroId) {
+    const fromHere = mkActionBtn("▶ from here", `Run this macro starting at step #${index}`,
+      false, () => runFromStep(index));
+    fromHere.className = "from-here";
+    actions.appendChild(fromHere);
+  }
+
   if (chunkClipboard) {
     const pasteBtn = mkActionBtn("Paste", `Paste the copied ${chunkClipboard.length}-step chunk just below this step`,
       false, () => pasteChunkInto(stepsArray, index + 1, containerEl));
@@ -2015,6 +2043,19 @@ function buildStepRow(step, index, stepsArray, containerEl) {
   }
 
   return li;
+}
+
+// Running from part-way down is for the third attempt at a macro whose
+// first twenty steps already worked. It runs what is SAVED, so an unsaved
+// edit would otherwise run the old version of the step you are looking at.
+async function runFromStep(index) {
+  const macro = macros.find((m) => m.id === editingMacroId);
+  if (!macro) return;
+  const dirty = JSON.stringify(editingSteps) !== JSON.stringify(savedSteps);
+  if (dirty && !window.confirm(
+      `This macro has unsaved changes, and a run always uses the saved version.\n\n` +
+      `Run the saved macro from step #${index} anyway?`)) return;
+  runMacro(macro.id, macro.name, false, index);
 }
 
 function freshStepId() {
@@ -2276,6 +2317,7 @@ function renderStepSearch() {
     const add = document.createElement("button");
     add.textContent = hit.kind === "recipe" ? "+ Add these steps" : "+ Add step";
     add.addEventListener("click", () => {
+      markUndo();
       if (hit.kind === "recipe") {
         RECIPES[hit.key].make().forEach((step) => editingSteps.push(step));
         showNote(editorNote, `Added "${hit.label}". Edit the folder and web address in it, then Save Changes.`, "info");
@@ -2325,6 +2367,7 @@ function closeEditor() {
   editorEmpty.style.display = "";
   editingMacroId = null;
   editingSteps = [];
+  savedSteps = [];
   pickedSteps.clear();
   lastPick = null;
   undoStack.length = 0;
@@ -2348,6 +2391,7 @@ saveEditorBtn.addEventListener("click", async () => {
       showNote(editorNote, body.detail || `Unexpected error (HTTP ${res.status})`, "error");
       return;
     }
+    savedSteps = JSON.parse(JSON.stringify(editingSteps));
     showNote(editorNote, "Saved.", "info");
     loadMacros();
   } catch (err) {
