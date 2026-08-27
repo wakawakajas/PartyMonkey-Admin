@@ -539,7 +539,7 @@ class ReplayEngine:
                                "web_download",
                                "web_wait_for", "web_type", "web_upload", "web_drop_files",
                                "web_read", "web_print_pdf",
-                               "web_switch_tab", "web_close_tab", "cdp_close",
+                               "web_switch_tab", "web_close_tab", "web_show_tab", "cdp_close",
                                "web_wait_loaded", "web_reload"):
                 outcome = self._run_web_step(step_type, step, context)
             else:
@@ -724,6 +724,13 @@ class ReplayEngine:
                 remember(page)
                 return {"status": "success", "tier": "cdp",
                         "reason": f'Following that tab: {page.get("url", "")[:90]}'}
+
+            if step_type == "web_show_tab":
+                page = cdp.find_page(port, match or context.get("cdp_tab", ""), timeout_ms=timeout_ms)
+                shown = cdp.activate_page(port, page)
+                remember(page)
+                return {"status": "success", "tier": "cdp",
+                        "reason": f"Brought that tab to the front ({shown[:70]})."}
 
             if step_type == "web_close_tab":
                 page = cdp.find_page(port, match or context.get("cdp_tab", ""), timeout_ms=timeout_ms)

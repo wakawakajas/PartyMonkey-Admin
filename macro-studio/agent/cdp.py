@@ -489,6 +489,30 @@ def wait_for_new_page(port: int, known_ids, match: str = "", timeout_ms: int = 1
         time.sleep(0.3)
 
 
+def activate_page(port: int, page: dict) -> str:
+    """Puts a tab in front, so a person watching sees what the run is
+    doing on it.
+
+    Nothing else needs this: the steps drive a tab by id whether it is
+    visible or buried. It exists for the times a page opens a tab of its
+    own -- a print job, a preview -- and leaves the browser showing that
+    while the run carries on somewhere else, out of sight.
+
+    Two calls, because they answer different questions: activateTarget
+    picks the tab within its window, bringToFront raises the window."""
+    target_id = page.get("id", "")
+    if not target_id:
+        raise RuntimeError("That tab has no id to bring forward.")
+    _send(_browser_socket(port), "Target.activateTarget", {"targetId": target_id})
+    try:
+        _send(page, "Page.bringToFront", {})
+    except RuntimeError:
+        # The tab is already the one showing; a window that refuses to be
+        # raised is not a reason to fail the step.
+        pass
+    return page.get("url", "")
+
+
 def close_page(port: int, target_id: str) -> None:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/close/{target_id}", timeout=5):

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -129,6 +130,46 @@ def create_macro(name: str, steps: list[dict]) -> dict:
         }
         _atomic_write(_macro_path(macro_id), data)
         return data
+
+
+def import_macro(data: dict) -> dict:
+    """Takes a macro file's own contents -- the thing you'd copy off
+    another machine -- and files it into macros/.
+
+    A macro carries its own id, so a file that came from a macro already
+    here is the same macro, newer: it replaces what's on disk (after the
+    old copy goes into version history, so a wrong file can be undone by
+    hand). Anything else is somebody else's macro arriving for the first
+    time and is added alongside. What we never do is silently merge two
+    different macros because they happen to share a name.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("That file isn't a macro -- expected a JSON object.")
+    name = str(data.get("name") or "").strip()
+    if not name:
+        raise ValueError("That file has no macro name in it.")
+    steps = data.get("steps")
+    if not isinstance(steps, list):
+        raise ValueError("That file has no steps list in it.")
+
+    macro_id = str(data.get("id") or "").strip()
+    with _lock:
+        # An id we can't turn into a filename is not an id we can trust.
+        if not macro_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", macro_id):
+            macro_id = uuid.uuid4().hex
+        replaced = _macro_path(macro_id).exists()
+        if replaced:
+            _snapshot_version(macro_id)
+        record = dict(data)
+        record["id"] = macro_id
+        record["name"] = name
+        record["steps"] = steps
+        record.setdefault("created_at", _now())
+        record["updated_at"] = _now()
+        record.setdefault("last_run", None)
+        record.setdefault("last_result", None)
+        _atomic_write(_macro_path(macro_id), record)
+        return {"macro": record, "replaced": replaced}
 
 
 def rename_macro(macro_id: str, new_name: str) -> dict:

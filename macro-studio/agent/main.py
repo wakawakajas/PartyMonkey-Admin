@@ -15,6 +15,7 @@ import ctypes
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import threading
@@ -24,7 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -142,6 +143,7 @@ def get_status() -> dict:
         "host": config.HOST,
         "port": config.PORT,
         "started_at": datetime.fromtimestamp(START_TIME, tz=timezone.utc).isoformat(),
+        "macros_dir": str(config.MACROS_DIR),
     }
 
 
@@ -424,6 +426,15 @@ class MacroIds(BaseModel):
     ids: list[str]
 
 
+class MacroImportFile(BaseModel):
+    filename: str = "macro.json"
+    content: str
+
+
+class MacroImport(BaseModel):
+    files: list[MacroImportFile]
+
+
 class MacroDeleteAllConfirm(BaseModel):
     confirm: str
 
@@ -460,6 +471,66 @@ def save_macro(body: MacroCreate) -> JSONResponse:
         return _macro_error(exc)
     recorder.cancel()  # consumed into a saved macro -- reset the buffer
     return JSONResponse(content=macro)
+
+
+@app.post("/api/macros/import")
+def import_macros(body: MacroImport) -> JSONResponse:
+    """Files uploaded macro .json files into macros/.
+
+    Every file is reported on individually and a bad one doesn't stop the
+    others: dropping five files in and being told only that "something
+    was wrong" would mean opening all five by hand to find out which.
+    """
+    if not body.files:
+        return JSONResponse(status_code=400, content={
+            "error": "no_files", "detail": "No files were picked.",
+        })
+    results = []
+    for item in body.files:
+        try:
+            data = json.loads(item.content)
+        except json.JSONDecodeError as exc:
+            results.append({"filename": item.filename, "ok": False,
+                            "detail": f"Not valid JSON: {exc}"})
+            continue
+        try:
+            outcome = macro_store.import_macro(data)
+        except ValueError as exc:
+            results.append({"filename": item.filename, "ok": False, "detail": str(exc)})
+            continue
+        macro = outcome["macro"]
+        results.append({
+            "filename": item.filename, "ok": True,
+            "replaced": outcome["replaced"],
+            "id": macro["id"], "name": macro["name"],
+            "step_count": len(macro.get("steps", [])),
+        })
+    return JSONResponse(content={
+        "results": results,
+        "added": sum(1 for r in results if r["ok"] and not r["replaced"]),
+        "updated": sum(1 for r in results if r["ok"] and r["replaced"]),
+        "failed": sum(1 for r in results if not r["ok"]),
+    })
+
+
+@app.get("/api/macros/{macro_id}/file")
+def download_macro_file(macro_id: str) -> object:
+    """Hands back the macro's file exactly as it sits in macros/, named
+    the way it is named on disk.
+
+    The same bytes a colleague would copy off this machine by hand -- not
+    a re-serialised copy of it -- so what they upload on the other side is
+    the file itself, and "which file do I copy" has the same answer
+    whether you fetch it here or open the folder.
+    """
+    path = config.MACROS_DIR / f"{macro_id}.json"
+    # Never let a crafted id walk out of macros/ -- ids are hex, and
+    # anything else has no business naming a file to hand out.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", macro_id) or not path.is_file():
+        return JSONResponse(status_code=404, content={
+            "error": "macro_not_found", "detail": f"No macro file for {macro_id}.",
+        })
+    return FileResponse(path, media_type="application/json", filename=path.name)
 
 
 @app.get("/api/macros/{macro_id}")

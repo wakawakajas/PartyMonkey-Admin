@@ -42,6 +42,12 @@ const viewerNote = document.getElementById("viewerNote");
 const viewerEmptyState = document.getElementById("viewerEmptyState");
 const macroViewer = document.getElementById("macroViewer");
 const addCategoryBtn = document.getElementById("addCategoryBtn");
+const uploadMacroBtn = document.getElementById("uploadMacroBtn");
+const uploadMacroInput = document.getElementById("uploadMacroInput");
+const uploadNote = document.getElementById("uploadNote");
+const copyGuideList = document.getElementById("copyGuideList");
+const macrosDirPath = document.getElementById("macrosDirPath");
+const copyMacrosDirBtn = document.getElementById("copyMacrosDirBtn");
 const editLibList = document.getElementById("editLibList");
 const editLibSearch = document.getElementById("editLibSearch");
 const viewerScreen = document.getElementById("viewerScreen");
@@ -147,7 +153,7 @@ function typeLabel(type) {
     web_wait_for: "Web: wait for", web_type: "Web: type", web_upload: "Web: upload file",
     web_drop_files: "Web: drop files on",
     web_read: "Web: read",
-    web_print_pdf: "Web: save PDF", web_switch_tab: "Web: follow tab", web_close_tab: "Web: close tab",
+    web_print_pdf: "Web: save PDF", web_switch_tab: "Web: follow tab", web_show_tab: "Web: show tab", web_close_tab: "Web: close tab",
     web_wait_loaded: "Web: wait until loaded", web_reload: "Web: refresh",
   };
   return labels[type] || type;
@@ -696,6 +702,115 @@ if (addCategoryBtn) {
   });
 }
 
+// -- copying a macro between machines ---------------------------------------
+// The folder comes from the agent rather than being written into the page:
+// it is the actual path on THIS machine, which is the whole point of showing
+// it -- a guessed path helps nobody standing in front of Explorer.
+
+let macrosDir = "";
+
+function setMacrosDir(dir) {
+  macrosDir = dir || "";
+  if (macrosDirPath && macrosDir) macrosDirPath.textContent = macrosDir;
+}
+
+function renderCopyGuide() {
+  if (!copyGuideList) return;
+  if (macros.length === 0) {
+    copyGuideList.innerHTML = '<div class="empty-state">No macros here yet to copy.</div>';
+    return;
+  }
+  copyGuideList.innerHTML = "";
+  [...macros].sort((a, b) => a.name.localeCompare(b.name)).forEach((m) => {
+    const row = document.createElement("div");
+    row.className = "cg-row";
+    const nm = document.createElement("span");
+    nm.className = "cg-name";
+    nm.textContent = m.name;
+    const file = document.createElement("code");
+    file.className = "mono cg-file";
+    file.textContent = `${m.id}.json`;
+    const btn = document.createElement("button");
+    btn.className = "btn-sm";
+    btn.textContent = "Copy filename";
+    btn.addEventListener("click", () => copyText(`${m.id}.json`, btn));
+    // For sending one on: a colleague needs the file, and digging it out
+    // of the folder is the step that goes wrong -- wrong macro, or the
+    // versions folder by mistake.
+    const dl = document.createElement("a");
+    dl.className = "btn-sm cg-dl";
+    dl.textContent = "Download";
+    dl.href = `/api/macros/${m.id}/file`;
+    dl.download = `${m.id}.json`;
+    row.append(nm, file, btn, dl);
+    copyGuideList.append(row);
+  });
+}
+
+async function copyText(text, btn) {
+  const was = btn.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = "Copied";
+  } catch (err) {
+    btn.textContent = "Press Ctrl+C";
+    window.prompt("Copy this:", text);
+  }
+  setTimeout(() => { btn.textContent = was; }, 1500);
+}
+
+if (copyMacrosDirBtn) {
+  copyMacrosDirBtn.addEventListener("click", () => copyText(macrosDirPath.textContent, copyMacrosDirBtn));
+}
+
+if (uploadMacroBtn) {
+  uploadMacroBtn.addEventListener("click", () => uploadMacroInput.click());
+
+  uploadMacroInput.addEventListener("change", async () => {
+    const picked = [...uploadMacroInput.files];
+    // Cleared straight away: picking the same file twice in a row is a
+    // normal thing to do after fixing it, and an unchanged input fires
+    // no change event.
+    uploadMacroInput.value = "";
+    if (picked.length === 0) return;
+
+    uploadMacroBtn.disabled = true;
+    showNote(uploadNote, `Reading ${picked.length} file${picked.length === 1 ? "" : "s"}...`, "info");
+    try {
+      const files = await Promise.all(picked.map(async (f) => ({
+        filename: f.name, content: await f.text(),
+      })));
+      const res = await fetch("/api/macros/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        showNote(uploadNote, body.detail || `Unexpected error (HTTP ${res.status})`, "error");
+        return;
+      }
+      await loadMacros();
+      showNote(uploadNote, summariseImport(body), body.failed ? "error" : "info");
+    } catch (err) {
+      showNote(uploadNote, `Could not upload: ${err.message}`, "error");
+    } finally {
+      uploadMacroBtn.disabled = false;
+    }
+  });
+}
+
+function summariseImport(body) {
+  const parts = [];
+  if (body.updated) parts.push(`${body.updated} updated to the newer file`);
+  if (body.added) parts.push(`${body.added} added`);
+  const bad = body.results.filter((r) => !r.ok);
+  if (bad.length) parts.push(bad.map((r) => `${r.filename}: ${r.detail}`).join(" | "));
+  const named = body.results.filter((r) => r.ok).map((r) => r.name);
+  if (named.length) parts.push(`(${named.join(", ")})`);
+  return parts.length ? parts.join(" -- ") : "Nothing was imported.";
+}
+
 // -- the edit screen's library ----------------------------------------------
 
 function renderEditLibrary() {
@@ -784,6 +899,7 @@ async function deleteMacro(macro) {
 function renderAll() {
   renderViewer();
   renderEditLibrary();
+  renderCopyGuide();
 }
 
 async function loadMacros() {
@@ -998,6 +1114,7 @@ function renderStatus(status) {
     )
     .join("");
   phaseBadge.textContent = `Phase ${status.phase}`;
+  setMacrosDir(status.macros_dir);
 
   if (status.is_admin) {
     showNote(recordNote,
@@ -1189,6 +1306,10 @@ const STEP_TEMPLATES = {
     label: "Web: follow new tab",
     make: () => ({ type: "web_switch_tab", port: 9222, mode: "new", tab_match: "", timeout_ms: 15000, delay_ms: 0 }),
   },
+  web_show_tab: {
+    label: "Web: bring tab to the front",
+    make: () => ({ type: "web_show_tab", port: 9222, tab_match: "", timeout_ms: 8000, delay_ms: 0 }),
+  },
   web_close_tab: {
     label: "Web: close tab",
     make: () => ({ type: "web_close_tab", port: 9222, tab_match: "", timeout_ms: 8000, delay_ms: 0 }),
@@ -1233,6 +1354,7 @@ const STEP_HELP = {
   web_goto: "Opens a web address in that Chrome. Tick new tab to leave the current page alone. EXAMPLE: https://www.google.com/search?q={{row}} -- the number from the spreadsheet goes straight into the address.",
   web_reload: "Reloads the page -- for a screen showing stale numbers, or a retry after something did not take.",
   web_switch_tab: "Follows a tab that just opened because of the previous click, so the steps after it act on the new page. Put it after a click that opens a PDF or a preview.",
+  web_show_tab: "Puts the tab the macro is working on in front, so you can watch it. For after a click that opens a tab of its own -- a print job, a preview -- which leaves the browser showing that tab while the run carries on behind it. Changes nothing about how the steps work; only what you see.",
   web_close_tab: "Closes the tab the macro is on and goes back to the one before it.",
   web_click: "Clicks something on the page -- a button, a link, a row. Say which by its visible words, or by a CSS selector (the name the page uses for it: press F12 in the CDP Chrome, click the arrow icon, click the thing, right-click the highlighted line, Copy > Copy selector). EXAMPLE: visible text 搜索, exact match on. Fill in \"until this appears\" with what the click should produce -- a dialog, a panel -- and it presses again until that shows up, which fixes a button that exists a moment before it works.",
   web_type: "Types into a box on the page. No clicking first, no clipboard -- the value goes straight in. EXAMPLE: CSS selector #fuzzyName, value {{row}}, press Enter after on.",
@@ -1268,7 +1390,7 @@ const COMPARE_OPERATORS = ["equals", "not_equals", "contains", "regex", "greater
 // in: get the data, open the browser, do the thing.
 const STEP_GROUPS = [
   ["Spreadsheets and files", ["file_search", "sheet_read", "open_file", "file_op", "file_wait", "clipboard"]],
-  ["Web: getting there", ["cdp_launch", "web_goto", "web_reload", "web_switch_tab", "web_close_tab", "cdp_close"]],
+  ["Web: getting there", ["cdp_launch", "web_goto", "web_reload", "web_switch_tab", "web_show_tab", "web_close_tab", "cdp_close"]],
   ["Web: doing things", ["web_click", "web_type", "web_hover", "web_upload", "web_drop_files", "web_download", "web_print_pdf", "web_read"]],
   ["Web: waiting", ["web_wait_for", "web_wait_loaded"]],
   ["Repeating and deciding", ["loop", "conditional", "wait"]],
@@ -1865,6 +1987,10 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("quiet for (ms)", editorInput("number", step.quiet_ms, (v) => (step.quiet_ms = v), "80px"));
     addField("wait at least (ms)", editorInput("number", step.min_ms, (v) => (step.min_ms = v), "80px"));
     addField("timeout (ms)", editorInput("number", step.timeout_ms, (v) => (step.timeout_ms = v), "80px"));
+  } else if (step.type === "web_show_tab") {
+    addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
+    addField("URL/title contains (optional)", editorInput("text", step.tab_match, (v) => (step.tab_match = v), "170px"));
+    addField("timeout ms", editorInput("number", step.timeout_ms, (v) => (step.timeout_ms = v), "80px"));
   } else if (step.type === "web_switch_tab") {
     addField("port", editorInput("number", step.port, (v) => (step.port = v), "60px"));
     addField("which", editorSelect(step.mode || "new", ["new", "match"], (v) => (step.mode = v)));
@@ -2209,6 +2335,7 @@ const STEP_KEYWORDS = {
   web_goto: "go to website open page url address navigate search url 打开网页 网址",
   web_reload: "refresh reload page again 刷新",
   web_switch_tab: "new tab opened follow tab popup 新标签 切换",
+  web_show_tab: "show tab front focus watch see what it is doing bring forward 前台 切换显示",
   web_close_tab: "close tab 关闭标签",
   web_click: "click button link press tap open menu 点击 按钮 搜索",
   web_type: "type enter fill search box input write text into field paste number 输入 填写 搜索框",
