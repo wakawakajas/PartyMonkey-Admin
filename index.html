@@ -5126,9 +5126,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div id="loadDesignQtyRow" style="display:none;margin-top:12px;">
       <div class="ph-card" id="loadDesignSelected" style="margin-bottom:8px;word-break:break-word;"></div>
       <div class="grid2">
-        <label class="field"><span>QUANTITY</span><input type="number" id="loadDesignQty" min="1" value="1"/></label>
+        <label class="field" id="loadDesignQtyField"><span>QUANTITY</span><input type="number" id="loadDesignQty" min="1" value="1"/></label>
         <button class="btn-primary" id="loadDesignConfirmBtn" style="align-self:end;height:44px;">Add design</button>
       </div>
+      <!-- Opened to map a SKU, the design that was tapped can stand for the
+           folder it is in: a design that is a set — artwork, cutting file,
+           proof — is filed together, and the folder is the mapping. -->
+      <button class="btn-outline" id="loadDesignFolderMapBtn"
+              style="display:none;width:100%;margin-top:8px;height:44px;"></button>
     </div>
     <div id="loadDesignMsg" style="margin-top:10px;"></div>
   </div>
@@ -17197,11 +17202,23 @@ function computeGridForQty(qty){
   if(!best) best={cols:maxCols,rows:maxRows,waste:maxPerSheet-qty};
   return {cols:best.cols,rows:best.rows,short:false,maxPerSheet};
 }
+// what the picker is for on this trip: adding artwork to a sheet, or naming a
+// file for the shop's routing
+function loadDesignMapMode(){
+  const map=!!mcRoutePickFor;
+  const q=document.getElementById('loadDesignQtyField');
+  if(q) q.style.display=map?'none':'';
+  const c=document.getElementById('loadDesignConfirmBtn');
+  if(c) c.textContent=map?'Map this file':'Add design';
+  const f=document.getElementById('loadDesignFolderMapBtn');
+  if(f&&!map) f.style.display='none';
+}
 async function openLoadDesignModal(){
   document.getElementById('loadDesignModal').classList.add('open');
   document.getElementById('loadDesignSearch').value='';
   loadDesignSelected=null;
   document.getElementById('loadDesignQtyRow').style.display='none';
+  loadDesignMapMode();
   document.getElementById('loadDesignMsg').innerHTML='';
   loadDesignFolderState();
   const dir=await loadDesignDirGet();
@@ -17210,9 +17227,19 @@ async function openLoadDesignModal(){
 }
 function closeLoadDesignModal(){
   document.getElementById('loadDesignModal').classList.remove('open');
+  const fb=document.getElementById('loadDesignFolderMapBtn');
+  if(fb) fb.style.display='none';
+  // Opened from the SKU summary, it goes back to the SKU summary — shutting a
+  // picker is not a way out of the list it was opened from, and landing on the
+  // batch with the selection gone was a morning's ticking thrown away.
+  const back=!!mcRoutePickFor;
   // shut without picking: the SKU that opened it is no longer waiting, so an
   // ordinary Load design later does not finish as though it were
   mcSummaryPickFor=null; mcRoutePickFor=null;
+  if(back){
+    document.getElementById('mcSummarySheet').classList.add('open');
+    if(typeof mcRenderSummary==='function') mcRenderSummary();
+  }
 }
 document.getElementById('loadDesignBtn').addEventListener('click',openLoadDesignModal);
 document.getElementById('loadDesignClose').addEventListener('click',closeLoadDesignModal);
@@ -17246,7 +17273,16 @@ document.getElementById('loadDesignList').addEventListener('click',e=>{
   row.style.borderColor='var(--blueprint)';
   document.getElementById('loadDesignSelected').textContent=it.path;
   document.getElementById('loadDesignQtyRow').style.display='';
-  document.getElementById('loadDesignQty').focus();
+  loadDesignMapMode();
+  // the folder this design is in, offered as the mapping instead of the file
+  const fb=document.getElementById('loadDesignFolderMapBtn');
+  const folder=String(it.folder||'').trim();
+  if(fb){
+    const ok=!!mcRoutePickFor&&folder&&folder!=='—';
+    fb.style.display=ok?'':'none';
+    if(ok) fb.textContent=`📁 Map the whole folder “${folder}” instead`;
+  }
+  if(!mcRoutePickFor) document.getElementById('loadDesignQty').focus();
 });
 // Reads a design off the folder and adds it to the list as its own line.
 // Nothing about the grid is touched: the sheet holds what it holds, and a
@@ -17268,6 +17304,22 @@ async function addDesignLine(pick,qty,sku){
   renderDesignLines(); refreshArtInputs(); drawAll();
   return line;
 }
+document.getElementById('loadDesignFolderMapBtn').addEventListener('click',async()=>{
+  if(!mcRoutePickFor||!loadDesignSelected) return;
+  const folder=String(loadDesignSelected.folder||'').trim();
+  if(!folder||folder==='—') return;
+  const who=mcRoutePickFor; mcRoutePickFor=null;
+  closeLoadDesignModal();
+  document.getElementById('mcSummarySheet').classList.add('open');
+  const skus=Array.isArray(who)?who:[who];
+  const ok=await mcBulkWrite(skus.map(sku=>({sku,dest:'copy',
+    patch:{copy_path:folder+'/'}})));
+  if(!ok) return;
+  mcRenderSummary();
+  showMsg(document.getElementById('mcSummaryMsg'),
+    `✓ ${skus.length===1?skus[0]:skus.length+' SKUs'} `
+    +`cop${skus.length===1?'ies':'y'} everything in ${folder} — mapped for everybody.`,true);
+});
 document.getElementById('loadDesignConfirmBtn').addEventListener('click',async()=>{
   if(!loadDesignSelected) return;
   // opened to map a file to a SKU: nothing is loaded and no sheet is touched —
@@ -27735,6 +27787,10 @@ async function mcOpenSummary(){
     const dir=await loadDesignDirGet();
     if(dir&&await loadDesignDirOk(dir,false)){ await loadDesignRescan(); mcRenderSummary(); }
   }
+  // and the folder box is filled from it afterwards rather than before: filled
+  // first, it was filled from a library nothing had read yet, and the only
+  // answer it offered was the empty one
+  mcSelFolderOpts();
   // and so are both gift tag libraries — a tag SKU should say Add on the way
   // in, not only once something has been to the page it lives on — and the
   // shop's own routing, which is what a row says before either of them
@@ -27815,9 +27871,21 @@ document.getElementById('mcSummaryBulkFolderMap').addEventListener('click',async
   const out=document.getElementById('mcSummaryMsg');
   const rows=mcSelRows();
   if(!rows.length){ showMsg(out,'Nothing is selected.',false); return; }
+  // read the library first where nothing has: the box beside this button is
+  // empty until something has, and an empty box is not an answer
+  if(!loadDesignFiles.length){
+    const dir=await loadDesignDirGet();
+    if(dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan();
+    mcSelFolderOpts();
+  }
   const folder=document.getElementById('mcSummaryBulkFolder').value;
   if(!folder){
-    showMsg(out,'Pick the folder beside this button first.',false); return; }
+    const sel=document.getElementById('mcSummaryBulkFolder');
+    showMsg(out,sel&&sel.options.length>1
+      ? 'Pick which folder in the box beside this button, then press it again.'
+      : 'No designs folder connected — set one under Load design, or press One file '
+        +'for all and map a folder from there.',false);
+    return; }
   const n=rows.length;
   if(!confirm(`Set ${n} SKU${n===1?'':'s'} to copy everything in ${folder}?`
     +'\n\nRouting is shared, so this is how they are copied for everybody.')) return;
