@@ -4778,6 +4778,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <input type="text" id="mcSummaryBulkInto" placeholder="into — a folder, Copy only"
              aria-label="Which folder these are copied into" autocomplete="off"/>
       <button type="button" class="btn-outline" id="mcSummaryBulkApply">Set for these</button>
+      <button type="button" class="btn-outline" id="mcSummaryBulkMap">🔎 Map files by name</button>
       <button type="button" class="btn-outline" id="mcSummaryBulkCopy">⧉ Copy these</button>
       <button type="button" class="btn-outline" id="mcSummaryBulkNone">Clear</button>
     </div>
@@ -25777,56 +25778,127 @@ const mcSelRows=()=>mcSummaryRows().filter(r=>mcSel.has(String(r.sku)));
 // Where a whole selection goes, written in as few round trips as it can be:
 // one update for the SKUs that already have a row of their own and one insert
 // for the rest. Two hundred separate saves is a minute of watching a spinner.
+// entries: [{sku, dest, patch}] — one row of the shop's routing per SKU, and
+// dest '' means take that SKU's own row away and leave it to the rules. Two
+// hundred separate saves is a minute of watching a spinner, so the ones that
+// already have a row go up in one upsert and the rest in one insert.
+async function mcBulkWrite(entries){
+  const out=document.getElementById('mcSummaryMsg');
+  if(!entries||!entries.length) return false;
+  if(!sb){ showMsg(out,'No connection — routing is shared, so it is saved online.',false);
+    return false; }
+  const key=x=>String(x||'').trim().toLowerCase();
+  const byKey=new Map(entries.map(e=>[key(e.sku),e]));
+  const had=mcSkuRows().filter(r=>byKey.has(key(r.match)));
+  const hadKeys=new Set(had.map(r=>key(r.match)));
+  const drop=had.filter(r=>!byKey.get(key(r.match)).dest);
+  const keep=had.filter(r=>byKey.get(key(r.match)).dest);
+  const fresh=entries.filter(e=>e.dest&&!hadKeys.has(key(e.sku)));
+  try{
+    if(drop.length){
+      const {error}=await sb.from('magic_routes').delete().in('id',drop.map(r=>r.id));
+      if(error) throw error;
+      const gone=new Set(drop.map(r=>r.id));
+      mcRoutes=mcRoutes.filter(r=>!gone.has(r.id));
+    }
+    if(keep.length){
+      const rows=keep.map(r=>{ const e=byKey.get(key(r.match));
+        return {...r,dest:e.dest,...(e.patch||{})}; });
+      const {error}=await sb.from('magic_routes').upsert(rows);
+      if(error) throw error;
+      rows.forEach(n=>{ const r=mcRoutes.find(x=>x.id===n.id); if(r) Object.assign(r,n); });
+    }
+    if(fresh.length){
+      const uid=await mcWhoAmI();
+      const {data,error}=await sb.from('magic_routes').insert(fresh.map(e=>({
+        user_id:uid,kind:'sku',how:'exact',match:String(e.sku),dest:e.dest,sort_order:0,
+        ...(e.patch||{})}))).select();
+      if(error) throw error;
+      mcRoutes.push(...(data||[]));
+    }
+  }catch(err){
+    showMsg(out,'Could not save that — '+((err&&err.message)||'unknown error'),false);
+    return false;
+  }
+  mcRenderSummary();
+  if(document.getElementById('mcRouteSheet').classList.contains('open')) mcRenderRoutes();
+  return true;
+}
+// Where a whole selection goes.
 async function mcBulkDest(skus,dest,into){
   const out=document.getElementById('mcSummaryMsg');
   const want=[...new Set(skus.map(x=>String(x)))];
   if(!want.length) return;
-  if(!sb){ showMsg(out,'No connection — routing is shared, so it is saved online.',false); return; }
-  const keys=new Map(want.map(x=>[x.trim().toLowerCase(),x]));
-  const had=mcSkuRows().filter(r=>keys.has(String(r.match||'').trim().toLowerCase()));
-  const hadKeys=new Set(had.map(r=>String(r.match||'').trim().toLowerCase()));
-  const extra=dest==='copy'
+  const patch=dest==='copy'
     // the file stays whatever each SKU already had — it is one file per SKU and
     // no selection can answer that — but the folder they land in is one answer
     ? (into===undefined||into===''?{}:{copy_to:mcCopyToClean(into)})
     // sent to a sheet instead: what it used to copy is not carried along, or
     // the row would go back to copying the moment it was set to Copy again
     : {copy_path:'',copy_to:''};
-  try{
-    if(!dest){
-      if(had.length){
-        const {error}=await sb.from('magic_routes').delete().in('id',had.map(r=>r.id));
-        if(error) throw error;
-        const gone=new Set(had.map(r=>r.id));
-        mcRoutes=mcRoutes.filter(r=>!gone.has(r.id));
-      }
-    }else{
-      if(had.length){
-        const rows=had.map(r=>({...r,dest,...extra}));
-        const {error}=await sb.from('magic_routes').upsert(rows);
-        if(error) throw error;
-        rows.forEach(n=>{ const r=mcRoutes.find(x=>x.id===n.id); if(r) Object.assign(r,n); });
-      }
-      const fresh=want.filter(x=>!hadKeys.has(x.trim().toLowerCase()));
-      if(fresh.length){
-        const uid=await mcWhoAmI();
-        const {data,error}=await sb.from('magic_routes').insert(fresh.map(sku=>({
-          user_id:uid,kind:'sku',how:'exact',match:String(sku),dest,sort_order:0,...extra})))
-          .select();
-        if(error) throw error;
-        mcRoutes.push(...(data||[]));
-      }
-    }
-  }catch(err){
-    showMsg(out,'Could not save that — '+((err&&err.message)||'unknown error'),false);
-    return;
-  }
-  mcRenderSummary();
-  if(typeof mcRenderRoutes==='function'
-    &&document.getElementById('mcRouteSheet').classList.contains('open')) mcRenderRoutes();
+  const ok=await mcBulkWrite(want.map(sku=>({sku,dest,patch})));
+  if(!ok) return;
   showMsg(out,`✓ ${want.length} SKU${want.length===1?'':'s'} → `
     +`${dest?mcDestLabel(dest):'left to the rules'}`
-    +`${dest==='copy'&&extra.copy_to?` · into ${extra.copy_to}`:''}.`,true);
+    +`${dest==='copy'&&patch.copy_to?` · into ${patch.copy_to}`:''}.`,true);
+}
+// The file a SKU copies, found in the designs folder by name. Everything with
+// that exact name is collected rather than the first one taken: two files of
+// one name in two folders is a question, and mapping the wrong one copies the
+// wrong artwork under a name that says it is right. A .png wins over the other
+// kinds, which is the shop's own convention and the only tie broken here.
+function mcMapMatches(row){
+  const want=[String(row.sku||''),String(row.name||'')]
+    .map(n=>n.trim().toLowerCase()).filter(Boolean);
+  const stem=f=>String(f.name||'').replace(/\.[^.]+$/,'').trim().toLowerCase();
+  for(const n of want){
+    const hits=loadDesignFiles.filter(f=>stem(f)===n);
+    if(!hits.length) continue;
+    const png=hits.filter(f=>/\.png$/i.test(f.name));
+    if(png.length===1) return {pick:png[0]};
+    if(hits.length===1) return {pick:hits[0]};
+    return {ambiguous:(png.length?png:hits).map(f=>f.path)};
+  }
+  return {};
+}
+// Maps a whole selection at once: every SKU that has a file of its own name
+// gets that file written onto its routing, and the ones that do not are named
+// so they can be picked by hand. Nothing is guessed — a SKU with two files of
+// the same name in different folders is left for somebody to choose between.
+async function mcBulkMap(rows,into){
+  const out=document.getElementById('mcSummaryMsg');
+  if(!rows||!rows.length){ showMsg(out,'Nothing is selected.',false); return; }
+  if(!loadDesignFiles.length){
+    showMsg(out,'No designs folder connected — set one under Load design first.',false);
+    return;
+  }
+  const to=into===undefined||into===''?undefined:mcCopyToClean(into);
+  const entries=[]; const missing=[], twice=[];
+  for(const r of rows){
+    const m=mcMapMatches(r);
+    if(m.pick) entries.push({sku:r.sku,dest:'copy',
+      patch:{copy_path:m.pick.path,...(to===undefined?{}:{copy_to:to})}});
+    else if(m.ambiguous) twice.push(r.sku);
+    else missing.push(r.sku);
+  }
+  if(!entries.length){
+    showMsg(out,`Nothing to map — no file in the folder is named after `
+      +`${rows.length===1?'that SKU':'any of these'}.`,false);
+    return;
+  }
+  const list=n=>n.slice(0,3).join(', ')+(n.length>3?'…':'');
+  if(!confirm(`Map ${entries.length} of ${rows.length} SKU${rows.length===1?'':'s'} to the file named after it, and set them to Copy file?\n\n`
+    +(to?`They copy into ${to}.\n`:'')
+    +(missing.length?`${missing.length} have no file of that name: ${list(missing)}\n`:'')
+    +(twice.length?`${twice.length} have more than one and are left alone: ${list(twice)}\n`:'')
+    +'\nRouting is shared, so this is how they are copied for everybody.')) return;
+  showMsg(out,'Mapping…',true);
+  const ok=await mcBulkWrite(entries);
+  if(!ok) return;
+  showMsg(out,[`✓ ${entries.length} mapped to Copy file`,to?`into ${to}`:'',
+    missing.length?`${missing.length} with no file of that name: ${list(missing)}`:'',
+    twice.length?`${twice.length} with more than one file of that name: ${list(twice)}`:'']
+    .filter(Boolean).join(' · '),!missing.length&&!twice.length);
 }
 function mcRenderSummary(){
   const body=document.getElementById('mcSummaryBody');
@@ -27416,6 +27488,18 @@ document.getElementById('mcSummaryBulkApply').addEventListener('click',async()=>
   if(n>1&&!confirm(`Set ${n} SKUs to ${dest?mcDestLabel(dest):'no route of their own'}?`
     +'\n\nRouting is shared, so this is how they are added for everybody.')) return;
   await mcBulkDest([...mcSel],dest,into);
+});
+document.getElementById('mcSummaryBulkMap').addEventListener('click',async()=>{
+  const rows=mcSelRows();
+  if(!rows.length){
+    showMsg(document.getElementById('mcSummaryMsg'),'Nothing is selected.',false); return; }
+  // the folder is read on the way in, the way the summary itself reads it —
+  // mapping against an empty list would call the whole selection nameless
+  if(!loadDesignFiles.length){
+    const dir=await loadDesignDirGet();
+    if(dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan();
+  }
+  await mcBulkMap(rows,document.getElementById('mcSummaryBulkInto').value);
 });
 // and the same selection, filed. The file each one copies is its own — mapped,
 // or <SKU>.png where it is not — so this is the whole press of the button.
