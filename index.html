@@ -5815,8 +5815,15 @@ function designPickerPanel(q,selPath){
 // Which designs keep their own is written down against the design itself (its
 // file), not against the line: the same artwork put on a sheet next week comes
 // back already bleeding the way it was set, with nobody re-typing it.
+// And written down for the whole print team, not for one browser. A bleed
+// worked out at the machine is what that design needs on any machine, so it
+// lives in design_bleeds and everybody with the print section reads the same
+// list — see supabase-migration-DESIGN-BLEED.sql.
 const DESIGN_BLEED_KEY='pigu.designBleed';
-let designBleedMemo=null;
+let designBleedMemo=null, designBleedLoaded=false, designBleedLoading=null;
+// This browser's copy of that list. Not the truth — the table is — but it is
+// what the first sheet of the morning draws with while the table is still on
+// its way, and all there is when there is no connection at all.
 function designBleedStore(){
   if(designBleedMemo) return designBleedMemo;
   try{ designBleedMemo=JSON.parse(localStorage.getItem(DESIGN_BLEED_KEY)||'{}')||{}; }
@@ -5825,6 +5832,77 @@ function designBleedStore(){
 }
 function designBleedSaveStore(){
   try{ localStorage.setItem(DESIGN_BLEED_KEY,JSON.stringify(designBleedStore())); }catch(e){}
+}
+// Reads the shared list. One in-flight read is shared by every caller: a sheet
+// being built asks once per design, and that is one question, not six.
+// A read that fails leaves the mirror alone and stays un-loaded, so the next
+// design added tries again rather than the morning silently running on a copy
+// from last week.
+function designBleedLoad(force){
+  if(!sb) return Promise.resolve(designBleedStore());
+  if(designBleedLoaded&&!force) return Promise.resolve(designBleedStore());
+  if(designBleedLoading&&!force) return designBleedLoading;
+  designBleedLoading=(async()=>{
+    try{
+      const {data,error}=await sb.from('design_bleeds').select('path,mm');
+      if(error) return designBleedStore();
+      const store={};
+      (data||[]).forEach(r=>{
+        const key=r&&r.path?String(r.path).trim().toLowerCase():'';
+        const mm=Number(r&&r.mm);
+        if(key&&isFinite(mm)&&mm>=0) store[key]={on:true,mm};
+      });
+      designBleedMemo=store; designBleedLoaded=true;
+      designBleedSaveStore();
+      return store;
+    }finally{ designBleedLoading=null; }
+  })();
+  return designBleedLoading;
+}
+// Puts one design's bleed on the table, or takes it off. A row exists only
+// while the design keeps its own figure: handing it back to the sheet deletes
+// the row rather than writing a zero, because zero bleed and "follow the
+// sheet" are two different instructions.
+// It says so when the write does not land. A bleed that looks saved on this
+// screen and reaches nobody else is the exact failure this table was added to
+// end, so it is not allowed to fail quietly.
+async function designBleedWrite(key,mm,on){
+  if(!key) return;
+  if(!sb){ designBleedTold('Sync is unavailable — that bleed is on this browser only.'); return; }
+  try{
+    const {data:{session}}=await sb.auth.getSession();
+    if(!session){ designBleedTold('Sign in for the team to see that bleed — it is on this browser only for now.'); return; }
+    const {error}=on
+      ? await sb.from('design_bleeds').upsert(
+          {path:key,mm:Number(mm),user_id:session.user.id,updated_at:new Date().toISOString()},
+          {onConflict:'path'})
+      : await sb.from('design_bleeds').delete().eq('path',key);
+    if(error) throw error;
+  }catch(err){
+    designBleedTold('Could not share that bleed: '+((err&&err.message)||'unknown error')
+      +' — it is on this browser only.');
+  }
+}
+function designBleedTold(text){
+  const el=document.getElementById('saveMsg');
+  if(el) showMsg(el,escapeHtml(text),false);
+}
+// When the shared list arrives after a sheet is already up, the lines that
+// nobody has touched take what it says. Lines somebody has just set by hand
+// are left exactly as typed — an answer arriving late must not overwrite the
+// person who was not waiting for it.
+function designBleedRefreshLines(){
+  const store=designBleedStore();
+  let changed=false;
+  (state.designs||[]).forEach(d=>{
+    if(d.bleedTouched) return;
+    const saved=store[designBleedKey(d)];
+    const on=!!(saved&&saved.on&&isFinite(Number(saved.mm)));
+    const mm=on?Number(saved.mm):null;
+    if(!!d.bleedOn===on&&(!on||Number(d.bleedMm)===mm)) return;
+    d.bleedOn=on; d.bleedMm=on?mm:null; changed=true;
+  });
+  if(changed){ renderDesignLines(); drawAll(); }
 }
 // what a design is remembered by: the file it came from. A plain upload has no
 // path, so its bleed is this sheet's line only and nothing is written down —
@@ -5846,16 +5924,21 @@ function bleedMmFor(line){
 // "whatever the sheet says".
 function setDesignBleed(line,mm,on){
   if(!line) return null;
-  const want=Number(mm);
+  // no figure given is not a figure of zero: handing a design back to the
+  // sheet leaves the last one it kept alone rather than reading as 0 mm
+  const want=(mm===null||mm===undefined||mm==='')?NaN:Number(mm);
   line.bleedOn=(on===undefined)?(isFinite(want)&&want>=0):!!on;
   if(isFinite(want)&&want>=0) line.bleedMm=want;
   else if(!isFinite(Number(line.bleedMm))) line.bleedMm=state.bleed.mm;
+  // set here, on purpose: a shared list arriving a moment later leaves it alone
+  line.bleedTouched=true;
   const key=designBleedKey(line);
   if(key){
     const store=designBleedStore();
     if(line.bleedOn) store[key]={on:true,mm:Number(line.bleedMm)};
     else delete store[key];
     designBleedSaveStore();
+    designBleedWrite(key,line.bleedMm,line.bleedOn);
   }
   return line;
 }
@@ -5907,7 +5990,7 @@ function renderDesignLines(){
         <div class="field bleed" title="Off: this design bleeds by whatever the sheet says. On: it bleeds by its own figure instead, and is remembered against the design for next time.">
           <span><input type="checkbox" data-design-bleed-on ${d.bleedOn?'checked':''}/>BLEED ${escapeHtml(u)}</span>
           <input type="number" min="0" step="0.1" ${d.bleedOn?'':'disabled'}
-                 value="${round(fromMm(isFinite(Number(d.bleedMm))&&d.bleedMm!==null?Number(d.bleedMm):state.bleed.mm,u))}" data-design-bleed/>
+                 value="${round(fromMm(d.bleedOn&&isFinite(Number(d.bleedMm))?Number(d.bleedMm):state.bleed.mm,u))}" data-design-bleed/>
         </div>
         <button class="icon-btn" data-design-remove title="Take this design off the sheet">×</button>
       </div>`).join('');
@@ -6014,6 +6097,7 @@ document.addEventListener('click',e=>{
 });
 // point an existing line at a folder design, keeping its quantity
 async function setDesignLineFile(line,pick){
+  await designBleedLoad();
   const file=await pick.handle.getFile();
   const dataURL=await fileToImageData(file);
   line.name=pick.name;
@@ -16707,6 +16791,7 @@ function applyPrintState(meta,name){
   if(designs&&designs.length){
     (async()=>{
       const out=[], missing=[];
+      await designBleedLoad();
       for(const d of designs){
         const file=await loadDesignFileByPath(d.path);
         if(!file){ missing.push(d.name||d.path); continue; }
@@ -16797,7 +16882,10 @@ document.getElementById('authForm').addEventListener('submit',async(e)=>{
 // signing out lives in the drawer only — the top bar is just the menu now
 if(sb){
   sb.auth.onAuthStateChange((event,session)=>{
-    if(session){ setAuthedUI(true,session.user.email); refreshTemplateList(); }
+    if(session){
+      setAuthedUI(true,session.user.email); refreshTemplateList();
+      designBleedLoad(true).then(designBleedRefreshLines).catch(()=>{});
+    }
     else{ setAuthedUI(false); templateRows=[]; document.getElementById('templateList').innerHTML='<p class="hint" style="margin:4px 0 0;">— none saved —</p>'; }
   });
 }else{
@@ -17458,6 +17546,7 @@ document.getElementById('loadDesignList').addEventListener('click',e=>{
 // cannot come from the file name — the artwork is often filed under another
 // name, and Choose… exists precisely for that.
 async function addDesignLine(pick,qty,sku){
+  await designBleedLoad();
   const file=await pick.handle.getFile();
   const dataURL=await fileToImageData(file);
   const img=await loadImage(dataURL);
@@ -24562,7 +24651,10 @@ if(sb){
   // database, so this costs one small query when it is not due.
   setInterval(()=>sweepOrphanPhotos(),6*60*60*1000);
   sb.auth.getSession().then(({data:{session}})=>{
-    if(session){ setAuthedUI(true,session.user.email); refreshTemplateList(); }
+    if(session){
+      setAuthedUI(true,session.user.email); refreshTemplateList();
+      designBleedLoad(true).then(designBleedRefreshLines).catch(()=>{});
+    }
     else{ setAuthedUI(false); }
   });
 }
