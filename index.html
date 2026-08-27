@@ -1935,7 +1935,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 #mcSummaryBulk{align-items:center;gap:8px;margin:6px 0 2px;padding:8px;
   border:1px solid var(--blueprint);border-radius:10px;background:var(--nest);}
 #mcSummaryBulk .hint{margin:0;font-weight:700;color:var(--ink);}
-.sheet #mcSummaryBulk select{flex:0 0 168px;}
+.sheet #mcSummaryBulk select{flex:0 1 168px;min-width:0;}
 .sheet #mcSummaryBulk input[type="text"]{flex:1 1 150px;min-width:120px;}
 .sheet #mcSummaryBulk select,.sheet #mcSummaryBulk input[type="text"]{height:32px;
   min-height:32px;font-size:12px;margin:0;width:auto;}
@@ -4778,7 +4778,13 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <input type="text" id="mcSummaryBulkInto" placeholder="into — a folder, Copy only"
              aria-label="Which folder these are copied into" autocomplete="off"/>
       <button type="button" class="btn-outline" id="mcSummaryBulkApply">Set for these</button>
+      <!-- a whole shop's designs often sit in one folder of the library, and
+           looking only there settles the names that appear in two of them -->
+      <select id="mcSummaryBulkFolder" aria-label="Which folder to map from">
+        <option value="">— anywhere in the designs folder —</option>
+      </select>
       <button type="button" class="btn-outline" id="mcSummaryBulkMap">🔎 Map files by name</button>
+      <button type="button" class="btn-outline" id="mcSummaryBulkOne">⧉ One file for all…</button>
       <button type="button" class="btn-outline" id="mcSummaryBulkCopy">⧉ Copy these</button>
       <button type="button" class="btn-outline" id="mcSummaryBulkNone">Clear</button>
     </div>
@@ -17236,14 +17242,22 @@ document.getElementById('loadDesignConfirmBtn').addEventListener('click',async()
   // opened to map a file to a SKU: nothing is loaded and no sheet is touched —
   // the path is written onto the routing, where the rest of the team reads it
   if(mcRoutePickFor){
-    const sku=mcRoutePickFor, pick=loadDesignSelected;
+    const who=mcRoutePickFor, pick=loadDesignSelected;
     mcRoutePickFor=null;
     closeLoadDesignModal();
-    await mcSetCopyFile(sku,pick.path);
     document.getElementById('mcSummarySheet').classList.add('open');
+    const skus=Array.isArray(who)?who:[who];
+    const into=document.getElementById('mcSummaryBulkInto').value;
+    const to=Array.isArray(who)&&into?{copy_to:mcCopyToClean(into)}:{};
+    if(skus.length===1) await mcSetCopyFile(skus[0],pick.path);
+    else if(!await mcBulkWrite(skus.map(sku=>
+      ({sku,dest:'copy',patch:{copy_path:pick.path,...to}})))) return;
     mcRenderSummary();
     showMsg(document.getElementById('mcSummaryMsg'),
-      `✓ ${sku} copies ${pick.name} — mapped for everybody.`,true);
+      skus.length===1
+        ? `✓ ${skus[0]} copies ${pick.name} — mapped for everybody.`
+        : `✓ ${skus.length} SKUs copy ${pick.name}${to.copy_to?` into ${to.copy_to}`:''} `
+          +'— mapped for everybody.',true);
     return;
   }
   const qty=Math.max(1,Math.round(parseFloat(document.getElementById('loadDesignQty').value)||1));
@@ -25783,6 +25797,20 @@ function mcSelSync(){
   const cp=document.getElementById('mcSummaryBulkCopy');
   if(cp) cp.disabled=!mcSel.size;
 }
+// every folder the designs library has, so a selection can be mapped from one
+// of them rather than from the whole tree
+function mcSelFolderOpts(){
+  const sel=document.getElementById('mcSummaryBulkFolder'); if(!sel) return;
+  const keep=sel.value;
+  const seen=[];
+  (loadDesignFiles||[]).forEach(f=>{
+    const n=f&&f.folder; if(n&&n!=='—'&&!seen.includes(n)) seen.push(n);
+  });
+  seen.sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'}));
+  sel.innerHTML='<option value="">— anywhere in the designs folder —</option>'
+    +seen.map(n=>`<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+  sel.value=seen.includes(keep)?keep:'';
+}
 // the same four answers the one-SKU sheet gives, in a list because this one is
 // asked of a whole selection and there is no room for four buttons
 function mcSelDestOpts(){
@@ -25866,12 +25894,17 @@ async function mcBulkDest(skus,dest,into){
 // one name in two folders is a question, and mapping the wrong one copies the
 // wrong artwork under a name that says it is right. A .png wins over the other
 // kinds, which is the shop's own convention and the only tie broken here.
-function mcMapMatches(row){
+function mcMapMatches(row,folder){
   const want=[String(row.sku||''),String(row.name||'')]
     .map(n=>n.trim().toLowerCase()).filter(Boolean);
   const stem=f=>String(f.name||'').replace(/\.[^.]+$/,'').trim().toLowerCase();
+  // named a folder: only that one is read, which is also how a name filed in
+  // two folders stops being a question — the shop has said which folder it is
+  const pool=folder
+    ? loadDesignFiles.filter(f=>String(f.folder||'')===String(folder))
+    : loadDesignFiles;
   for(const n of want){
-    const hits=loadDesignFiles.filter(f=>stem(f)===n);
+    const hits=pool.filter(f=>stem(f)===n);
     if(!hits.length) continue;
     const png=hits.filter(f=>/\.png$/i.test(f.name));
     if(png.length===1) return {pick:png[0]};
@@ -25884,7 +25917,7 @@ function mcMapMatches(row){
 // gets that file written onto its routing, and the ones that do not are named
 // so they can be picked by hand. Nothing is guessed — a SKU with two files of
 // the same name in different folders is left for somebody to choose between.
-async function mcBulkMap(rows,into){
+async function mcBulkMap(rows,into,folder){
   const out=document.getElementById('mcSummaryMsg');
   if(!rows||!rows.length){ showMsg(out,'Nothing is selected.',false); return; }
   if(!loadDesignFiles.length){
@@ -25894,7 +25927,7 @@ async function mcBulkMap(rows,into){
   const to=into===undefined||into===''?undefined:mcCopyToClean(into);
   const entries=[]; const missing=[], twice=[];
   for(const r of rows){
-    const m=mcMapMatches(r);
+    const m=mcMapMatches(r,folder);
     if(m.pick) entries.push({sku:r.sku,dest:'copy',
       patch:{copy_path:m.pick.path,...(to===undefined?{}:{copy_to:to})}});
     else if(m.ambiguous) twice.push(r.sku);
@@ -25907,6 +25940,7 @@ async function mcBulkMap(rows,into){
   }
   const list=n=>n.slice(0,3).join(', ')+(n.length>3?'…':'');
   if(!confirm(`Map ${entries.length} of ${rows.length} SKU${rows.length===1?'':'s'} to the file named after it, and set them to Copy file?\n\n`
+    +(folder?`Looking in ${folder} only.\n`:'')
     +(to?`They copy into ${to}.\n`:'')
     +(missing.length?`${missing.length} have no file of that name: ${list(missing)}\n`:'')
     +(twice.length?`${twice.length} have more than one and are left alone: ${list(twice)}\n`:'')
@@ -25914,7 +25948,8 @@ async function mcBulkMap(rows,into){
   showMsg(out,'Mapping…',true);
   const ok=await mcBulkWrite(entries);
   if(!ok) return;
-  showMsg(out,[`✓ ${entries.length} mapped to Copy file`,to?`into ${to}`:'',
+  showMsg(out,[`✓ ${entries.length} mapped to Copy file`,
+    folder?`from ${folder}`:'',to?`into ${to}`:'',
     missing.length?`${missing.length} with no file of that name: ${list(missing)}`:'',
     twice.length?`${twice.length} with more than one file of that name: ${list(twice)}`:'']
     .filter(Boolean).join(' · '),!missing.length&&!twice.length);
@@ -27493,7 +27528,7 @@ function mcSummaryFolderState(){
 }
 async function mcOpenSummary(){
   document.getElementById('mcSummarySearch').value='';   // a fresh look, not the last search
-  mcSel.clear(); mcSelDestOpts();                        // and nothing ticked from last time
+  mcSel.clear(); mcSelDestOpts(); mcSelFolderOpts();     // and nothing ticked from last time
   document.getElementById('mcSummaryMsg').innerHTML='';
   document.getElementById('mcSummarySheet').classList.add('open');
   mcRenderSummary();
@@ -27555,6 +27590,20 @@ document.getElementById('mcSummaryBulkApply').addEventListener('click',async()=>
     +'\n\nRouting is shared, so this is how they are added for everybody.')) return;
   await mcBulkDest([...mcSel],dest,into);
 });
+// The other shape the job takes: a dozen SKUs that are all the same card, or a
+// shop whose whole run is one sheet. The picker is opened once and what comes
+// back is written onto every one of them.
+document.getElementById('mcSummaryBulkOne').addEventListener('click',async()=>{
+  const rows=mcSelRows();
+  if(!rows.length){
+    showMsg(document.getElementById('mcSummaryMsg'),'Nothing is selected.',false); return; }
+  mcRoutePickFor=rows.map(r=>String(r.sku));
+  document.getElementById('mcSummarySheet').classList.remove('open');
+  await openLoadDesignModal();
+  const folder=document.getElementById('mcSummaryBulkFolder').value;
+  document.getElementById('loadDesignSearch').value=folder||'';
+  loadDesignRenderList();
+});
 document.getElementById('mcSummaryBulkMap').addEventListener('click',async()=>{
   const rows=mcSelRows();
   if(!rows.length){
@@ -27565,7 +27614,9 @@ document.getElementById('mcSummaryBulkMap').addEventListener('click',async()=>{
     const dir=await loadDesignDirGet();
     if(dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan();
   }
-  await mcBulkMap(rows,document.getElementById('mcSummaryBulkInto').value);
+  mcSelFolderOpts();
+  await mcBulkMap(rows,document.getElementById('mcSummaryBulkInto').value,
+    document.getElementById('mcSummaryBulkFolder').value);
 });
 // and the same selection, filed. The file each one copies is its own — mapped,
 // or <SKU>.png where it is not — so this is the whole press of the button.
