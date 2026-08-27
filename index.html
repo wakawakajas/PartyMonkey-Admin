@@ -1927,6 +1927,20 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .mc-plan-stage canvas{max-width:100%;max-height:66vh;}
 .mc-sum-row{display:flex;align-items:center;gap:9px;padding:7px 0;
   border-bottom:1px solid var(--paper-line);}
+/* picking rows out to say something about all of them at once. Setting two
+   hundred SKUs to Copy file one row at a time is the same decision made two
+   hundred times, so the rows are selectable and the answer is given once. */
+.sheet .mc-sum-row input.mc-sum-pick{flex:0 0 auto;width:17px;height:17px;
+  min-height:0;margin:0;padding:0;accent-color:var(--blueprint);cursor:pointer;}
+#mcSummaryBulk{align-items:center;gap:8px;margin:6px 0 2px;padding:8px;
+  border:1px solid var(--blueprint);border-radius:10px;background:var(--nest);}
+#mcSummaryBulk .hint{margin:0;font-weight:700;color:var(--ink);}
+.sheet #mcSummaryBulk select{flex:0 0 168px;}
+.sheet #mcSummaryBulk input[type="text"]{flex:1 1 150px;min-width:120px;}
+.sheet #mcSummaryBulk select,.sheet #mcSummaryBulk input[type="text"]{height:32px;
+  min-height:32px;font-size:12px;margin:0;width:auto;}
+.sheet #mcSummaryBulk button{width:auto;height:32px;min-height:32px;padding:0 10px;
+  font-size:12px;flex:0 0 auto;}
 /* one routing rule: the text to look for, how to look for it, and where
    anything carrying it goes. Wide enough to read as a sentence on a laptop
    and wrapped into three lines on a phone rather than squeezed. */
@@ -1979,10 +1993,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* the three at the top of the summary stand in a row of their own, so they
    are sized like controls rather than stretched like answers */
 .sheet .mc-sum-row button,.sheet #mcSummaryAddAll,.sheet #mcSummaryAddAvail,
-.sheet #mcSummaryRemoveAll{width:auto;height:32px;min-height:32px;
+.sheet #mcSummaryRemoveAll,.sheet #mcSummaryCopyAll,.sheet #mcSummarySelAll,
+.sheet #mcSummaryCopyFolderBtn{width:auto;height:32px;min-height:32px;
   padding:0 11px;font-size:12px;flex:0 0 auto;}
 .sheet #mcSummaryAddAll:disabled,.sheet #mcSummaryAddAvail:disabled,
-.sheet #mcSummaryRemoveAll:disabled{opacity:.4;}
+.sheet #mcSummaryRemoveAll:disabled,.sheet #mcSummaryCopyAll:disabled{opacity:.4;}
 .mc-sum-row button:disabled{opacity:.4;}
 /* what the SKU actually looks like, so the row is recognised rather than read */
 .mc-sum-shot{flex:0 0 auto;width:36px;height:36px;border-radius:9px;object-fit:cover;
@@ -4746,11 +4761,25 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button type="button" class="btn-outline btn-sm" id="mcSummaryRemoveAll">－ Remove all shown</button>
       <!-- the copy-only SKUs on show, filed in one press -->
       <button type="button" class="btn-outline btn-sm" id="mcSummaryCopyAll">⧉ Copy all shown</button>
+      <button type="button" class="btn-outline btn-sm" id="mcSummarySelAll">☑ Select all shown</button>
       <!-- where a row's Copy files its artwork. Chosen once and kept, the same
            way the export folder is: a browser cannot be handed a path. -->
       <button type="button" class="btn-outline btn-sm" id="mcSummaryCopyFolderBtn"
               title="Choose the folder a row's Copy files its artwork into">📁 Copy-to folder…</button>
       <span class="hint" id="mcSummaryFolderLbl" style="margin:0;"></span>
+    </div>
+    <!-- what to do with the rows that are ticked. Hidden until something is,
+         because it is an answer to a question nobody has asked yet. -->
+    <div class="chips" id="mcSummaryBulk" style="display:none;">
+      <span class="hint" id="mcSummarySelCount"></span>
+      <select id="mcSummaryBulkDest" aria-label="Where these go">
+        <option value="">— leave them to the rules —</option>
+      </select>
+      <input type="text" id="mcSummaryBulkInto" placeholder="into — a folder, Copy only"
+             aria-label="Which folder these are copied into" autocomplete="off"/>
+      <button type="button" class="btn-outline" id="mcSummaryBulkApply">Set for these</button>
+      <button type="button" class="btn-outline" id="mcSummaryBulkCopy">⧉ Copy these</button>
+      <button type="button" class="btn-outline" id="mcSummaryBulkNone">Clear</button>
     </div>
     <div id="mcSummaryMsg"></div>
     <div id="mcSummaryBody"></div>
@@ -25722,6 +25751,83 @@ function mcSummaryShownRows(){
 // second time. A SKU that is on a sheet is done for that reason and is offered
 // Remove rather than Add, so this is about the ones ticked by hand.
 const mcRowDone=r=>!!(r&&r.allDone)&&!mcWhereIsSku(r.sku);
+// Which rows are ticked. Held by SKU rather than by position, so a re-render
+// — and every Add, Copy and route change causes one — does not lose it.
+let mcSel=new Set();
+function mcSelSync(){
+  const bar=document.getElementById('mcSummaryBulk');
+  const lbl=document.getElementById('mcSummarySelCount');
+  if(!bar||!lbl) return;
+  bar.style.display=mcSel.size?'flex':'none';
+  lbl.textContent=`${mcSel.size} selected`;
+  const cp=document.getElementById('mcSummaryBulkCopy');
+  if(cp) cp.disabled=!mcSel.size;
+}
+// the same four answers the one-SKU sheet gives, in a list because this one is
+// asked of a whole selection and there is no room for four buttons
+function mcSelDestOpts(){
+  const sel=document.getElementById('mcSummaryBulkDest'); if(!sel) return;
+  const keep=sel.value;
+  sel.innerHTML='<option value="">— leave them to the rules —</option>'
+    +MC_DESTS.map(d=>`<option value="${d.v}">${escapeHtml(d.label)}</option>`).join('');
+  sel.value=keep;
+}
+// the rows behind the ticks, in the order the summary has them
+const mcSelRows=()=>mcSummaryRows().filter(r=>mcSel.has(String(r.sku)));
+// Where a whole selection goes, written in as few round trips as it can be:
+// one update for the SKUs that already have a row of their own and one insert
+// for the rest. Two hundred separate saves is a minute of watching a spinner.
+async function mcBulkDest(skus,dest,into){
+  const out=document.getElementById('mcSummaryMsg');
+  const want=[...new Set(skus.map(x=>String(x)))];
+  if(!want.length) return;
+  if(!sb){ showMsg(out,'No connection — routing is shared, so it is saved online.',false); return; }
+  const keys=new Map(want.map(x=>[x.trim().toLowerCase(),x]));
+  const had=mcSkuRows().filter(r=>keys.has(String(r.match||'').trim().toLowerCase()));
+  const hadKeys=new Set(had.map(r=>String(r.match||'').trim().toLowerCase()));
+  const extra=dest==='copy'
+    // the file stays whatever each SKU already had — it is one file per SKU and
+    // no selection can answer that — but the folder they land in is one answer
+    ? (into===undefined||into===''?{}:{copy_to:mcCopyToClean(into)})
+    // sent to a sheet instead: what it used to copy is not carried along, or
+    // the row would go back to copying the moment it was set to Copy again
+    : {copy_path:'',copy_to:''};
+  try{
+    if(!dest){
+      if(had.length){
+        const {error}=await sb.from('magic_routes').delete().in('id',had.map(r=>r.id));
+        if(error) throw error;
+        const gone=new Set(had.map(r=>r.id));
+        mcRoutes=mcRoutes.filter(r=>!gone.has(r.id));
+      }
+    }else{
+      if(had.length){
+        const rows=had.map(r=>({...r,dest,...extra}));
+        const {error}=await sb.from('magic_routes').upsert(rows);
+        if(error) throw error;
+        rows.forEach(n=>{ const r=mcRoutes.find(x=>x.id===n.id); if(r) Object.assign(r,n); });
+      }
+      const fresh=want.filter(x=>!hadKeys.has(x.trim().toLowerCase()));
+      if(fresh.length){
+        const uid=await mcWhoAmI();
+        const {data,error}=await sb.from('magic_routes').insert(fresh.map(sku=>({
+          user_id:uid,kind:'sku',how:'exact',match:String(sku),dest,sort_order:0,...extra})))
+          .select();
+        if(error) throw error;
+        mcRoutes.push(...(data||[]));
+      }
+    }
+  }catch(err){
+    showMsg(out,'Could not save that — '+((err&&err.message)||'unknown error'),false);
+    return;
+  }
+  mcRenderSummary();
+  if(typeof mcRenderRoutes==='function'
+    &&document.getElementById('mcRouteSheet').classList.contains('open')) mcRenderRoutes();
+  showMsg(out,`✓ ${want.length} SKU${want.length===1?'':'s'} → `
+    +`${dest?mcDestLabel(dest):'left to the rules'}`
+    +`${dest==='copy'&&extra.copy_to?` · into ${extra.copy_to}`:''}.`,true);
+}
 function mcRenderSummary(){
   const body=document.getElementById('mcSummaryBody');
   const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
@@ -25836,6 +25942,9 @@ function mcRenderSummary(){
            title="${set?'Routing says this SKU goes on the '+escapeHtml(heading)
              :'Where this SKU is added — tap to say'}">→ ${escapeHtml(heading)}</button>`;
     return `<div class="mc-sum-row${on?' is-on':''}">
+      <input type="checkbox" class="mc-sum-pick" data-mc-sum-sel="${escapeHtml(r.sku)}"
+             ${mcSel.has(String(r.sku))?'checked':''}
+             aria-label="Select ${escapeHtml(r.sku)}"/>
       ${shot}
       <span class="mc-sum-main">
         <span class="mc-sum-sku">${escapeHtml(r.sku)}</span>
@@ -25851,6 +25960,7 @@ function mcRenderSummary(){
       ${btn}
     </div>`;}).join('');
   mcSummaryButtons(rows);
+  mcSelSync();
 }
 // The three buttons say how many they would act on, and go quiet where that
 // is none: "Add all shown" against a search that has left nothing addable is
@@ -27246,6 +27356,7 @@ function mcSummaryFolderState(){
 }
 async function mcOpenSummary(){
   document.getElementById('mcSummarySearch').value='';   // a fresh look, not the last search
+  mcSel.clear(); mcSelDestOpts();                        // and nothing ticked from last time
   document.getElementById('mcSummaryMsg').innerHTML='';
   document.getElementById('mcSummarySheet').classList.add('open');
   mcRenderSummary();
@@ -27278,6 +27389,42 @@ document.getElementById('mcSummaryCopyFolderBtn').addEventListener('click',async
   }catch(e){ /* cancelled */ }
 });
 document.getElementById('mcSummarySearch').addEventListener('input',mcRenderSummary);
+// ticking a row is not an edit to anything, so it does not redraw the list —
+// the list is what the ticks are being made against
+document.getElementById('mcSummaryBody').addEventListener('change',e=>{
+  const box=e.target.closest('[data-mc-sum-sel]'); if(!box) return;
+  const sku=String(box.dataset.mcSumSel);
+  if(box.checked) mcSel.add(sku); else mcSel.delete(sku);
+  mcSelSync();
+});
+// all of what the search has left on screen, and off again on a second press
+document.getElementById('mcSummarySelAll').addEventListener('click',()=>{
+  const shown=mcSummaryShownRows().map(r=>String(r.sku));
+  const all=shown.length&&shown.every(k=>mcSel.has(k));
+  shown.forEach(k=>{ if(all) mcSel.delete(k); else mcSel.add(k); });
+  mcRenderSummary();
+});
+document.getElementById('mcSummaryBulkNone').addEventListener('click',()=>{
+  mcSel.clear(); mcRenderSummary();
+});
+document.getElementById('mcSummaryBulkApply').addEventListener('click',async()=>{
+  const out=document.getElementById('mcSummaryMsg');
+  if(!mcSel.size){ showMsg(out,'Nothing is selected.',false); return; }
+  const dest=document.getElementById('mcSummaryBulkDest').value;
+  const into=document.getElementById('mcSummaryBulkInto').value;
+  const n=mcSel.size;
+  if(n>1&&!confirm(`Set ${n} SKUs to ${dest?mcDestLabel(dest):'no route of their own'}?`
+    +'\n\nRouting is shared, so this is how they are added for everybody.')) return;
+  await mcBulkDest([...mcSel],dest,into);
+});
+// and the same selection, filed. The file each one copies is its own — mapped,
+// or <SKU>.png where it is not — so this is the whole press of the button.
+document.getElementById('mcSummaryBulkCopy').addEventListener('click',async()=>{
+  const rows=mcSelRows();
+  if(!rows.length){
+    showMsg(document.getElementById('mcSummaryMsg'),'Nothing is selected.',false); return; }
+  await mcCopyRows(rows);
+});
 document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
   // taking one back off: the row says so again straight away, and the summary
   // stays put — this is an edit to the sheet, not a new sheet to look at
