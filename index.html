@@ -26513,61 +26513,27 @@ async function mcBulkDest(skus,dest,into){
 // one name in two folders is a question, and mapping the wrong one copies the
 // wrong artwork under a name that says it is right. A .png wins over the other
 // kinds, which is the shop's own convention and the only tie broken here.
-// A SKU and the file it is filed under are written by two different hands. The
-// SKU comes off a listing and the file off somebody's desktop, so they differ
-// by a full stop, a double space, a bracket — "Custom Gift Wrapper-6. Harry
-// Potter-BIG" against "Custom Gift Wrapper-6 Harry Potter BIG.pdf". Read
-// letter for letter those are two different things; to anybody in the room
-// they are the same card.
-//
-// So the name is asked three ways, and only ever settles on one file:
-//   1. the name exactly
-//   2. the name with the punctuation and spacing taken out of both
-//   3. one containing the other, once that has been done — and only where a
-//      single file in the folder does
-// A tie at any step is not an answer and is handed back as one to look at,
-// because two files of nearly one name is a question, not a near miss.
-const mcNameKey=t=>String(t||'').toLowerCase().replace(/[^a-z0-9]+/g,'');
+// Matched on the SKU exactly, and on nothing else. The name of the file is
+// the shop's own instruction: a file that is nearly named after this SKU is
+// a different card, and mapping it copies the wrong artwork under a name
+// that says it is right. A SKU with two files of its name is a question and
+// is handed back rather than picked between; a PNG against other kinds of one
+// name is the shop's own way round and is the only thing settled here.
 function mcMapMatches(row,folder){
-  const want=[String(row.sku||''),String(row.name||'')]
-    .map(n=>n.trim().toLowerCase()).filter(Boolean);
+  const want=String(row.sku||'').trim().toLowerCase();
+  if(!want) return {};
   const stem=f=>String(f.name||'').replace(/\.[^.]+$/,'').trim().toLowerCase();
   // named a folder: only that one is read, which is also how a name filed in
   // two folders stops being a question — the shop has said which folder it is
   const pool=folder
     ? (mcSrcFiles||[]).filter(f=>String(f.folder||'')===String(folder))
     : (mcSrcFiles||[]);
-  // a PNG beats the other kinds of one name, which is the shop's own way round
-  const settle=hits=>{
-    const png=hits.filter(f=>/\.png$/i.test(f.name));
-    if(png.length===1) return {pick:png[0]};
-    if(hits.length===1) return {pick:hits[0]};
-    return {ambiguous:(png.length?png:hits).map(f=>f.path)};
-  };
-  for(const n of want){
-    const hits=pool.filter(f=>stem(f)===n);
-    if(hits.length) return settle(hits);
-  }
-  for(const n of want){
-    const k=mcNameKey(n); if(!k) continue;
-    const hits=pool.filter(f=>mcNameKey(stem(f))===k);
-    if(hits.length) return {...settle(hits),loose:true};
-  }
-  for(const n of want){
-    const k=mcNameKey(n);
-    // one name starting the other — "Chick" against "Chick (v2)", a SKU with
-    // the size on the end. Held to the start rather than anywhere inside,
-    // because inside catches half the folder, and to a name with something to
-    // it, because three letters catch the other half.
-    if(k.length<4) continue;
-    const hits=pool.filter(f=>{
-      const fk=mcNameKey(stem(f));
-      return fk&&(fk.startsWith(k)||k.startsWith(fk));
-    });
-    if(hits.length===1) return {pick:hits[0],loose:true};
-    if(hits.length) return {ambiguous:hits.map(f=>f.path)};
-  }
-  return {};
+  const hits=pool.filter(f=>stem(f)===want);
+  if(!hits.length) return {};
+  const png=hits.filter(f=>/\.png$/i.test(f.name));
+  if(png.length===1) return {pick:png[0]};
+  if(hits.length===1) return {pick:hits[0]};
+  return {ambiguous:(png.length?png:hits).map(f=>f.path)};
 }
 // Maps a whole selection at once: every SKU that has a file of its own name
 // gets that file written onto its routing, and the ones that do not are named
@@ -26583,14 +26549,11 @@ async function mcBulkMap(rows,into,folder){
     return;
   }
   const to=into===undefined||into===''?undefined:mcCopyToClean(into);
-  const entries=[]; const missing=[], twice=[]; let loose=0;
+  const entries=[]; const missing=[], twice=[];
   for(const r of rows){
     const m=mcMapMatches(r,folder);
-    if(m.pick){
-      if(m.loose) loose++;
-      entries.push({sku:r.sku,dest:'copy',
-        patch:{copy_path:m.pick.path,...(to===undefined?{}:{copy_to:to})}});
-    }
+    if(m.pick) entries.push({sku:r.sku,dest:'copy',
+      patch:{copy_path:m.pick.path,...(to===undefined?{}:{copy_to:to})}});
     else if(m.ambiguous) twice.push(r.sku);
     else missing.push(r.sku);
   }
@@ -26607,8 +26570,6 @@ async function mcBulkMap(rows,into,folder){
   }
   const list=n=>n.slice(0,3).join(', ')+(n.length>3?'…':'');
   if(!confirm(`Map ${entries.length} of ${rows.length} SKU${rows.length===1?'':'s'} to the file named after it, and set them to Copy file?\n\n`
-    +(loose?`${loose} of them matched apart from spacing or punctuation — check those rows after.
-`:'')
     +(folder?`Looking in ${folder} only.\n`:'')
     +(to?`They copy into ${to}.\n`:'')
     +(missing.length?`${missing.length} have no file of that name: ${list(missing)}\n`:'')
@@ -26623,7 +26584,6 @@ async function mcBulkMap(rows,into,folder){
   const ok=await mcBulkWrite(entries);
   if(!ok) return;
   showMsg(out,[`✓ ${entries.length} mapped to Copy file`,
-    loose?`${loose} matched apart from spacing or punctuation`:'',
     folder?`from ${folder}`:'',to?`into ${to}`:'',
     missing.length?`${missing.length} with no file of that name: ${list(missing)}`:'',
     twice.length?`${twice.length} with more than one file of that name: ${list(twice)}`:'']
