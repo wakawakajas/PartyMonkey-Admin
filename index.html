@@ -2980,6 +2980,17 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     </div></div>
 
     <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
+      <h2 style="margin:0 0 6px;font-size:15px;">Macro files</h2>
+      <p class="sub" style="margin:0 0 10px;">The macros themselves &mdash; one file each. Download the
+        one you need, then in Macro Studio press <b>Upload macro file</b> and pick it. A macro you
+        already have is replaced by the newer file rather than added twice, and the copy it
+        replaces is kept.</p>
+      <div id="macroFilesList"></div>
+      <button class="btn-outline" id="macroFilesUploadBtn" style="width:100%;margin-top:10px;" hidden>Publish macro files&hellip;</button>
+      <div id="macroFilesMsg"></div>
+    </div></div>
+
+    <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
       <h2 style="margin:0 0 6px;font-size:15px;">Already installed?</h2>
       <p class="sub" style="margin:0 0 10px;">If you've already run <code>start.bat</code> once on
         this PC, this starts it directly and opens its page.</p>
@@ -6643,7 +6654,8 @@ function applyAccess(){
                ['goToMacroStudioBtn','macro_studio'],
                ['goToBundleSkuBtn','bundle_sku'],
                ['goToPickListBtn','daily_pick_list'],
-               ['navUsersBtn','admin'],['macroStudioUploadBtn','admin']];
+               ['navUsersBtn','admin'],['macroStudioUploadBtn','admin'],
+               ['macroFilesUploadBtn','admin']];
   pairs.forEach(([id,sec])=>{ const el=document.getElementById(id); if(el) el.style.display=may(sec)?'':'none'; });
   const none=!may('print')&&!may('shipping')&&!may('pickup');
   const note=document.getElementById('homeNoAccess');
@@ -9094,6 +9106,7 @@ const MACRO_STUDIO_BUILD_PATH='latest/MacroStudio-Setup.zip';
 
 async function refreshMacroStudio(){
   document.getElementById('macroStudioUploadBtn').hidden=!access.admin;
+  refreshMacroFiles();
   const info=document.getElementById('macroStudioBuildInfo');
   if(!sb){ info.textContent=''; return; }
   try{
@@ -9144,6 +9157,109 @@ document.getElementById('macroStudioUploadBtn').addEventListener('click',()=>{
     }finally{
       btn.disabled=false; btn.textContent=label;
     }
+  };
+  inp.click();
+});
+
+// ---------- the macros themselves ----------
+// The build above is the program; these are the jobs it runs. Published
+// here so a colleague fetches the current copy instead of being sent a
+// file that was current whenever the chat message was written.
+//
+// A macro is filed under its own id, with its name in front for reading:
+// the id is what Macro Studio matches on when the file lands, so a macro
+// renamed and re-published replaces its older self instead of quietly
+// becoming a second macro that runs the same clicks.
+const MACRO_FILES_BUCKET='macro-studio-macros';
+
+function macroFileLabel(name){
+  const cut=name.lastIndexOf('__');
+  return cut>0 ? name.slice(0,cut).replace(/_/g,' ') : name.replace(/\.json$/,'');
+}
+
+async function refreshMacroFiles(){
+  const btn=document.getElementById('macroFilesUploadBtn');
+  if(btn) btn.hidden=!access.admin;
+  const list=document.getElementById('macroFilesList');
+  if(!list) return;
+  if(!sb){ list.innerHTML='<p class="hint" style="margin:0;">Sync unavailable — check your connection.</p>'; return; }
+  try{
+    const {data,error}=await sb.storage.from(MACRO_FILES_BUCKET).list('',{limit:200,sortBy:{column:'name',order:'asc'}});
+    if(error) throw error;
+    const files=(data||[]).filter(f=>/\.json$/i.test(f.name));
+    if(!files.length){ list.innerHTML='<p class="hint" style="margin:0;">No macros published yet.</p>'; return; }
+    list.innerHTML=files.map(f=>{
+      const when=f.updated_at||f.created_at;
+      return `<div class="row" style="gap:7px;align-items:center;margin-top:7px;">
+        <div style="flex:1 1 auto;min-width:0;">
+          <div style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(macroFileLabel(f.name))}</div>
+          <div class="hint" style="margin:0;">${when?('updated '+new Date(when).toLocaleDateString()):''}</div>
+        </div>
+        <button class="btn-outline btn-sm" data-macro-file="${escapeHtml(f.name)}">Download</button>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('[data-macro-file]').forEach(b=>{
+      b.addEventListener('click',()=>downloadMacroFile(b.getAttribute('data-macro-file')));
+    });
+  }catch(err){
+    list.innerHTML='<p class="hint" style="margin:0;">Could not list the macros: '+escapeHtml((err&&err.message)||'unknown error')+'</p>';
+  }
+}
+
+async function downloadMacroFile(name){
+  const msg=document.getElementById('macroFilesMsg');
+  const session=await requireSession(msg); if(!session) return;
+  try{
+    const {data,error}=await sb.storage.from(MACRO_FILES_BUCKET)
+      .createSignedUrl(name,3600,{download:name});
+    if(error) throw error;
+    const a=document.createElement('a');
+    a.href=data.signedUrl; a.download=name;
+    document.body.appendChild(a); a.click(); a.remove();
+    showMsg(msg,'✓ Downloading '+escapeHtml(macroFileLabel(name))+'. In Macro Studio: Upload macro file.',true);
+  }catch(err){
+    showMsg(msg,'Could not download that macro: '+((err&&err.message)||'unknown error'),false);
+  }
+}
+
+document.getElementById('macroFilesUploadBtn').addEventListener('click',()=>{
+  if(!access.admin) return;
+  const msg=document.getElementById('macroFilesMsg');
+  const inp=document.createElement('input');
+  inp.type='file'; inp.accept='.json,application/json'; inp.multiple=true;
+  inp.onchange=async()=>{
+    const files=[...inp.files]; if(!files.length) return;
+    const session=await requireSession(msg); if(!session) return;
+    const btn=document.getElementById('macroFilesUploadBtn');
+    btn.disabled=true; const label=btn.textContent; btn.textContent='Publishing…';
+    const done=[],bad=[];
+    for(const file of files){
+      try{
+        const text=await file.text();
+        const macro=JSON.parse(text);
+        // Read rather than trust the filename: the id inside is what
+        // Macro Studio files it under, and a file renamed on the way here
+        // would otherwise be published as somebody else's macro.
+        if(!macro||typeof macro!=='object'||!macro.id||!Array.isArray(macro.steps)) throw new Error('not a macro file');
+        const safe=String(macro.name||'macro').replace(/[^\w -]+/g,'').trim().replace(/\s+/g,'_').slice(0,60)||'macro';
+        const path=`${safe}__${macro.id}.json`;
+        const {error}=await sb.storage.from(MACRO_FILES_BUCKET)
+          .upload(path,file,{contentType:'application/json',upsert:true});
+        if(error) throw error;
+        // Same macro under an old name: drop the stale copy, or the list
+        // offers two files that are the same macro at different ages.
+        const {data:existing}=await sb.storage.from(MACRO_FILES_BUCKET).list('',{limit:200});
+        const stale=(existing||[]).map(f=>f.name).filter(n=>n.endsWith('__'+macro.id+'.json')&&n!==path);
+        if(stale.length) await sb.storage.from(MACRO_FILES_BUCKET).remove(stale);
+        done.push(macro.name||path);
+      }catch(err){
+        bad.push(file.name+': '+((err&&err.message)||'unknown error'));
+      }
+    }
+    btn.disabled=false; btn.textContent=label;
+    refreshMacroFiles();
+    if(bad.length) showMsg(msg,(done.length?('✓ Published '+done.length+'. '):'')+'Not published — '+escapeHtml(bad.join(' | ')),false);
+    else showMsg(msg,'✓ Published '+done.length+' macro'+(done.length===1?'':'s')+'.',true);
   };
   inp.click();
 });
@@ -26397,6 +26513,21 @@ async function mcBulkDest(skus,dest,into){
 // one name in two folders is a question, and mapping the wrong one copies the
 // wrong artwork under a name that says it is right. A .png wins over the other
 // kinds, which is the shop's own convention and the only tie broken here.
+// A SKU and the file it is filed under are written by two different hands. The
+// SKU comes off a listing and the file off somebody's desktop, so they differ
+// by a full stop, a double space, a bracket — "Custom Gift Wrapper-6. Harry
+// Potter-BIG" against "Custom Gift Wrapper-6 Harry Potter BIG.pdf". Read
+// letter for letter those are two different things; to anybody in the room
+// they are the same card.
+//
+// So the name is asked three ways, and only ever settles on one file:
+//   1. the name exactly
+//   2. the name with the punctuation and spacing taken out of both
+//   3. one containing the other, once that has been done — and only where a
+//      single file in the folder does
+// A tie at any step is not an answer and is handed back as one to look at,
+// because two files of nearly one name is a question, not a near miss.
+const mcNameKey=t=>String(t||'').toLowerCase().replace(/[^a-z0-9]+/g,'');
 function mcMapMatches(row,folder){
   const want=[String(row.sku||''),String(row.name||'')]
     .map(n=>n.trim().toLowerCase()).filter(Boolean);
@@ -26406,13 +26537,35 @@ function mcMapMatches(row,folder){
   const pool=folder
     ? (mcSrcFiles||[]).filter(f=>String(f.folder||'')===String(folder))
     : (mcSrcFiles||[]);
-  for(const n of want){
-    const hits=pool.filter(f=>stem(f)===n);
-    if(!hits.length) continue;
+  // a PNG beats the other kinds of one name, which is the shop's own way round
+  const settle=hits=>{
     const png=hits.filter(f=>/\.png$/i.test(f.name));
     if(png.length===1) return {pick:png[0]};
     if(hits.length===1) return {pick:hits[0]};
     return {ambiguous:(png.length?png:hits).map(f=>f.path)};
+  };
+  for(const n of want){
+    const hits=pool.filter(f=>stem(f)===n);
+    if(hits.length) return settle(hits);
+  }
+  for(const n of want){
+    const k=mcNameKey(n); if(!k) continue;
+    const hits=pool.filter(f=>mcNameKey(stem(f))===k);
+    if(hits.length) return {...settle(hits),loose:true};
+  }
+  for(const n of want){
+    const k=mcNameKey(n);
+    // one name starting the other — "Chick" against "Chick (v2)", a SKU with
+    // the size on the end. Held to the start rather than anywhere inside,
+    // because inside catches half the folder, and to a name with something to
+    // it, because three letters catch the other half.
+    if(k.length<4) continue;
+    const hits=pool.filter(f=>{
+      const fk=mcNameKey(stem(f));
+      return fk&&(fk.startsWith(k)||k.startsWith(fk));
+    });
+    if(hits.length===1) return {pick:hits[0],loose:true};
+    if(hits.length) return {ambiguous:hits.map(f=>f.path)};
   }
   return {};
 }
@@ -26430,21 +26583,32 @@ async function mcBulkMap(rows,into,folder){
     return;
   }
   const to=into===undefined||into===''?undefined:mcCopyToClean(into);
-  const entries=[]; const missing=[], twice=[];
+  const entries=[]; const missing=[], twice=[]; let loose=0;
   for(const r of rows){
     const m=mcMapMatches(r,folder);
-    if(m.pick) entries.push({sku:r.sku,dest:'copy',
-      patch:{copy_path:m.pick.path,...(to===undefined?{}:{copy_to:to})}});
+    if(m.pick){
+      if(m.loose) loose++;
+      entries.push({sku:r.sku,dest:'copy',
+        patch:{copy_path:m.pick.path,...(to===undefined?{}:{copy_to:to})}});
+    }
     else if(m.ambiguous) twice.push(r.sku);
     else missing.push(r.sku);
   }
   if(!entries.length){
-    showMsg(out,`Nothing to map — no file in the folder is named after `
-      +`${rows.length===1?'that SKU':'any of these'}.`,false);
+    const eg=(folder?(mcSrcFiles||[]).filter(f=>String(f.folder||'')===String(folder))
+      :(mcSrcFiles||[])).slice(0,3).map(f=>f.name);
+    showMsg(out,`Nothing to map — no file ${folder?`in ${folder} `:'in the copy-from folder '}`
+      +`is named after ${rows.length===1?'that SKU':'any of these'}. `
+      +`${mcSrcFiles.length} file${mcSrcFiles.length===1?'':'s'} to choose from`
+      +(eg.length?`, e.g. ${eg.join(', ')}`:'')
+      +`. The first SKU here is “${escapeHtml(rows[0].sku)}”`
+      +(rows[0].name?` (design “${escapeHtml(rows[0].name)}”)`:'')+'.',false);
     return;
   }
   const list=n=>n.slice(0,3).join(', ')+(n.length>3?'…':'');
   if(!confirm(`Map ${entries.length} of ${rows.length} SKU${rows.length===1?'':'s'} to the file named after it, and set them to Copy file?\n\n`
+    +(loose?`${loose} of them matched apart from spacing or punctuation — check those rows after.
+`:'')
     +(folder?`Looking in ${folder} only.\n`:'')
     +(to?`They copy into ${to}.\n`:'')
     +(missing.length?`${missing.length} have no file of that name: ${list(missing)}\n`:'')
@@ -26459,6 +26623,7 @@ async function mcBulkMap(rows,into,folder){
   const ok=await mcBulkWrite(entries);
   if(!ok) return;
   showMsg(out,[`✓ ${entries.length} mapped to Copy file`,
+    loose?`${loose} matched apart from spacing or punctuation`:'',
     folder?`from ${folder}`:'',to?`into ${to}`:'',
     missing.length?`${missing.length} with no file of that name: ${list(missing)}`:'',
     twice.length?`${twice.length} with more than one file of that name: ${list(twice)}`:'']
