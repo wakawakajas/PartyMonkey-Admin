@@ -4889,6 +4889,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
     <div class="chips" style="margin:8px 0 4px;align-items:center;">
       <button type="button" class="btn-outline btn-sm" id="mcRouteExport">⬇ Export Excel</button>
       <button type="button" class="btn-outline btn-sm" id="mcRouteImport">⬆ Import</button>
+      <!-- "she cannot see what I mapped" has four possible answers and none of
+           them is visible from a row. This asks the table, on the machine that
+           cannot see it, and prints what it said. -->
+      <button type="button" class="btn-outline btn-sm" id="mcRouteCheck"
+              title="Ask the table what this account can actually see">🩺 Why can't I see mappings?</button>
       <span class="hint" id="mcRouteCount" style="margin:0;"></span>
     </div>
     <p class="hint" style="margin:0 0 4px;">Export writes a spreadsheet — one row to a
@@ -5844,6 +5849,7 @@ function designBleedLoad(force){
   if(designBleedLoading&&!force) return designBleedLoading;
   designBleedLoading=(async()=>{
     try{
+      const local=designBleedStore();   // what this browser had, before the table answers
       const {data,error}=await sb.from('design_bleeds').select('path,mm');
       if(error) return designBleedStore();
       const store={};
@@ -5852,12 +5858,43 @@ function designBleedLoad(force){
         const mm=Number(r&&r.mm);
         if(key&&isFinite(mm)&&mm>=0) store[key]={on:true,mm};
       });
-      designBleedMemo=store; designBleedLoaded=true;
+      designBleedMemo=await designBleedLift(local,store);
+      designBleedLoaded=true;
       designBleedSaveStore();
-      return store;
+      return designBleedMemo;
     }finally{ designBleedLoading=null; }
   })();
   return designBleedLoading;
+}
+// Once, per browser: the bleeds set here before the list was shared are the
+// only copy of somebody's work, and they were never on the table. The first
+// read that succeeds puts the ones the table has never heard of onto it.
+// Once, and then this browser is marked done — otherwise a design handed back
+// to the sheet by a colleague would be resurrected every morning by whichever
+// machine still had it in its mirror.
+const DESIGN_BLEED_LIFTED_KEY='pigu.designBleed.shared';
+async function designBleedLift(local,store){
+  let done=false;
+  try{ done=localStorage.getItem(DESIGN_BLEED_LIFTED_KEY)==='1'; }catch(e){ return store; }
+  if(done) return store;
+  const mine=Object.keys(local||{}).filter(k=>{
+    const v=local[k];
+    return k&&!store[k]&&v&&v.on&&isFinite(Number(v.mm))&&Number(v.mm)>=0;
+  });
+  if(!mine.length){
+    try{ localStorage.setItem(DESIGN_BLEED_LIFTED_KEY,'1'); }catch(e){}
+    return store;
+  }
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session) return store;            // not this browser's turn yet — try again signed in
+  const now=new Date().toISOString();
+  const {error}=await sb.from('design_bleeds').upsert(
+    mine.map(k=>({path:k,mm:Number(local[k].mm),user_id:session.user.id,updated_at:now})),
+    {onConflict:'path'});
+  if(error) return store;               // left un-marked on purpose: it has not happened yet
+  mine.forEach(k=>{ store[k]={on:true,mm:Number(local[k].mm)}; });
+  try{ localStorage.setItem(DESIGN_BLEED_LIFTED_KEY,'1'); }catch(e){}
+  return store;
 }
 // Puts one design's bleed on the table, or takes it off. A row exists only
 // while the design keeps its own figure: handing it back to the sheet deletes
@@ -27284,6 +27321,54 @@ async function mcOpenRoutes(){
   mcRenderRoutes();
 }
 document.getElementById('mcRoutesBtn').addEventListener('click',mcOpenRoutes);
+// Reads the routing table from this account, on this machine, and says what
+// came back: who is signed in, how many rows they are allowed to see, how many
+// carry a mapping, whether the two copy columns exist at all, and which build
+// of the app is asking. Between two machines these five lines say which of
+// them is wrong without anybody opening Supabase.
+document.getElementById('mcRouteCheck').addEventListener('click',async()=>{
+  const out=document.getElementById('mcRouteMsg');
+  const lines=[];
+  try{
+    if(!sb){ showMsg(out,'No connection to the database at all.',false); return; }
+    const {data:{session}}=await sb.auth.getSession();
+    lines.push(session
+      ?`Signed in as ${session.user.email||session.user.id}`
+      :'NOT signed in — nothing shared can be read.');
+    // on_team is what every policy on these tables asks, and it is a row in
+    // profiles: an account without one sees an empty table rather than an error
+    const {count:mates,error:pe}=await sb.from('profiles')
+      .select('user_id',{count:'exact',head:true})
+      .eq('user_id',session?session.user.id:'');
+    lines.push(pe?`profiles: could not read — ${pe.message}`
+      :mates?'On the team ✓ (has a profiles row)'
+      :'NOT on the team — no profiles row, so shared routing reads as empty. '
+       +'Somebody with access has to add this account under Users & access.');
+    const {data,error}=await sb.from('magic_routes').select('*');
+    if(error){
+      lines.push(`magic_routes: ${error.message}`);
+      lines.push(/relation|does not exist/i.test(error.message||'')
+        ?'Run supabase-migration-MAGIC-ROUTES.sql in Supabase.':'');
+    }else{
+      const rows=data||[];
+      const skus=rows.filter(r=>r.kind==='sku');
+      const mapped=skus.filter(r=>String(r.copy_path||''));
+      lines.push(`Can see ${rows.length} routing row${rows.length===1?'':'s'} — `
+        +`${skus.length} for single SKUs, ${mapped.length} with a file or folder mapped`);
+      lines.push(rows.length&&!('copy_path' in rows[0])
+        ? 'The copy columns are missing — run supabase-migration-MAGIC-COPY.sql.'
+        : '');
+    }
+    const tag=await fetchBuildTag();
+    lines.push(`This app: ${tag?String(tag).replace(/"/g,'').slice(-12):'unknown build'}`
+      +' — if two machines differ here, the older one needs a hard refresh.');
+    // shown as a notice rather than a tick: a tick fades after five seconds
+    // and this is a report somebody is meant to read out or photograph
+    showMsg(out,lines.filter(Boolean).join('<br/>'),false);
+  }catch(err){
+    showMsg(out,'Check failed: '+((err&&err.message)||'unknown error'),false);
+  }
+});
 document.getElementById('mcRouteSearch').addEventListener('input',mcRenderRoutes);
 document.getElementById('mcRouteClose').addEventListener('click',()=>
   document.getElementById('mcRouteSheet').classList.remove('open'));
