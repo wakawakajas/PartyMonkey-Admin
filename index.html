@@ -6566,11 +6566,6 @@ function showScreen(name,viaBack){
   }
   closeDrawer();
   syncAddButton(name);
-  // which page's designs folder is the one in hand. Done on the way in rather
-  // than inside each screen, so a page opened by any route — Back, a link, the
-  // drawer — is reading its own library and not the last page's.
-  if(name==='magic'||name==='magic-batch') ldUse('magic').catch(()=>{});
-  else if(name!=='tool-gift-tag'&&name!=='gift-tag-settings') ldUse('print').catch(()=>{});
   if(name==='tool-custom'){ drawAll(); ppLoad(); } // canvases were hidden (0 size) while off-screen; redraw now they're visible
   if(name==='tool-gift-tag') gtOpen();
   if(name==='gift-tag-settings') gtSettingsOpen();
@@ -17104,38 +17099,14 @@ const LOAD_DESIGN_FOLDER_HINT=String.raw`C:\NAS Folders\Partymonkey NAS\Pigu\Big
 const LOAD_DESIGN_ART=/\.(png|jpe?g|webp|pdf)$/i;
 let loadDesignDir=null, loadDesignDirRead=false;
 let loadDesignFiles=[], loadDesignSelected=null;
-// Each page keeps its own. The print tool reads a library of artwork to lay
-// onto a sheet; Magic Create reads the files a batch is filed from, which for
-// a shop that copies rather than prints is a different folder altogether. One
-// handle for both meant repicking it on one page quietly moved the other
-// page's library — and nothing on either page said so.
-const LD_SCOPES={print:{key:'loadDesignDir',name:'Print template'},
-                 magic:{key:'loadDesignDir:magic',name:'Magic Create'}};
-let ldScope='print';
-const ldCache={};                 // scope -> what was in hand when it was left
-const ldKey=()=>(LD_SCOPES[ldScope]||LD_SCOPES.print).key;
-function ldStash(){
-  ldCache[ldScope]={dir:loadDesignDir,read:loadDesignDirRead,files:loadDesignFiles};
-}
-async function ldUse(scope){
-  if(!LD_SCOPES[scope]||scope===ldScope) return;
-  ldStash();
-  ldScope=scope;
-  const c=ldCache[scope]||{};
-  loadDesignDir=c.dir||null; loadDesignDirRead=!!c.read;
-  loadDesignFiles=c.files||[]; loadDesignSelected=null;
-  let dir=await loadDesignDirGet();
-  // A page that has never been given one starts with the other's, so nothing
-  // that worked this morning stops working. It is a copy of the handle: changed
-  // on either page afterwards, the other is left where it was.
-  if(!dir){
-    const other=await gtIdbGet(LD_SCOPES[scope==='magic'?'print':'magic'].key)
-      .catch(()=>null);
-    if(other){ await loadDesignDirSet(other); dir=other; }
-  }
-  if(!loadDesignFiles.length&&dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan();
-  loadDesignFolderState();
-}
+// This is the print template's library and nothing else's: artwork to be laid
+// onto a sheet. Anything that prints reads it — the tool itself, and Magic
+// Create when it puts a SKU on a print sheet. What a batch copies is a
+// different question and a different folder; see the copy-from folder in
+// Magic Create, which nothing here touches.
+// which library the design picker is showing: the print template's, or the
+// folder Magic Create copies from, when it was opened to map one
+const ldMapMode=()=>!!mcRoutePickFor;
 // which SKU on the Magic Create summary this picker was opened for, so the
 // sheet it makes is shown the same way Add shows it rather than the picker
 // quietly closing. Declared here with the rest of the picker's state — the
@@ -17147,15 +17118,14 @@ let mcSummaryPickFor=null;
 let mcRoutePickFor=null;
 async function loadDesignDirGet(){
   if(!loadDesignDirRead){
-    loadDesignDir=await gtIdbGet(ldKey()).catch(()=>null)||null;
+    loadDesignDir=await gtIdbGet('loadDesignDir').catch(()=>null)||null;
     loadDesignDirRead=true;
   }
   return loadDesignDir;
 }
 async function loadDesignDirSet(dir){
   loadDesignDir=dir; loadDesignDirRead=true;
-  await gtIdbPut(ldKey(),dir);
-  ldStash();
+  await gtIdbPut('loadDesignDir',dir);
 }
 // read-only — nothing here is ever written back into the presets folder
 async function loadDesignDirOk(handle,ask){
@@ -17169,12 +17139,18 @@ async function loadDesignDirOk(handle,ask){
 function loadDesignFolderState(){
   const el=document.getElementById('loadDesignFolderState'); if(!el) return;
   if(!canPickFolder()){ el.textContent='This browser cannot browse a folder — use Chrome or Edge on a PC.'; return; }
-  // named by the page it belongs to, because there is one of these per page
-  // and "Looking in Pigu" on its own does not say whose
-  const who=(LD_SCOPES[ldScope]||LD_SCOPES.print).name;
+  // there are two of these — the print template's library and the folder Magic
+  // Create copies from — so it says which one is in hand
+  if(ldMapMode()){
+    el.textContent=mcSrcDir
+      ? `Magic Create copies from ${mcSrcDir.name}`
+      : 'Magic Create has no copy-from folder yet — choose the folder the files '
+        +'a batch is filed from live in.';
+    return;
+  }
   el.textContent=loadDesignDir
-    ? `${who} — looking in ${loadDesignDir.name}`
-    : `${who} — not chosen yet — pick ${LOAD_DESIGN_FOLDER_HINT}`;
+    ? `Print template — looking in ${loadDesignDir.name}`
+    : `Print template — not chosen yet — pick ${LOAD_DESIGN_FOLDER_HINT}`;
 }
 // recursive: "a few folders" of presets sit under the chosen root
 async function loadDesignScan(dir,prefix){
@@ -17203,15 +17179,7 @@ async function loadDesignFileByPath(path){
       return await fh.getFile();
     }catch(e){ return null; }
   };
-  const here=await under(await loadDesignDirGet());
-  if(here) return here;
-  // A path written down on one page and read on another — a template saved
-  // from the print tool and replayed by a batch, or the other way about. The
-  // two folders are usually the same folder anyway, and where they are not,
-  // looking in both beats telling somebody their artwork has gone.
-  const otherKey=LD_SCOPES[ldScope==='magic'?'print':'magic'].key;
-  const other=await gtIdbGet(otherKey).catch(()=>null);
-  return other?await under(other):null;
+  return await under(await loadDesignDirGet());
 }
 async function loadDesignRescan(){
   loadDesignFiles=[];
@@ -17224,11 +17192,12 @@ async function loadDesignRescan(){
 }
 function loadDesignRenderList(){
   const q=(document.getElementById('loadDesignSearch').value||'').trim().toLowerCase();
-  const items=loadDesignFiles.filter(it=>!q||it.path.toLowerCase().includes(q));
+  const all=ldMapMode()?(mcSrcFiles||[]):loadDesignFiles;
+  const items=all.filter(it=>!q||it.path.toLowerCase().includes(q));
   document.getElementById('loadDesignCount').textContent=
-    loadDesignFiles.length?`${items.length} of ${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'}`:'';
+    all.length?`${items.length} of ${all.length} file${all.length===1?'':'s'}`:'';
   const listEl=document.getElementById('loadDesignList');
-  if(!loadDesignFiles.length){
+  if(!all.length){
     listEl.innerHTML='<p class="hint" style="margin:4px 0 0;">— choose a folder to see designs —</p>';
   }else if(!items.length){
     listEl.innerHTML='<p class="hint" style="margin:4px 0 0;">— no matches —</p>';
@@ -17279,6 +17248,9 @@ async function openLoadDesignModal(){
   loadDesignMapMode();
   document.getElementById('loadDesignMsg').innerHTML='';
   loadDesignFolderState();
+  // opened to map, it browses the folder Magic Create copies from; opened to
+  // put artwork on a sheet, the print template's own library
+  if(ldMapMode()){ await mcSrcReady(); loadDesignRenderList(); return; }
   const dir=await loadDesignDirGet();
   if(dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan(); else loadDesignFiles=[];
   loadDesignRenderList();
@@ -17310,13 +17282,27 @@ document.getElementById('loadDesignPickFolderBtn').addEventListener('click',asyn
   try{
     const dir=await window.showDirectoryPicker({mode:'read'});
     if(!await loadDesignDirOk(dir,true)){ showMsg(out,'Permission to that folder was not given.',false); return; }
+    if(ldMapMode()){
+      await mcSrcDirSet(dir); loadDesignFolderState();
+      await mcSrcRescan(); loadDesignRenderList();
+      showMsg(out,`✓ Magic Create copies from ${dir.name} — ${mcSrcFiles.length} file(s).`,true);
+      return;
+    }
     await loadDesignDirSet(dir); loadDesignFolderState();
     await loadDesignRescan(); loadDesignRenderList();
     showMsg(out,`✓ Looking in ${dir.name} — ${loadDesignFiles.length} design(s) found.`,true);
   }catch(e){ /* cancelled */ }
 });
 document.getElementById('loadDesignForgetFolderBtn').addEventListener('click',async()=>{
-  loadDesignDir=null; loadDesignDirRead=true; await gtIdbPut(ldKey(),null); ldStash();
+  if(ldMapMode()){
+    mcSrcDir=null; mcSrcRead=true; mcSrcFiles=[];
+    await gtIdbPut(MC_SRC_KEY,null);
+    loadDesignSelected=null;
+    document.getElementById('loadDesignQtyRow').style.display='none';
+    loadDesignFolderState(); loadDesignRenderList();
+    return;
+  }
+  loadDesignDir=null; loadDesignDirRead=true; await gtIdbPut('loadDesignDir',null);
   loadDesignFiles=[]; loadDesignSelected=null;
   document.getElementById('loadDesignQtyRow').style.display='none';
   loadDesignFolderState(); loadDesignRenderList();
@@ -25440,13 +25426,9 @@ async function mcCopyLine(id){
   if(!canPickFolder()){
     showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false);
     return; }
-  // the library is read on the way in the same way the summary reads it: a
-  // line copied before anything has opened the folder would otherwise be told
-  // there is no artwork of that name
-  if(!loadDesignFiles.length){
-    const dir=await loadDesignDirGet();
-    if(dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan();
-  }
+  // the copy-from folder is read on the way in: a line copied before anything
+  // has opened it would otherwise be told there is no file of that name
+  await mcSrcReady();
   const src=mcCopySource(it.sku);
   if(!src){
     showMsg(out,`No file for ${it.sku} — map one on the SKU summary.`,false); return; }
@@ -26020,7 +26002,7 @@ function mcSelFolderOpts(){
   const sel=document.getElementById('mcSummaryBulkFolder'); if(!sel) return;
   const keep=sel.value;
   const seen=[];
-  (loadDesignFiles||[]).forEach(f=>{
+  (mcSrcFiles||[]).forEach(f=>{
     const n=f&&f.folder; if(n&&n!=='—'&&!seen.includes(n)) seen.push(n);
   });
   seen.sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'}));
@@ -26156,8 +26138,8 @@ function mcMapMatches(row,folder){
   // named a folder: only that one is read, which is also how a name filed in
   // two folders stops being a question — the shop has said which folder it is
   const pool=folder
-    ? loadDesignFiles.filter(f=>String(f.folder||'')===String(folder))
-    : loadDesignFiles;
+    ? (mcSrcFiles||[]).filter(f=>String(f.folder||'')===String(folder))
+    : (mcSrcFiles||[]);
   for(const n of want){
     const hits=pool.filter(f=>stem(f)===n);
     if(!hits.length) continue;
@@ -26175,8 +26157,10 @@ function mcMapMatches(row,folder){
 async function mcBulkMap(rows,into,folder){
   const out=document.getElementById('mcSummaryMsg');
   if(!rows||!rows.length){ showMsg(out,'Nothing is selected.',false); return; }
-  if(!loadDesignFiles.length){
-    showMsg(out,'No designs folder connected — set one under Load design first.',false);
+  await mcSrcReady();
+  if(!mcSrcFiles.length){
+    showMsg(out,'No copy-from folder connected — press Map File or One file for all '
+      +'and choose the folder a batch is filed from.',false);
     return;
   }
   const to=into===undefined||into===''?undefined:mcCopyToClean(into);
@@ -26371,8 +26355,8 @@ function mcWhyNotAdd(rows){
   const bare=rows.filter(r=>!mcWhereIsSku(r.sku)&&!mcRowDone(r)
     &&!mcToolFor(r)&&mcRouteFor(r)!=='copy').length;
   if(bare&&!loadDesignFiles.length)
-    return 'No designs folder connected for Magic Create — open Load design and '
-      +'pick one, then try again.';
+    return 'No designs folder connected — open Load design on the print template '
+      +'and pick the library these are printed from.';
   return [on?`${on} already on a sheet`:'',
     done?`${done} ticked off`:'',
     bare?`${bare} with no artwork of that name and nowhere set to go`:'']
@@ -27644,6 +27628,75 @@ async function mcAddSkusToGiftTag(rows,opts){
   mcOpenMade(note,!missing.length&&!o.extra,'gift');
   return {added,updated,missing,per};
 }
+// ---------- Magic Create: the folder copies are taken FROM ----------
+// Nothing to do with the print template's library. The print side draws
+// artwork onto a sheet and can only use what it can draw, so it reads its own
+// folder and always will — a TY card put on a print sheet comes from there.
+// This is the other half of the job: the files a batch is filed from, copied
+// as they are and never drawn, which for this shop live somewhere else
+// entirely. Only Copy File and mapping ever read it.
+const MC_SRC_KEY='mcCopySrcDir';
+let mcSrcDir=null, mcSrcRead=false, mcSrcFiles=[];
+async function mcSrcDirGet(){
+  if(!mcSrcRead){
+    mcSrcDir=await gtIdbGet(MC_SRC_KEY).catch(()=>null)||null;
+    // set up before this folder was its own thing: one library was being read
+    // for both, so that is where it starts rather than nothing at all
+    if(!mcSrcDir) mcSrcDir=await gtIdbGet('loadDesignDir:magic').catch(()=>null)||null;
+    if(!mcSrcDir) mcSrcDir=await gtIdbGet('loadDesignDir').catch(()=>null)||null;
+    mcSrcRead=true;
+  }
+  return mcSrcDir;
+}
+async function mcSrcDirSet(dir){ mcSrcDir=dir; mcSrcRead=true; await gtIdbPut(MC_SRC_KEY,dir); }
+// every file, not only the kinds a sheet can be drawn from: a design that is
+// copied rather than printed is whatever it is — a PDF, a cutting file, a font
+async function mcSrcScan(dir,prefix){
+  const out=[];
+  for await (const entry of dir.values()){
+    if(entry.kind==='directory'){
+      out.push(...await mcSrcScan(entry,prefix+entry.name+'/'));
+    }else if(entry.kind==='file'){
+      out.push({name:entry.name,path:prefix+entry.name,
+        folder:prefix.replace(/\/$/,'')||'—',handle:entry});
+    }
+  }
+  return out;
+}
+async function mcSrcRescan(){
+  mcSrcFiles=[];
+  const dir=await mcSrcDirGet();
+  if(!dir||!await loadDesignDirOk(dir,false)) return mcSrcFiles;
+  const out=await mcSrcScan(dir,'');
+  out.sort((a,b)=>a.path.localeCompare(b.path,undefined,{numeric:true,sensitivity:'base'}));
+  mcSrcFiles=out;
+  return mcSrcFiles;
+}
+// read it if nothing has yet — every copy and every mapping goes through here
+async function mcSrcReady(){
+  if(mcSrcFiles.length) return mcSrcFiles;
+  const dir=await mcSrcDirGet();
+  if(dir&&await loadDesignDirOk(dir,false)) await mcSrcRescan();
+  return mcSrcFiles;
+}
+// One file out of it, by the path a mapping wrote down. The handle collected
+// by the scan answers first; where the scan has not run, the path is walked.
+async function mcSrcFileByPath(path){
+  const known=(mcSrcFiles||[]).find(f=>f.path===path);
+  if(known&&known.handle){ try{ return await known.handle.getFile(); }catch(e){} }
+  const dir=await mcSrcDirGet();
+  const parts=String(path||'').split('/').filter(Boolean);
+  if(!dir||!parts.length||!await loadDesignDirOk(dir,false)) return null;
+  try{
+    let cur=dir;
+    for(let i=0;i<parts.length-1;i++) cur=await cur.getDirectoryHandle(parts[i]);
+    return await (await cur.getFileHandle(parts[parts.length-1])).getFile();
+  }catch(e){
+    // a path a print job wrote down — the same artwork, filed in the other
+    // library — rather than nothing at all
+    return await loadDesignFileByPath(path);
+  }
+}
 // ---------- Magic Create: filing a SKU's artwork into a folder ----------
 // The designs folder is opened read-only and stays that way — nothing is ever
 // written back beside the presets. This is a second folder, chosen once and
@@ -27703,7 +27756,7 @@ async function mcCopyDirReady(ask){
 function mcCopyFileForSku(sku){
   const want=String(sku||'').trim().toLowerCase();
   if(!want) return null;
-  const hits=loadDesignFiles.filter(f=>
+  const hits=(mcSrcFiles||[]).filter(f=>
     String(f.name||'').replace(/\.[^.]+$/,'').trim().toLowerCase()===want);
   if(!hits.length) return null;
   const png=hits.filter(f=>/\.png$/i.test(f.name));
@@ -27776,6 +27829,7 @@ const mcCopyMsgEl=()=>{
 };
 async function mcCopySku(sku){
   const out=mcCopyMsgEl();
+  await mcSrcReady();
   if(!canPickFolder()){
     showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false); return; }
   const src=mcCopySource(sku);
@@ -27813,7 +27867,7 @@ const mcCopyWhat=src=>!src?'':src.folder?`everything in ${src.name}`:src.name;
 // cutting file, a proof, a font. Copying hands files over as they are, so
 // everything filed there goes.
 async function mcFolderFiles(path){
-  const root=await loadDesignDirGet();
+  const root=await mcSrcDirGet();
   if(!root||!await loadDesignDirOk(root,false)) return [];
   let cur=root;
   for(const part of String(path||'').split('/').map(t=>t.trim()).filter(Boolean))
@@ -27826,6 +27880,7 @@ async function mcFolderFiles(path){
 // already sitting there — a file that is already where it was asked to be is
 // not a failure, and the line it belongs to is finished either way.
 async function mcCopyInto(dir,src){
+  await mcSrcReady();
   const list=src.folder
     ? await mcFolderFiles(src.path)
     : [{name:src.name,path:src.path}];
@@ -27833,7 +27888,7 @@ async function mcCopyInto(dir,src){
   const target=await mcCopyTarget(dir,src.to);
   let done=0,already=0; const gone=[];
   for(const f of list){
-    const file=f.handle?await f.handle.getFile():await loadDesignFileByPath(f.path);
+    const file=f.handle?await f.handle.getFile():await mcSrcFileByPath(f.path);
     if(!file){ gone.push(f.name); continue; }
     let there=false;
     try{ await target.getFileHandle(f.name); there=true; }catch(e){ /* not there — good */ }
@@ -27850,6 +27905,7 @@ async function mcCopyRows(rows){
     showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false);
     return 0;
   }
+  await mcSrcReady();
   const dir=await mcCopyDirReady(true);
   if(!dir){ showMsg(out,'No folder to copy into — pick one and try again.',false); return 0; }
   let done=0,already=0,ticked=0;
@@ -27884,8 +27940,13 @@ function mcSummaryFolderState(){
     ? `${p.name} folder not open — visit that page once`
     : `${(mcGtNames[p.mode]||[]).length} ${p.name}`).join(' · ');
   el.textContent=[loadDesignFiles.length
-    ? `${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'} in the folder`
-    : 'No designs folder chosen — set one under Load design.',
+    ? `${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'} to print with`
+    : 'No print designs folder chosen — set one under Load design.',
+    // the other folder, the one copies come out of, said separately because it
+    // is a different folder answering a different question
+    mcSrcFiles.length?`${mcSrcFiles.length} file${mcSrcFiles.length===1?'':'s'} to copy from`
+      :(mcSrcDir?`copy-from folder ${mcSrcDir.name} not read yet`
+        :'no copy-from folder yet'),
     `gift tags: ${tags}`,
     // said out loud, because Copy writes into it without asking again
     mcCopyDir?`Copy files into ${mcCopyDir.name}`
@@ -28001,7 +28062,7 @@ document.getElementById('mcSummaryBulkMap').addEventListener('click',async()=>{
     const dir=await loadDesignDirGet();
     if(dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan();
   }
-  mcSelFolderOpts();
+  await mcSrcReady(); mcSelFolderOpts();
   await mcBulkMap(rows,undefined,document.getElementById('mcSummaryBulkFolder').value);
 });
 // and the same selection, filed. The file each one copies is its own — mapped,
