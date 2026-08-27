@@ -4744,6 +4744,12 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
            everything with artwork behind it and nothing on a sheet yet -->
       <button type="button" class="btn-outline btn-sm" id="mcSummaryAddAvail">＋ Add all available</button>
       <button type="button" class="btn-outline btn-sm" id="mcSummaryRemoveAll">－ Remove all shown</button>
+      <!-- the copy-only SKUs on show, filed in one press -->
+      <button type="button" class="btn-outline btn-sm" id="mcSummaryCopyAll">⧉ Copy all shown</button>
+      <!-- where a row's Copy files its artwork. Chosen once and kept, the same
+           way the export folder is: a browser cannot be handed a path. -->
+      <button type="button" class="btn-outline btn-sm" id="mcSummaryCopyFolderBtn"
+              title="Choose the folder a row's Copy files its artwork into">📁 Copy-to folder…</button>
       <span class="hint" id="mcSummaryFolderLbl" style="margin:0;"></span>
     </div>
     <div id="mcSummaryMsg"></div>
@@ -17027,6 +17033,10 @@ let loadDesignFiles=[], loadDesignSelected=null;
 // quietly closing. Declared here with the rest of the picker's state — the
 // close function reads it, and that runs long before Magic Create's own.
 let mcSummaryPickFor=null;
+// and which SKU the picker is naming a file for, when it was opened to map one
+// rather than to put a design on a sheet. The two are never both set: one adds
+// artwork to a sheet, the other writes a path onto the shop's routing.
+let mcRoutePickFor=null;
 async function loadDesignDirGet(){
   if(!loadDesignDirRead){ loadDesignDir=await gtIdbGet('loadDesignDir').catch(()=>null)||null; loadDesignDirRead=true; }
   return loadDesignDir;
@@ -17135,7 +17145,7 @@ function closeLoadDesignModal(){
   document.getElementById('loadDesignModal').classList.remove('open');
   // shut without picking: the SKU that opened it is no longer waiting, so an
   // ordinary Load design later does not finish as though it were
-  mcSummaryPickFor=null;
+  mcSummaryPickFor=null; mcRoutePickFor=null;
 }
 document.getElementById('loadDesignBtn').addEventListener('click',openLoadDesignModal);
 document.getElementById('loadDesignClose').addEventListener('click',closeLoadDesignModal);
@@ -17193,6 +17203,19 @@ async function addDesignLine(pick,qty,sku){
 }
 document.getElementById('loadDesignConfirmBtn').addEventListener('click',async()=>{
   if(!loadDesignSelected) return;
+  // opened to map a file to a SKU: nothing is loaded and no sheet is touched —
+  // the path is written onto the routing, where the rest of the team reads it
+  if(mcRoutePickFor){
+    const sku=mcRoutePickFor, pick=loadDesignSelected;
+    mcRoutePickFor=null;
+    closeLoadDesignModal();
+    await mcSetCopyFile(sku,pick.path);
+    document.getElementById('mcSummarySheet').classList.add('open');
+    mcRenderSummary();
+    showMsg(document.getElementById('mcSummaryMsg'),
+      `✓ ${sku} copies ${pick.name} — mapped for everybody.`,true);
+    return;
+  }
   const qty=Math.max(1,Math.round(parseFloat(document.getElementById('loadDesignQty').value)||1));
   const msgEl=document.getElementById('loadDesignMsg');
   const btn=document.getElementById('loadDesignConfirmBtn');
@@ -24986,8 +25009,9 @@ function mcLineHtml(it){
       ? `<span class="mc-qty-more" title="${more} extra on top of the ${it.qty} ordered — `
         +`${mcQty(it)} in all">Extra ${more}</span>` : ''}</span>
     <span class="mc-line-acts">
-      <button type="button" data-mc-create="${it.id}"
-        title="Pick a print tile and work this line">Create</button>
+      <button type="button" data-mc-create="${it.id}"${it.status?' disabled':''}
+        title="${it.status?'This line is done — press Done to re-open it before working on it'
+                          :'Pick a print tile and work this line'}">Create</button>
       <button type="button" data-mc-extra="${it.id}"${more?' class="has"':''}
         title="${more?`${more} extra on top of the ${it.qty} ordered — ${mcQty(it)} in all. `
                      +'Press to change or clear them.'
@@ -25653,7 +25677,10 @@ function mcSummaryRows(){
   mcItems.forEach(it=>{
     const key=it.sku||it.product||it.design_name||'—';
     const row=map.get(key)||{sku:key,name:it.design_name||it.product||'',qty:0,img:'',
-      tiles:new Set()};
+      lines:0,done:0,tiles:new Set()};
+    // how much of this SKU is already ticked off — a row every line of which is
+    // done has nothing left to lay onto a sheet
+    row.lines++; if(it.status) row.done++;
     // the extras are pieces to be printed and pulled like any other, so the
     // figure a shelf is read against is the order plus whatever was added
     row.qty+=mcQty(it);
@@ -25670,7 +25697,8 @@ function mcSummaryRows(){
   });
   // one tile, said by every line that says anything, or none: lines that
   // disagree are not an instruction, they are two jobs sharing a SKU
-  map.forEach(r=>{ r.tile=r.tiles.size===1?[...r.tiles][0]:''; delete r.tiles; });
+  map.forEach(r=>{ r.tile=r.tiles.size===1?[...r.tiles][0]:''; delete r.tiles;
+    r.allDone=r.lines>0&&r.done===r.lines; });
   // What else each SKU is called. A custom tag's SKU is the shop's own
   // — Custom Gift Tag-TD-1 — and the design in the library is filed under the
   // variation printed on it, "1". The per-line window has always matched on
@@ -25689,6 +25717,11 @@ function mcSummaryShownRows(){
   return q?all.filter(r=>
     String(r.sku).toLowerCase().includes(q)||String(r.name||'').toLowerCase().includes(q)):all;
 }
+// A SKU whose every line is ticked done is not added again: the row is work
+// that has been through the machine, and Add would put it on the sheet a
+// second time. A SKU that is on a sheet is done for that reason and is offered
+// Remove rather than Add, so this is about the ones ticked by hand.
+const mcRowDone=r=>!!(r&&r.allDone)&&!mcWhereIsSku(r.sku);
 function mcRenderSummary(){
   const body=document.getElementById('mcSummaryBody');
   const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
@@ -25746,7 +25779,9 @@ function mcRenderSummary(){
     // It searches the designs folder and lands on the print sheet, so it is
     // not offered for a SKU that is meant to be a gift tag: pressing it there
     // was how a batch of tags ended up on a print template.
-    const printable=tool!=='gift'&&routed!=='festive'&&routed!=='custom'&&routed!=='skip';
+    const isDone=mcRowDone(r);
+    const printable=!isDone&&tool!=='gift'&&routed!=='festive'&&routed!=='custom'
+      &&routed!=='skip'&&routed!=='copy';
     const pick=printable
       ? `<button type="button" class="btn-outline" data-mc-sum-pick="${escapeHtml(r.sku)}"
            title="Search the designs folder and pick one for ${escapeHtml(r.sku)}">Choose…</button>`
@@ -25761,10 +25796,33 @@ function mcRenderSummary(){
       ? `<button type="button" class="btn-danger" data-mc-sum-del="${escapeHtml(r.sku)}"
            title="Take ${escapeHtml(r.sku)} off the ${on.on==='gift'
              ?escapeHtml(mcGtPage(on.mode).name)+' gift tag':'print'} sheet">Remove</button>`
-      : (has
-        ? `<button type="button" class="btn-outline" data-mc-sum-add="${escapeHtml(r.sku)}"
-             title="${escapeHtml(addTitle)}">Add</button>`+pick
-        : pick);
+      : isDone
+        ? ''
+        : (has
+          ? `<button type="button" class="btn-outline" data-mc-sum-add="${escapeHtml(r.sku)}"
+               title="${escapeHtml(addTitle)}">Add</button>`+pick
+          : pick);
+    // The artwork behind this row, filed into the copy-to folder on a tap and
+    // nothing else — no sheet is touched and no line is added. Offered whether
+    // the row is done or not: filing a design is not printing it.
+    const cpSrc=mcCopySource(r.sku);
+    // A row the shop has set to Copy says what it copies before it is pressed:
+    // the file that is mapped to it, and the folder it lands in. Where nothing
+    // is mapped it says that too, and the button becomes the way to map it.
+    const cpNote=routed==='copy'
+      ? `<span class="mc-sum-name">${cpSrc
+          ? `Copies ${escapeHtml(cpSrc.name)}${cpSrc.to?` → ${escapeHtml(cpSrc.to)}`:''}${
+              cpSrc.mapped?'':' — found by name, not mapped'}`
+          : 'Copy — no file mapped to this SKU yet'}</span>`
+      : '';
+    const copy=cpSrc
+      ? `<button type="button" class="btn-outline" data-mc-sum-copy="${escapeHtml(r.sku)}"
+           title="Copy ${escapeHtml(cpSrc.name)} into the copy-to folder${
+             cpSrc.to?'/'+escapeHtml(cpSrc.to):''}">⧉ Copy</button>`
+      : routed==='copy'
+        ? `<button type="button" class="btn-outline" data-mc-sum-map="${escapeHtml(r.sku)}"
+             title="Say which file ${escapeHtml(r.sku)} copies">⧉ Map a file…</button>`
+        : '';
     // where this SKU is headed, and the way to say something else. What it
     // says is what Add will do — the routing rule where there is one, the
     // tile or the artwork where there is not.
@@ -25783,9 +25841,13 @@ function mcRenderSummary(){
         <span class="mc-sum-sku">${escapeHtml(r.sku)}</span>
         ${r.name?`<span class="mc-sum-name">${escapeHtml(r.name)}</span>`:''}
         ${badge}
+        ${cpNote}
+        ${isDone?`<span class="mc-sum-name">Every line done — take the tick off a line to `
+          +`put this on a sheet again</span>`:''}
       </span>
       <span class="mc-sum-qty">×${r.qty}</span>
       ${dest}
+      ${copy}
       ${btn}
     </div>`;}).join('');
   mcSummaryButtons(rows);
@@ -25795,7 +25857,7 @@ function mcRenderSummary(){
 // a button that does nothing and does not say so.
 function mcSummaryButtons(shown){
   const rows=shown||mcSummaryShownRows();
-  const addable=rows.filter(r=>!mcWhereIsSku(r.sku)&&mcToolFor(r)).length;
+  const addable=rows.filter(r=>!mcWhereIsSku(r.sku)&&mcToolFor(r)&&!mcRowDone(r)).length;
   const avail=mcSummaryAvailRows().length;
   const off=rows.filter(r=>mcWhereIsSku(r.sku)).length;
   const set=(id,label,n)=>{
@@ -25806,6 +25868,7 @@ function mcSummaryButtons(shown){
   set('mcSummaryAddAll','＋ Add all shown',addable);
   set('mcSummaryAddAvail','＋ Add all available',avail);
   set('mcSummaryRemoveAll','－ Remove all shown',off);
+  set('mcSummaryCopyAll','⧉ Copy all shown',rows.filter(r=>mcRouteFor(r)==='copy').length);
 }
 // <SKU>.png in the designs folder, by that exact name — nothing is guessed,
 // because guessing here prints the wrong card a hundred times.
@@ -26189,8 +26252,13 @@ document.getElementById('mcMadeOpen').addEventListener('click',()=>{
 // and where anything carrying it goes, and a SKU named outright beats every
 // rule. Shared, because two people working one morning's batch must add the
 // same SKU to the same sheet.
+// 'copy' is the destination for the designs that need no template and no
+// editing at all: the file is copied out of the designs folder into the
+// copy-to folder and that line is done. The path it is copied from lives on
+// the route, so it is mapped once for everybody rather than once per person.
 const MC_DESTS=[{v:'print',label:'Print sheet'},{v:'festive',label:'Festive gift tag'},
-  {v:'custom',label:'Custom gift tag'},{v:'skip',label:'Not added here'}];
+  {v:'custom',label:'Custom gift tag'},{v:'copy',label:'Copy file'},
+  {v:'skip',label:'Not added here'}];
 const MC_HOWS=[{v:'contains',label:'contains'},{v:'starts',label:'starts with'},
   {v:'exact',label:'is exactly'}];
 const mcDestLabel=v=>(MC_DESTS.find(d=>d.v===v)||{}).label||'';
@@ -26291,6 +26359,16 @@ function mcRenderRoutes(){
          (templateRows||[]).map(t=>`<option value="${escapeHtml(String(t.id))}"${
            String(t.id)===String(r.template||'')?' selected':''
          }>${escapeHtml(t.name||'')}</option>`).join('')}</select></label>`;
+  // a copy row is asked the two questions the sheets never are: which file,
+  // and which folder inside the copy-to folder it goes in. Editable in the
+  // list, so a morning's worth can be mapped without opening each one.
+  const cpPick=r=>r.dest!=='copy'?'':`<label class="field m"><input type="text"
+         data-mc-r="copy_path" value="${escapeHtml(r.copy_path||'')}"
+         placeholder="the file — e.g. Big TY Card/AAA.png"
+         aria-label="Which file this copies"/></label>
+       <label class="field t"><input type="text" data-mc-r="copy_to"
+         value="${escapeHtml(r.copy_to||'')}" placeholder="into — a folder, optional"
+         aria-label="Which folder it is copied into"/></label>`;
   const all=mcRuleRows();
   const rows=mcRoutesShown(all);
   // ↑ and ↓ move a rule against the whole list, not against what the search
@@ -26312,7 +26390,7 @@ function mcRenderRoutes(){
       <button type="button" class="icon-btn" data-mc-r-move="down"
               aria-label="Move down"${i===all.length-1?' disabled':''}>↓</button>
       <button type="button" class="btn-danger" data-mc-r-del aria-label="Delete rule">×</button>
-      ${tplPick(r)}${note(r)}
+      ${tplPick(r)}${cpPick(r)}${note(r)}
     </div>`;}).join('')
     :none(all.length?'nothing here matches that':'no rules yet — everything goes by its tile');
   const owned=mcSkuRows(), own=mcRoutesShown(owned);
@@ -26328,7 +26406,7 @@ function mcRenderRoutes(){
              aria-label="Where ${escapeHtml(r.match||'')} goes">${
              mcOptsHtml(MC_DESTS,r.dest)}</select></label>
       <button type="button" class="btn-danger" data-mc-r-del aria-label="Delete override">×</button>
-      ${tplPick(r)}${note(r)}
+      ${tplPick(r)}${cpPick(r)}${note(r)}
     </div>`).join(''):none(owned.length?'nothing here matches that':'none set');
   const el=document.getElementById('mcRouteCount');
   const q=mcRouteQuery();
@@ -26348,7 +26426,7 @@ const mcRouteQuery=()=>{
 function mcRoutesShown(list){
   const q=mcRouteQuery();
   if(!q) return list;
-  return list.filter(r=>[r.match,r.remarks,mcDestLabel(r.dest)]
+  return list.filter(r=>[r.match,r.remarks,mcDestLabel(r.dest),r.copy_path,r.copy_to]
     .some(v=>String(v||'').toLowerCase().includes(q)));
 }
 async function mcRouteWrite(id,patch){
@@ -26420,6 +26498,19 @@ async function mcSetDest(sku,dest){
   mcRoutes.push(data);
   mcRenderSummary();
 }
+// The file a SKU copies, and the folder it lands in. Kept on the SKU's own
+// row rather than on whichever rule caught it: a rule may cover a hundred
+// SKUs, and this is a decision about one file.
+async function mcSetCopyFile(sku,path,to){
+  let own=mcSkuRow(sku);
+  if(!own||own.dest!=='copy'){ await mcSetDest(sku,'copy'); own=mcSkuRow(sku); }
+  if(!own) return null;
+  const patch={};
+  if(path!==undefined) patch.copy_path=String(path||'').trim().slice(0,400);
+  if(to!==undefined) patch.copy_to=mcCopyToClean(to);
+  if(Object.keys(patch).length) await mcRouteWrite(own.id,patch);
+  return own;
+}
 async function mcOpenRoutes(){
   document.getElementById('mcRouteMsg').innerHTML='';
   document.getElementById('mcRouteSearch').value='';   // a fresh look, not the last search
@@ -26449,7 +26540,12 @@ const MC_ROUTE_FILE='pigu-magic-routing';
 // The spreadsheet's own columns, in the words the sheet uses on screen — the
 // file is meant to be worked in Excel by somebody who has only ever seen this
 // pop-up, so "Where" says Custom gift tag rather than 'custom'.
-const MC_ROUTE_COLS=['Kind','Match','How','Where','Template','Remarks','Order'];
+const MC_ROUTE_COLS=['Kind','Match','How','Where','Template','File','Into','Remarks','Order'];
+// a folder inside the copy-to folder, written the way somebody types it —
+// leading and trailing slashes, backslashes off a Windows path, all tidied to
+// the one shape the folder walk below expects
+const mcCopyToClean=v=>String(v==null?'':v).trim().split('\\').join('/')
+  .replace(/^\/+/,'').replace(/\/+$/,'').slice(0,200);
 // The template travels by name, which is what somebody working the sheet in
 // Excel can read and type; it is matched back by that name on the way in. Two
 // templates of one name is the case the app itself picks between, so an
@@ -26466,6 +26562,7 @@ const mcCellDest=v=>{
   const s=String(v||'').trim().toLowerCase();
   const exact=MC_DESTS.find(d=>d.v===s||d.label.toLowerCase()===s);
   if(exact) return exact.v;
+  if(/copy|file only|no template/.test(s)) return 'copy';
   if(/festive/.test(s)) return 'festive';
   if(/custom/.test(s)) return 'custom';
   if(/print/.test(s)) return 'print';
@@ -26497,6 +26594,10 @@ const mcRouteFromCells=(c,i)=>{
   // hand-worked sheet ended up saying
   return {kind,match,how:kind==='sku'?'exact':mcCellHow(c.how),dest,
     template:dest==='print'&&tpl?String(tpl.id):'',
+    // the file this row copies, and the folder inside the copy-to folder it
+    // lands in — both only mean anything on a copy row
+    copy_path:dest==='copy'?String(c.copy_path==null?'':c.copy_path).trim().slice(0,400):'',
+    copy_to:dest==='copy'?mcCopyToClean(c.copy_to):'',
     sort_order:Number.isFinite(Number(c.sort_order))?Number(c.sort_order):i,
     remarks:String(c.remarks==null?'':c.remarks).slice(0,500)};
 };
@@ -26509,10 +26610,12 @@ document.getElementById('mcRouteExport').addEventListener('click',async()=>{
     const rows=mcRoutes.map(r=>({Kind:r.kind==='sku'?'SKU':'Rule',Match:r.match||'',
       How:mcHowLabel(r.how),Where:mcDestLabel(r.dest),
       Template:(mcTemplateById(r.template)||{}).name||'',
+      File:r.copy_path||'',Into:r.copy_to||'',
       Remarks:r.remarks||'',Order:Number(r.sort_order)||0}));
     const ws=XLSX.utils.json_to_sheet(rows,{header:MC_ROUTE_COLS});
     // wide enough to read the rule without dragging every column out first
-    ws['!cols']=[{wch:7},{wch:30},{wch:12},{wch:18},{wch:24},{wch:40},{wch:7}];
+    ws['!cols']=[{wch:7},{wch:30},{wch:12},{wch:18},{wch:24},{wch:38},{wch:18},
+      {wch:40},{wch:7}];
     const wb=XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb,ws,'Routing');
     const buf=XLSX.write(wb,{bookType:'xlsx',type:'array'});
@@ -26550,6 +26653,8 @@ document.getElementById('mcRouteImport').addEventListener('click',async()=>{
       };
       cells=grid.map(o=>({kind:key(o,'kind'),match:key(o,'match'),how:key(o,'how'),
         dest:key(o,'where')||key(o,'dest'),template:key(o,'template'),
+        copy_path:key(o,'file')||key(o,'copy_path'),
+        copy_to:key(o,'into')||key(o,'copy_to'),
         remarks:key(o,'remarks'),sort_order:key(o,'order')}));
     }
     // the Template column comes in by name, so the saved templates have to be
@@ -26643,7 +26748,15 @@ function mcOpenDest(sku){
     : tool==='print'?'print sheet'
     : tool==='both'?'sheet it asks you to pick'
     : '';
-  const will=willName
+  const cpNow=dest==='copy'?mcCopySource(mcDestFor):null;
+  const will=dest==='copy'
+    ? (cpNow
+      ? `<b>Copy</b> files <b>${escapeHtml(cpNow.name)}</b> into the copy-to folder${
+          cpNow.to?` under <b>${escapeHtml(cpNow.to)}</b>`:''} and ticks its lines off. `
+        +(cpNow.mapped?'Mapped for everybody.'
+          :'Found by name — map it below so it is the same for everybody.')
+      : '<b>No file mapped yet.</b> Say which one below and it holds for everybody.')
+    : willName
     ? `Add puts it on the <b>${escapeHtml(willName)}</b>.`
     : (dest&&dest!=='skip')
       ? `<b>Add cannot: ${escapeHtml(mcDestLabel(dest))} has nothing of this name.</b> `
@@ -26656,7 +26769,19 @@ function mcOpenDest(sku){
   // when this SKU is going to the print sheet at all.
   const tplBox=document.getElementById('mcDestTpl');
   const routeRow=mcRouteRowFor(row);
-  tplBox.innerHTML=dest==='print'
+  if(dest==='copy'){
+    const own=mcSkuRow(mcDestFor);
+    tplBox.innerHTML=`<label class="field" style="margin:8px 0 0;"><span>FILE</span>
+         <input type="text" data-mc-dest-copy="copy_path"
+                value="${escapeHtml((own&&own.copy_path)||'')}"
+                placeholder="e.g. Big TY Card/AAA.png"/></label>
+       <button type="button" class="btn-outline" data-mc-dest-copy-pick
+               style="margin:6px 0 0;">Pick from the designs folder…</button>
+       <label class="field" style="margin:8px 0 0;"><span>INTO</span>
+         <input type="text" data-mc-dest-copy="copy_to"
+                value="${escapeHtml((own&&own.copy_to)||'')}"
+                placeholder="a folder inside the copy-to folder — optional"/></label>`;
+  }else tplBox.innerHTML=dest==='print'
     ? `<label class="field" style="margin:8px 0 0;"><span>TEMPLATE</span>
          <select data-mc-dest-tpl><option value="">— work it out from the folder —</option>${
          (templateRows||[]).map(t=>`<option value="${escapeHtml(String(t.id))}"${
@@ -26681,11 +26806,30 @@ document.getElementById('mcDestOpts').addEventListener('click',async e=>{
 // Naming the template for one SKU is a decision about that SKU, so it is kept
 // on its own row rather than written into whichever rule happened to catch it.
 document.getElementById('mcDestTpl').addEventListener('change',async e=>{
+  const cp=e.target.closest('[data-mc-dest-copy]');
+  if(cp){
+    const what=cp.dataset.mcDestCopy;
+    await mcSetCopyFile(mcDestFor,what==='copy_path'?cp.value:undefined,
+      what==='copy_to'?cp.value:undefined);
+    mcOpenDest(mcDestFor);          // drawn again, so it says what it now does
+    return;
+  }
   const sel=e.target.closest('[data-mc-dest-tpl]'); if(!sel) return;
   let own=mcSkuRow(mcDestFor);
   if(!own){ await mcSetDest(mcDestFor,'print'); own=mcSkuRow(mcDestFor); }
   if(own) await mcRouteWrite(own.id,{template:sel.value});
   mcRenderSummary();
+});
+// the designs folder's own search, opened on this SKU — the same picker the
+// summary row uses, so there is one way of naming a file and not two
+document.getElementById('mcDestTpl').addEventListener('click',async e=>{
+  if(!e.target.closest('[data-mc-dest-copy-pick]')) return;
+  mcRoutePickFor=mcDestFor;
+  document.getElementById('mcDestSheet').classList.remove('open');
+  document.getElementById('mcSummarySheet').classList.remove('open');
+  await openLoadDesignModal();
+  document.getElementById('loadDesignSearch').value=mcRoutePickFor;
+  loadDesignRenderList();
 });
 document.getElementById('mcDestClear').addEventListener('click',async()=>{
   await mcSetDest(mcDestFor,'');
@@ -26713,7 +26857,7 @@ function mcToolFor(row){
   // what the shop said under Routing comes before everything: it is the only
   // one of these three that is somebody's decision rather than a reading
   const dest=mcRouteFor(r);
-  if(dest==='skip') return '';
+  if(dest==='skip'||dest==='copy') return '';
   if(dest==='print') return png?'print':'';
   if(dest==='festive'||dest==='custom') return mcGiftHit(r.sku,dest)?'gift':'';
   if(r.tile==='giftTag') return tag?'gift':'';
@@ -26729,6 +26873,15 @@ function mcToolFor(row){
 async function mcRouteRows(rows){
   if(!rows||!rows.length) return;
   const out=document.getElementById('mcSummaryMsg');
+  // the ones the shop says are a copy and nothing else. Done first and taken
+  // out of the list: they never reach a sheet, and Add all is the button a
+  // morning's batch is run from, so it has to finish them too.
+  const toCopy=rows.filter(r=>mcRouteFor(r)==='copy');
+  if(toCopy.length){
+    await mcCopyRows(toCopy);
+    rows=rows.filter(r=>mcRouteFor(r)!=='copy');
+    if(!rows.length) return;
+  }
   // a SKU with no PNG may still be a tag, and both pages' libraries are read
   // before anything is sorted — the page that is open is not the whole answer
   if(rows.some(r=>!designFileForSku(r.sku))){
@@ -26927,6 +27080,154 @@ async function mcAddSkusToGiftTag(rows,opts){
   mcOpenMade(note,!missing.length&&!o.extra,'gift');
   return {added,updated,missing,per};
 }
+// ---------- Magic Create: filing a SKU's artwork into a folder ----------
+// The designs folder is opened read-only and stays that way — nothing is ever
+// written back beside the presets. This is a second folder, chosen once and
+// kept, that a row's Copy files artwork into. A browser cannot be told a path,
+// so the handle is what is remembered, exactly as the export folder does it.
+let mcCopyDir=null, mcCopyDirRead=false;
+async function mcCopyDirGet(){
+  if(!mcCopyDirRead){ mcCopyDir=await gtIdbGet('mcCopyDir').catch(()=>null)||null; mcCopyDirRead=true; }
+  return mcCopyDir;
+}
+async function mcCopyDirSet(dir){ mcCopyDir=dir; mcCopyDirRead=true; await gtIdbPut('mcCopyDir',dir); }
+// A handle survives a reload but its write permission does not, and asking for
+// it again has to come off a tap — so ask is only ever true from the click.
+async function mcCopyDirReady(ask){
+  if(!canPickFolder()) return null;
+  const dir=await mcCopyDirGet();
+  if(await gtDirOk(dir,ask)) return dir;
+  if(!ask) return null;
+  try{
+    const picked=await window.showDirectoryPicker({mode:'readwrite'});
+    if(!await gtDirOk(picked,true)) return null;
+    await mcCopyDirSet(picked); mcSummaryFolderState();
+    return picked;
+  }catch(e){ return null; }   // cancelled
+}
+// Which file a row's Copy would take. What the SKU was actually put on the
+// sheet with beats <SKU>.png: Choose… exists because the artwork is often
+// filed under another name, and the copy should be the design that is printing.
+function mcCopySource(sku){
+  // What the shop wrote down beats everything: it is somebody's decision, it
+  // is shared, and it is the whole point of mapping a file to a SKU — a
+  // colleague opening the same batch copies the same file without mapping it
+  // again. Only where nothing is written down is it worked out.
+  const rt=mcRouteRowFor(sku);
+  if(rt&&rt.copy_path){
+    const path=String(rt.copy_path);
+    return {path,name:path.split('/').pop(),to:String(rt.copy_to||''),mapped:true};
+  }
+  const line=mcLineForSku(sku);
+  if(line&&line.source&&line.source.path)
+    return {path:line.source.path,
+            name:line.name||String(line.source.path).split('/').pop(),to:'',mapped:false};
+  const f=designFileForSku(sku);
+  return f?{path:f.path,name:f.name,to:'',mapped:false}:null;
+}
+// Copies one row's artwork out of the designs folder and into the copy-to
+// folder, under the name it already has. A file of that name already there is
+// left alone rather than written over — it is somebody's work, and a Copy
+// pressed twice on a batch should not be able to undo a hand-made version.
+// A route can name a folder inside the copy-to folder — "Ready to print", one
+// per shop — so a batch does not land in one heap. Made where it is not there:
+// the folder is part of the instruction, not something to set up first.
+async function mcCopyTarget(dir,to){
+  let cur=dir;
+  for(const part of String(to||'').split('/').map(t=>t.trim()).filter(Boolean))
+    cur=await cur.getDirectoryHandle(part,{create:true});
+  return cur;
+}
+// A design that needs no template and no editing is finished the moment its
+// file is in the folder, so the lines are ticked here rather than by hand
+// afterwards. What was copied is written onto the line: six months later
+// "done" on its own does not say which file went where.
+async function mcMarkCopiedLines(sku,src,folder){
+  if(!mcBatch||mcBatch.status!=='open') return 0;
+  let n=0;
+  for(const it of mcItems.filter(i=>String(i.sku||'')===String(sku))){
+    const was=it.sheet_item||{};
+    const si={...was,copied:{path:src.path,name:src.name,
+      to:String(folder||''),at:new Date().toISOString()}};
+    it.sheet_item=si;
+    await mcSave(it,{sheet_item:si,...mcDonePatch(it,true)});
+    n++;
+  }
+  if(n){ mcRenderItems(); mcSyncBatchButtons(); }
+  return n;
+}
+async function mcCopySku(sku){
+  const out=document.getElementById('mcSummaryMsg');
+  if(!canPickFolder()){
+    showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false); return; }
+  const src=mcCopySource(sku);
+  if(!src){
+    showMsg(out,`No design in the folder for ${sku} — use Choose… to say which file.`,false); return; }
+  const dir=await mcCopyDirReady(true);
+  if(!dir){ showMsg(out,'No folder to copy into — pick one and press Copy again.',false); return; }
+  const file=await loadDesignFileByPath(src.path);
+  if(!file){
+    showMsg(out,`${src.name} is no longer in the designs folder — reconnect it under Load design.`,
+      false); return; }
+  const where=src.to?`${dir.name}/${src.to}`:dir.name;
+  let target;
+  try{ target=await mcCopyTarget(dir,src.to); }
+  catch(err){
+    showMsg(out,`Could not open ${where}: ${(err&&err.message)||'unknown error'}`,false);
+    return;
+  }
+  let there=false;
+  try{ await target.getFileHandle(src.name); there=true; }catch(e){ /* not there — good */ }
+  try{
+    // already there is not a failure: the file is where it was asked to be, so
+    // the line is finished either way — only the writing is skipped
+    if(!there) await writeIntoFolder(target,src.name,file);
+    const done=await mcMarkCopiedLines(sku,src,src.to);
+    mcRenderSummary();
+    showMsg(out,(there?`✓ ${src.name} was already in ${where}`
+      :`✓ Copied ${src.name} into ${where}`)
+      +(done?` — ${done} line${done===1?'':'s'} ticked off`:'')+'.',true);
+  }catch(err){
+    showMsg(out,`Could not copy ${src.name}: ${(err&&err.message)||'unknown error'}`,false);
+  }
+}
+// Copies a whole list in one press. Reported as one line at the end rather
+// than one per SKU: a morning's batch is two hundred of these.
+async function mcCopyRows(rows){
+  const out=document.getElementById('mcSummaryMsg');
+  if(!rows||!rows.length){ showMsg(out,'Nothing here is set to copy.',false); return 0; }
+  if(!canPickFolder()){
+    showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false);
+    return 0;
+  }
+  const dir=await mcCopyDirReady(true);
+  if(!dir){ showMsg(out,'No folder to copy into — pick one and try again.',false); return 0; }
+  let done=0,already=0,ticked=0;
+  const missing=[],failed=[];
+  for(const r of rows){
+    const src=mcCopySource(r.sku);
+    if(!src){ missing.push(r.sku); continue; }
+    try{
+      const file=await loadDesignFileByPath(src.path);
+      if(!file){ missing.push(r.sku); continue; }
+      const target=await mcCopyTarget(dir,src.to);
+      let there=false;
+      try{ await target.getFileHandle(src.name); there=true; }catch(e){}
+      if(there) already++; else { await writeIntoFolder(target,src.name,file); done++; }
+      ticked+=await mcMarkCopiedLines(r.sku,src,src.to);
+    }catch(err){ failed.push(r.sku); }
+  }
+  mcRenderSummary();
+  const note=[done?`${done} copied into ${dir.name}`:'',
+    already?`${already} already there`:'',
+    ticked?`${ticked} line${ticked===1?'':'s'} ticked off`:'',
+    missing.length?`${missing.length} with no file to copy: ${missing.slice(0,3).join(', ')}`
+      +(missing.length>3?'…':''):'',
+    failed.length?`${failed.length} failed: ${failed.slice(0,3).join(', ')}`:'']
+    .filter(Boolean).join(' · ');
+  showMsg(out,note||'Nothing to copy.',!failed.length&&!missing.length);
+  return done;
+}
 function mcSummaryFolderState(){
   const el=document.getElementById('mcSummaryFolderLbl'); if(!el) return;
   // what is searchable, all three libraries of it — the designs folder and
@@ -26938,13 +27239,19 @@ function mcSummaryFolderState(){
   el.textContent=[loadDesignFiles.length
     ? `${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'} in the folder`
     : 'No designs folder chosen — set one under Load design.',
-    `gift tags: ${tags}`].filter(Boolean).join(' · ');
+    `gift tags: ${tags}`,
+    // said out loud, because Copy writes into it without asking again
+    mcCopyDir?`Copy files into ${mcCopyDir.name}`:'No copy-to folder chosen yet'
+    ].filter(Boolean).join(' · ');
 }
 async function mcOpenSummary(){
   document.getElementById('mcSummarySearch').value='';   // a fresh look, not the last search
   document.getElementById('mcSummaryMsg').innerHTML='';
   document.getElementById('mcSummarySheet').classList.add('open');
   mcRenderSummary();
+  // the copy-to folder is a handle in the database until something asks for it,
+  // and the line at the top of the sheet is what asks
+  await mcCopyDirGet().catch(()=>null); mcSummaryFolderState();
   // the folder is what says which SKUs can be added, so it is read on the way in
   if(!loadDesignFiles.length){
     const dir=await loadDesignDirGet();
@@ -26959,6 +27266,17 @@ async function mcOpenSummary(){
   mcSummaryFolderState();
 }
 document.getElementById('mcSummaryBtn').addEventListener('click',mcOpenSummary);
+document.getElementById('mcSummaryCopyFolderBtn').addEventListener('click',async()=>{
+  const out=document.getElementById('mcSummaryMsg');
+  if(!canPickFolder()){
+    showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false); return; }
+  try{
+    const dir=await window.showDirectoryPicker({mode:'readwrite'});
+    if(!await gtDirOk(dir,true)){ showMsg(out,'Permission to that folder was not given.',false); return; }
+    await mcCopyDirSet(dir); mcSummaryFolderState();
+    showMsg(out,`✓ Copy files into ${dir.name}.`,true);
+  }catch(e){ /* cancelled */ }
+});
 document.getElementById('mcSummarySearch').addEventListener('input',mcRenderSummary);
 document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
   // taking one back off: the row says so again straight away, and the summary
@@ -26992,6 +27310,12 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
   const pick=e.target.closest('[data-mc-sum-pick]');
   if(pick){
     const row=mcSummaryRows().find(r=>String(r.sku)===pick.dataset.mcSumPick); if(!row) return;
+    if(mcRowDone(row)){
+      showMsg(document.getElementById('mcSummaryMsg'),
+        `Every line of ${row.sku} is done — take the tick off a line to put it on a sheet again.`,
+        false);
+      return;
+    }
     mcSummaryPickFor=row;
     document.getElementById('mcSummarySheet').classList.remove('open');
     await openLoadDesignModal();
@@ -27000,20 +27324,44 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
     document.getElementById('loadDesignQty').value=row.qty;
     return;
   }
+  // file this row's artwork — the folder, not the sheet
+  const cp=e.target.closest('[data-mc-sum-copy]');
+  if(cp){ await mcCopySku(cp.dataset.mcSumCopy); return; }
+  // say which file this SKU copies — the designs folder's own search, opened
+  // on the SKU, and what is picked is written onto the routing
+  const map=e.target.closest('[data-mc-sum-map]');
+  if(map){
+    mcRoutePickFor=map.dataset.mcSumMap;
+    document.getElementById('mcSummarySheet').classList.remove('open');
+    await openLoadDesignModal();
+    document.getElementById('loadDesignSearch').value=mcRoutePickFor;
+    loadDesignRenderList();
+    return;
+  }
   const b=e.target.closest('[data-mc-sum-add]'); if(!b||b.disabled) return;
   const row=mcSummaryRows().find(r=>String(r.sku)===b.dataset.mcSumAdd); if(!row) return;
+  if(mcRowDone(row)){
+    showMsg(document.getElementById('mcSummaryMsg'),
+      `Every line of ${row.sku} is done — take the tick off a line to put it on a sheet again.`,
+      false);
+    return;
+  }
   mcRouteRows([row]);           // print sheet or gift tag — whichever has its artwork
 });
 document.getElementById('mcSummaryAddAll').addEventListener('click',async()=>{
-  const rows=mcSummaryShownRows();
-  if(!rows.length) return;
+  const rows=mcSummaryShownRows().filter(r=>!mcRowDone(r));
+  if(!rows.length){
+    showMsg(document.getElementById('mcSummaryMsg'),
+      'Nothing to add — every line of these is done.',false);
+    return;
+  }
   await mcRouteRows(rows);
 });
 // Every SKU on the batch that has somewhere to go and is not there yet —
 // searched or not. It is the button for a morning's batch: the search is for
 // finding one line, and this is for the other two hundred.
 const mcSummaryAvailRows=()=>mcSummaryRows()
-  .filter(r=>!mcWhereIsSku(r.sku)&&mcToolFor(r));
+  .filter(r=>!mcWhereIsSku(r.sku)&&mcToolFor(r)&&!mcRowDone(r));
 document.getElementById('mcSummaryAddAvail').addEventListener('click',async()=>{
   const out=document.getElementById('mcSummaryMsg');
   const rows=mcSummaryAvailRows();
@@ -27043,6 +27391,15 @@ document.getElementById('mcSummaryRemoveAll').addEventListener('click',async()=>
   mcRenderSummary();
   showMsg(out,[p?`${p} off the print sheet`:'',g?`${g} off the gift tag sheet`:'']
     .filter(Boolean).join(' · '),true);
+});
+document.getElementById('mcSummaryCopyAll').addEventListener('click',async()=>{
+  const rows=mcSummaryShownRows().filter(r=>mcRouteFor(r)==='copy');
+  if(!rows.length){
+    showMsg(document.getElementById('mcSummaryMsg'),
+      'None of these is set to Copy file — set one under → where it goes.',false);
+    return;
+  }
+  await mcCopyRows(rows);
 });
 document.getElementById('mcSummaryClose').addEventListener('click',()=>
   document.getElementById('mcSummarySheet').classList.remove('open'));
@@ -27154,6 +27511,15 @@ function mcSnapshot(){
 
 async function mcWinOpen(id){
   const it=mcItem(id); if(!it) return;
+  // A line that is ticked done is finished with, and the builder is how a line
+  // gets laid onto the sheet — opening it here is how a card already through
+  // the machine goes on again. The tick comes off first: one tap, and it says
+  // what happened.
+  if(it.status){
+    showMsg(document.getElementById('mcBatchMsg'),
+      'That line is done — press Done on it to re-open it before working on it.',false);
+    return;
+  }
   if(mcBatch&&mcBatch.status!=='open'){
     showMsg(document.getElementById('mcBatchMsg'),'This batch is completed — re-open it to work on it.',false);
     return;
