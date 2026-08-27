@@ -25026,6 +25026,16 @@ function mcLineHtml(it){
         escapeHtml(new Date(it.exported_at).toLocaleString())}">⬇ Downloaded ${
         escapeHtml(mcWhenWord(it.exported_at))}</span>`
     : '';
+  // the file this line was finished by, and when. A copy-only design never
+  // reaches a sheet and never becomes a PDF, so without this the line simply
+  // reads as ticked and says nothing about what was actually done to it.
+  const cp=it.sheet_item&&it.sheet_item.copied;
+  const cpTag=cp
+    ? `<span class="mc-dl-tag" title="${escapeHtml(cp.name||'The file')} was copied into ${
+        escapeHtml(cp.to?'the copy-to folder, under '+cp.to:'the copy-to folder')}${
+        cp.at?' '+escapeHtml(new Date(cp.at).toLocaleString()):''}">⧉ Copied${
+        cp.name?' '+escapeHtml(cp.name):''}${cp.at?' '+escapeHtml(mcWhenWord(cp.at)):''}</span>`
+    : '';
   return `<div class="mc-line${it.status?' is-done':''}" data-mc-row="${it.id}">
     ${shot}
     <span class="mc-line-main">
@@ -25033,7 +25043,7 @@ function mcLineHtml(it){
       <span class="mc-line-sub">${escapeHtml(it.product||it.sku)}</span>
       ${it.sku?`<span class="mc-line-sku">${escapeHtml(it.sku)}</span>`:''}
       ${it.message?`<span class="mc-line-msg">“${escapeHtml(it.message)}”</span>`:''}
-      ${tag}${dl}
+      ${tag}${dl}${cpTag}
     </span>
     <span class="mc-qty">${it.qty}${more
       ? `<span class="mc-qty-more" title="${more} extra on top of the ${it.qty} ordered — `
@@ -25707,10 +25717,19 @@ function mcSummaryRows(){
   mcItems.forEach(it=>{
     const key=it.sku||it.product||it.design_name||'—';
     const row=map.get(key)||{sku:key,name:it.design_name||it.product||'',qty:0,img:'',
-      lines:0,done:0,tiles:new Set()};
+      lines:0,done:0,copied:0,copiedTo:'',copiedName:'',tiles:new Set()};
     // how much of this SKU is already ticked off — a row every line of which is
     // done has nothing left to lay onto a sheet
     row.lines++; if(it.status) row.done++;
+    // and how much of it has been filed: a copy-only SKU is finished by its
+    // file being in the folder, so the row says that outright rather than
+    // leaving a tick to stand for two different kinds of work
+    const cp=it.sheet_item&&it.sheet_item.copied;
+    if(cp){
+      row.copied++;
+      if(!row.copiedName) row.copiedName=cp.name||'';
+      if(!row.copiedTo) row.copiedTo=cp.to||'';
+    }
     // the extras are pieces to be printed and pulled like any other, so the
     // figure a shelf is read against is the order plus whatever was added
     row.qty+=mcQty(it);
@@ -25987,6 +26006,12 @@ function mcRenderSummary(){
     // A row the shop has set to Copy says what it copies before it is pressed:
     // the file that is mapped to it, and the folder it lands in. Where nothing
     // is mapped it says that too, and the button becomes the way to map it.
+    // every line of this SKU has had its file put in the folder
+    const cpDone=r.lines>0&&r.copied===r.lines;
+    const cpBadge=cpDone
+      ? `<span class="mc-sum-on">⧉ Copied${r.copiedName?' '+escapeHtml(r.copiedName):''}${
+          r.copiedTo?' → '+escapeHtml(r.copiedTo):''}</span>`
+      : (r.copied?`<span class="mc-sum-name">${r.copied} of ${r.lines} lines copied</span>`:'');
     const cpNote=routed==='copy'
       ? `<span class="mc-sum-name">${cpSrc
           ? `Copies ${escapeHtml(cpSrc.name)}${cpSrc.to?` → ${escapeHtml(cpSrc.to)}`:''}${
@@ -26022,6 +26047,7 @@ function mcRenderSummary(){
         <span class="mc-sum-sku">${escapeHtml(r.sku)}</span>
         ${r.name?`<span class="mc-sum-name">${escapeHtml(r.name)}</span>`:''}
         ${badge}
+        ${cpBadge}
         ${cpNote}
         ${isDone?`<span class="mc-sum-name">Every line done — take the tick off a line to `
           +`put this on a sheet again</span>`:''}
@@ -27290,6 +27316,24 @@ async function mcCopyDirReady(ask){
 // Which file a row's Copy would take. What the SKU was actually put on the
 // sheet with beats <SKU>.png: Choose… exists because the artwork is often
 // filed under another name, and the copy should be the design that is printing.
+// The file to copy where nothing is mapped. <SKU>.png is what the print side
+// looks for, because that side draws the artwork onto a sheet and a PDF is not
+// something it can draw. Copying is not drawing: the file is handed over as it
+// is, so a PDF, a JPEG or a WEBP named after the SKU is as good an answer as a
+// PNG — and for the designs that are only ever copied, the PDF usually is the
+// answer. A PNG still wins where both are there, which is the shop's own way
+// round, and two files of one name with no PNG between them is left alone
+// rather than guessed at.
+function mcCopyFileForSku(sku){
+  const want=String(sku||'').trim().toLowerCase();
+  if(!want) return null;
+  const hits=loadDesignFiles.filter(f=>
+    String(f.name||'').replace(/\.[^.]+$/,'').trim().toLowerCase()===want);
+  if(!hits.length) return null;
+  const png=hits.filter(f=>/\.png$/i.test(f.name));
+  if(png.length===1) return png[0];
+  return hits.length===1?hits[0]:null;
+}
 function mcCopySource(sku){
   // What the shop wrote down beats everything: it is somebody's decision, it
   // is shared, and it is the whole point of mapping a file to a SKU — a
@@ -27304,7 +27348,7 @@ function mcCopySource(sku){
   if(line&&line.source&&line.source.path)
     return {path:line.source.path,
             name:line.name||String(line.source.path).split('/').pop(),to:'',mapped:false};
-  const f=designFileForSku(sku);
+  const f=mcCopyFileForSku(sku);
   return f?{path:f.path,name:f.name,to:'',mapped:false}:null;
 }
 // Copies one row's artwork out of the designs folder and into the copy-to
