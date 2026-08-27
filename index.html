@@ -25946,6 +25946,11 @@ async function mcBulkMap(rows,into,folder){
     +(twice.length?`${twice.length} have more than one and are left alone: ${list(twice)}\n`:'')
     +'\nRouting is shared, so this is how they are copied for everybody.')) return;
   showMsg(out,'Mapping…',true);
+  if(!mcCopyCols){
+    showMsg(out,'This Supabase has no place to keep a mapping — run '
+      +'supabase-migration-MAGIC-COPY.sql and try again.',false);
+    return;
+  }
   const ok=await mcBulkWrite(entries);
   if(!ok) return;
   showMsg(out,[`✓ ${entries.length} mapped to Copy file`,
@@ -26506,6 +26511,8 @@ const MC_HOWS=[{v:'contains',label:'contains'},{v:'starts',label:'starts with'},
   {v:'exact',label:'is exactly'}];
 const mcDestLabel=v=>(MC_DESTS.find(d=>d.v===v)||{}).label||'';
 let mcRoutes=[], mcRoutesRead=false, mcRoutesErr=false;
+// whether this Supabase has the two columns a mapping is kept in
+let mcCopyCols=true;
 async function mcRoutesLoad(force){
   if(!sb) return mcRoutes;
   if(mcRoutesRead&&!force) return mcRoutes;
@@ -26516,6 +26523,11 @@ async function mcRoutesLoad(force){
   mcRoutesErr=!!error;
   if(error) return mcRoutes;
   mcRoutes=data||[]; mcRoutesRead=true;
+  // A routing table set up before the copy migration answers every read
+  // happily and drops the two columns on every write. Nothing about that is
+  // visible from a row — it simply never maps — so it is read off the shape of
+  // what came back and said out loud.
+  mcCopyCols=!mcRoutes.length||('copy_path' in mcRoutes[0]);
   return mcRoutes;
 }
 const mcRuleRows=()=>mcRoutes.filter(r=>r.kind!=='sku');
@@ -26672,14 +26684,37 @@ function mcRoutesShown(list){
   return list.filter(r=>[r.match,r.remarks,mcDestLabel(r.dest),r.copy_path,r.copy_to]
     .some(v=>String(v||'').toLowerCase().includes(q)));
 }
+// Where a routing message belongs: the routing sheet is only one of the three
+// places routing is written from, and a message put there while somebody is
+// looking at the SKU summary is a message nobody reads. That is how a mapping
+// that never reached the table went on looking mapped — on that screen, and
+// on nobody else's.
+function mcRouteMsgEl(){
+  const open=id=>{ const el=document.getElementById(id);
+    return el&&el.classList.contains('open'); };
+  if(open('mcDestSheet')) return document.getElementById('mcDestMsg');
+  if(open('mcSummarySheet')) return document.getElementById('mcSummaryMsg');
+  return document.getElementById('mcRouteMsg');
+}
 async function mcRouteWrite(id,patch){
   const row=mcRoutes.find(r=>r.id===id); if(!row) return;
+  const was={};
+  Object.keys(patch).forEach(k=>{ was[k]=row[k]; });
   Object.assign(row,patch);
-  const out=document.getElementById('mcRouteMsg');
-  if(!sb) return;
+  const out=mcRouteMsgEl();
+  if(!sb){ showMsg(out,'No connection — routing is shared, so it is saved online.',false); return; }
   const {error}=await sb.from('magic_routes').update(patch).eq('id',id);
-  if(error) showMsg(out,'Could not save that — '+error.message,false);
-  else showMsg(out,'Saved.',true);
+  if(error){
+    // put back what was there: the screen must not go on showing a mapping the
+    // rest of the team will never see
+    Object.assign(row,was);
+    showMsg(out,'Could not save that — '+error.message
+      +(/copy_path|copy_to/.test(error.message||'')
+        ? ' · run supabase-migration-MAGIC-COPY.sql in Supabase.':''),false);
+    mcRenderSummary();
+    return;
+  }
+  showMsg(out,'Saved.',true);
   // where it is sent decides whether it is asked which template, so that row
   // is drawn again rather than left saying the wrong thing
   if('dest' in patch) mcRenderRoutes();
@@ -26732,7 +26767,7 @@ async function mcSetDest(sku,dest){
   if(!dest){ if(had) await mcRouteDelete(had.id); return; }
   if(had){ await mcRouteWrite(had.id,{dest}); return; }
   const uid=await mcWhoAmI();
-  const out=document.getElementById('mcDestMsg');
+  const out=mcRouteMsgEl();
   if(!sb) return;
   const {data,error}=await sb.from('magic_routes')
     .insert({user_id:uid,kind:'sku',how:'exact',match:String(sku),dest,sort_order:0})
@@ -27523,7 +27558,8 @@ function mcSummaryFolderState(){
     `gift tags: ${tags}`,
     // said out loud, because Copy writes into it without asking again
     mcCopyDir?`Copy files into ${mcCopyDir.name}`
-      :`No copy-to folder chosen yet — pick ${MC_COPY_FOLDER_HINT}`
+      :`No copy-to folder chosen yet — pick ${MC_COPY_FOLDER_HINT}`,
+    mcCopyCols?'':'⚠ Mapping cannot be saved — run supabase-migration-MAGIC-COPY.sql in Supabase'
     ].filter(Boolean).join(' · ');
 }
 async function mcOpenSummary(){
