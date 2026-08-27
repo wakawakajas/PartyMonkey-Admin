@@ -26025,9 +26025,47 @@ async function mcBulkWrite(entries){
     showMsg(out,'Could not save that — '+((err&&err.message)||'unknown error'),false);
     return false;
   }
+  // Read back from the table rather than trusted: an insert that RLS refused,
+  // a column that is not there, a row somebody else owns — all of them come
+  // back as a write that said nothing and a screen that says it worked.
+  const check=await mcVerifyRoutes(entries);
+  if(check) { showMsg(out,check,false); return false; }
   mcRenderSummary();
   if(document.getElementById('mcRouteSheet').classList.contains('open')) mcRenderRoutes();
   return true;
+}
+// '' where the table holds what was asked for, and what is wrong where it does
+// not. The rows are re-read into mcRoutes on the way through, so the screen
+// afterwards is the table's own answer rather than the one we hoped for.
+async function mcVerifyRoutes(entries){
+  if(!sb||!entries||!entries.length) return '';
+  const key=x=>String(x||'').trim().toLowerCase();
+  const want=new Map(entries.map(e=>[key(e.sku),e]));
+  const {data,error}=await sb.from('magic_routes').select('*').eq('kind','sku');
+  if(error) return 'Saved, but reading it back failed — '+error.message;
+  const rows=(data||[]).filter(r=>want.has(key(r.match)));
+  // whatever the table holds is now what this app holds: no screen should be
+  // showing a mapping the table does not have
+  const mine=new Set(rows.map(r=>r.id));
+  mcRoutes=mcRoutes.filter(r=>r.kind!=='sku'||!want.has(key(r.match))||mine.has(r.id))
+    .map(r=>mine.has(r.id)?(rows.find(x=>x.id===r.id)||r):r);
+  rows.forEach(r=>{ if(!mcRoutes.some(x=>x.id===r.id)) mcRoutes.push(r); });
+  const missing=[],wrong=[];
+  want.forEach((e,k)=>{
+    const row=rows.find(r=>key(r.match)===k);
+    if(!row){ if(e.dest) missing.push(e.sku); return; }
+    if(e.dest&&String(row.dest||'')!==String(e.dest)) wrong.push(e.sku);
+    const path=e.patch&&e.patch.copy_path;
+    if(path!==undefined&&String(row.copy_path||'')!==String(path)) wrong.push(e.sku);
+  });
+  if(!missing.length&&!wrong.length) return '';
+  const list=n=>n.slice(0,3).join(', ')+(n.length>3?'…':'');
+  return 'The table did not keep '
+    +[missing.length?`${missing.length} that never arrived (${list(missing)})`:'',
+      wrong.length?`${wrong.length} that came back different (${list(wrong)})`:'']
+      .filter(Boolean).join(' and ')
+    +'. Nothing is mapped for anybody until this saves — check that '
+    +'supabase-migration-MAGIC-COPY.sql has been run, and that this account is on the team.';
 }
 // Where a whole selection goes.
 async function mcBulkDest(skus,dest,into){
@@ -26947,7 +26985,13 @@ async function mcSetCopyFile(sku,path,to){
   const patch={};
   if(path!==undefined) patch.copy_path=String(path||'').trim().slice(0,400);
   if(to!==undefined) patch.copy_to=mcCopyToClean(to);
-  if(Object.keys(patch).length) await mcRouteWrite(own.id,patch);
+  if(Object.keys(patch).length){
+    await mcRouteWrite(own.id,patch);
+    // and read back, the same as a selection is: one SKU mapped by hand is the
+    // one most likely to be looked at afterwards and believed
+    const bad=await mcVerifyRoutes([{sku,dest:'copy',patch}]);
+    if(bad){ showMsg(mcRouteMsgEl(),bad,false); mcRenderSummary(); return null; }
+  }
   return own;
 }
 async function mcOpenRoutes(){
