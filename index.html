@@ -256,6 +256,13 @@ input:checked + .slider:before{transform:translateX(18px);}
   height:100%;color:var(--faint);font-size:16px;}
 .design-line .qty{flex:0 0 74px;margin:0;}
 .design-line .qty input{height:38px;min-height:38px;text-align:center;}
+/* a design's own bleed, set on its own row */
+.design-line .bleed{flex:0 0 88px;margin:0;}
+.design-line .bleed > span{display:flex;align-items:center;gap:4px;}
+.design-line .bleed input[type=checkbox]{width:13px;height:13px;margin:0;flex:0 0 13px;
+  accent-color:var(--blueprint);cursor:pointer;}
+.design-line .bleed input[type=number]{height:38px;min-height:38px;text-align:center;}
+.design-line .bleed input[type=number]:disabled{opacity:.42;}
 .sheet-nav{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:9px;}
 .sheet-nav span{font-family:'IBM Plex Sans',sans-serif;font-size:10px;color:var(--faint);letter-spacing:.08em;}
 .sheet-nav .icon-btn{min-width:34px;}
@@ -5487,13 +5494,14 @@ function renderSide(side,canvas,maxDim,opts){
   // fills it, "Original" fits the file's own proportions inside it. Doing it
   // per image rather than once is what lets a list of designs at different
   // shapes each keep its own without any of them being stretched.
-  const one=(img,ph)=>{
+  const one=(img,ph,line)=>{
     let wMm=a.wMm, hMm=a.hMm;
     if(state.artFit==='original'&&img.naturalWidth&&img.naturalHeight){
       const f=Math.min(a.wMm/img.naturalWidth,a.hMm/img.naturalHeight);
       wMm=img.naturalWidth*f; hMm=img.naturalHeight*f;
     }
-    const bleedMm=state.bleed.enabled?state.bleed.mm:0;
+    // the sheet's bleed unless this design keeps its own
+    const bleedMm=bleedMmFor(line);
     const effW=wMm+bleedMm*2, effH=hMm+bleedMm*2;
     const rotDeg=state.rotate[side]||0;
     const swapped=(rotDeg%180)!==0; // 90 or 270: image is drawn on its side
@@ -5514,11 +5522,11 @@ function renderSide(side,canvas,maxDim,opts){
     const order=fillOrder(), per=order.length;
     if(per){
       const q=designQueue(), start=(opts.page||0)*per;
-      order.forEach((ph,i)=>{ const d=q[start+i]; if(d&&d.img) one(d.img,ph); });
+      order.forEach((ph,i)=>{ const d=q[start+i]; if(d&&d.img) one(d.img,ph,d); });
     }
   }else if(!useList){
     const art=state.final[side].img;
-    if(art&&a.wMm&&a.hMm) state.placeholders.forEach(ph=>one(art,ph));
+    if(art&&a.wMm&&a.hMm) state.placeholders.forEach(ph=>one(art,ph,null));
   }
 
   // fold line sits above the artwork (unlike the reference marks below it)
@@ -5690,7 +5698,8 @@ document.getElementById('applySizeBtn').addEventListener('click',()=>{
   state.paper.w=parseFloat(document.getElementById('paperW').value)||state.paper.w;
   state.paper.h=parseFloat(document.getElementById('paperH').value)||state.paper.h;
   state.paper.unit=document.getElementById('paperUnit').value;
-  renderPlaceholderList();refreshArtInputs();updateCalc();drawAll();
+  // the design rows carry a bleed in the sheet's unit, so they are redrawn too
+  renderPlaceholderList();refreshArtInputs();renderDesignLines();updateCalc();drawAll();
 });
 document.getElementById('swapOrientBtn').addEventListener('click',()=>{
   const w=state.paper.w;state.paper.w=state.paper.h;state.paper.h=w;
@@ -5799,11 +5808,87 @@ function designPickerPanel(q,selPath){
         <span class="hint" style="margin:0;">· ${escapeHtml(it.folder)}</span></span>
     </div>`).join('');
 }
+// ---------- a design's own bleed ----------
+// The sheet's bleed is the rule and most designs follow it. One that must not
+// keeps its own instead: only that design bleeds differently, every other
+// design on the same sheet is untouched.
+// Which designs keep their own is written down against the design itself (its
+// file), not against the line: the same artwork put on a sheet next week comes
+// back already bleeding the way it was set, with nobody re-typing it.
+const DESIGN_BLEED_KEY='pigu.designBleed';
+let designBleedMemo=null;
+function designBleedStore(){
+  if(designBleedMemo) return designBleedMemo;
+  try{ designBleedMemo=JSON.parse(localStorage.getItem(DESIGN_BLEED_KEY)||'{}')||{}; }
+  catch(e){ designBleedMemo={}; }
+  return designBleedMemo;
+}
+function designBleedSaveStore(){
+  try{ localStorage.setItem(DESIGN_BLEED_KEY,JSON.stringify(designBleedStore())); }catch(e){}
+}
+// what a design is remembered by: the file it came from. A plain upload has no
+// path, so its bleed is this sheet's line only and nothing is written down —
+// there would be nothing to match it back to.
+function designBleedKey(line){
+  const path=line&&line.source&&line.source.path;
+  return path?String(path).trim().toLowerCase():'';
+}
+// how far this design bleeds when it is drawn: its own figure if it keeps one,
+// the sheet's otherwise. Everything that draws artwork asks this and never
+// state.bleed directly, so the two cannot disagree.
+function bleedMmFor(line){
+  if(line&&line.bleedOn&&isFinite(Number(line.bleedMm))) return Math.max(0,Number(line.bleedMm));
+  return state.bleed.enabled?state.bleed.mm:0;
+}
+// Bleeds this one design by the millimetres given, and writes that down
+// against the design itself. Turning it off hands the design back to the
+// sheet's bleed and forgets the figure — off is not "zero bleed", it is
+// "whatever the sheet says".
+function setDesignBleed(line,mm,on){
+  if(!line) return null;
+  const want=Number(mm);
+  line.bleedOn=(on===undefined)?(isFinite(want)&&want>=0):!!on;
+  if(isFinite(want)&&want>=0) line.bleedMm=want;
+  else if(!isFinite(Number(line.bleedMm))) line.bleedMm=state.bleed.mm;
+  const key=designBleedKey(line);
+  if(key){
+    const store=designBleedStore();
+    if(line.bleedOn) store[key]={on:true,mm:Number(line.bleedMm)};
+    else delete store[key];
+    designBleedSaveStore();
+  }
+  return line;
+}
+// The same thing asked for by SKU: bleeds only the design that SKU put on the
+// sheet — the rest of the sheet keeps the sheet's bleed — and saves it to that
+// design, so the SKU prints that way from here on. Null when the SKU is not on
+// the sheet: there is nothing to bleed, and quietly bleeding something else
+// would be worse than saying so.
+function setSkuBleed(sku,mm,on){
+  const line=mcLineForSku(sku);
+  if(!line) return null;
+  setDesignBleed(line,mm,on);
+  renderDesignLines(); drawAll();
+  return line;
+}
+// a design landing on a line brings its remembered bleed with it
+function applyRememberedBleed(line){
+  if(!line) return line;
+  const key=designBleedKey(line);
+  const saved=key?designBleedStore()[key]:null;
+  if(saved&&saved.on&&isFinite(Number(saved.mm))){
+    line.bleedOn=true; line.bleedMm=Number(saved.mm);
+  }else if(line.bleedOn===undefined){
+    line.bleedOn=false; line.bleedMm=null;
+  }
+  return line;
+}
 function renderDesignLines(){
   const el=document.getElementById('designLines');
   if(!state.designs.length){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">— none yet —</p>';
   }else{
+    const u=state.paper.unit;
     el.innerHTML=state.designs.map(d=>`
       <div class="ph-card design-line" data-design-id="${escapeHtml(d.id)}">
         <div class="thumb">${d.data?`<img src="${d.data}" alt=""/>`:'<span class="ico">＋</span>'}</div>
@@ -5819,6 +5904,11 @@ function renderDesignLines(){
         </div>
         <label class="field qty"><span>QTY</span>
           <input type="number" min="0" step="1" value="${Math.max(0,Math.floor(Number(d.qty)||0))}" data-design-qty/></label>
+        <div class="field bleed" title="Off: this design bleeds by whatever the sheet says. On: it bleeds by its own figure instead, and is remembered against the design for next time.">
+          <span><input type="checkbox" data-design-bleed-on ${d.bleedOn?'checked':''}/>BLEED ${escapeHtml(u)}</span>
+          <input type="number" min="0" step="0.1" ${d.bleedOn?'':'disabled'}
+                 value="${round(fromMm(isFinite(Number(d.bleedMm))&&d.bleedMm!==null?Number(d.bleedMm):state.bleed.mm,u))}" data-design-bleed/>
+        </div>
         <button class="icon-btn" data-design-remove title="Take this design off the sheet">×</button>
       </div>`).join('');
   }
@@ -5843,6 +5933,28 @@ document.querySelectorAll('#artModeSeg button').forEach(b=>{
 // the list is only rebuilt when lines come and go — a field rebuilt under the
 // caret while it is being typed into is a keystroke lost
 document.getElementById('designLines').addEventListener('input',e=>{
+  // this design's own bleed, on or off. Off does not mean nothing bleeds — it
+  // means the sheet's bleed is back in charge of this one.
+  const bleedOnEl=e.target.closest('[data-design-bleed-on]');
+  if(bleedOnEl){
+    const d=designLineOf(bleedOnEl); if(!d) return;
+    const numEl=bleedOnEl.closest('[data-design-id]').querySelector('[data-design-bleed]');
+    const typed=toMm(parseFloat(numEl.value),state.paper.unit);
+    setDesignBleed(d,bleedOnEl.checked?(isFinite(typed)&&typed>=0?typed:state.bleed.mm):null,bleedOnEl.checked);
+    numEl.disabled=!bleedOnEl.checked;
+    numEl.value=round(fromMm(bleedOnEl.checked?d.bleedMm:state.bleed.mm,state.paper.unit));
+    drawAll();
+    return;
+  }
+  const bleedEl=e.target.closest('[data-design-bleed]');
+  if(bleedEl){
+    const d=designLineOf(bleedEl); if(!d) return;
+    const v=parseFloat(bleedEl.value);
+    if(isNaN(v)||v<0) return;
+    setDesignBleed(d,toMm(v,state.paper.unit),true);
+    drawAll();
+    return;
+  }
   const qtyEl=e.target.closest('[data-design-qty]');
   if(qtyEl){
     const d=designLineOf(qtyEl); if(!d) return;
@@ -5908,6 +6020,7 @@ async function setDesignLineFile(line,pick){
   line.data=dataURL;
   line.img=await loadImage(dataURL);
   line.source={dir:'loadDesignDir',path:pick.path};
+  applyRememberedBleed(line);
   ensureGridFor(line.qty);
   fitArtToCard('front'); fitArtToCard('back');
   renderDesignLines(); refreshArtInputs(); drawAll();
@@ -16493,8 +16606,11 @@ async function saveTemplate(){
     // a few hundred KB of data URL per design is a row nobody can sync.
     const design=state.final.front.source
       ? {path:state.final.front.source.path,name:state.final.front.name} : null;
+    // a design keeping its own bleed keeps it in the template too, so a job
+    // reopened next month lays down what it laid down the first time
     const designs=state.designs.filter(d=>d.source).map(d=>
-      ({path:d.source.path,name:d.name,qty:d.qty}));
+      ({path:d.source.path,name:d.name,qty:d.qty,
+        bleedOn:!!d.bleedOn,bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}));
     const meta={name,folders:templateFoldersValue(),
       paper:state.paper,layout:state.layout,placeholders:state.placeholders,
       showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate,
@@ -16596,8 +16712,13 @@ function applyPrintState(meta,name){
         if(!file){ missing.push(d.name||d.path); continue; }
         try{
           const dataURL=await fileToImageData(file);
-          out.push({id:uid(),name:d.name||file.name,qty:Math.max(1,Math.round(Number(d.qty)||1)),
-            data:dataURL,img:await loadImage(dataURL),source:{dir:'loadDesignDir',path:d.path}});
+          const line={id:uid(),name:d.name||file.name,qty:Math.max(1,Math.round(Number(d.qty)||1)),
+            data:dataURL,img:await loadImage(dataURL),source:{dir:'loadDesignDir',path:d.path}};
+          // what the template says this design bleeds beats what the design is
+          // remembered by — the template is the job, and the job was saved
+          if(d.bleedOn&&isFinite(Number(d.bleedMm))){ line.bleedOn=true; line.bleedMm=Number(d.bleedMm); }
+          else applyRememberedBleed(line);
+          out.push(line);
         }catch(e){ missing.push(d.name||d.path); }
       }
       state.designs=out;
@@ -17342,6 +17463,7 @@ async function addDesignLine(pick,qty,sku){
   const img=await loadImage(dataURL);
   const line={id:uid(),name:pick.name,qty:Math.max(1,Math.round(qty)||1),
     data:dataURL,img,sku:sku||'',source:{dir:'loadDesignDir',path:pick.path}};
+  applyRememberedBleed(line);
   state.designs.push(line);
   ensureGridFor(line.qty);
   fitArtToCard('front'); fitArtToCard('back');
