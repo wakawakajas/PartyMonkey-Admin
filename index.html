@@ -6566,6 +6566,11 @@ function showScreen(name,viaBack){
   }
   closeDrawer();
   syncAddButton(name);
+  // which page's designs folder is the one in hand. Done on the way in rather
+  // than inside each screen, so a page opened by any route — Back, a link, the
+  // drawer — is reading its own library and not the last page's.
+  if(name==='magic'||name==='magic-batch') ldUse('magic').catch(()=>{});
+  else if(name!=='tool-gift-tag'&&name!=='gift-tag-settings') ldUse('print').catch(()=>{});
   if(name==='tool-custom'){ drawAll(); ppLoad(); } // canvases were hidden (0 size) while off-screen; redraw now they're visible
   if(name==='tool-gift-tag') gtOpen();
   if(name==='gift-tag-settings') gtSettingsOpen();
@@ -17099,6 +17104,38 @@ const LOAD_DESIGN_FOLDER_HINT=String.raw`C:\NAS Folders\Partymonkey NAS\Pigu\Big
 const LOAD_DESIGN_ART=/\.(png|jpe?g|webp|pdf)$/i;
 let loadDesignDir=null, loadDesignDirRead=false;
 let loadDesignFiles=[], loadDesignSelected=null;
+// Each page keeps its own. The print tool reads a library of artwork to lay
+// onto a sheet; Magic Create reads the files a batch is filed from, which for
+// a shop that copies rather than prints is a different folder altogether. One
+// handle for both meant repicking it on one page quietly moved the other
+// page's library — and nothing on either page said so.
+const LD_SCOPES={print:{key:'loadDesignDir',name:'Print template'},
+                 magic:{key:'loadDesignDir:magic',name:'Magic Create'}};
+let ldScope='print';
+const ldCache={};                 // scope -> what was in hand when it was left
+const ldKey=()=>(LD_SCOPES[ldScope]||LD_SCOPES.print).key;
+function ldStash(){
+  ldCache[ldScope]={dir:loadDesignDir,read:loadDesignDirRead,files:loadDesignFiles};
+}
+async function ldUse(scope){
+  if(!LD_SCOPES[scope]||scope===ldScope) return;
+  ldStash();
+  ldScope=scope;
+  const c=ldCache[scope]||{};
+  loadDesignDir=c.dir||null; loadDesignDirRead=!!c.read;
+  loadDesignFiles=c.files||[]; loadDesignSelected=null;
+  let dir=await loadDesignDirGet();
+  // A page that has never been given one starts with the other's, so nothing
+  // that worked this morning stops working. It is a copy of the handle: changed
+  // on either page afterwards, the other is left where it was.
+  if(!dir){
+    const other=await gtIdbGet(LD_SCOPES[scope==='magic'?'print':'magic'].key)
+      .catch(()=>null);
+    if(other){ await loadDesignDirSet(other); dir=other; }
+  }
+  if(!loadDesignFiles.length&&dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan();
+  loadDesignFolderState();
+}
 // which SKU on the Magic Create summary this picker was opened for, so the
 // sheet it makes is shown the same way Add shows it rather than the picker
 // quietly closing. Declared here with the rest of the picker's state — the
@@ -17109,10 +17146,17 @@ let mcSummaryPickFor=null;
 // artwork to a sheet, the other writes a path onto the shop's routing.
 let mcRoutePickFor=null;
 async function loadDesignDirGet(){
-  if(!loadDesignDirRead){ loadDesignDir=await gtIdbGet('loadDesignDir').catch(()=>null)||null; loadDesignDirRead=true; }
+  if(!loadDesignDirRead){
+    loadDesignDir=await gtIdbGet(ldKey()).catch(()=>null)||null;
+    loadDesignDirRead=true;
+  }
   return loadDesignDir;
 }
-async function loadDesignDirSet(dir){ loadDesignDir=dir; loadDesignDirRead=true; await gtIdbPut('loadDesignDir',dir); }
+async function loadDesignDirSet(dir){
+  loadDesignDir=dir; loadDesignDirRead=true;
+  await gtIdbPut(ldKey(),dir);
+  ldStash();
+}
 // read-only — nothing here is ever written back into the presets folder
 async function loadDesignDirOk(handle,ask){
   if(!handle) return false;
@@ -17125,7 +17169,12 @@ async function loadDesignDirOk(handle,ask){
 function loadDesignFolderState(){
   const el=document.getElementById('loadDesignFolderState'); if(!el) return;
   if(!canPickFolder()){ el.textContent='This browser cannot browse a folder — use Chrome or Edge on a PC.'; return; }
-  el.textContent=loadDesignDir?`Looking in ${loadDesignDir.name}`:`Not chosen yet — pick ${LOAD_DESIGN_FOLDER_HINT}`;
+  // named by the page it belongs to, because there is one of these per page
+  // and "Looking in Pigu" on its own does not say whose
+  const who=(LD_SCOPES[ldScope]||LD_SCOPES.print).name;
+  el.textContent=loadDesignDir
+    ? `${who} — looking in ${loadDesignDir.name}`
+    : `${who} — not chosen yet — pick ${LOAD_DESIGN_FOLDER_HINT}`;
 }
 // recursive: "a few folders" of presets sit under the chosen root
 async function loadDesignScan(dir,prefix){
@@ -17143,16 +17192,26 @@ async function loadDesignScan(dir,prefix){
 // than rescanning the whole folder — null if the folder isn't connected or
 // the file is no longer there
 async function loadDesignFileByPath(path){
-  const dir=await loadDesignDirGet();
-  if(!dir||!await loadDesignDirOk(dir,false)) return null;
   const parts=String(path||'').split('/').filter(Boolean);
   if(!parts.length) return null;
-  try{
-    let cur=dir;
-    for(let i=0;i<parts.length-1;i++) cur=await cur.getDirectoryHandle(parts[i]);
-    const fh=await cur.getFileHandle(parts[parts.length-1]);
-    return await fh.getFile();
-  }catch(e){ return null; }
+  const under=async dir=>{
+    if(!dir||!await loadDesignDirOk(dir,false)) return null;
+    try{
+      let cur=dir;
+      for(let i=0;i<parts.length-1;i++) cur=await cur.getDirectoryHandle(parts[i]);
+      const fh=await cur.getFileHandle(parts[parts.length-1]);
+      return await fh.getFile();
+    }catch(e){ return null; }
+  };
+  const here=await under(await loadDesignDirGet());
+  if(here) return here;
+  // A path written down on one page and read on another — a template saved
+  // from the print tool and replayed by a batch, or the other way about. The
+  // two folders are usually the same folder anyway, and where they are not,
+  // looking in both beats telling somebody their artwork has gone.
+  const otherKey=LD_SCOPES[ldScope==='magic'?'print':'magic'].key;
+  const other=await gtIdbGet(otherKey).catch(()=>null);
+  return other?await under(other):null;
 }
 async function loadDesignRescan(){
   loadDesignFiles=[];
@@ -17257,7 +17316,7 @@ document.getElementById('loadDesignPickFolderBtn').addEventListener('click',asyn
   }catch(e){ /* cancelled */ }
 });
 document.getElementById('loadDesignForgetFolderBtn').addEventListener('click',async()=>{
-  loadDesignDir=null; loadDesignDirRead=true; await gtIdbPut('loadDesignDir',null);
+  loadDesignDir=null; loadDesignDirRead=true; await gtIdbPut(ldKey(),null); ldStash();
   loadDesignFiles=[]; loadDesignSelected=null;
   document.getElementById('loadDesignQtyRow').style.display='none';
   loadDesignFolderState(); loadDesignRenderList();
