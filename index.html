@@ -16913,9 +16913,15 @@ function renderTemplateList(){
       ? ` <span class="hint" style="margin:0;">· ${escapeHtml(
           r.user_id===myTemplateOwner?'yours':(templateOwners[r.user_id]||'someone else'))}</span>`
       : '';
+    // the folder it prints, on the row itself: two templates pointed at one
+    // folder is the thing that goes wrong, and it should be visible without
+    // loading each of them in turn to look
+    const f=(Array.isArray(r.folders)?r.folders:[]).filter(Boolean);
+    const fol=f.length
+      ? ` <span class="hint" style="margin:0;">· 📁 ${escapeHtml(f.join(', '))}</span>` : '';
     return `<div class="combo-opt${String(r.id)===String(selectedTemplate)?' active':''}"
        role="option" data-id="${escapeHtml(String(r.id))}">
-      <span class="nm">${n}${who}</span>
+      <span class="nm">${n}${who}${fol}</span>
     </div>`;
   }).join('');
 }
@@ -17025,16 +17031,35 @@ async function saveTemplate(){
       // artwork sits and how far it bleeds all come back with the template
       artFit:state.artFit,artMode:state.artMode,art:state.art,bleed:state.bleed,
       paperType:state.paperType,gsm:state.gsm};
+    // The row that was loaded is the row that is written, by id — the same
+    // way Load and Delete already work. Saving by name alone wrote to
+    // whichever of your rows carried that name, so two templates saved under
+    // one name were one row: the second save took the first one's place, and
+    // its folder with it. Changing the name in the box still makes a new
+    // template, which is how a copy has always been made.
+    const open=templateById(selectedTemplate);
+    const sameRow=open&&open.user_id===session.user.id&&open.name===name;
     // yours by that name, not anybody's — saving overwrites your own copy and
     // never touches a colleague's, so somebody else's "A6 postcard" must not
     // make this look like an existing one
-    const isNew=!templateRows.some(r=>r.name===name&&r.user_id===session.user.id);
-    const payload={user_id:session.user.id,name,data:meta,updated_at:new Date().toISOString()};
-    if(isNew) payload.sort_order=templateRows.length; // append new templates at the end
-    const {error}=await sb.from('templates').upsert(payload,{onConflict:'user_id,name'});
+    const isNew=!sameRow&&!templateRows.some(r=>r.name===name&&r.user_id===session.user.id);
+    const stamp=new Date().toISOString();
+    let error;
+    if(sameRow){
+      ({error}=await sb.from('templates')
+        .update({name,data:meta,updated_at:stamp}).eq('id',open.id));
+    }else{
+      const payload={user_id:session.user.id,name,data:meta,updated_at:stamp};
+      if(isNew) payload.sort_order=templateRows.length; // append new templates at the end
+      ({error}=await sb.from('templates').upsert(payload,{onConflict:'user_id,name'}));
+    }
     if(error) throw error;
     await refreshTemplateList();
-    showMsg(msgEl,'✓ Saved "'+name+'" — synced to your account',true);
+    // what it was saved with, not just that it saved: the folder is the thing
+    // that decides a batch, and reading it back here is how you see it took
+    showMsg(msgEl,'✓ Saved "'+name+'"'+(folders.length?` — folder: ${folders[0]}`
+      :' — no folder, so only a folder named exactly like it finds it')
+      +' — synced to your account',true);
   }catch(err){
     showMsg(msgEl,'Could not save: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false;btn.textContent='Save template'; }
