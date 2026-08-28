@@ -3679,7 +3679,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button type="button" data-fmode="box" class="on">Its Own Box</button>
       <button type="button" data-fmode="shared">Shared Across All Boxes</button>
     </div>
-    <p class="hint">“Its Own Box” charges each box’s freight only to the pieces inside it. “Shared Across All Boxes” pools every box’s freight and spreads it evenly over all ordered pieces, so each piece carries the same average rate.</p>
+    <p class="hint">“Its Own Box” charges each box’s freight only to the pieces inside it. “Shared Across All Boxes” pools every box’s freight and spreads it evenly over every piece that arrived, so each piece carries the same average rate.</p>
     <div class="add-row">
       <button class="fab-add" id="addBoxBtn" title="Add box" aria-label="Add box">+</button>
     </div>
@@ -11536,11 +11536,17 @@ function itemChargesRmb(i){ return itemPlatformRmb(i)+itemServiceRmb(i)+itemGstR
 // alone and only changes what that share works out to per piece.
 function freightMode(){ const s=currentShipment(); return (s&&s.freight_mode==='shared')?'shared':'box'; }
 function totalFreightRmb(){ return boxRows.reduce((s,b)=>s+boxShipRmb(b),0); }
-function sharedFreightPerUnitRmb(){ const q=totalUnitsAll(); return q>0?totalFreightRmb()/q:0; }
+// A box is measured once it is open in front of you, so the freight pooled
+// here is the bill for the pieces that turned up — not for the ones still
+// outstanding, which were never in a lorry. Dividing by everything ordered
+// hands them a share anyway and prices every arrived piece below what it cost
+// to land: 332 ordered against 330 arrived quietly shaves the rate.
+function freightBasisUnits(){ return arrivedUnitsAll(); }
+function sharedFreightPerUnitRmb(){ const q=freightBasisUnits(); return q>0?totalFreightRmb()/q:0; }
 // in 'box' mode a line's freight is the sum over its arrivals, each priced at
 // its own box's rate — so a split delivery is costed per box, not averaged
 function itemFreightRmb(item){
-  if(freightMode()==='shared') return sharedFreightPerUnitRmb()*itemUnits(item);
+  if(freightMode()==='shared') return sharedFreightPerUnitRmb()*arrivedUnitsOf(item);
   return allocsForItem(item.id).reduce((s,a)=>s+shipPerUnitRmb(a.box_id)*allocUnits(a),0);
 }
 // the box's whole shipping charge spread evenly over every piece inside it
@@ -11692,7 +11698,9 @@ function renderItems(){
         </div>
         <div class="calc-right">
           <span class="hint" style="margin:0;">Final price per piece all-in</span><br/>
-          <span class="hint" style="margin:0;opacity:.65;">line total ÷ ${qty||0} pcs</span><br/>
+          <span class="hint" style="margin:0;opacity:.65;">${arr>0&&arr<qty
+            ?`goods &amp; fees ÷ ${qty} pcs · freight ÷ ${arr} arrived`
+            :`line total ÷ ${qty||0} pcs`}</span><br/>
           <strong style="color:var(--blueprint);font-size:15px;">${fmtCeilFromRmb(allInPerUnitRmb(r))}</strong><br/>
           ${inBoxes||'not yet in a box'}${out>0?`<br/><strong>${out} not arrived</strong>`:''}
         </div>
@@ -12520,8 +12528,14 @@ const SKU_EXCHANGE_RATE=1;   // already converted, so no further conversion need
 function allInPerUnitRmb(i){
   const qty=Number(i.qty)||0;
   if(!qty) return Number(i.unit_price_rmb)||0;
+  // Goods and the fees on them were paid for the whole line, so they spread
+  // over the whole line. Freight was paid for the pieces in the boxes, so it
+  // spreads over those — a short delivery costs more per piece to land, and
+  // this is the figure that has to say so.
+  const arr=arrivedQtyOf(i)||qty;
   return (Number(i.unit_price_rmb)||0)
-    + (itemChinaRmb(i)+itemChargesRmb(i)+itemFreightRmb(i))/qty;
+    + (itemChinaRmb(i)+itemChargesRmb(i))/qty
+    + itemFreightRmb(i)/arr;
 }
 function buildSkuSheetRows(rows){
   const sh=currentShipment();
@@ -12845,13 +12859,13 @@ function renderBoxCalc(){
   const sharedPU=sharedFreightPerUnitRmb();
   const split=itemRows.some(i=>perUnitOf(i)>1);
   const word=split?'unit':'piece';
-  const pooledOver=split?totalUnitsAll():totalQtyAll();
+  const pooledOver=split?arrivedUnitsAll():arrivedQtyAll();
   document.getElementById('boxCalc').innerHTML=
     `CBM <strong>${cbm.toFixed(4)} m³</strong> &nbsp;·&nbsp; volumetric weight ${vw.toFixed(2)} kg <span style="opacity:.7">(÷${VOLUMETRIC_DIVISOR}, reference only)</span><br/>`+
     `Box shipping <strong>¥${shipRmb.toFixed(2)}</strong>${r?` = <strong>S$${(shipRmb/r).toFixed(2)}</strong>`:''}<br/>`+
     (shared
       ? `${q} piece(s) ticked below &nbsp;·&nbsp; <span style="opacity:.7">freight is pooled across all boxes</span><br/>`+
-        `Pooled ¥${totalFreightRmb().toFixed(2)} over ${(+pooledOver.toFixed(2))} ordered ${word}(s) &nbsp;·&nbsp; per ${word} <strong>¥${sharedPU.toFixed(2)}</strong>${r?` = <strong>S$${(sharedPU/r).toFixed(2)}</strong>`:''}`
+        `Pooled ¥${totalFreightRmb().toFixed(2)} over ${(+pooledOver.toFixed(2))} arrived ${word}(s) &nbsp;·&nbsp; per ${word} <strong>¥${sharedPU.toFixed(2)}</strong>${r?` = <strong>S$${(sharedPU/r).toFixed(2)}</strong>`:''}`
       : `${q} piece(s) ticked below &nbsp;·&nbsp; per ${word} <strong>¥${perUnitRmb.toFixed(2)}</strong>${r?` = <strong>S$${(perUnitRmb/r).toFixed(2)}</strong>`:''}`)
     // the whole order rather than this box, so it is set apart from the three
     // lines above it — they are all about the parcel in front of you
