@@ -5942,7 +5942,7 @@ function designTallyText(){
 // the searchable list of folder designs a line can be pointed at
 function designPickerPanel(q,selPath){
   const term=(q||'').trim().toLowerCase();
-  const items=loadDesignFiles.filter(it=>!term||it.path.toLowerCase().includes(term));
+  const items=ldScoped().filter(it=>!term||it.path.toLowerCase().includes(term));
   if(!loadDesignFiles.length)
     return '<div class="combo-empty">No folder chosen yet — tap Load design.</div>';
   if(!items.length) return '<div class="combo-empty">Nothing matches “'+escapeHtml(q)+'”.</div>';
@@ -17128,7 +17128,12 @@ function applyPrintState(meta,name){
   // folder onto the template in the name box. Two templates, one folder.
   if(name!==undefined){
     const fEl=document.getElementById('templateFolders');
-    if(fEl) fEl.value=(Array.isArray(meta.folders)?meta.folders:[]).join(', ');
+    const list=Array.isArray(meta.folders)?meta.folders:[];
+    if(fEl) fEl.value=list.join(', ');
+    // and the designs the template prints are the designs it offers: the
+    // template says the folder, so Load design and the line picker look there
+    // rather than at everything under the folder that happens to be chosen
+    ldSetTemplateFolder(list[0]||'');
   }
   document.getElementById('artOrderId').value=state.orderId||'';
   state.page=0;
@@ -17659,6 +17664,33 @@ const LOAD_DESIGN_FOLDER_HINT=String.raw`C:\NAS Folders\Partymonkey NAS\Pigu\Big
 const LOAD_DESIGN_ART=/\.(png|jpe?g|webp|pdf)$/i;
 let loadDesignDir=null, loadDesignDirRead=false;
 let loadDesignFiles=[], loadDesignSelected=null;
+// The folder the template in hand prints. One template is one folder, so the
+// picker keeps to it: the template says "95 x 65mm Mini Card" and that is what
+// Load design shows, rather than every design under the chosen folder with the
+// Big TY Card ones first. Set when a template is loaded and cleared with it.
+// Show all folders stands it down for as long as somebody wants the lot.
+let ldTplFolder='', ldShowAll=false;
+// a file is in a folder, or in something inside it
+const ldUnder=(f,folder)=>{
+  const a=String((f&&f.folder)||'').trim().toLowerCase();
+  const b=String(folder||'').trim().toLowerCase();
+  return !!b&&(a===b||a.startsWith(b+'/'));
+};
+// what the picker may show. A folder the chosen root does not contain is not
+// a filter, it is a mistake — everything is shown and the state line says so,
+// because an empty list would look like an empty folder.
+const ldScopeOn=()=>!!ldTplFolder&&!ldShowAll
+  &&(loadDesignFiles||[]).some(f=>ldUnder(f,ldTplFolder));
+const ldScoped=()=>ldScopeOn()
+  ? loadDesignFiles.filter(f=>ldUnder(f,ldTplFolder)) : loadDesignFiles;
+// told by the template being loaded, and by nothing else
+function ldSetTemplateFolder(folder){
+  const next=String(folder||'').trim();
+  if(next===ldTplFolder&&!ldShowAll) return;
+  ldTplFolder=next; ldShowAll=false;
+  loadDesignFolderState();
+  if(typeof loadDesignRenderList==='function') loadDesignRenderList();
+}
 // This is the print template's library and nothing else's: artwork to be laid
 // onto a sheet. Anything that prints reads it — the tool itself, and Magic
 // Create when it puts a SKU on a print sheet. What a batch copies is a
@@ -17708,9 +17740,22 @@ function loadDesignFolderState(){
         +'a batch is filed from live in.';
     return;
   }
-  el.textContent=loadDesignDir
-    ? `Print template — looking in ${loadDesignDir.name}`
-    : `Print template — not chosen yet — pick ${LOAD_DESIGN_FOLDER_HINT}`;
+  if(!loadDesignDir){
+    el.textContent=`Print template — not chosen yet — pick ${LOAD_DESIGN_FOLDER_HINT}`;
+    return;
+  }
+  if(!ldTplFolder){ el.textContent=`Print template — looking in ${loadDesignDir.name}`; return; }
+  // A template naming a folder that is not under the chosen one is the usual
+  // trouble: the folder chosen is one product's own folder, so every other
+  // template points somewhere it cannot see. Said plainly, with the way out.
+  if(!(loadDesignFiles||[]).some(f=>ldUnder(f,ldTplFolder))){
+    el.textContent=`Print template — looking in ${loadDesignDir.name}. This template prints `
+      +`“${ldTplFolder}”, which is not in there — choose the folder those folders sit inside.`;
+    return;
+  }
+  el.textContent=ldShowAll
+    ? `Print template — looking in ${loadDesignDir.name}, all of it. This template prints “${ldTplFolder}”.`
+    : `Print template — looking in ${loadDesignDir.name} › ${ldTplFolder}, the folder this template prints.`;
 }
 // recursive: "a few folders" of presets sit under the chosen root
 async function loadDesignScan(dir,prefix){
@@ -17750,12 +17795,23 @@ async function loadDesignRescan(){
   loadDesignFiles=out;
   fillTemplateFolderOptions();
 }
+document.getElementById('loadDesignCount').addEventListener('click',e=>{
+  if(!e.target.closest('#ldScopeBtn')) return;
+  ldShowAll=!ldShowAll; loadDesignFolderState(); loadDesignRenderList();
+});
 function loadDesignRenderList(){
   const q=(document.getElementById('loadDesignSearch').value||'').trim().toLowerCase();
-  const all=ldMapMode()?(mcSrcFiles||[]):loadDesignFiles;
+  const all=ldMapMode()?(mcSrcFiles||[]):ldScoped();
   const items=all.filter(it=>!q||it.path.toLowerCase().includes(q));
-  document.getElementById('loadDesignCount').textContent=
-    all.length?`${items.length} of ${all.length} file${all.length===1?'':'s'}`:'';
+  // the scope is a button as well as a sentence: a design wanted from another
+  // folder for once is one tap away, and the tap says what it is doing
+  const scoped=!ldMapMode()&&!!ldTplFolder
+    &&(loadDesignFiles||[]).some(f=>ldUnder(f,ldTplFolder));
+  document.getElementById('loadDesignCount').innerHTML=
+    (all.length?`${items.length} of ${all.length} file${all.length===1?'':'s'}`
+      +(scoped&&!ldShowAll?` in ${escapeHtml(ldTplFolder)}`:''):'')
+    +(scoped?` <button type="button" class="btn-outline btn-sm" id="ldScopeBtn">`
+      +(ldShowAll?`Only ${escapeHtml(ldTplFolder)}`:'Show all folders')+'</button>':'');
   const listEl=document.getElementById('loadDesignList');
   if(!all.length){
     listEl.innerHTML='<p class="hint" style="margin:4px 0 0;">— choose a folder to see designs —</p>';
@@ -28174,8 +28230,16 @@ function mcSummaryButtons(shown){
 function designFileForSku(sku){
   const want=String(sku||'').trim().toLowerCase();
   if(!want) return null;
-  return loadDesignFiles.find(f=>
-    /\.png$/i.test(f.name)&&f.name.replace(/\.png$/i,'').trim().toLowerCase()===want)||null;
+  const hits=loadDesignFiles.filter(f=>
+    /\.png$/i.test(f.name)&&f.name.replace(/\.png$/i,'').trim().toLowerCase()===want);
+  if(hits.length<2) return hits[0]||null;
+  // One name in two folders used to be whichever the scan reached first, which
+  // is the wrong card printed under a name that says it is right. The folder
+  // of the template in hand is the one meant; failing that, a folder some
+  // template says it prints, which is at least a folder somebody has claimed.
+  const claimed=f=>(templateRows||[]).some(t=>(Array.isArray(t.folders)?t.folders:[])
+    .some(x=>String(x||'').trim().toLowerCase()===String(f.folder||'').trim().toLowerCase()));
+  return hits.find(f=>ldUnder(f,ldTplFolder))||hits.find(claimed)||hits[0];
 }
 // the design line this SKU put on the sheet, if it is on there. Read off the
 // sheet rather than remembered, so shutting the summary loses nothing and two
