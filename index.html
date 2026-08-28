@@ -4003,6 +4003,15 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         <button type="button" class="on" data-gt-finish="Matte">Matte</button>
         <button type="button" data-gt-finish="Gloss">Gloss</button>
       </div>
+      <!-- A design that arrived as a PDF can go into the export as the page it
+           is rather than as a picture of it. Nothing is redrawn, so its colours
+           are the ones it was drawn in — which is what a CMYK design needs, and
+           its text and edges stay as sharp as the paper allows. Off, and every
+           tag is drawn at 300dpi as it always was. -->
+      <div class="toggle-row" style="margin-bottom:8px;">
+        <span style="font-size:13px;color:var(--muted);">PDF artwork goes in whole</span>
+        <label class="switch"><input type="checkbox" id="gtVectorToggle" checked/><span class="slider"></span></label>
+      </div>
       <button class="btn-primary" id="gtExportBtn" style="width:100%;height:50px;font-size:14px;">Save PDF &amp; cut file</button>
       <button class="btn-outline" id="gtPltPreviewBtn" style="width:100%;margin-top:8px;">Look at the cut file first</button>
       <div id="gtExportMsg"></div>
@@ -4463,6 +4472,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         <div class="chips" style="margin-top:9px;align-items:center;">
           <button type="button" class="btn-outline btn-sm" id="exportFolderBtn">📁 Save folder…</button>
           <span class="hint" id="exportFolderLbl" style="margin:0;"></span>
+        </div>
+        <!-- One switch for everything this tool writes, both sheets and the
+             gift tag sheet alike: a design whose file is a PDF goes into the
+             download as that page rather than as a picture of it, so the
+             colours it was drawn in are the colours that are printed. -->
+        <div class="toggle-row" style="margin-top:9px;">
+          <span style="font-size:13px;color:var(--muted);">PDF artwork goes in whole</span>
+          <label class="switch"><input type="checkbox" id="wholeArtToggle" checked/><span class="slider"></span></label>
         </div>
         <div id="exportMsgFront"></div>
       </div>
@@ -5360,15 +5377,18 @@ document.querySelectorAll('[data-card] .card-head').forEach(h=>{
 // ---------- files ----------
 function loadImage(d){return new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src=d;});}
 function fileToDataURL(f){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(f);});}
-async function pdfFileToDataURL(file){
+async function pdfFileToDataURL(file,maxPx,clear){
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
   const page=await pdf.getPage(1);
   const b=page.getViewport({scale:1});
-  const vp=page.getViewport({scale:1600/Math.max(b.width,b.height)});
+  const vp=page.getViewport({scale:(maxPx||1600)/Math.max(b.width,b.height)});
   const c=document.createElement('canvas');
   c.width=vp.width;c.height=vp.height;
-  const ctx=c.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,c.width,c.height);
+  const ctx=c.getContext('2d');
+  // a page read as a document sits on paper; one read as artwork does not, so
+  // that a shape cut out of nothing stays cut out of nothing
+  if(!clear){ ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,c.height); }
   await page.render({canvasContext:ctx,viewport:vp}).promise;
   return c.toDataURL('image/png');
 }
@@ -5400,7 +5420,9 @@ async function useArtFile(group,side,file,source){
   try{
     const dataURL=await fileToImageData(file);
     const img=await loadImage(dataURL);
-    state[group][side]={data:dataURL,img,name:file.name,source:source||null};
+    // the file itself is kept beside the picture of it — a File is a handle on
+    // what is on disk, not a copy of it, and the export needs the real thing
+    state[group][side]={data:dataURL,img,name:file.name,source:source||null,file};
     fitArtToCard(side);
     refreshSlots();refreshArtInputs();drawAll();
   }catch(err){ infoEl.textContent=(err&&err.message)||'Could not read that file'; }
@@ -5617,7 +5639,10 @@ function renderSide(side,canvas,maxDim,opts){
   canvas.width=Math.max(1,Math.round(p.w*sc));
   canvas.height=Math.max(1,Math.round(p.h*sc));
   ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
+  // Paper, unless artwork is being placed under this render — then the sheet
+  // is drawn on nothing, so each design left undrawn shows its own page
+  // through. The paper is white either way; it is the PDF's.
+  if(!opts.vec){ ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height); }
 
   // registration shift: nudges reference marks, placeholders and artwork
   // together as one unit, independently per side, to correct printer feed
@@ -5639,7 +5664,7 @@ function renderSide(side,canvas,maxDim,opts){
   // fills it, "Original" fits the file's own proportions inside it. Doing it
   // per image rather than once is what lets a list of designs at different
   // shapes each keep its own without any of them being stretched.
-  const one=(img,ph,line)=>{
+  const one=(img,ph,line,key)=>{
     let wMm=a.wMm, hMm=a.hMm;
     if(state.artFit==='original'&&img.naturalWidth&&img.naturalHeight){
       const f=Math.min(a.wMm/img.naturalWidth,a.hMm/img.naturalHeight);
@@ -5650,8 +5675,17 @@ function renderSide(side,canvas,maxDim,opts){
     const effW=wMm+bleedMm*2, effH=hMm+bleedMm*2;
     const rotDeg=state.rotate[side]||0;
     const swapped=(rotDeg%180)!==0; // 90 or 270: image is drawn on its side
-    const srcW=(swapped?effH:effW)*sc, srcH=(swapped?effW:effH)*sc;
+    const boxW=swapped?effH:effW, boxH=swapped?effW:effH;   // the box before the turn
+    const srcW=boxW*sc, srcH=boxH*sc;
     const cx=(ph.xMm+ph.wMm/2)*sc, cy=(ph.yMm+ph.hMm/2)*sc;
+    // Artwork whose own file is a PDF is not drawn here: the same box, turned
+    // the same way, is filled by that file's page placed under this render.
+    // The shift is in the rectangle rather than around it, the placing having
+    // no canvas transform to sit inside.
+    if(opts.vec&&opts.vec.take(key,
+        {x:ph.xMm+ph.wMm/2-boxW/2+shift.xMm, y:ph.yMm+ph.hMm/2-boxH/2+shift.yMm,
+         w:boxW, h:boxH, rot:rotDeg},
+        {x:(effW-ph.wMm)/2, y:(effH-ph.hMm)/2})) return;
     ctx.save();
     ctx.translate(cx,cy);
     ctx.rotate(rotDeg*Math.PI/180);
@@ -5667,11 +5701,11 @@ function renderSide(side,canvas,maxDim,opts){
     const order=fillOrder(), per=order.length;
     if(per){
       const q=designQueue(), start=(opts.page||0)*per;
-      order.forEach((ph,i)=>{ const d=q[start+i]; if(d&&d.img) one(d.img,ph,d); });
+      order.forEach((ph,i)=>{ const d=q[start+i]; if(d&&d.img) one(d.img,ph,d,'d:'+d.id); });
     }
   }else if(!useList){
     const art=state.final[side].img;
-    if(art&&a.wMm&&a.hMm) state.placeholders.forEach(ph=>one(art,ph,null));
+    if(art&&a.wMm&&a.hMm) state.placeholders.forEach(ph=>one(art,ph,null,'final:'+side));
   }
 
   // fold line sits above the artwork (unlike the reference marks below it)
@@ -5688,21 +5722,8 @@ function renderSide(side,canvas,maxDim,opts){
   if(!opts.forExport) drawFoldOverlay(ctx,sc);
   ctx.restore(); // pairs with the shift save above
 
-  // order ID is anchored to the physical sheet corner, not the shift —
-  // and once a job runs to several sheets it says which one this is, or a
-  // stack of them off the printer cannot be told apart. On screen only: the
-  // exported PDF is the artwork itself — the Order ID is keyed for the file
-  // name it is exported under, and never printed onto the artwork itself.
-  if(!opts.forExport && state.orderId){
-    const sheets=sheetCount();
-    const tag=state.orderId+(sheets>1?`  ·  sheet ${(opts.page||0)+1}/${sheets}`:'');
-    ctx.save();
-    const fs=Math.max(2,Math.max(p.w,p.h)*0.012*sc);
-    ctx.font=fs+'px "IBM Plex Mono", monospace';
-    ctx.fillStyle='#232323';ctx.textBaseline='bottom';
-    ctx.fillText(tag,1.5*sc,canvas.height-1.5*sc);
-    ctx.restore();
-  }
+  // the Order ID is keyed for the export file name only — it is never drawn
+  // on the sheet, on screen or in the PDF.
 }
 function drawAll(){
   // measure the card the canvas actually sits in, so the sheet fills whatever
@@ -6296,6 +6317,7 @@ async function setDesignLineFile(line,pick){
   line.data=dataURL;
   line.img=await loadImage(dataURL);
   line.source={dir:'loadDesignDir',path:pick.path};
+  line.file=file;
   applyRememberedBleed(line);
   ensureGridFor(line.qty);
   fitArtToCard('front'); fitArtToCard('back');
@@ -17263,11 +17285,13 @@ if(sb){
 }
 
 // ---------- self-contained PDF writer (no external library) ----------
-// Images are embedded fully losslessly: raw RGB pixel rows (no JPEG, no
+// Renders are embedded fully losslessly: raw RGB pixel rows (no JPEG, no
 // downsampling) run through the browser's built-in deflate — the exact same
 // zlib-compressed-stream format PDF's /FlateDecode expects, with a PNG-style
 // predictor (row filtering) requested via /Predictor 15 so the compressed
-// size stays reasonable without discarding a single pixel.
+// size stays reasonable without discarding a single pixel. Artwork that came
+// in as a PDF is not rendered at all: its page is placed under the render,
+// which is the only way its colours arrive as they were drawn.
 function mmToPt(mm){return mm*72/25.4;}
 function rgbaToRawRgbScanlines(imgData){
   const w=imgData.width,h=imgData.height,data=imgData.data;
@@ -17291,35 +17315,698 @@ async function deflateBytes(bytes){
   chunks.forEach(c=>{ out.set(c,o); o+=c.length; });
   return out;
 }
-async function buildPdfBytes(imgData,wMm,hMm){
-  const imgW=imgData.width, imgH=imgData.height;
-  const deflated=await deflateBytes(rgbaToRawRgbScanlines(imgData));
+// ---------- which red the printer is being handed ----------
+// Every page here is drawn on a canvas, and a canvas is sRGB. An image marked
+// /DeviceRGB in the PDF says no such thing: the numbers arrive at the printer
+// bare, and it reads them in whatever RGB space it happens to default to —
+// which is why a sheet can come back a different colour from the one on the
+// screen, usually duller or shifted. Tagging the image /ICCBased with an sRGB
+// profile closes that gap: the same pixels are written, but they now say which
+// red 255,0,0 was meant to be, and the RIP converts to its ink from there.
+let _srgbIcc=null;
+function srgbIccProfile(){
+  if(_srgbIcc) return _srgbIcc;
   const enc=new TextEncoder();
-  const W=mmToPt(wMm).toFixed(2),H=mmToPt(hMm).toFixed(2);
-  const content=`q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
-  const contentBytes=enc.encode(content);
-  const imgDict=`<< /Type /XObject /Subtype /Image /Width ${imgW} /Height ${imgH} /ColorSpace /DeviceRGB `
-    +`/BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns ${imgW} >> `
-    +`/Length ${deflated.length} >>\nstream\n`;
+  const pad4=n=>(n+3)&~3;
+  // sRGB's tone curve, sampled to 1024 points as a 'curv' tag. One tag serves
+  // all three channels — the format lets tags share their data.
+  const trc=new Uint8Array(12+1024*2), trcV=new DataView(trc.buffer);
+  trc.set(enc.encode('curv'),0); trcV.setUint32(8,1024);
+  for(let i=0;i<1024;i++){
+    const x=i/1023;
+    const y=x<=0.04045?x/12.92:Math.pow((x+0.055)/1.055,2.4);
+    trcV.setUint16(12+i*2,Math.round(y*65535));
+  }
+  // primaries and white point already adapted to the connection space's D50 —
+  // the same s15Fixed16 numbers the published sRGB IEC61966-2.1 profile carries
+  const xyz=(x,y,z)=>{
+    const b=new Uint8Array(20), v=new DataView(b.buffer);
+    b.set(enc.encode('XYZ '),0);
+    v.setInt32(8,x); v.setInt32(12,y); v.setInt32(16,z);
+    return b;
+  };
+  const desc=str=>{            // ascii name, then room for the encodings we do not use
+    const a=enc.encode(str+'\0');
+    const b=new Uint8Array(90+a.length), v=new DataView(b.buffer);
+    b.set(enc.encode('desc'),0); v.setUint32(8,a.length); b.set(a,12);
+    return b;
+  };
+  const text=str=>{
+    const a=enc.encode(str+'\0');
+    const b=new Uint8Array(8+a.length);
+    b.set(enc.encode('text'),0); b.set(a,8);
+    return b;
+  };
+  const tags=[
+    ['desc',desc('sRGB IEC61966-2.1')],
+    ['wtpt',xyz(0x0000F6D6,0x00010000,0x0000D32D)],
+    ['rXYZ',xyz(0x00006FA2,0x000038F5,0x00000390)],
+    ['gXYZ',xyz(0x00006299,0x0000B785,0x000018DA)],
+    ['bXYZ',xyz(0x000024A0,0x00000F84,0x0000B6CF)],
+    ['rTRC',trc],['gTRC',trc],['bTRC',trc],
+    ['cprt',text('Public Domain')],
+  ];
+  const head=128, table=4+tags.length*12;
+  let at=pad4(head+table);
+  const seen=new Map(), body=[];
+  const rows=tags.map(([sig,d])=>{
+    let o=seen.get(d);
+    if(o===undefined){ o=at; seen.set(d,o); body.push([o,d]); at=pad4(at+d.length); }
+    return [sig,o,d.length];
+  });
+  const out=new Uint8Array(at), v=new DataView(out.buffer);
+  v.setUint32(0,at);                      // profile size
+  v.setUint32(8,0x02100000);              // ICC 2.1
+  out.set(enc.encode('mntr'),12); out.set(enc.encode('RGB '),16); out.set(enc.encode('XYZ '),20);
+  out.set(enc.encode('acsp'),36);
+  v.setInt32(68,0x0000F6D6); v.setInt32(72,0x00010000); v.setInt32(76,0x0000D32D); // D50 illuminant
+  v.setUint32(head,rows.length);
+  rows.forEach(([sig,o,n],i)=>{
+    out.set(enc.encode(sig),head+4+i*12);
+    v.setUint32(head+8+i*12,o); v.setUint32(head+12+i*12,n);
+  });
+  body.forEach(([o,d])=>out.set(d,o));
+  return _srgbIcc=out;
+}
+// the profile as one PDF stream object, written whole — 2 kB, once per file
+// ---------- artwork that came in as a PDF ----------
+// One setting for the whole tool rather than one per sheet: wherever a PDF is
+// written out of Custom Print Template, artwork whose own file is a PDF goes
+// in as the page it is. Anything that learns to export later reads this too,
+// by going through the writers below rather than rasterising for itself.
+const WHOLE_ART_KEY='pigu.wholeArt';
+function wholeArtOn(){
+  try{ return localStorage.getItem(WHOLE_ART_KEY)!=='0'; }catch(e){ return true; }
+}
+function wholeArtSet(on){
+  try{ localStorage.setItem(WHOLE_ART_KEY,on?'1':'0'); }catch(e){}
+}
+function iccObject(num){
+  const icc=srgbIccProfile(), enc=new TextEncoder();
+  const head=enc.encode(num+' 0 obj\n<< /N 3 /Length '+icc.length+' >>\nstream\n');
+  const tail=enc.encode('\nendstream\nendobj\n');
+  const b=new Uint8Array(head.length+icc.length+tail.length);
+  b.set(head,0); b.set(icc,head.length); b.set(tail,head.length+icc.length);
+  return b;
+}
+// ---------- lifting one page out of somebody else's PDF ----------
+// Kept to itself: every name in here is the format's, not the app's.
+const pdfLift=(function(){
+  // ---------- reading a PDF well enough to lift one page out of it ----------
+  // Only as much of the format as placing a page inside another file needs: the
+  // objects, the page tree, and the bytes of the streams. Nothing is decoded that
+  // does not have to be — an image the artwork carries is copied across exactly
+  // as it was written, which is the whole point of the exercise.
 
-  const parts=[]; const off=[]; let pos=0;
-  const push=u8=>{ parts.push(u8); pos+=u8.length; };
-  push(enc.encode('%PDF-1.4\n'));
-  off[1]=pos; push(enc.encode('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n'));
-  off[2]=pos; push(enc.encode('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n'));
-  off[3]=pos; push(enc.encode(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n`));
-  off[4]=pos; push(enc.encode(`4 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n`)); push(contentBytes); push(enc.encode('\nendstream\nendobj\n'));
-  off[5]=pos; push(enc.encode(`5 0 obj\n${imgDict}`)); push(deflated); push(enc.encode('\nendstream\nendobj\n'));
-  const xref=pos;
-  let xrefStr='xref\n0 6\n0000000000 65535 f \n';
-  for(let i=1;i<=5;i++) xrefStr+=String(off[i]).padStart(10,'0')+' 00000 n \n';
-  xrefStr+=`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
-  push(enc.encode(xrefStr));
+  const PDF_WS = new Set([0, 9, 10, 12, 13, 32]);
+  const PDF_DELIM = new Set([0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25]);
+  const isWs = c => PDF_WS.has(c);
+  const isDelim = c => PDF_DELIM.has(c);
+  const isReg = c => !isWs(c) && !isDelim(c);
 
-  const total=parts.reduce((s,p)=>s+p.length,0);
-  const bytes=new Uint8Array(total); let o=0;
-  parts.forEach(p=>{ bytes.set(p,o); o+=p.length; });
-  return bytes;
+  // values: number | boolean | null | {name} | {str} | {ref} | Array | Map(dict) | {dict,raw}
+  const Name = n => ({ name: n });
+  const Ref = (num, gen) => ({ ref: [num, gen] });
+  const isName = (v, n) => v && v.name !== undefined && (n === undefined || v.name === n);
+  const isRef = v => !!(v && v.ref);
+  const isDict = v => v instanceof Map;
+  const isStream = v => !!(v && v.dict instanceof Map && v.raw);
+
+  class PdfSrc {
+    constructor(bytes) {
+      this.b = bytes;
+      this.cache = new Map();       // "num gen" -> value
+      this.offs = new Map();        // num -> byte offset of "num gen obj"
+      this.inStm = new Map();       // num -> [objstm num, index]
+      this.trailers = [];
+      this.scan();
+    }
+    // Where the objects are, found by reading the file rather than by trusting
+    // its table. A cross-reference table that points at the wrong place is
+    // common enough that every serious reader recovers this way; doing it always
+    // means one path, and the one that copes with a file saved half a dozen
+    // times over.
+    scan() {
+      const b = this.b, n = b.length;
+      for (let i = 0; i + 3 <= n; i++) {
+        if (b[i] !== 0x6f || b[i + 1] !== 0x62 || b[i + 2] !== 0x6a) continue;   // "obj"
+        if (i + 3 < n && isReg(b[i + 3])) continue;
+        // back over: whitespace, generation digits, whitespace, object digits
+        let p = i - 1;
+        while (p >= 0 && isWs(b[p])) p--;
+        const genEnd = p;
+        while (p >= 0 && b[p] >= 0x30 && b[p] <= 0x39) p--;
+        if (p === genEnd) continue;
+        const genStart = p + 1;
+        while (p >= 0 && isWs(b[p])) p--;
+        if (p === genStart - 1) continue;
+        const numEnd = p;
+        while (p >= 0 && b[p] >= 0x30 && b[p] <= 0x39) p--;
+        if (p === numEnd) continue;
+        const numStart = p + 1;
+        if (p >= 0 && isReg(b[p])) continue;
+        const num = parseInt(this.text(numStart, numEnd + 1), 10);
+        if (!isFinite(num)) continue;
+        this.offs.set(num, numStart);   // a later revision of an object wins
+      }
+      // the trailers, for /Root — and /Encrypt, which stops the whole errand
+      for (let i = 0; i + 7 <= n; i++) {
+        if (b[i] === 0x74 && this.text(i, i + 7) === 'trailer') {
+          try { this.trailers.push(this.parseAt(i + 7).v); } catch (e) { }
+        }
+      }
+    }
+    text(a, z) { return String.fromCharCode.apply(null, this.b.subarray(a, z)); }
+
+    // ---- lexing ----
+    skip(p) {
+      const b = this.b;
+      for (; p < b.length; p++) {
+        if (isWs(b[p])) continue;
+        if (b[p] === 0x25) { while (p < b.length && b[p] !== 10 && b[p] !== 13) p++; continue; }
+        break;
+      }
+      return p;
+    }
+    parseAt(p) {
+      const b = this.b;
+      p = this.skip(p);
+      if (p >= b.length) return { v: null, p };
+      const c = b[p];
+      if (c === 0x2f) {                                  // /Name
+        let q = p + 1;
+        while (q < b.length && isReg(b[q])) q++;
+        let raw = this.text(p + 1, q);
+        if (raw.indexOf('#') >= 0) raw = raw.replace(/#([0-9a-fA-F]{2})/g,
+          (m, h) => String.fromCharCode(parseInt(h, 16)));
+        return { v: Name(raw), p: q };
+      }
+      if (c === 0x28) return this.parseLiteral(p);        // (string)
+      if (c === 0x3c && b[p + 1] === 0x3c) return this.parseDict(p);
+      if (c === 0x3c) return this.parseHex(p);            // <hex>
+      if (c === 0x5b) {                                   // [array]
+        const arr = [];
+        let q = p + 1;
+        for (; ;) {
+          q = this.skip(q);
+          if (q >= b.length) break;
+          if (b[q] === 0x5d) { q++; break; }
+          const r = this.parseAt(q);
+          if (r.p === q) { q++; continue; }               // never stand still
+          arr.push(r.v); q = r.p;
+        }
+        return { v: this.foldRefs(arr), p: q };
+      }
+      if (c === 0x5d || c === 0x3e || c === 0x29) return { v: null, p: p + 1 };
+      // keyword or number
+      let q = p;
+      while (q < b.length && isReg(b[q])) q++;
+      const tok = this.text(p, q);
+      if (tok === 'true') return { v: true, p: q };
+      if (tok === 'false') return { v: false, p: q };
+      if (tok === 'null') return { v: null, p: q };
+      if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(tok)) return { v: parseFloat(tok), p: q, int: /^\d+$/.test(tok), tok };
+      return { v: Name(tok), p: q, kw: tok };             // stray keyword: harmless here
+    }
+    parseLiteral(p) {
+      const b = this.b;
+      let depth = 0, q = p;
+      for (; q < b.length; q++) {
+        const c = b[q];
+        if (c === 0x5c) { q++; continue; }
+        if (c === 0x28) depth++;
+        else if (c === 0x29) { depth--; if (!depth) { q++; break; } }
+      }
+      return { v: { str: this.b.subarray(p, q) }, p: q };  // kept as written
+    }
+    parseHex(p) {
+      const b = this.b;
+      let q = p + 1;
+      while (q < b.length && b[q] !== 0x3e) q++;
+      return { v: { str: this.b.subarray(p, q + 1) }, p: q + 1 };
+    }
+    parseDict(p) {
+      const b = this.b;
+      const d = new Map();
+      let q = p + 2;
+      for (; ;) {
+        q = this.skip(q);
+        if (q >= b.length) break;
+        if (b[q] === 0x3e && b[q + 1] === 0x3e) { q += 2; break; }
+        if (b[q] !== 0x2f) { const r = this.parseAt(q); q = r.p === q ? q + 1 : r.p; continue; }
+        const k = this.parseAt(q); q = k.p;
+        const vals = [];
+        // a value, but an integer may be the head of "12 0 R"
+        const first = this.parseAt(q); q = first.p; vals.push(first);
+        if (first.int) {
+          const second = this.parseAt(q);
+          if (second.int) {
+            const third = this.parseAt(q = second.p);
+            if (third.kw === 'R') { d.set(k.v.name, Ref(first.v, second.v)); q = third.p; continue; }
+            q = second.p;                                  // put the two back
+            d.set(k.v.name, first.v);
+            continue;
+          }
+          q = first.p;
+        }
+        d.set(k.v.name, first.v);
+      }
+      // a stream may follow the dictionary
+      let s = this.skip(q);
+      if (this.text(s, s + 6) === 'stream') {
+        s += 6;
+        if (b[s] === 13) s++;
+        if (b[s] === 10) s++;
+        let len = d.get('Length');
+        if (isRef(len)) len = this.resolve(len);
+        let end = (typeof len === 'number' && len >= 0 && s + len <= b.length) ? s + len : -1;
+        // a wrong /Length is common; the keyword after the data is the truth
+        if (end < 0 || !/^\s*endstream/.test(this.text(end, end + 11))) {
+          end = this.find('endstream', s);
+          if (end < 0) end = b.length;
+          let e = end;
+          if (b[e - 1] === 10) e--;
+          if (b[e - 1] === 13) e--;
+          end = e;
+        }
+        const raw = b.subarray(s, end);
+        const after = this.find('endstream', end);
+        return { v: { dict: d, raw }, p: after < 0 ? end : after + 9 };
+      }
+      return { v: d, p: q };
+    }
+    foldRefs(arr) {
+      // arrays hold references too, and they arrive as three loose values
+      const out = [];
+      for (let i = 0; i < arr.length; i++) {
+        if (typeof arr[i] === 'number' && Number.isInteger(arr[i]) &&
+          typeof arr[i + 1] === 'number' && Number.isInteger(arr[i + 1]) &&
+          isName(arr[i + 2], 'R')) { out.push(Ref(arr[i], arr[i + 1])); i += 2; continue; }
+        out.push(arr[i]);
+      }
+      return out;
+    }
+    find(needle, from) {
+      const b = this.b, first = needle.charCodeAt(0), n = needle.length;
+      for (let i = from; i + n <= b.length; i++) {
+        if (b[i] !== first) continue;
+        if (this.text(i, i + n) === needle) return i;
+      }
+      return -1;
+    }
+    // ---- objects ----
+    obj(num) {
+      if (this.cache.has(num)) return this.cache.get(num);
+      this.cache.set(num, null);                       // cycles end here
+      let v = null;
+      const off = this.offs.get(num);
+      if (off !== undefined) {
+        const o = this.find('obj', off);
+        if (o >= 0) { try { v = this.parseAt(o + 3).v; } catch (e) { v = null; } }
+      } else if (this.inStm.has(num)) {
+        v = this.fromObjStm(num);
+      }
+      this.cache.set(num, v);
+      return v;
+    }
+    resolve(v, depth) {
+      let d = depth || 0;
+      while (isRef(v) && d < 32) { v = this.obj(v.ref[0]); d++; }
+      return v;
+    }
+    // Objects packed inside an object stream. The map from number to stream is
+    // built once, by opening every /ObjStm the file holds.
+    async loadObjStms(inflate) {
+      for (const [num, off] of this.offs) {
+        // a cheap look at the head of the object first: opening every object in
+        // a 40 MB file to find the handful that are object streams is work for
+        // nothing
+        if (this.text(off, Math.min(off + 300, this.b.length)).indexOf('/ObjStm') < 0) continue;
+        const o = this.obj(num);
+        if (!isStream(o) || !isName(this.resolve(o.dict.get('Type')), 'ObjStm')) continue;
+        let data;
+        try { data = await this.streamData(o, inflate); } catch (e) { continue; }
+        const n = this.resolve(o.dict.get('N')) || 0;
+        const first = this.resolve(o.dict.get('First')) || 0;
+        const inner = new PdfSrc(data.subarray(0, 0));   // borrow the lexer only
+        inner.b = data;
+        let p = 0;
+        const pairs = [];
+        for (let i = 0; i < n * 2; i++) { const r = inner.parseAt(p); pairs.push(r.v); p = r.p; }
+        for (let i = 0; i < n; i++) {
+          const objNum = pairs[i * 2], at = pairs[i * 2 + 1];
+          if (this.offs.has(objNum)) continue;            // a loose object wins
+          if (this.cache.has(objNum)) continue;
+          try { this.cache.set(objNum, inner.parseAt(first + at).v); } catch (e) { }
+        }
+      }
+    }
+    async streamData(s, inflate) {
+      let f = this.resolve(s.dict.get('Filter'));
+      let parms = this.resolve(s.dict.get('DecodeParms'));
+      const fs = f == null ? [] : (Array.isArray(f) ? f : [f]);
+      const ps = parms == null ? [] : (Array.isArray(parms) ? parms : [parms]);
+      let data = s.raw;
+      for (let i = 0; i < fs.length; i++) {
+        const nm = isName(fs[i]) ? fs[i].name : '';
+        if (nm === 'FlateDecode') data = await inflate(data);
+        else if (nm === 'ASCIIHexDecode') data = hexDecode(data);
+        else if (nm === 'ASCII85Decode') data = a85Decode(data);
+        else throw new Error('filter ' + nm + ' is not read here');
+        const pp = this.resolve(ps[i]);
+        if (isDict(pp) && this.resolve(pp.get('Predictor')) > 1) data = unpredict(data, this, pp);
+      }
+      return data;
+    }
+    trailerRoot() {
+      for (let i = this.trailers.length - 1; i >= 0; i--) {
+        const t = this.trailers[i];
+        if (isDict(t) && t.get('Root')) return t.get('Root');
+      }
+      // no usable trailer: the catalog is still in there somewhere
+      for (const [num] of this.offs) {
+        const o = this.obj(num);
+        if (isDict(o) && isName(this.resolve(o.get('Type')), 'Catalog')) return Ref(num, 0);
+      }
+      for (const [num] of this.cache) {
+        const o = this.cache.get(num);
+        if (isDict(o) && isName(this.resolve(o.get('Type')), 'Catalog')) return Ref(num, 0);
+      }
+      return null;
+    }
+    encrypted() {
+      return this.trailers.some(t => isDict(t) && t.get('Encrypt'));
+    }
+    // the page, with what it inherits from the tree above it already folded in
+    page(index) {
+      const root = this.resolve(this.trailerRoot());
+      const inherit = ['Resources', 'MediaBox', 'CropBox', 'Rotate'];
+      const found = [];
+      const walk = (node, from, depth) => {
+        if (!isDict(node) || depth > 64 || found.length > index) return;
+        const inh = Object.assign({}, from);
+        inherit.forEach(k => { if (node.get(k) !== undefined) inh[k] = node.get(k); });
+        const kids = this.resolve(node.get('Kids'));
+        if (Array.isArray(kids)) {
+          for (const k of kids) { walk(this.resolve(k), inh, depth + 1); if (found.length > index) return; }
+          return;
+        }
+        if (isName(this.resolve(node.get('Type')), 'Page') || node.get('Contents') !== undefined)
+          found.push({ dict: node, inh });
+      };
+      const pages = root && this.resolve(root.get('Pages'));
+      if (pages) walk(pages, {}, 0);
+      if (!found.length) {                       // no tree worth the name: take any page object
+        for (const [num] of this.offs) {
+          const o = this.obj(num);
+          if (isDict(o) && isName(this.resolve(o.get('Type')), 'Page')) found.push({ dict: o, inh: {} });
+          if (found.length > index) break;
+        }
+      }
+      return found[index] || null;
+    }
+    count() {
+      const root = this.resolve(this.trailerRoot());
+      const pages = root && this.resolve(root.get('Pages'));
+      const n = pages && this.resolve(pages.get('Count'));
+      return typeof n === 'number' ? n : (this.page(0) ? 1 : 0);
+    }
+  }
+
+  function hexDecode(data) {
+    const out = [];
+    let hi = -1;
+    for (let i = 0; i < data.length; i++) {
+      const c = data[i];
+      if (c === 0x3e) break;
+      let v = -1;
+      if (c >= 0x30 && c <= 0x39) v = c - 0x30;
+      else if (c >= 0x41 && c <= 0x46) v = c - 55;
+      else if (c >= 0x61 && c <= 0x66) v = c - 87;
+      else continue;
+      if (hi < 0) hi = v; else { out.push(hi * 16 + v); hi = -1; }
+    }
+    if (hi >= 0) out.push(hi * 16);
+    return new Uint8Array(out);
+  }
+  function a85Decode(data) {
+    const out = [];
+    let tup = 0, n = 0;
+    for (let i = 0; i < data.length; i++) {
+      const c = data[i];
+      if (isWs(c)) continue;
+      if (c === 0x7e) break;                       // ~>
+      if (c === 0x7a && n === 0) { out.push(0, 0, 0, 0); continue; }
+      tup = tup * 85 + (c - 33); n++;
+      if (n === 5) {
+        out.push((tup >>> 24) & 255, (tup >>> 16) & 255, (tup >>> 8) & 255, tup & 255);
+        tup = 0; n = 0;
+      }
+    }
+    if (n > 1) {
+      for (let i = n; i < 5; i++) tup = tup * 85 + 84;
+      const b = [(tup / 16777216) & 255, (tup >>> 16) & 255, (tup >>> 8) & 255, tup & 255];
+      for (let i = 0; i < n - 1; i++) out.push(b[i]);
+    }
+    return new Uint8Array(out);
+  }
+  // PNG-style row filters, the same ones our own writer asks for on the way out
+  function unpredict(data, src, parms) {
+    const pred = src.resolve(parms.get('Predictor')) || 1;
+    if (pred < 2) return data;
+    const colors = src.resolve(parms.get('Colors')) || 1;
+    const bpc = src.resolve(parms.get('BitsPerComponent')) || 8;
+    const cols = src.resolve(parms.get('Columns')) || 1;
+    const bpp = Math.max(1, Math.ceil(colors * bpc / 8));
+    const rowLen = Math.ceil(colors * bpc * cols / 8);
+    if (pred === 2) return data;                   // TIFF predictor: not met in practice here
+    const rows = Math.floor(data.length / (rowLen + 1));
+    const out = new Uint8Array(rows * rowLen);
+    let prev = new Uint8Array(rowLen);
+    for (let r = 0; r < rows; r++) {
+      const ft = data[r * (rowLen + 1)];
+      const row = data.subarray(r * (rowLen + 1) + 1, (r + 1) * (rowLen + 1));
+      const cur = out.subarray(r * rowLen, (r + 1) * rowLen);
+      for (let i = 0; i < rowLen; i++) {
+        const a = i >= bpp ? cur[i - bpp] : 0, b = prev[i], c = i >= bpp ? prev[i - bpp] : 0, x = row[i];
+        let v = x;
+        if (ft === 1) v = x + a;
+        else if (ft === 2) v = x + b;
+        else if (ft === 3) v = x + ((a + b) >> 1);
+        else if (ft === 4) {
+          const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+          v = x + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
+        }
+        cur[i] = v & 255;
+      }
+      prev = cur;
+    }
+    return out;
+  }
+
+  // ---------- writing what was read back out, renumbered ----------
+  const enc = new TextEncoder();
+  const numText = n => {
+    if (Number.isInteger(n)) return String(n);
+    return String(Math.round(n * 1e6) / 1e6);
+  };
+  function serialize(v, map, out) {
+    if (v === null || v === undefined) { out.push(enc.encode('null')); return; }
+    if (v === true || v === false) { out.push(enc.encode(v ? 'true' : 'false')); return; }
+    if (typeof v === 'number') { out.push(enc.encode(numText(v))); return; }
+    if (isRef(v)) { out.push(enc.encode(map(v.ref[0]) + ' 0 R')); return; }
+    if (isName(v)) {
+      out.push(enc.encode('/' + v.name.replace(/[^!-~]|[#()<>\[\]{}\/%]/g,
+        c => '#' + c.charCodeAt(0).toString(16).padStart(2, '0'))));
+      return;
+    }
+    if (v.str) { out.push(v.str); return; }                 // exactly as it was written
+    if (Array.isArray(v)) {
+      out.push(enc.encode('['));
+      v.forEach((x, i) => { if (i) out.push(enc.encode(' ')); serialize(x, map, out); });
+      out.push(enc.encode(']'));
+      return;
+    }
+    if (isStream(v)) { serialize(v.dict, map, out); return; }
+    if (isDict(v)) {
+      out.push(enc.encode('<<'));
+      for (const [k, val] of v) {
+        out.push(enc.encode('/' + k + ' '));
+        serialize(val, map, out);
+        out.push(enc.encode(' '));
+      }
+      out.push(enc.encode('>>'));
+      return;
+    }
+    out.push(enc.encode('null'));
+  }
+
+  // Everything the page's own drawing reaches, copied across under new numbers.
+  // The page dictionary itself is not copied — its contents become the form's
+  // stream and its resources the form's resources; what hangs off it (the fonts,
+  // the images, the colour spaces, the transparency groups) comes as it is.
+  async function embedPage(bytes, pageIndex, alloc) {
+    const src = new PdfSrc(bytes);
+    if (src.encrypted()) throw new Error('the file is encrypted');
+    await src.loadObjStms(inflateBytes);
+    const pg = src.page(pageIndex || 0);
+    if (!pg) throw new Error('no page in the file');
+    const D = pg.dict, inh = pg.inh;
+    const get = k => (D.get(k) !== undefined ? D.get(k) : inh[k]);
+
+    const box = v => {
+      const a = src.resolve(v);
+      if (!Array.isArray(a) || a.length !== 4) return null;
+      const n = a.map(x => src.resolve(x)).map(Number);
+      if (n.some(x => !isFinite(x))) return null;
+      return [Math.min(n[0], n[2]), Math.min(n[1], n[3]), Math.max(n[0], n[2]), Math.max(n[1], n[3])];
+    };
+    const media = box(get('MediaBox')) || [0, 0, 612, 792];
+    const crop = box(get('CropBox')) || media;
+    // the drawn box is the crop, held inside the media box
+    const bbox = [Math.max(crop[0], media[0]), Math.max(crop[1], media[1]),
+    Math.min(crop[2], media[2]), Math.min(crop[3], media[3])];
+    if (!(bbox[2] > bbox[0] && bbox[3] > bbox[1])) throw new Error('the page has no size');
+
+    // ---- the content, decoded and run together ----
+    let cs = src.resolve(get('Contents'));
+    const list = Array.isArray(cs) ? cs.map(x => src.resolve(x)) : [cs];
+    const chunks = [];
+    for (const s of list) {
+      if (!isStream(s)) continue;
+      chunks.push(await src.streamData(s, inflateBytes));
+      chunks.push(new Uint8Array([10]));            // a newline between them, as the spec asks
+    }
+    let contentLen = chunks.reduce((a, c) => a + c.length, 0);
+    const content = new Uint8Array(contentLen);
+    { let o = 0; chunks.forEach(c => { content.set(c, o); o += c.length; }); }
+
+    // ---- the objects it draws with ----
+    const map = new Map();                          // old number -> new number
+    const objs = [];                                // {num, parts}
+    const seen = new Set();
+    const newNum = old => {
+      if (map.has(old)) return map.get(old);
+      const n = alloc();
+      map.set(old, n);
+      pending.push(old);
+      return n;
+    };
+    const pending = [];
+    const mapper = old => newNum(old);
+
+    const walkRefs = v => {                          // nothing to do but find them
+      if (isRef(v)) { newNum(v.ref[0]); return; }
+      if (Array.isArray(v)) { v.forEach(walkRefs); return; }
+      if (isStream(v)) { walkRefs(v.dict); return; }
+      if (isDict(v)) { for (const [, val] of v) walkRefs(val); }
+    };
+
+    const drain = () => {
+      while (pending.length) {
+        const old = pending.shift();
+        if (seen.has(old)) continue;
+        seen.add(old);
+        const v = src.obj(old);
+        walkRefs(v);
+        const parts = [enc.encode(map.get(old) + ' 0 obj\n')];
+        if (isStream(v)) {
+          // the stream's own bytes, untouched — filters and all. This is the
+          // whole point: an image the artwork carries is never decoded, so
+          // nothing about its colour can be lost on the way through.
+          const d = new Map(v.dict);
+          d.set('Length', v.raw.length);
+          serialize(d, mapper, parts);
+          parts.push(enc.encode('\nstream\n'), v.raw, enc.encode('\nendstream'));
+        } else {
+          serialize(v, mapper, parts);
+        }
+        parts.push(enc.encode('\nendobj\n'));
+        objs.push({ num: map.get(old), parts });
+      }
+    };
+
+    const resources = get('Resources');
+    walkRefs(resources);
+    const group = get('Group');
+    walkRefs(group);
+    drain();
+
+    // ---- the form itself ----
+    // A page that asks to be turned before it is looked at is turned here, in the
+    // form's own matrix, so that everything outside this function can go on
+    // treating the artwork as an upright rectangle.
+    const rotate = ((Number(src.resolve(get('Rotate'))) || 0) % 360 + 360) % 360;
+    const matrix = rotate === 90 ? [0, -1, 1, 0, 0, 0]
+      : rotate === 180 ? [-1, 0, 0, -1, 0, 0]
+        : rotate === 270 ? [0, 1, -1, 0, 0, 0]
+          : [1, 0, 0, 1, 0, 0];
+    // where that box lands once the matrix has been applied — what the placing
+    // has to work from, since the form is clipped to exactly this
+    const [a, b, c, d, e, f] = matrix;
+    const xs = [], ys = [];
+    [[bbox[0], bbox[1]], [bbox[2], bbox[1]], [bbox[2], bbox[3]], [bbox[0], bbox[3]]].forEach(([px, py]) => {
+      xs.push(a * px + c * py + e); ys.push(b * px + d * py + f);
+    });
+    const tbox = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+
+    const packed = await deflateBytes(content);
+    const formNum = alloc();
+    const fd = new Map();
+    fd.set('Type', Name('XObject'));
+    fd.set('Subtype', Name('Form'));
+    fd.set('FormType', 1);
+    fd.set('BBox', bbox);
+    fd.set('Matrix', matrix);
+    if (resources !== undefined) fd.set('Resources', resources);
+    if (group !== undefined) fd.set('Group', group);
+    fd.set('Filter', Name('FlateDecode'));
+    fd.set('Length', packed.length);
+    const fparts = [enc.encode(formNum + ' 0 obj\n')];
+    serialize(fd, mapper, fparts);
+    fparts.push(enc.encode('\nstream\n'), packed, enc.encode('\nendstream\nendobj\n'));
+    objs.push({ num: formNum, parts: fparts });
+    drain();                                        // anything the form dictionary itself reached
+
+    return {
+      form: formNum, objs,
+      // the box the form actually draws in, in the space that places it
+      x: tbox[0], y: tbox[1], w: tbox[2] - tbox[0], h: tbox[3] - tbox[1],
+      bbox, matrix, rotate,
+      pages: src.count(),
+    };
+  }
+    return { embedPage, PdfSrc };
+})();
+
+async function inflateBytes(bytes){
+  // zlib-wrapped is what /FlateDecode means; files written by tools that got
+  // that wrong are out there, so a raw stream is tried after it
+  try{ return await unzipBytes(bytes,'deflate'); }
+  catch(e){ return await unzipBytes(bytes,'deflate-raw'); }
+}
+async function unzipBytes(bytes,how){
+  const ds=new DecompressionStream(how);
+  const writer=ds.writable.getWriter();
+  writer.write(bytes).catch(()=>{}); writer.close().catch(()=>{});
+  const chunks=[]; let total=0;
+  const reader=ds.readable.getReader();
+  for(;;){ const {done,value}=await reader.read(); if(done)break; chunks.push(value); total+=value.length; }
+  const out=new Uint8Array(total); let o=0;
+  chunks.forEach(c=>{ out.set(c,o); o+=c.length; });
+  return out;
+}
+// the alpha channel on its own, for the /SMask that lets a rendered sheet be
+// laid over artwork placed under it
+function rgbaToAlphaScanlines(imgData){
+  const w=imgData.width,h=imgData.height,data=imgData.data;
+  const out=new Uint8Array((1+w)*h);
+  let o=0,p=3;
+  for(let y=0;y<h;y++){
+    out[o++]=0;
+    for(let x=0;x<w;x++){ out[o++]=data[p]; p+=4; }
+  }
+  return out;
 }
 
 function downloadBlob(blob,filename){
@@ -17574,41 +18261,75 @@ document.getElementById('exportFolderBtn').addEventListener('click',async()=>{
 });
 exportDirGet().then(exportFolderLbl);
 
-// One side of the sheet as PDF bytes, at print resolution. Lifted out of
-// exportSide so Magic Create renders a batch through the same code the two
-// buttons on the tool have always used — a second renderer would be a second
-// thing to keep in step, and they would drift.
-async function renderSidePdf(side,page){
+// ---------- what a sheet is made of ----------
+// The artwork this side prints, as files, for the ones that are PDFs. A design
+// keeps the file it was chosen from; one that came back with a template has
+// only the path it came from, which the folder can still be asked for.
+async function artPdfBytes(o){
+  if(!o) return null;
+  let file=o.file||null;
+  if(!file&&o.source&&o.source.dir==='loadDesignDir'&&o.source.path)
+    file=await loadDesignFileByPath(o.source.path).catch(()=>null);
+  if(!file) return null;
+  const looksPdf=gtIsPdfFile(file.name||o.name)||file.type==='application/pdf'
+    ||await gtLooksPdf(file);
+  if(!looksPdf) return null;
+  try{ return new Uint8Array(await file.arrayBuffer()); }catch(e){ return null; }
+}
+async function printVectorSources(side){
+  const out=new Map();
+  if(!wholeArtOn()) return out;
+  const want=[];
+  if(side==='front'&&usingPreset()) state.designs.forEach(d=>{
+    if(d.img&&Number(d.qty)>0) want.push(['d:'+d.id,d]);
+  });
+  else want.push(['final:'+side,state.final[side]]);
+  for(const [key,o] of want){
+    const bytes=await artPdfBytes(o);
+    if(bytes) out.set(key,{bytes,page:0});
+  }
+  return out;
+}
+// A design is only lifted out of the render where the sheet prints nothing of
+// its own underneath it. The cutting marks are drawn below the artwork here,
+// so artwork that reaches them is drawn as it always was rather than placed
+// and leaving them on top of it.
+function printVecTaker(forms,place){
+  const off=state.refMark&&state.refMark.enabled?(Number(state.refMark.offsetMm)||0):null;
+  return {take(key,rect,ext){
+    if(!key||!forms.has(key)) return false;
+    if(off!==null&&(ext.x>off||ext.y>off)) return false;
+    place.push({key,rect});
+    return true;
+  }};
+}
+// Every sheet the quantities need, as one PDF of that many pages — and the one
+// sheet a single download asks for, which is this with a count of one. Both
+// buttons, Magic Create and anything added later come through here, so what a
+// PDF out of this tool is made of is decided in one place.
+async function renderSidePdfAll(side,pages,onPage,from){
   const p=paperMm();
   // print-quality resolution (300dpi), uncapped except for a safety ceiling
   // against runaway canvas sizes on very large custom sheets
   const px=Math.min(6000,Math.round(Math.max(p.w,p.h)/25.4*300));
-  const c=document.createElement('canvas');
-  renderSide(side,c,px,{forExport:true,page:page||0});
-  const ctx=c.getContext('2d');
-  const imgData=ctx.getImageData(0,0,c.width,c.height);
-  const bytes=await buildPdfBytes(imgData,p.w,p.h);
-  // a 300dpi A4 page is about 35 MB of pixels; a batch that keeps them all
-  // is a batch that runs the tab out of memory before it finishes
-  c.width=c.height=0;
-  return bytes;
-}
-// Every sheet the quantities need, as one PDF of that many pages. gtBuildPdf
-// renders them through a callback one at a time rather than holding them all,
-// which is what keeps a twenty-sheet job inside the tab's memory.
-async function renderSidePdfAll(side,pages,onPage){
-  const p=paperMm();
-  const px=Math.min(6000,Math.round(Math.max(p.w,p.h)/25.4*300));
-  return await gtBuildPdf(pages,async i=>{
+  const sources=await printVectorSources(side);
+  return await gtBuildPdf(pages,async(i,forms)=>{
     if(onPage) onPage(i);
     const c=document.createElement('canvas');
-    renderSide(side,c,px,{forExport:true,page:i});
+    const place=[];
+    const vec=forms.size?printVecTaker(forms,place):null;
+    renderSide(side,c,px,{forExport:true,page:(from||0)+i,vec});
     const ctx=c.getContext('2d');
     const imgData=ctx.getImageData(0,0,c.width,c.height);
-    // handed straight on; the canvas is released as soon as the page is packed
+    // a 300dpi A4 page is about 35 MB of pixels; a batch that keeps them all
+    // is a batch that runs the tab out of memory before it finishes. Handed
+    // straight on, the canvas is released as soon as the page is packed.
     setTimeout(()=>{ c.width=c.height=0; },0);
-    return {imgData,wMm:p.w,hMm:p.h};
-  });
+    return {imgData,wMm:p.w,hMm:p.h,place,clear:!!vec};
+  },sources);
+}
+async function renderSidePdf(side,page){
+  return await renderSidePdfAll(side,1,null,page||0);
 }
 // msgId: where to report. Defaults to the message line under that sheet's own
 // button; the enlarged view passes its own so the result lands where you are.
@@ -17668,6 +18389,13 @@ async function exportSide(side,msgId){
 }
 document.getElementById('exportFrontBtn').addEventListener('click',()=>exportSide('front'));
 document.getElementById('exportBackBtn').addEventListener('click',()=>exportSide('back'));
+// the two switches are one setting, so whichever is turned the other follows
+document.getElementById('wholeArtToggle').checked=wholeArtOn();
+document.getElementById('wholeArtToggle').addEventListener('change',e=>{
+  wholeArtSet(e.target.checked);
+  const other=document.getElementById('gtVectorToggle');
+  if(other) other.checked=e.target.checked;
+});
 
 // ---------- load a preset design straight into Front ----------
 // Presets live on the NAS, one image per design, sorted into a few folders
@@ -17675,7 +18403,7 @@ document.getElementById('exportBackBtn').addEventListener('click',()=>exportSide
 // same File System Access pattern as the export folder above and the Design
 // Library further down — and every visit after that just searches what's in it.
 const LOAD_DESIGN_FOLDER_HINT=String.raw`C:\NAS Folders\Partymonkey NAS\Pigu\Big TY Card`;
-const LOAD_DESIGN_ART=/\.(png|jpe?g|webp|pdf)$/i;
+const LOAD_DESIGN_ART=/\.(png|jpe?g|webp|pdf|ai)$/i;
 let loadDesignDir=null, loadDesignDirRead=false;
 let loadDesignFiles=[], loadDesignSelected=null;
 // The folder the template in hand prints. One template is one folder, so the
@@ -17972,7 +18700,7 @@ async function addDesignLine(pick,qty,sku){
   const dataURL=await fileToImageData(file);
   const img=await loadImage(dataURL);
   const line={id:uid(),name:pick.name,qty:Math.max(1,Math.round(qty)||1),
-    data:dataURL,img,sku:sku||'',source:{dir:'loadDesignDir',path:pick.path}};
+    data:dataURL,img,sku:sku||'',source:{dir:'loadDesignDir',path:pick.path},file};
   applyRememberedBleed(line);
   state.designs.push(line);
   ensureGridFor(line.qty);
@@ -18152,6 +18880,26 @@ async function gtDirOk(handle,ask){
 // the manifest nor the folder ever hears of it — the file it was made from
 // stays wherever it was picked from and nothing is written beside it.
 const gtIsAdhoc=path=>String(path||'').startsWith('adhoc/');
+// An Illustrator file is a PDF, and so is a print-ready design straight out of
+// one. Both are artwork here.
+const gtIsPdfFile=path=>/\.(pdf|ai)$/i.test(String(path||''));
+async function gtLooksPdf(blob){
+  try{
+    const head=new Uint8Array(await blob.slice(0,5).arrayBuffer());
+    return String.fromCharCode.apply(null,head)==='%PDF-';
+  }catch(e){ return false; }
+}
+// The picture of a design, for the screen and for every sum the sheet does
+// with it. A PDF is drawn by the reader first, larger than a preview needs —
+// it stands in for the artwork wherever the export cannot place the file
+// itself, and that stand-in is what gets printed then.
+async function gtArtURL(blob,name){
+  const looksPdf=gtIsPdfFile(name||(blob&&blob.name))
+    ||(blob&&blob.type==='application/pdf')||await gtLooksPdf(blob);
+  if(!looksPdf) return await fileToDataURL(blob);
+  if(!window.pdfjsLib) throw new Error('the PDF reader has not loaded');
+  return await pdfFileToDataURL(blob,2600,true);
+}
 // The library's own designs, stashed while a shape's folder is showing in
 // their place. The manifest is written from this rather than from what is on
 // screen: swapping the visible list must never be able to write a manifest
@@ -18450,7 +19198,7 @@ async function gtHydrate(){
   for(const d of gtLib.designs){
     if(gtImgs.has(d.id)) continue;
     const blob=gtAssets.get(d.file); if(!blob) continue;
-    try{ gtImgs.set(d.id,await loadImage(await fileToDataURL(blob))); }catch(e){}
+    try{ gtImgs.set(d.id,await loadImage(await gtArtURL(blob,d.file))); }catch(e){}
   }
   for(const f of gtLib.fonts){
     if(gtFontsDone.has(f.id)) continue;
@@ -18485,7 +19233,7 @@ async function gtHydrate(){
 // now on, and a picture is what prints under them. Each is taken up once, when
 // it first appears, so coming back to the window does not keep undoing a sheet
 // that was set up by hand afterwards.
-const GT_ART=/\.(png|jpe?g|webp)$/i, GT_FACE=/\.(ttf|otf|woff2)$/i;
+const GT_ART=/\.(png|jpe?g|webp|pdf|ai)$/i, GT_FACE=/\.(ttf|otf|woff2)$/i;
 const GT_CUT=/\.svg$/i;
 // One look at the folder at a time. Arriving on the screen starts one and
 // coming back to the window starts another, and two of them reading designs/
@@ -18811,7 +19559,7 @@ async function gtReadPiguFolder(dir,folderName,keep){
     const was=saved[path]||null;
     const d=gtNormalizeDesign({id,name:f.entry.name.replace(/\.[^.]+$/,''),file:path,
       adhoc:true,fields:(was&&was.fields)||[],hole:was&&was.hole});
-    try{ gtImgs.set(id,await loadImage(await fileToDataURL(blob))); }catch(err){}
+    try{ gtImgs.set(id,await loadImage(await gtArtURL(blob,path))); }catch(err){}
     made.push(d);
   }
   return {ok:true,made};
@@ -18990,7 +19738,7 @@ document.getElementById('gtShapeMapList').addEventListener('change',async e=>{
 async function gtApplyBase(file,path){
   gtAssets.set(path,file);
   gtSheet.baseFile=path; gtBaseFrom=path;
-  try{ gtBaseImg=await loadImage(await fileToDataURL(file)); }
+  try{ gtBaseImg=await loadImage(await gtArtURL(file,path)); }
   catch(e){ gtBaseImg=null; return false; }
   return true;
 }
@@ -20284,7 +21032,7 @@ function gtDrawArt(ctx,img,x,y,w,h,b,sc,mode,id){
   }
   ctx.drawImage(img,x*sc,y*sc,w*sc,h*sc);
 }
-function gtDrawTag(ctx,line,x,y,w,h,sc,forExport){
+function gtDrawTag(ctx,line,x,y,w,h,sc,forExport,vec){
   const d=gtDesign(line.designId); if(!d) return;
   const img=gtImgs.get(d.id);
   let ax=x,ay=y,aw=w,ah=h;
@@ -20292,7 +21040,10 @@ function gtDrawTag(ctx,line,x,y,w,h,sc,forExport){
     const f=gtFit(img.naturalWidth,img.naturalHeight,w,h);
     ax=x+f.x; ay=y+f.y; aw=f.w; ah=f.h;
     const r=gtArtDraw(d,f,x,y);
-    gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,gtBleedOf(d),sc,gtSheet.bleedMode,d.id);
+    const b=gtBleedOf(d);
+    // artwork that came in as a PDF is not drawn on the sheet at all: its own
+    // page is placed under this render, at exactly this rectangle
+    if(!(vec&&vec.take(d,r,b))) gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,d.id);
   }
   gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc);
   if(!forExport&&gtSheet.showHole&&d.hole&&d.hole.on){
@@ -20306,14 +21057,17 @@ function gtDrawTag(ctx,line,x,y,w,h,sc,forExport){
 // `view` is the piece of the sheet to draw, in mm — the whole of it normally,
 // a window onto one placeholder when zoomed. Everything below is drawn in sheet
 // millimetres either way; only what the canvas is looking at changes.
-function gtRenderPage(canvas,page,maxDim,forExport,view){
+function gtRenderPage(canvas,page,maxDim,forExport,view,vec){
   const S=gtSheet;
   const V=view||{x:0,y:0,w:S.paperW,h:S.paperH};
   const sc=maxDim/Math.max(V.w,V.h);
   const ctx=canvas.getContext('2d');
   canvas.width=Math.max(1,Math.round(V.w*sc));
   canvas.height=Math.max(1,Math.round(V.h*sc));
-  ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  // Paper, unless artwork is being placed underneath this render — then the
+  // sheet is drawn on nothing, so that everywhere a tag was left undrawn its
+  // own page shows through. The paper is white either way; it is the PDF's.
+  if(!vec){ ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); }
   ctx.translate(-V.x*sc,-V.y*sc);
   // the base layer is the bottom of the sheet and prints with it, unlike the
   // cut lines and holes above — it is artwork, not something to cut by
@@ -20327,7 +21081,7 @@ function gtRenderPage(canvas,page,maxDim,forExport,view){
   const start=plan?plan.start:page*per;
   S.slots.forEach((slot,i)=>{
     const line=q[start+i]; if(!line) return;
-    gtDrawTag(ctx,line,slot.x,slot.y,slot.w,slot.h,sc,forExport);
+    gtDrawTag(ctx,line,slot.x,slot.y,slot.w,slot.h,sc,forExport,vec);
   });
   // the boxes of the line being worked on, because they are dragged here
   if(!forExport&&gtSelLine) S.slots.forEach((slot,i)=>{
@@ -21291,6 +22045,7 @@ function gtWriteSheetInputs(){
   document.getElementById('gtBleedToggle').checked=!!gtSheet.bleedOn;
   document.getElementById('gtBleedAmount').value=gtSheet.bleed;
   document.getElementById('gtMarksToggle').checked=gtSheet.marksOn!==false;
+  document.getElementById('gtVectorToggle').checked=wholeArtOn();
   document.getElementById('gtPltFromMark').checked=gtSheet.pltFromMark!==false;
   document.getElementById('gtMarkDia').value=gtSheet.markDia;
   document.getElementById('gtMarkInset').value=gtSheet.markInset;
@@ -21306,6 +22061,13 @@ document.getElementById('gtCutToggle').addEventListener('change',e=>{ gtSheet.sh
 document.getElementById('gtHoleToggle').addEventListener('change',e=>{ gtSheet.showHole=e.target.checked; gtDraw(); gtSaveSoon(); });
 // The dots change what is printed, so every one of these redraws the sheet.
 document.getElementById('gtMarksToggle').addEventListener('change',e=>{ gtSheet.marksOn=e.target.checked; gtDraw(); gtSaveSoon(); });
+// nothing on screen changes: this is about what every export is made of, on
+// this sheet and on the print template both
+document.getElementById('gtVectorToggle').addEventListener('change',e=>{
+  wholeArtSet(e.target.checked);
+  const other=document.getElementById('wholeArtToggle');
+  if(other) other.checked=e.target.checked;
+});
 document.getElementById('gtPltFromMark').addEventListener('change',e=>{ gtSheet.pltFromMark=e.target.checked; gtSaveSoon(); });
 [['gtMarkDia','markDia'],['gtMarkInset','markInset']].forEach(([id,key])=>{
   document.getElementById(id).addEventListener('input',e=>{
@@ -21624,7 +22386,8 @@ document.getElementById('gtCutDelBtn').addEventListener('click',async()=>{
 });
 document.getElementById('gtBaseBtn').addEventListener('click',async()=>{
   await gtEnsureDir(true);
-  const file=await gtPickFile('image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp');
+  const file=await gtPickFile('image/png,image/jpeg,image/webp,application/pdf,'
+    +'.png,.jpg,.jpeg,.webp,.pdf,.ai');
   if(!file) return;
   const path=await gtAssetPath('shape',file);
   gtAssets.set(path,file);
@@ -21647,7 +22410,7 @@ async function gtAdhocDesign(blob,filename){
   gtAssets.set(path,blob);
   const d=gtNormalizeDesign({id,name,file:path,adhoc:true,fields:[]});
   gtLib.designs.push(d);
-  try{ gtImgs.set(id,await loadImage(await fileToDataURL(blob))); }catch(e){}
+  try{ gtImgs.set(id,await loadImage(await gtArtURL(blob,path))); }catch(e){}
   await gtSaveLib();
   return d;
 }
@@ -21848,7 +22611,8 @@ const gtAdhocSaid=d=>showMsg(document.getElementById('gtLibMsg'),
   `✓ ${d.name} is on this order as a one-off — nothing has been written to the folder. `
   +`Drop the file into the designs folder if it should come back next time.`,true);
 document.getElementById('gtAddDesignBtn').addEventListener('click',async()=>{
-  const file=await gtPickFile('image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp');
+  const file=await gtPickFile('image/png,image/jpeg,image/webp,application/pdf,'
+    +'.png,.jpg,.jpeg,.webp,.pdf,.ai');
   if(!file) return;
   const d=await gtAdhocDesign(file,file.name||'art.png');
   gtAdhocSaid(d);
@@ -22515,7 +23279,8 @@ document.getElementById('gtHoleOn').addEventListener('change',e=>{
 document.getElementById('gtReplaceArtBtn').addEventListener('click',async()=>{
   const d=gtCurrentDesign; if(!d) return;
   await gtEnsureDir(true);
-  const file=await gtPickFile('image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp');
+  const file=await gtPickFile('image/png,image/jpeg,image/webp,application/pdf,'
+    +'.png,.jpg,.jpeg,.webp,.pdf,.ai');
   if(!file) return;
   // artwork replaced by a different file of the same name is numbered rather
   // than written over, so the folder keeps the old one and no browser serves a
@@ -22524,7 +23289,7 @@ document.getElementById('gtReplaceArtBtn').addEventListener('click',async()=>{
   const path=await gtAssetPath('designs',file);
   gtAssets.set(path,file);
   d.file=path;
-  try{ gtImgs.set(d.id,await loadImage(await fileToDataURL(file))); }catch(e){}
+  try{ gtImgs.set(d.id,await loadImage(await gtArtURL(file))); }catch(e){}
   gtDrawDesign();
 });
 document.getElementById('gtSaveDesignBtn').addEventListener('click',async()=>{
@@ -22679,40 +23444,134 @@ document.getElementById('gtTraceBtn').addEventListener('click',()=>{
 // ---------- export ----------
 // One page per sheet, each rendered and compressed in turn rather than all of
 // them held at once — a 300dpi A4 page is 35 MB of pixels before it is packed.
-async function gtBuildPdf(count,render){
+// one transform after another, in the order a PDF applies them
+function mtxMul(m,n){
+  return [m[0]*n[0]+m[1]*n[2], m[0]*n[1]+m[1]*n[3],
+          m[2]*n[0]+m[3]*n[2], m[2]*n[1]+m[3]*n[3],
+          m[4]*n[0]+m[5]*n[2]+n[4], m[4]*n[1]+m[5]*n[3]+n[5]];
+}
+async function gtBuildPdf(count,render,sources){
   const enc=new TextEncoder();
-  const kids=Array.from({length:count},(_,i)=>`${3+i*3} 0 R`).join(' ');
-  const parts=[],off=[]; let pos=0;
+  const parts=[],off=new Map(); let last=0,pos=0;
   const push=u8=>{ parts.push(u8); pos+=u8.length; };
-  push(enc.encode('%PDF-1.4\n'));
-  off[1]=pos; push(enc.encode('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n'));
-  off[2]=pos; push(enc.encode(`2 0 obj\n<< /Type /Pages /Kids [${kids}] /Count ${count} >>\nendobj\n`));
+  const alloc=()=>++last;                 // object numbers, handed out as needed
+  const mark=n=>off.set(n,pos);           // and where each one ended up
+  const f=n=>(Math.round(n*1e4)/1e4).toString();
+  const catalog=alloc(), pages=alloc(), iccNum=alloc();
+  push(enc.encode('%PDF-1.7\n'));
+  mark(iccNum); push(iccObject(iccNum));
+  // Artwork that arrived as a PDF goes in as the page it is: embedded once,
+  // however many sheets it is printed on. Nothing about it is read or
+  // converted — a design drawn in CMYK reaches the printer in the numbers its
+  // designer set, which a picture of it never could.
+  const forms=new Map();
+  for(const [key,src] of (sources||new Map())){
+    try{
+      const em=await pdfLift.embedPage(src.bytes,src.page||0,alloc);
+      em.objs.forEach(o=>{ mark(o.num); o.parts.forEach(push); });
+      forms.set(key,em);
+    }catch(e){ /* unreadable: that design is drawn as pixels, as it always was */ }
+  }
+  const kids=[];
   for(let i=0;i<count;i++){
-    const {imgData,wMm,hMm}=await render(i);
+    const {imgData,wMm,hMm,place,clear}=await render(i,forms);
     const W=mmToPt(wMm).toFixed(2), H=mmToPt(hMm).toFixed(2);
-    const pi=3+i*3, ci=4+i*3, ii=5+i*3;
+    const put=(place||[]).map(p=>({em:forms.get(p.key),r:p.rect})).filter(u=>u.em);
+    // A render made without paper under it has to let what is beneath show
+    // through, so it goes in with its alpha channel as a mask. That holds for
+    // every page of such a run, not only the pages that ended up with artwork
+    // placed below them — the others are transparent too, and a mask left off
+    // there would print them as a sheet of black.
+    const alpha=(clear||put.length)?rgbaToAlphaScanlines(imgData):null;
     const deflated=await deflateBytes(rgbaToRawRgbScanlines(imgData));
-    const content=enc.encode(`q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`);
-    off[pi]=pos; push(enc.encode(`${pi} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] `
-      +`/Resources << /XObject << /Im0 ${ii} 0 R >> >> /Contents ${ci} 0 R >>\nendobj\n`));
-    off[ci]=pos; push(enc.encode(`${ci} 0 obj\n<< /Length ${content.length} >>\nstream\n`));
+    const packedA=alpha?await deflateBytes(alpha):null;
+    const imgNum=alloc(), maskNum=alpha?alloc():0, contentNum=alloc(), pageNum=alloc();
+    let cs='';
+    const names=new Map();                // one name per page placed, not per tag
+    put.forEach(u=>{ if(!names.has(u.em.form)) names.set(u.em.form,'Fm'+names.size); });
+    put.forEach(u=>{
+      const {em,r}=u;
+      // the sheet is worked in millimetres from the top, a PDF in points from
+      // the bottom, and the form draws inside a box of its own choosing
+      const X=mmToPt(r.x), Y=mmToPt(hMm-(r.y+r.h)), TW=mmToPt(r.w), TH=mmToPt(r.h);
+      const sx=TW/em.w, sy=TH/em.h;
+      let M=[sx,0,0,sy,X-em.x*sx,Y-em.y*sy];
+      if(r.rot){
+        // the sheet turns a tile clockwise about its middle; a PDF's y runs the
+        // other way, so the same turn is the negative angle here
+        const rad=-r.rot*Math.PI/180, co=Math.cos(rad), si=Math.sin(rad);
+        const cx=X+TW/2, cy=Y+TH/2;
+        M=mtxMul(M,mtxMul([1,0,0,1,-cx,-cy],mtxMul([co,si,-si,co,0,0],[1,0,0,1,cx,cy])));
+      }
+      cs+=`q ${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
+    });
+    cs+=`q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
+    const content=enc.encode(cs);
+    const xo=['/Im0 '+imgNum+' 0 R']
+      .concat([...names].map(([form,nm])=>`/${nm} ${form} 0 R`)).join(' ');
+    mark(pageNum); push(enc.encode(`${pageNum} 0 obj\n<< /Type /Page /Parent ${pages} 0 R `
+      +`/MediaBox [0 0 ${W} ${H}] /Resources << /XObject << ${xo} >> >> `
+      +`/Contents ${contentNum} 0 R >>\nendobj\n`));
+    mark(contentNum); push(enc.encode(`${contentNum} 0 obj\n<< /Length ${content.length} >>\nstream\n`));
     push(content); push(enc.encode('\nendstream\nendobj\n'));
-    off[ii]=pos; push(enc.encode(`${ii} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${imgData.width} `
-      +`/Height ${imgData.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode `
+    mark(imgNum); push(enc.encode(`${imgNum} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${imgData.width} `
+      +`/Height ${imgData.height} /ColorSpace [/ICCBased ${iccNum} 0 R] /BitsPerComponent 8 /Filter /FlateDecode `
       +`/DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns ${imgData.width} >> `
+      +(maskNum?`/SMask ${maskNum} 0 R `:'')
       +`/Length ${deflated.length} >>\nstream\n`));
     push(deflated); push(enc.encode('\nendstream\nendobj\n'));
+    if(maskNum){
+      mark(maskNum); push(enc.encode(`${maskNum} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${imgData.width} `
+        +`/Height ${imgData.height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode `
+        +`/DecodeParms << /Predictor 15 /Colors 1 /BitsPerComponent 8 /Columns ${imgData.width} >> `
+        +`/Length ${packedA.length} >>\nstream\n`));
+      push(packedA); push(enc.encode('\nendstream\nendobj\n'));
+    }
+    kids.push(pageNum);
   }
-  const last=2+count*3, xref=pos;
+  mark(pages); push(enc.encode(`${pages} 0 obj\n<< /Type /Pages /Kids [${kids.map(k=>k+' 0 R').join(' ')}] `
+    +`/Count ${count} >>\nendobj\n`));
+  mark(catalog); push(enc.encode(`${catalog} 0 obj\n<< /Type /Catalog /Pages ${pages} 0 R >>\nendobj\n`));
+  const xref=pos;
   let s=`xref\n0 ${last+1}\n0000000000 65535 f \n`;
-  for(let i=1;i<=last;i++) s+=String(off[i]).padStart(10,'0')+' 00000 n \n';
-  s+=`trailer\n<< /Size ${last+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  for(let i=1;i<=last;i++) s+=String(off.get(i)||0).padStart(10,'0')+' 00000 n \n';
+  s+=`trailer\n<< /Size ${last+1} /Root ${catalog} 0 R >>\nstartxref\n${xref}\n%%EOF`;
   push(enc.encode(s));
   const total=parts.reduce((a,p)=>a+p.length,0);
   const bytes=new Uint8Array(total); let o=0;
   parts.forEach(p=>{ bytes.set(p,o); o+=p.length; });
   return bytes;
 }
+// ---------- which tags are placed rather than drawn ----------
+// A design is only lifted out of the render where the sheet can promise its
+// rectangle is clear: nothing of the sheet's own printed underneath it, and a
+// bleed the placing can do — growing artwork outward is something done to
+// pixels, not to a page.
+function gtVecTaker(forms,place){
+  const base=gtBaseRect();
+  return {take(d,r,b){
+    if(!forms.has(d.id)) return false;
+    if(b>0&&gtSheet.bleedMode!=='scale') return false;
+    const R=b>0?{x:r.x-b,y:r.y-b,w:r.w+b*2,h:r.h+b*2}:{x:r.x,y:r.y,w:r.w,h:r.h};
+    if(base&&R.x<base.x+base.w&&base.x<R.x+R.w&&R.y<base.y+base.h&&base.y<R.y+R.h) return false;
+    place.push({key:d.id,rect:R});
+    return true;
+  }};
+}
+// The files behind the designs on this order that are PDFs, read once for the
+// whole run. A design whose file is a picture is not here and never was.
+async function gtVectorSources(){
+  const out=new Map();
+  if(!wholeArtOn()) return out;
+  for(const line of gtQueue()){
+    const d=gtDesign(line.designId);
+    if(!d||out.has(d.id)||!gtIsPdfFile(d.file)) continue;
+    const blob=gtAssets.get(d.file); if(!blob) continue;
+    try{ out.set(d.id,{bytes:new Uint8Array(await blob.arrayBuffer()),page:0}); }catch(e){}
+  }
+  return out;
+}
+
 document.getElementById('gtPltPreviewBtn').addEventListener('click',async()=>{
   const out=document.getElementById('gtExportMsg');
   const btn=document.getElementById('gtPltPreviewBtn');
@@ -22789,18 +23648,24 @@ document.getElementById('gtExportBtn').addEventListener('click',async()=>{
     // the shape is already swapped in and its placeholders already stand where
     // the tags were drawn, which is the only moment the two are certain to agree
     const cuts=[];
-    const bytes=await gtBuildPdf(pages,async i=>{
+    const sources=await gtVectorSources();
+    let placed=0;
+    const bytes=await gtBuildPdf(pages,async(i,forms)=>{
       const at=plan[i];
       if(at&&at.shape!==S.layoutFile) await gtShowShape(at.shape);
       try{ cuts.push(gtPltSheet(at)); }catch(e){ cuts.push(null); }
       const px=Math.min(6000,Math.round(Math.max(S.paperW,S.paperH)/25.4*300));
       const c=document.createElement('canvas');
-      gtRenderPage(c,i,px,true);          // cut lines and holes are preview furniture
+      const place=[];
+      const vec=forms.size?gtVecTaker(forms,place):null;
+      gtRenderPage(c,i,px,true,null,vec);  // cut lines and holes are preview furniture
+      placed+=place.length;
       const ctx=c.getContext('2d');
-      const out={imgData:ctx.getImageData(0,0,c.width,c.height),wMm:S.paperW,hMm:S.paperH};
+      const out={imgData:ctx.getImageData(0,0,c.width,c.height),
+                 wMm:S.paperW,hMm:S.paperH,place,clear:!!vec};
       setTimeout(()=>{ c.width=c.height=0; },0);
       return out;
-    });
+    },sources);
     // back to the sheet that was on screen before the run
     if(S.layoutFile!==wasShape) await gtShowShape(wasShape);
     gtPage=wasPage;
@@ -22817,7 +23682,8 @@ document.getElementById('gtExportBtn').addEventListener('click',async()=>{
       setTimeout(()=>downloadBlob(new Blob([text],{type:'application/vnd.hp-HPGL'}),nm),i*400);
     });
     showMsg(out,`✓ ${filename} — ${pages} sheet(s)`
-      +(cut.length?` · ${cut.length} cut file(s) (.plt) alongside it`:''),true);
+      +(cut.length?` · ${cut.length} cut file(s) (.plt) alongside it`:'')
+      +(placed?` · ${placed} tag(s) went in as their own PDF, colours untouched`:''),true);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false; }
@@ -31666,13 +32532,16 @@ async function mcGiftBundle(lines,mode){
     const pages=gtPageCount();
     if(!pages) throw new Error(`nothing landed on the ${where} sheet`);
     const px=Math.min(6000,Math.round(Math.max(gtSheet.paperW,gtSheet.paperH)/25.4*300));
-    return await gtBuildPdf(pages,async i=>{
+    const sources=await gtVectorSources();
+    return await gtBuildPdf(pages,async(i,forms)=>{
       const c=document.createElement('canvas');
-      gtRenderPage(c,i,px,true);
+      const place=[];
+      const vec=forms.size?gtVecTaker(forms,place):null;
+      gtRenderPage(c,i,px,true,null,vec);
       const ctx=c.getContext('2d');
       const imgData=ctx.getImageData(0,0,c.width,c.height);
-      return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH};
-    });
+      return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH,place,clear:!!vec};
+    },sources);
   }finally{ gtOrder=keep; }
 }
 
