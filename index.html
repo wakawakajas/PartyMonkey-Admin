@@ -5450,11 +5450,6 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
         <label class="field" id="loadDesignQtyField"><span>QUANTITY</span><input type="number" id="loadDesignQty" min="1" value="1"/></label>
         <button class="btn-primary" id="loadDesignConfirmBtn" style="align-self:end;height:44px;">Add design</button>
       </div>
-      <!-- Opened to map a SKU, the design that was tapped can stand for the
-           folder it is in: a design that is a set — artwork, cutting file,
-           proof — is filed together, and the folder is the mapping. -->
-      <button class="btn-outline" id="loadDesignFolderMapBtn"
-              style="display:none;width:100%;margin-top:8px;height:44px;"></button>
     </div>
     <div id="loadDesignMsg" style="margin-top:10px;"></div>
   </div>
@@ -19124,8 +19119,6 @@ function loadDesignMapMode(){
   if(q) q.style.display=map?'none':'';
   const c=document.getElementById('loadDesignConfirmBtn');
   if(c) c.textContent=map?'Map this file':'Add design';
-  const f=document.getElementById('loadDesignFolderMapBtn');
-  if(f&&!map) f.style.display='none';
 }
 async function openLoadDesignModal(){
   document.getElementById('loadDesignModal').classList.add('open');
@@ -19150,8 +19143,6 @@ async function openLoadDesignModal(){
 }
 function closeLoadDesignModal(){
   document.getElementById('loadDesignModal').classList.remove('open');
-  const fb=document.getElementById('loadDesignFolderMapBtn');
-  if(fb) fb.style.display='none';
   // Opened from the SKU summary, it goes back to the SKU summary — shutting a
   // picker is not a way out of the list it was opened from, and landing on the
   // batch with the selection gone was a morning's ticking thrown away.
@@ -19211,14 +19202,6 @@ document.getElementById('loadDesignList').addEventListener('click',e=>{
   document.getElementById('loadDesignSelected').textContent=it.path;
   document.getElementById('loadDesignQtyRow').style.display='';
   loadDesignMapMode();
-  // the folder this design is in, offered as the mapping instead of the file
-  const fb=document.getElementById('loadDesignFolderMapBtn');
-  const folder=String(it.folder||'').trim();
-  if(fb){
-    const ok=!!mcRoutePickFor&&folder&&folder!=='—';
-    fb.style.display=ok?'':'none';
-    if(ok) fb.textContent=`📁 Map the whole folder “${folder}” instead`;
-  }
   if(!mcRoutePickFor) document.getElementById('loadDesignQty').focus();
 });
 // Reads a design off the folder and adds it to the list as its own line.
@@ -19265,22 +19248,6 @@ async function addDesignLine(pick,qty,sku,quiet){
   renderDesignLines(); refreshArtInputs(); drawAll();
   return line;
 }
-document.getElementById('loadDesignFolderMapBtn').addEventListener('click',async()=>{
-  if(!mcRoutePickFor||!loadDesignSelected) return;
-  const folder=String(loadDesignSelected.folder||'').trim();
-  if(!folder||folder==='—') return;
-  const who=mcRoutePickFor; mcRoutePickFor=null;
-  closeLoadDesignModal();
-  document.getElementById('mcSummarySheet').classList.add('open');
-  const skus=Array.isArray(who)?who:[who];
-  const ok=await mcBulkWrite(skus.map(sku=>({sku,dest:'copy',
-    patch:{copy_path:folder+'/'}})));
-  if(!ok) return;
-  mcRenderSummary();
-  showMsg(document.getElementById('mcSummaryMsg'),
-    `✓ ${skus.length===1?skus[0]:skus.length+' SKUs'} `
-    +`cop${skus.length===1?'ies':'y'} everything in ${folder} — mapped for everybody.`,true);
-});
 document.getElementById('loadDesignConfirmBtn').addEventListener('click',async()=>{
   if(!loadDesignSelected) return;
   // opened to map a file to a SKU: nothing is loaded and no sheet is touched —
@@ -28843,8 +28810,7 @@ async function mcCopyLine(id){
   try{
     const r=await mcCopyInto(dir,src);
     if(!r.n){
-      showMsg(out,src.folder?`Nothing is filed in ${src.name}.`
-        :`${src.name} is no longer in the designs folder.`,false);
+      showMsg(out,`${src.name} is no longer in the designs folder.`,false);
       return;
     }
     const was=it.sheet_item||{};
@@ -30587,7 +30553,7 @@ function mcRenderRoutes(){
   // list, so a morning's worth can be mapped without opening each one.
   const cpPick=r=>r.dest!=='copy'?'':`<label class="field m"><input type="text"
          data-mc-r="copy_path" value="${escapeHtml(r.copy_path||'')}"
-         placeholder="a file, or a folder ending in /"
+         placeholder="the file this copies"
          aria-label="Which file this copies"/></label>
        <label class="field t"><input type="text" data-mc-r="copy_to"
          value="${escapeHtml(r.copy_to||'')}" placeholder="into — a folder, optional"
@@ -30666,6 +30632,9 @@ function mcRouteMsgEl(){
 }
 async function mcRouteWrite(id,patch){
   const row=mcRoutes.find(r=>r.id===id); if(!row) return;
+  // one place every mapping is written through, so a folder cannot get in from
+  // the routing sheet, a SKU's own panel or an import
+  if('copy_path' in patch) patch={...patch,copy_path:mcCopyPathClean(patch.copy_path)};
   const was={};
   Object.keys(patch).forEach(k=>{ was[k]=row[k]; });
   Object.assign(row,patch);
@@ -30752,7 +30721,7 @@ async function mcSetCopyFile(sku,path,to){
   if(!own||own.dest!=='copy'){ await mcSetDest(sku,'copy'); own=mcSkuRow(sku); }
   if(!own) return null;
   const patch={};
-  if(path!==undefined) patch.copy_path=String(path||'').trim().slice(0,400);
+  if(path!==undefined) patch.copy_path=mcCopyPathClean(path);
   if(to!==undefined) patch.copy_to=mcCopyToClean(to);
   if(Object.keys(patch).length){
     await mcRouteWrite(own.id,patch);
@@ -30855,6 +30824,15 @@ const MC_ROUTE_COLS=['Kind','Match','How','Where','Template','File','Into','Rema
 // the one shape the folder walk below expects
 const mcCopyToClean=v=>String(v==null?'':v).trim().split('\\').join('/')
   .replace(/^\/+/,'').replace(/\/+$/,'').slice(0,200);
+// The file a row copies. One file, named — never a folder. A slash on the end
+// used to mean "copy the whole of that folder", and a folder written on a rule
+// copied everything for every SKU that rule caught. A path written that way is
+// not a file, so it is not kept as one: the row is left with nothing mapped and
+// falls back to the file named after the SKU, the same as any unmapped row.
+const mcCopyPathClean=v=>{
+  const s=String(v==null?'':v).trim();
+  return /[\\/]$/.test(s)?'':s.slice(0,400);
+};
 // The template travels by name, which is what somebody working the sheet in
 // Excel can read and type; it is matched back by that name on the way in. Two
 // templates of one name is the case the app itself picks between, so an
@@ -30905,7 +30883,7 @@ const mcRouteFromCells=(c,i)=>{
     template:dest==='print'&&tpl?String(tpl.id):'',
     // the file this row copies, and the folder inside the copy-to folder it
     // lands in — both only mean anything on a copy row
-    copy_path:dest==='copy'?String(c.copy_path==null?'':c.copy_path).trim().slice(0,400):'',
+    copy_path:dest==='copy'?mcCopyPathClean(c.copy_path):'',
     copy_to:dest==='copy'?mcCopyToClean(c.copy_to):'',
     sort_order:Number.isFinite(Number(c.sort_order))?Number(c.sort_order):i,
     remarks:String(c.remarks==null?'':c.remarks).slice(0,500)};
@@ -31083,7 +31061,7 @@ function mcOpenDest(sku){
     tplBox.innerHTML=`<label class="field" style="margin:8px 0 0;"><span>FILE</span>
          <input type="text" data-mc-dest-copy="copy_path"
                 value="${escapeHtml((own&&own.copy_path)||'')}"
-                placeholder="a file — Big TY Card/AAA.png — or a folder ending in /"/></label>
+                placeholder="a file — Big TY Card/AAA.png"/></label>
        <button type="button" class="btn-outline" data-mc-dest-copy-pick
                style="margin:6px 0 0;">Pick from the designs folder…</button>
        <label class="field" style="margin:8px 0 0;"><span>INTO</span>
@@ -31570,17 +31548,13 @@ function mcCopySource(sku){
   // colleague opening the same batch copies the same file without mapping it
   // again. Only where nothing is written down is it worked out.
   const rt=mcRouteRowFor(sku);
-  if(rt&&rt.copy_path){
+  // A mapping names one file and only one file. A path with a slash on the end
+  // used to mean "copy the whole of that folder", and a folder mapping written
+  // on a rule quietly copied everything for every SKU that rule caught. Such a
+  // path is read as nothing said rather than as a folder, so the SKU falls back
+  // to the file named after it, exactly as an unmapped SKU does.
+  if(rt&&rt.copy_path&&!/[\\/]$/.test(String(rt.copy_path))){
     const raw=String(rt.copy_path);
-    // A path written with a slash on the end is a folder, and the whole of it
-    // is copied: some designs are not one file but a set — a wrapper, its
-    // cutting file and the proof — and naming them one at a time is three
-    // mappings that have to be kept in step with each other for ever.
-    if(/[\\/]$/.test(raw)){
-      const folder=raw.replace(/[\\/]+$/,'').split('\\').join('/');
-      return {path:folder,name:folder.split('/').pop()||folder,folder:true,
-        to:String(rt.copy_to||''),mapped:true};
-    }
     return {path:raw,name:raw.split('/').pop(),to:String(rt.copy_to||''),mapped:true};
   }
   const line=mcLineForSku(sku);
@@ -31642,10 +31616,8 @@ async function mcCopySku(sku){
   try{
     const r=await mcCopyInto(dir,src);
     if(!r.n){
-      showMsg(out,src.folder
-        ?`Nothing is filed in ${src.name} — or the designs folder is not connected.`
-        :`${src.name} is no longer in the designs folder — reconnect it under Load design.`,
-        false);
+      showMsg(out,`${src.name} is no longer in the designs folder — `
+        +'reconnect it under Load design.',false);
       return;
     }
     const done=await mcMarkCopiedLines(sku,src,src.to);
@@ -31661,30 +31633,13 @@ async function mcCopySku(sku){
   }
 }
 // What a row says it copies.
-const mcCopyWhat=src=>!src?'':src.folder?`everything in ${src.name}`:src.name;
-// The folder a mapping names, read off the folder itself rather than off the
-// library index. The index holds artwork the print side can draw — PNG, JPEG,
-// WEBP, PDF — and a design that is a set is whatever the set contains: a
-// cutting file, a proof, a font. Copying hands files over as they are, so
-// everything filed there goes.
-async function mcFolderFiles(path){
-  const root=await mcSrcDirGet();
-  if(!root||!await loadDesignDirOk(root,false)) return [];
-  let cur=root;
-  for(const part of String(path||'').split('/').map(t=>t.trim()).filter(Boolean))
-    cur=await cur.getDirectoryHandle(part);
-  const out=[];
-  for await(const e of cur.values()) if(e.kind==='file') out.push({name:e.name,handle:e});
-  return out;
-}
+const mcCopyWhat=src=>!src?'':src.name;
 // One mapping, copied into the folder. Returns what was written and what was
 // already sitting there — a file that is already where it was asked to be is
 // not a failure, and the line it belongs to is finished either way.
 async function mcCopyInto(dir,src){
   await mcSrcReady();
-  const list=src.folder
-    ? await mcFolderFiles(src.path)
-    : [{name:src.name,path:src.path}];
+  const list=[{name:src.name,path:src.path}];
   if(!list.length) return {done:0,already:0,n:0,gone:[]};
   const target=await mcCopyTarget(dir,src.to);
   let done=0,already=0; const gone=[];
@@ -31767,7 +31722,7 @@ function mcSummaryFolderState(){
     // the same number on two machines is the whole answer to "why does she not
     // see what I mapped": either the table has it and her app is stale, or it
     // never reached the table at all
-    `${mcSkuRows().filter(r=>String(r.copy_path||'')).length} SKUs mapped to a file or folder`
+    `${mcSkuRows().filter(r=>String(r.copy_path||'')).length} SKUs mapped to a file`
     ].filter(Boolean).join(' · ');
 }
 async function mcOpenSummary(){
