@@ -2044,9 +2044,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   .mc-route-row{flex-wrap:wrap;}
   .mc-route-row .m{flex:1 1 100%;}
   .mc-route-row .h,.mc-route-row .d{flex:1 1 45%;}
-  /* A summary row carries three controls now, and squeezed onto one line on a
-     phone the SKU was left a letter wide. The SKU and its count keep the first
-     line; where it goes and what to do about it share the second. */
+  /* A summary row carries four controls now — copy, add, tick and the count —
+     and squeezed onto one line on a phone the SKU was left a letter wide. The
+     SKU and its count keep the first line; where it goes and what to do about
+     it share the second. */
   .mc-sum-row{flex-wrap:wrap;}
   /* min-width is what makes it wrap rather than squeeze: with the base rule's
      min-width:0 the SKU is shrunk to a letter a line before anything moves.
@@ -28851,8 +28852,46 @@ async function mcOkOrder(orderId){
     }
   }
   lines.forEach(it=>{ it.status='done'; it.acted_by=mcMyId; it.acted_at=now; });
-  mcRenderItems(); mcSyncBatchButtons();
+  mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
   showMsg(out,`${orderId} — ${lines.length} line${lines.length===1?'':'s'} marked done.`,true);
+}
+// The same tick, taken by SKU instead of by order. The batch is grouped by
+// order and the summary by SKU, and one card is worked across both: the shelf
+// is walked in SKU order and the whole of a SKU is finished in one go, which
+// on the batch screen is a line here and three screens down. There is one tick
+// underneath either way — the line's own status — so an order ticked on the
+// batch shows on its SKUs here, and a SKU ticked here fills the orders in.
+// It only ever ticks, exactly as OK all does: undoing somebody else's work is
+// the direction that asks, and that question belongs on the line it is about.
+async function mcOkSku(sku){
+  const out=mcCopyMsgEl();
+  if(!mcBatch||mcBatch.status!=='open'){
+    showMsg(out,'This batch is completed — re-open it first.',false); return; }
+  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
+  if(!sb){ showMsg(out,'No connection — a batch is shared, so a tick is saved online.',false);
+    return; }
+  const lines=mcItems.filter(i=>String(i.sku||i.product||i.design_name||'—')===String(sku)
+    &&!i.status);
+  if(!lines.length){ showMsg(out,`Every line of ${sku} is already done.`,true); return; }
+  const now=new Date().toISOString();
+  const ids=lines.map(i=>i.id);
+  for(let i=0;i<ids.length;i+=MC_CHUNK){
+    const {error}=await sb.from('magic_items')
+      .update({status:'done',acted_by:mcMyId,acted_at:now}).in('id',ids.slice(i,i+MC_CHUNK));
+    if(error){
+      await mcLoadItems();                     // whatever went through, went through
+      mcRenderItems(); mcRenderSummary();
+      showMsg(out,'Could not save that: '+error.message,false);
+      return;
+    }
+  }
+  lines.forEach(it=>{ it.status='done'; it.acted_by=mcMyId; it.acted_at=now; });
+  // the batch behind the summary as well as the summary itself: the orders
+  // these lines belong to are what somebody looks at next
+  mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
+  const orders=new Set(lines.map(i=>String(i.order_id||'—'))).size;
+  showMsg(out,`✓ ${sku} — ${lines.length} line${lines.length===1?'':'s'} marked done`
+    +(orders>1?` across ${orders} orders`:'')+'.',true);
 }
 // More than the order asks for, said on the line rather than only inside the
 // window a line was built in — the machine spoils a tag while the batch is
@@ -29881,6 +29920,20 @@ function mcRenderSummary(){
     // where this SKU is headed, and the way to say something else. What it
     // says is what Add will do — the routing rule where there is one, the
     // tile or the artwork where there is not.
+    // Ticked off by SKU, which is how the shelf is walked. The tick is the
+    // line's own, so this row and the order rows on the batch are two views of
+    // one thing: OK all on an order shows up here as its SKUs filling in, and
+    // this fills those orders in. Gone once there is nothing left open — the
+    // badge beside the name is then what says so.
+    const okBtn=r.allDone?''
+      : `<button type="button" class="btn-outline" data-mc-sum-ok="${escapeHtml(r.sku)}"
+           title="Mark every line of ${escapeHtml(r.sku)} done — ${r.lines-r.done} still open. `
+        +`The same tick as OK on the batch.">OK</button>`;
+    // how much of this SKU is ticked off, wherever the tick was made: here, on
+    // a line, or by OK all on an order it is part of
+    const okBadge=r.allDone
+      ? '<span class="mc-sum-on">✓ done</span>'
+      : (r.done?`<span class="mc-sum-name">${r.done} of ${r.lines} lines done</span>`:'');
     const set=mcRouteFor(r);
     const heading=set?mcDestLabel(set)
       :tool==='gift'?`${gift?gift.page.name+' ':''}gift tag`
@@ -29906,9 +29959,11 @@ function mcRenderSummary(){
         ${r.name?`<span class="mc-sum-name">${escapeHtml(r.name)}</span>`:''}
         ${badge}
         ${cpBadge}
+        ${okBadge}
       </span>
       ${copy}
       ${btn}
+      ${okBtn}
       <span class="mc-sum-qty">×<input type="number" class="mc-qty-in" min="${r.lines}" step="1"
         value="${r.qty}" data-mc-sum-qty="${escapeHtml(r.sku)}"
         title="How many of this SKU go on the sheet. Lower it to print short of the order; the order itself is not changed."
@@ -31900,6 +31955,9 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
   // file this row's artwork — the folder, not the sheet
   const cp=e.target.closest('[data-mc-sum-copy]');
   if(cp){ await mcCopySku(cp.dataset.mcSumCopy); return; }
+  // ticked off by SKU — the same tick the batch's own OK makes
+  const ok=e.target.closest('[data-mc-sum-ok]');
+  if(ok){ await mcOkSku(ok.dataset.mcSumOk); return; }
   // say which file this SKU copies — the designs folder's own search, opened
   // on the SKU, and what is picked is written onto the routing
   const map=e.target.closest('[data-mc-sum-map]');
