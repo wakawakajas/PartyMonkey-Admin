@@ -19066,17 +19066,29 @@ document.getElementById('loadDesignCount').addEventListener('click',e=>{
   if(!e.target.closest('#ldScopeBtn')) return;
   ldShowAll=!ldShowAll; loadDesignFolderState(); loadDesignRenderList();
 });
+// How many rows are put on the screen at once. The copy-from folder is a NAS
+// with thousands of files in it, and the whole of it as one list is a second of
+// the tab doing nothing — on every opening of the picker and again on every
+// letter typed into the search, which is what "mapping is slow" was. Nobody
+// reads past the first screenful anyway: the rest is found by typing, and the
+// count line says how many are behind it.
+const LD_LIST_MAX=200;
 function loadDesignRenderList(){
   const q=(document.getElementById('loadDesignSearch').value||'').trim().toLowerCase();
   const all=ldMapMode()?(mcSrcFiles||[]):ldScoped();
-  const items=all.filter(it=>!q||it.path.toLowerCase().includes(q));
+  const found=all.filter(it=>!q||it.path.toLowerCase().includes(q));
+  const items=found.slice(0,LD_LIST_MAX);
   // the scope is a button as well as a sentence: a design wanted from another
   // folder for once is one tap away, and the tap says what it is doing
   const scoped=!ldMapMode()&&!!ldTplFolder
     &&(loadDesignFiles||[]).some(f=>ldUnder(f,ldTplFolder));
   document.getElementById('loadDesignCount').innerHTML=
-    (all.length?`${items.length} of ${all.length} file${all.length===1?'':'s'}`
-      +(scoped&&!ldShowAll?` in ${escapeHtml(ldTplFolder)}`:''):'')
+    (all.length?`${found.length} of ${all.length} file${all.length===1?'':'s'}`
+      +(scoped&&!ldShowAll?` in ${escapeHtml(ldTplFolder)}`:'')
+      // said plainly, or the file somebody is looking for is simply not there
+      // as far as they can tell and the search box looks broken
+      +(found.length>items.length
+        ? ` · showing the first ${items.length} — type more to narrow it`:''):'')
     +(scoped?` <button type="button" class="btn-outline btn-sm" id="ldScopeBtn">`
       +(ldShowAll?`Only ${escapeHtml(ldTplFolder)}`:'Show all folders')+'</button>':'');
   const listEl=document.getElementById('loadDesignList');
@@ -19134,7 +19146,14 @@ async function openLoadDesignModal(){
   // and the state line again once the folder has actually answered, so the
   // panel says what is true rather than what was true before it looked
   if(ldMapMode()){
-    await mcSrcReady();
+    // The first look at a NAS folder is minutes of waiting, and it was waited
+    // out behind a list saying "choose a folder" — which reads as a folder that
+    // was never chosen rather than as one being counted. It says what it is
+    // doing, and mcSrcReady counts up in the message line while it does it.
+    if(!mcSrcFiles.length)
+      document.getElementById('loadDesignList').innerHTML=
+        '<p class="hint" style="margin:4px 0 0;">— reading the copy-from folder… —</p>';
+    await mcSrcReady('loadDesignMsg');
     loadDesignFolderState(); loadDesignRenderList();
     return;
   }
@@ -19192,7 +19211,14 @@ document.getElementById('loadDesignForgetFolderBtn').addEventListener('click',as
   document.getElementById('loadDesignQtyRow').style.display='none';
   loadDesignFolderState(); loadDesignRenderList();
 });
-document.getElementById('loadDesignSearch').addEventListener('input',loadDesignRenderList);
+// Redrawn a moment after the typing stops rather than on every letter: a
+// six-letter SKU typed into a folder of thousands was six full redraws, and
+// the box itself went behind the fingers doing it.
+let ldSearchT=0;
+document.getElementById('loadDesignSearch').addEventListener('input',()=>{
+  clearTimeout(ldSearchT);
+  ldSearchT=setTimeout(loadDesignRenderList,120);
+});
 document.getElementById('loadDesignList').addEventListener('click',e=>{
   const row=e.target.closest('[data-load-design-pick]'); if(!row) return;
   const items=document.getElementById('loadDesignList').__items||[];
@@ -19259,7 +19285,16 @@ document.getElementById('loadDesignConfirmBtn').addEventListener('click',async()
     closeLoadDesignModal();
     document.getElementById('mcSummarySheet').classList.add('open');
     const skus=Array.isArray(who)?who:[who];
-    if(skus.length===1) await mcSetCopyFile(skus[0],pick.path);
+    // Three round trips on a slow morning — the row is set to Copy, the path is
+    // written, and it is read back — and the summary sat there saying nothing
+    // through all of it, which is how a mapping that was working read as one
+    // that had not happened.
+    showMsg(document.getElementById('mcSummaryMsg'),
+      `Mapping ${pick.name} to ${skus.length===1?skus[0]:skus.length+' SKUs'}…`,true);
+    // and the failure is left on the screen where it was written: saying
+    // "mapped for everybody" over the top of "the table did not keep it" is
+    // the app telling somebody their morning's work is safe when it is not
+    if(skus.length===1){ if(!await mcSetCopyFile(skus[0],pick.path)) return; }
     else if(!await mcBulkWrite(skus.map(sku=>
       ({sku,dest:'copy',patch:{copy_path:pick.path}})))) return;
     mcRenderSummary();
