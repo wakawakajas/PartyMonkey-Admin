@@ -20379,7 +20379,22 @@ async function gtApplyMode(){
   gtPaintMode();
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
 }
-async function gtSetMode(m,save){
+// Two things ask for a page at once — the line's panel, redrawing itself onto
+// the library its line is filed in, and the split putting that line's sheet in
+// the column beside it. Both called this, and the swap below has an await in
+// the middle of it: the second caller found the mode already changed, did
+// nothing, handed the sheet its tags — and then the first caller came back off
+// its await and put the empty order for that page over the top of them. The
+// sheet came up with nothing on it and no way to tell why.
+// They queue now. Whoever asks second waits for the first to finish and then
+// finds there is nothing left to do, which is the truth.
+let gtModeJob=Promise.resolve();
+function gtSetMode(m,save){
+  const run=()=>gtSetModeNow(m,save);
+  gtModeJob=gtModeJob.then(run,run);
+  return gtModeJob;
+}
+async function gtSetModeNow(m,save){
   const next=(m==='custom')?'custom':'festive';
   if(next===gtMode&&gtLoaded){ await gtApplyMode(); return; }
   // the order was built out of the page being left, and belongs to it
@@ -33723,6 +33738,10 @@ async function mcGtMoveToPage(it,mode,id){
   if(typeof gtSetMode==='function'&&gtMode!==mode) await gtSetMode(mode);
   if(mcWinItem===it.id) mcWinRender();
   mcRepaintRow(it);
+  // the sheet beside it is the other page's now, and it is holding the other
+  // page's tags — so it is lent again rather than left showing the old page
+  if(mcGtHome&&mcGtHome.page!==mode) await mcGtReturn();
+  if(mcWinItem===it.id) await mcSplitFollow(it);
 }
 // the sheet_item, shaped as the gift tag tool's own order line — so gtVal and
 // everything downstream of it read a line here exactly as they read one there
@@ -33853,6 +33872,10 @@ function mcGiftWire(it){
     openPanel(false);
     drawWords();
     drawPrev();
+    // And onto the sheet beside this, where the tag is actually worked. Its row
+    // was lent blank, and it used to sit blank until Save was pressed — so a
+    // design chosen here looked like a design that had not been chosen at all.
+    mcGtLiveDesign(it,mcGtPick);
     // The sheet is wherever the last line left it, and a design cut to another
     // shape would be previewed and saved on that one. Its own folder says what
     // it is cut to, so that is fetched before the tag is shown again.
@@ -34154,10 +34177,45 @@ async function mcGtOpenFull(page){
     if(msg) showMsg(msg,`Nothing is on the ${mcGtPage(want).name} sheet yet.`,false);
     return;
   }
-  if(!mcGtHome) mcGtHome={order:gtOrder,ids:lines.map(l=>l.id),page:want};
-  gtOrder=lines.map(mcGtLine);
+  // A sheet already lent is added to rather than built again. Saving a design
+  // to the line brings us back through here, and rebuilding the order from the
+  // rows would throw away every word dragged and every box resized on the sheet
+  // since it was lent — work that has not been written back yet by definition.
+  if(mcGtHome&&mcGtHome.page===want){
+    const on=new Map(gtOrder.map(l=>[String(l.id||''),l]));
+    for(const x of lines){
+      const key='mc-'+x.id, had=on.get(key);
+      if(!had){ gtOrder.push(mcGtLine(x)); mcGtHome.ids.push(x.id); continue; }
+      // the line that was lent blank has just been given a design in the panel:
+      // it takes it here rather than arriving as an empty row on the sheet
+      const si=x.sheet_item||{};
+      if(si.designId&&!had.designId){
+        had.designId=si.designId;
+        had.qty=si.qty||mcQty(x)||had.qty;
+        if(si.shape&&!had.shape) had.shape=si.shape;
+      }
+    }
+  }else{
+    if(!mcGtHome) mcGtHome={order:gtOrder,ids:lines.map(l=>l.id),page:want};
+    gtOrder=lines.map(mcGtLine);
+  }
   if(typeof gtRenderOrder==='function') gtRenderOrder();
+  if(typeof gtDraw==='function') gtDraw();
   showScreen('tool-gift-tag');
+}
+// A design chosen on the line's panel, onto the row that line was lent on the
+// sheet beside it. Nothing is written to the batch here: the row on the sheet
+// and the row in the panel are the same line being shown twice, and it is
+// saved by the Save that saves everything else.
+function mcGtLiveDesign(it,id){
+  if(!mcGtHome||!it||!id) return;
+  const row=gtOrder.find(l=>String(l.id||'')==='mc-'+it.id);
+  if(!row||row.designId===id) return;
+  row.designId=id;
+  if(!(Number(row.qty)>0)) row.qty=mcQty(it)||1;
+  if(typeof gtRenderOrder==='function') gtRenderOrder();
+  if(typeof gtDraw==='function') gtDraw();
+  if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync();
 }
 // Called on the way off the Gift Tag screen, whichever way somebody leaves it.
 async function mcGtReturn(){
