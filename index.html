@@ -30737,6 +30737,24 @@ function designFileForSku(sku){
     .some(x=>String(x||'').trim().toLowerCase()===String(f.folder||'').trim().toLowerCase()));
   return hits.find(f=>ldUnder(f,ldTplFolder))||hits.find(claimed)||hits[0];
 }
+// The PNG for a summary row: the SKU exactly, and then the Variation its lines
+// carry. Those are the two names the gift tag side has always been asked about
+// and the two the line's own window matches a PNG on — the print side of the
+// summary asked about the SKU alone. A shop that files its artwork under the
+// variation had every print row saying "no artwork of that name" while the
+// very same file was found the moment the line itself was opened.
+// Still exact, never a near miss: both names are matched whole.
+function designFileForRow(row){
+  const r=(row&&typeof row==='object')?row:{sku:row};
+  const key=String(r.sku||'');
+  const alias=String(r.name||mcSkuAlias.get(key)||'');
+  for(const n of [key,alias]){
+    if(!n) continue;
+    const f=designFileForSku(n);
+    if(f) return f;
+  }
+  return null;
+}
 // the design line this SKU put on the sheet, if it is on there. Read off the
 // sheet rather than remembered, so shutting the summary loses nothing and two
 // ways of taking a design off cannot disagree about what is on.
@@ -30745,7 +30763,7 @@ function mcLineForSku(sku){
   // what it was added for beats what the file happens to be called
   const tagged=state.designs.find(d=>d.sku&&d.sku===key);
   if(tagged) return tagged;
-  const pick=designFileForSku(key); if(!pick) return null;
+  const pick=designFileForRow(key); if(!pick) return null;
   return state.designs.find(d=>d.source&&d.source.path===pick.path)||null;
 }
 // ---------- both gift tag pages ----------
@@ -30916,7 +30934,7 @@ function mcTemplateFor(rows){
   // that is somebody's decision rather than a reading of a folder name
   const said=mcRouteTemplate(rows0);
   if(said) return said;
-  const pick=designFileForSku(rows0.sku);
+  const pick=designFileForRow(rows0);
   const folder=pick&&pick.folder;
   const tail=leaf(folder);
   // the folder said outright beats a template that merely shares its name: one
@@ -30974,8 +30992,8 @@ function mcRemoveSku(sku){
 // figure rather than doubled — the sheet is meant to mirror the batch.
 async function mcAddSkusToSheet(rows,extra){
   const out=document.getElementById('mcSummaryMsg');
-  const usable=rows.filter(r=>designFileForSku(r.sku));
-  const missing=rows.filter(r=>!designFileForSku(r.sku)).map(r=>r.sku);
+  const usable=rows.filter(r=>designFileForRow(r));
+  const missing=rows.filter(r=>!designFileForRow(r)).map(r=>r.sku);
   if(!usable.length){
     showMsg(out,missing.length
       ? `No PNG found for ${missing.length===1?escapeHtml(missing[0]):missing.length+' of these SKUs'}. `
@@ -31037,7 +31055,7 @@ async function mcAddSkusToSheet(rows,extra){
   setArtMode('preset',true);
   let added=0,updated=0;
   for(const r of usable){
-    const pick=designFileForSku(r.sku);
+    const pick=designFileForRow(r);
     const existing=state.designs.find(d=>d.source&&d.source.path===pick.path);
     if(existing){ existing.qty=Math.max(1,Math.round(r.qty)||1); updated++; }
     else { await addDesignLine(pick,r.qty,r.sku); added++; }
@@ -32051,7 +32069,7 @@ if(window.ResizeObserver){
 // either gift tag page is a gift tag — and a SKU with both then asks.
 function mcToolFor(row){
   const r=(row&&typeof row==='object')?row:{sku:row};
-  const png=!!designFileForSku(r.sku), tag=!!mcGiftHit(r.sku);
+  const png=!!designFileForRow(r), tag=!!mcGiftHit(r.sku);
   // what the shop said under Routing comes before everything: it is the only
   // one of these three that is somebody's decision rather than a reading
   const dest=mcRouteFor(r);
@@ -32082,7 +32100,7 @@ async function mcRouteRows(rows){
   }
   // a SKU with no PNG may still be a tag, and both pages' libraries are read
   // before anything is sorted — the page that is open is not the whole answer
-  if(rows.some(r=>!designFileForSku(r.sku))){
+  if(rows.some(r=>!designFileForRow(r))){
     showMsg(out,'Looking in the gift tag libraries…',true);
     await mcGtIndex();
   }
@@ -32147,7 +32165,7 @@ async function mcMarkPrintLines(rows,template){
   if(!rows||!rows.length||!mcBatch||mcBatch.status!=='open') return 0;
   let n=0;
   for(const r of rows){
-    const pick=designFileForSku(r.sku); if(!pick) continue;
+    const pick=designFileForRow(r); if(!pick) continue;
     for(const it of mcItems.filter(i=>mcRowKey(i)===String(r.sku))){
       const was=it.sheet_item||{};
       const si={...was,path:pick.path,name:pick.name,
@@ -34821,7 +34839,8 @@ async function mcPrintLay(lines,template){
   const missing=[];
   for(const it of lines){
     const si=it.sheet_item||{};
-    const pick=(loadDesignFiles||[]).find(f=>f.path===si.path)||designFileForSku(it.sku);
+    const pick=(loadDesignFiles||[]).find(f=>f.path===si.path)
+      ||designFileForRow({sku:it.sku,name:it.design_name||it.product||''});
     if(!pick){ missing.push(it.sku||si.name||''); continue; }
     const qty=Math.max(1,Math.round(Number(si.qty||mcQty(it))||1));
     // two lines of one SKU are two orders for the same card: they add up
