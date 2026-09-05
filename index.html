@@ -5256,6 +5256,16 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 
 <!-- ---- Magic Create: the builder already has work on it, and a summary row
      has more SKUs to put somewhere ---- -->
+<!-- ---- Magic Create: which cutting file a run of tags is cut to ---- -->
+<div class="sheet-bg" id="mcShapeSheet">
+  <div class="sheet">
+    <button class="req-x" id="mcShapeClose" title="Close" aria-label="Close">&times;</button>
+    <div class="sheet-title">Which shape?</div>
+    <p class="hint" style="margin:0 0 10px;" id="mcShapeWhy"></p>
+    <div id="mcShapeOpts"></div>
+  </div>
+</div>
+
 <div class="sheet-bg" id="mcPageSheet">
   <div class="sheet">
     <button class="req-x" id="mcPageClose" title="Close" aria-label="Close">&times;</button>
@@ -21353,6 +21363,11 @@ function gtSetBaseShape(path){ gtDefaultShape=path||''; }
 // the shape a line is cut to: the one its design's folder names, or the
 // order's own where the design names none
 function gtShapeOfLine(l){
+  // A line put on a shape of its own beats both. Magic Create asks which one
+  // when the design's folder names none, and the answer belongs to that line:
+  // it is the whole of how a design cut differently gets a sheet of its own
+  // rather than landing on whatever the sheet was left on.
+  if(l&&l.shape) return l.shape;
   const d=gtDesign(l&&l.designId);
   const folder=d?gtPiguFolderOf(d):'';
   const mapped=folder?gtFolderShapes[folder]:'';
@@ -31524,6 +31539,60 @@ document.getElementById('mcPageSheet').addEventListener('click',e=>{
   if(e.target.id==='mcPageSheet') mcPageAnswer('');
 });
 
+// ---------- gift tags: the shape a run of them is cut to ----------
+// A design out of a mapped Pigu folder brings its folder's cutting file with
+// it and is never asked about — the library already answered. Everything
+// else — every Festive design, and a Custom one in no mapped folder — used to
+// land on whatever shape the sheet happened to be left on. It is asked for
+// once per page instead, and a shape that is not the sheet's own becomes a
+// sheet of its own, which is how the gift tag screen lays an order out.
+// One cutting file in the folder is not a choice, so nothing is asked.
+let mcShapeAsk=null;
+async function mcAskShape(n,mode){
+  const cuts=(typeof gtShapeList==='function'?await gtShapeList():[]).filter(s=>s.kind==='cut');
+  if(cuts.length<2) return '';
+  const now=(typeof gtBaseShape==='function'&&gtBaseShape())||'';
+  document.getElementById('mcShapeWhy').innerHTML=
+    `${n===1?'One of these designs says':`${n} of these designs say`} nothing about the `
+    +`shape they are cut to${mode&&typeof mcGtPage==='function'
+      ?` on the ${escapeHtml(mcGtPage(mode).name)} page`:''}. `
+    +'Whichever is picked, a shape that is not the one on the sheet gets a sheet of its own.';
+  document.getElementById('mcShapeOpts').innerHTML=cuts.map(c=>
+    `<button type="button" class="${c.path===now?'btn-primary':'btn-outline'}"
+       data-mc-shape="${escapeHtml(c.path)}">${escapeHtml(c.name)}${
+       c.path===now?' — the sheet as it is':''}</button>`).join('');
+  document.getElementById('mcShapeSheet').classList.add('open');
+  return new Promise(res=>{ mcShapeAsk=res; });
+}
+function mcShapeAnswer(v){
+  document.getElementById('mcShapeSheet').classList.remove('open');
+  const f=mcShapeAsk; mcShapeAsk=null; if(f) f(v);
+}
+document.getElementById('mcShapeOpts').addEventListener('click',e=>{
+  const b=e.target.closest('[data-mc-shape]'); if(!b) return;
+  mcShapeAnswer(b.dataset.mcShape);
+});
+document.getElementById('mcShapeClose').addEventListener('click',()=>mcShapeAnswer(null));
+document.getElementById('mcShapeSheet').addEventListener('click',e=>{
+  if(e.target.id==='mcShapeSheet') mcShapeAnswer(null);
+});
+// The shape a design brings of its own, before it is anywhere near an order.
+const mcGiftShapeOf=d=>{
+  const folder=(typeof gtPiguFolderOf==='function'&&gtPiguFolderOf(d))||'';
+  return (folder&&gtFolderShapes[folder])||'';
+};
+// Every shape on the order read in, and the sheet left on the one it started
+// on. gtPagePlan takes each shape's placeholders out of gtShapeSlots and falls
+// back to the sheet on screen for a shape it has never read — which counts
+// the sheets off the wrong cuts and then lays the tags out on them.
+async function mcGtShapesInHand(){
+  if(typeof gtShapeGroups!=='function'||typeof gtShowShape!=='function') return;
+  const was=gtSheet.layoutFile;
+  for(const g of gtShapeGroups())
+    if(g.shape&&g.shape!==was&&!gtShapeSlots.has(g.shape)) await gtShowShape(g.shape);
+  if(was&&gtSheet.layoutFile!==was) await gtShowShape(was);
+}
+
 // ---------- the summary's tools, and what sits beside the list under them ----------
 // The tools are stuck to the top of the list; the sheet beside the list is
 // stuck to the top as well. How tall the tools are is not a number that can be
@@ -31705,18 +31774,21 @@ async function mcUnmarkLines(sku){
 async function mcMarkLinesOnSheet(laid,page){
   if(!laid||!laid.length||!mcBatch||mcBatch.status!=='open') return 0;
   let n=0;
-  for(const {sku,designId} of laid){
+  for(const {sku,designId,shape} of laid){
     for(const it of mcItems.filter(i=>String(i.sku||'')===String(sku))){
       const was=it.sheet_item||{};
       // words already typed into the line's own window are its own and are
       // never written over from here. The page is written down rather than
       // worked out later: it is known now, and a design deleted from a library
-      // afterwards would leave nothing to work it out from.
+      // afterwards would leave nothing to work it out from. The shape as well:
+      // Download All builds the sheet from these rows and never sees the
+      // answer that was given when they went on it.
       const si={...was,designId,qty:Math.max(1,mcQty(it)||1),
         vals:was.vals||{},page:String(page||gtMode||''),
+        shape:String(shape||was.shape||''),
         finish:was.finish||(typeof gtFinish!=='undefined'?gtFinish:'Matte')};
       if(it.tile==='giftTag'&&was.designId===designId&&was.qty===si.qty
-        &&String(was.page||'')===si.page){
+        &&String(was.page||'')===si.page&&String(was.shape||'')===si.shape){
         const tick=mcDonePatch(it,true);
         if(Object.keys(tick).length){ await mcSave(it,tick); n++; }
         continue;
@@ -31759,40 +31831,64 @@ async function mcAddSkusToGiftTag(rows,opts){
   // other one ends there — on the sheet it just built — and a run that touches
   // both leaves the tool where it started.
   const modes=[...byPage.keys()].sort((a,b)=>(a===gtMode?1:0)-(b===gtMode?1:0));
-  let added=0,updated=0; const per=[];
+  let added=0,updated=0; const per=[]; let stopped=false;
   for(const m of modes){
     // switching loads that page's library and swaps in its own order; the
     // order left behind is kept, not merged
     if(m!==gtMode) await gtSetMode(m);
+    // The library is in hand now, so each design is taken from it by the name
+    // that matched — the id read off disk is only the index's shorthand —
+    // and with the design comes the shape its folder cuts it to.
+    await gtFolderShapesGet();
+    const here=byPage.get(m).map(({row,design,name})=>{
+      const d=(typeof gtDesignForName==='function'&&gtDesignForName(name||row.sku))||design;
+      return {row,d,shape:mcGiftShapeOf(d)};
+    });
+    // The ones no folder answers for. Asked here rather than per SKU: it is
+    // one press of Add, and the shape folder being read is this page's own.
+    const loose=here.filter(x=>!x.shape);
+    if(loose.length){
+      const pick=await mcAskShape(loose.length,m);
+      if(pick===null){ stopped=true; break; }
+      if(pick) loose.forEach(x=>{ x.shape=pick; });
+    }
     let a=0,u=0;
     const laid=[];
-    byPage.get(m).forEach(({row,design,name})=>{
+    here.forEach(({row,d,shape})=>{
       const qty=Math.max(1,Math.round(Number(row.qty)||1));
-      // the library is in hand now, so the design is taken from it by the name
-      // that matched — the id read off disk is only the index's shorthand
-      const d=(typeof gtDesignForName==='function'&&gtDesignForName(name||row.sku))||design;
       // already on the order: set it to the batch's figure rather than doubling,
       // the same rule the print sheet follows
       const had=gtOrder.find(l=>(l.sku&&l.sku===row.sku)||l.designId===d.id);
-      if(had){ had.qty=qty; had.sku=row.sku; u++; }
-      else { gtOrder.push({id:gtId('l'),designId:d.id,qty,vals:{},sku:row.sku}); a++; }
-      laid.push({sku:row.sku,designId:d.id});
+      if(had){ had.qty=qty; had.sku=row.sku; had.shape=shape||had.shape||''; u++; }
+      else { gtOrder.push({id:gtId('l'),designId:d.id,qty,vals:{},sku:row.sku,shape}); a++; }
+      laid.push({sku:row.sku,designId:d.id,shape});
     });
+    // read in before anything counts the sheets: a shape nobody has opened yet
+    // is laid out on the cuts of the sheet that is open, which is the wrong die
+    await mcGtShapesInHand();
     await mcMarkLinesOnSheet(laid,m);
     added+=a; updated+=u;
     per.push(`${a+u} on ${mcGtPage(m).name}`);
   }
+  if(typeof gtWriteSheetInputs==='function') gtWriteSheetInputs();
+  if(typeof gtSyncShapeSlots==='function') gtSyncShapeSlots();
+  if(typeof gtRenderSlots==='function') gtRenderSlots();
   gtRenderOrder(); gtDraw();
+  if(stopped&&!added&&!updated){
+    showMsg(out,'Stopped — nothing was put on a gift tag sheet.',false);
+    return {added:0,updated:0,missing,per:[]};
+  }
   await mcGtIndex();          // the page on screen may have changed under it
   // called alongside a print sheet, the tags are a line in that sheet's note
   // rather than a pop-up of their own opening over it
   if(o.quiet) return {added,updated,missing,per};
   const note=[per.join(' · '),added?`${added} added`:'',updated?`${updated} updated`:'',
+    stopped?'stopped before the rest':'',
     missing.length?`${missing.length} with no design of that name: ${missing.slice(0,3).join(', ')}`
       +(missing.length>3?'…':''):'',o.extra||''].filter(Boolean).join(' · ');
   // the sheet it made — beside the summary while that is what is on screen,
   // and in the pop-up when it is not, the same as the print side
-  const ok=!missing.length&&!o.extra;
+  const ok=!missing.length&&!o.extra&&!stopped;
   if(mcSummaryOpen()){
     mcRenderSummary();
     mcSumStageDraw('gift',note);
@@ -33242,6 +33338,9 @@ const mcGtLine=it=>({id:'mc-'+it.id,
   designId:(it.sheet_item&&it.sheet_item.designId)||'',
   qty:(it.sheet_item&&it.sheet_item.qty)||mcQty(it)||1,
   vals:(it.sheet_item&&it.sheet_item.vals)||{},
+  // the cutting file this one was put on, so a sheet built from these rows is
+  // grouped by shape exactly as the sheet it was built on
+  shape:(it.sheet_item&&it.sheet_item.shape)||'',
   extra:(((it.sheet_item&&it.sheet_item.extra)||[]).map(f=>({...f})))});
 
 function mcGiftWire(it){
@@ -34018,6 +34117,7 @@ async function mcGiftPreview(lines,mode,canvas,dim,page){
   const keep=gtOrder, keepPage=gtPage;
   gtOrder=lines.map(mcGtLine);
   try{
+    await mcGtShapesInHand();      // or the sheets are counted off the wrong cuts
     const pages=Math.max(1,gtPageCount());
     const at=Math.max(0,Math.min(pages-1,Number(page)||0));
     // a sheet of another shape is another sheet: the page has to be turned to
@@ -34044,7 +34144,9 @@ async function mcGiftBundle(lines,mode){
   // taken after the switch: the order to put back is that page's own
   const keep=gtOrder;
   gtOrder=lines.map(mcGtLine);
+  const wasShape=gtSheet.layoutFile;
   try{
+    await mcGtShapesInHand();
     // A line whose design is not in this library lays out as nothing, and the
     // sheet then builds as a blank page rather than failing — a PDF of empty
     // paper is worse than an error, so it is one. Said with the page's name on
@@ -34056,9 +34158,16 @@ async function mcGiftBundle(lines,mode){
         +'— built on the other gift tag page');
     const pages=gtPageCount();
     if(!pages) throw new Error(`nothing landed on the ${where} sheet`);
-    const px=Math.min(6000,Math.round(Math.max(gtSheet.paperW,gtSheet.paperH)/25.4*300));
+    const plan=typeof gtPagePlan==='function'?gtPagePlan():[];
     const sources=await gtVectorSources();
     return await gtBuildPdf(pages,async(i,forms)=>{
+      // A shape of its own is a sheet of its own, and the sheet has to be put
+      // on it before it is drawn — the same pass the gift tag screen makes,
+      // so the cuts under the tags are the cuts they were laid out on. Every
+      // size is read after the swap: another die is often another paper.
+      const at=plan[i];
+      if(at&&at.shape&&at.shape!==gtSheet.layoutFile) await gtShowShape(at.shape);
+      const px=Math.min(6000,Math.round(Math.max(gtSheet.paperW,gtSheet.paperH)/25.4*300));
       const c=document.createElement('canvas');
       const place=[];
       const vec=forms.size?gtVecTaker(forms,place):null;
@@ -34067,7 +34176,11 @@ async function mcGiftBundle(lines,mode){
       const imgData=ctx.getImageData(0,0,c.width,c.height);
       return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH,place,clear:!!vec};
     },sources);
-  }finally{ gtOrder=keep; }
+  }finally{
+    gtOrder=keep;
+    // back onto the sheet this started on, whatever the last page was cut to
+    if(wasShape&&gtSheet.layoutFile!==wasShape) await gtShowShape(wasShape);
+  }
 }
 
 </script>
