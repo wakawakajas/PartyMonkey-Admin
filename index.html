@@ -5284,6 +5284,13 @@ body.mc-docked .mc-bubble{display:none !important;}
       <button type="button" class="btn-outline btn-sm" id="mcSummaryAddSel">＋ Add Selected</button>
       <button type="button" class="btn-outline btn-sm" id="mcSummaryRemoveSel">－ Remove Selected</button>
       <button type="button" class="btn-outline btn-sm" id="mcSummaryRemoveAll">－ Remove All</button>
+      <!-- The browser hands a remembered folder back saying "ask again", and
+           asking has to come off a tap. Without one there was nowhere on this
+           screen to give the permission back, and every row read as artwork
+           that is not in the folder. -->
+      <button type="button" class="btn-outline btn-sm" id="mcSummaryConnectDesigns"
+              style="display:none;border-color:var(--amber);color:var(--amber);"
+              title="The designs folder is remembered but not connected — one tap and it is read again">📁 Connect designs folder</button>
       <span class="hint" id="mcSummaryFolderLbl" style="margin:0;"></span>
     </div>
     <!-- Added is on a sheet or filed, Done is ticked off by hand, Pending is
@@ -19248,6 +19255,12 @@ const LOAD_DESIGN_FOLDER_HINT=String.raw`C:\NAS Folders\Partymonkey NAS\Pigu\Big
 const LOAD_DESIGN_ART=/\.(png|jpe?g|webp|pdf|ai)$/i;
 let loadDesignDir=null, loadDesignDirRead=false;
 let loadDesignFiles=[], loadDesignSelected=null;
+// A folder handle survives a reload; the permission to read it does not, and
+// asking again has to come off a tap. Until somebody taps, the folder is
+// remembered and unreadable — which every list downstream saw as an empty
+// folder, and reported as "nothing of that name in the designs folder". The
+// two are not the same thing and are no longer said with the same words.
+let ldPending=false;
 // The folder the template in hand prints. One template is one folder, so the
 // picker keeps to it: the template says "95 x 65mm Mini Card" and that is what
 // Load design shows, rather than every design under the chosen folder with the
@@ -32104,9 +32117,18 @@ async function mcRouteRows(rows){
   const gift=rows.filter(r=>tool.get(r)==='gift');
   const none=rows.filter(r=>!tool.get(r)).map(r=>r.sku);
   if(!print.length&&!gift.length){
-    showMsg(out,none.length===1
-      ? `Nothing called “${escapeHtml(none[0])}” in the designs folder or either gift tag library.`
-      : `None of these ${none.length} SKUs has artwork of the same name.`,false);
+    // "nothing of that name" and "the folder was never read" look identical
+    // from a row and are nothing like each other to fix. A folder remembered
+    // but not connected is by far the commoner of the two, and saying the
+    // wrong one sent people hunting through the folder for files that were
+    // sitting right there.
+    showMsg(out,(ldPending&&!loadDesignFiles.length)
+      ? `The designs folder ${loadDesignDir?'('+escapeHtml(loadDesignDir.name)+') ':''}`
+        +'is remembered but not connected, so nothing can be matched against it — '
+        +'press <b>📁 Connect designs folder</b> above and try again.'
+      : (none.length===1
+        ? `Nothing called “${escapeHtml(none[0])}” in the designs folder or either gift tag library.`
+        : `None of these ${none.length} SKUs has artwork of the same name.`),false);
     return;
   }
   const nonePart=none.length
@@ -32649,6 +32671,8 @@ async function mcCopyRows(rows){
 }
 function mcSummaryFolderState(){
   const el=document.getElementById('mcSummaryFolderLbl'); if(!el) return;
+  const conn=document.getElementById('mcSummaryConnectDesigns');
+  if(conn) conn.style.display=(ldPending&&!loadDesignFiles.length)?'':'none';
   // Both folder handles are read back from IndexedDB, and until that has
   // happened they read as empty. This line is the one people are told to look
   // at when something is not working, so it must not be the thing that lies:
@@ -32665,7 +32689,10 @@ function mcSummaryFolderState(){
     : `${(mcGtNames[p.mode]||[]).length} ${p.name}`).join(' · ');
   el.textContent=[loadDesignFiles.length
     ? `${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'} to print with`
-    : 'No print designs folder chosen — set one under Load design.',
+    : (ldPending
+      ? `Designs folder ${loadDesignDir?loadDesignDir.name:''} is remembered but not `
+        +'connected — press Connect designs folder above.'
+      : 'No print designs folder chosen — set one under Load design.'),
     // the other folder, the one copies come out of, said separately because it
     // is a different folder answering a different question
     mcSrcFiles.length?`${mcSrcFiles.length} file${mcSrcFiles.length===1?'':'s'} to copy from`
@@ -32703,8 +32730,9 @@ async function mcOpenSummary(){
   // the folder is what says which SKUs can be added, so it is read on the way in
   if(!loadDesignFiles.length){
     const dir=await loadDesignDirGet();
-    if(dir&&await loadDesignDirOk(dir,false)){ await loadDesignRescan(); mcRenderSummary(); }
-  }
+    if(dir&&await loadDesignDirOk(dir,false)){ ldPending=false; await loadDesignRescan(); mcRenderSummary(); }
+    else ldPending=!!dir;
+  }else ldPending=false;
   // and the folder box is filled from it afterwards rather than before: filled
   // first, it was filled from a library nothing had read yet, and the only
   // answer it offered was the empty one
@@ -32721,6 +32749,31 @@ async function mcOpenSummary(){
   mcSummaryFolderState();
 }
 document.getElementById('mcSummaryBtn').addEventListener('click',mcOpenSummary);
+document.getElementById('mcSummaryConnectDesigns').addEventListener('click',async()=>{
+  const out=document.getElementById('mcSummaryMsg');
+  const btn=document.getElementById('mcSummaryConnectDesigns');
+  btn.disabled=true; btn.textContent='Opening…';
+  try{
+    const dir=await loadDesignDirGet();
+    // asked with the tap still in hand — the one moment a browser will give a
+    // remembered folder's permission back
+    if(dir&&await loadDesignDirOk(dir,true)){
+      ldPending=false;
+      showMsg(out,'Reading the designs folder…',true);
+      await loadDesignRescan();
+      showMsg(out,`✓ ${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'} `
+        +'read — the rows say what they can be added with now.',true);
+    }else{
+      showMsg(out,'Permission to that folder was not given. Choose it again under '
+        +'Load design if it has moved.',false);
+    }
+  }catch(err){
+    showMsg(out,'Could not read it: '+((err&&err.message)||'unknown error'),false);
+  }finally{
+    btn.disabled=false; btn.textContent='📁 Connect designs folder';
+    mcRenderSummary(); mcSummaryFolderState();
+  }
+});
 document.getElementById('mcSummaryCopyFolderBtn').addEventListener('click',async()=>{
   const out=mcCopyMsgEl();
   if(!canPickFolder()){
