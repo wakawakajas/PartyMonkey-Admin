@@ -32122,10 +32122,13 @@ async function mcRouteRows(rows){
     // but not connected is by far the commoner of the two, and saying the
     // wrong one sent people hunting through the folder for files that were
     // sitting right there.
-    showMsg(out,(ldPending&&!loadDesignFiles.length)
-      ? `The designs folder ${loadDesignDir?'('+escapeHtml(loadDesignDir.name)+') ':''}`
-        +'is remembered but not connected, so nothing can be matched against it — '
-        +'press <b>📁 Connect designs folder</b> above and try again.'
+    showMsg(out,!loadDesignFiles.length
+      ? (ldPending
+        ? `The designs folder ${loadDesignDir?'('+escapeHtml(loadDesignDir.name)+') ':''}`
+          +'is remembered but not connected, so nothing can be matched against it — '
+          +'press <b>📁 Connect designs folder</b> above and try again.'
+        : 'No designs folder has been chosen on this machine, so there is nothing to '
+          +'match these against — press <b>📁 Choose designs folder</b> above.')
       : (none.length===1
         ? `Nothing called “${escapeHtml(none[0])}” in the designs folder or either gift tag library.`
         : `None of these ${none.length} SKUs has artwork of the same name.`),false);
@@ -32671,8 +32674,21 @@ async function mcCopyRows(rows){
 }
 function mcSummaryFolderState(){
   const el=document.getElementById('mcSummaryFolderLbl'); if(!el) return;
+  // Shown whenever there is nothing to match against, not only when a folder
+  // is remembered. A machine that has never been given the folder had no way
+  // to give it one from here at all — and this is the screen where the trouble
+  // shows, so it is the screen that has to be able to fix it.
   const conn=document.getElementById('mcSummaryConnectDesigns');
-  if(conn) conn.style.display=(ldPending&&!loadDesignFiles.length)?'':'none';
+  if(conn){
+    const need=!loadDesignFiles.length;
+    conn.style.display=need?'':'none';
+    if(need){
+      conn.textContent=ldPending?'📁 Connect designs folder':'📁 Choose designs folder';
+      conn.title=ldPending
+        ? 'The designs folder is remembered but not connected — one tap and it is read again'
+        : 'No designs folder on this machine yet — choose the folder your <SKU>.png files are in';
+    }
+  }
   // Both folder handles are read back from IndexedDB, and until that has
   // happened they read as empty. This line is the one people are told to look
   // at when something is not working, so it must not be the thing that lies:
@@ -32754,9 +32770,19 @@ document.getElementById('mcSummaryConnectDesigns').addEventListener('click',asyn
   const btn=document.getElementById('mcSummaryConnectDesigns');
   btn.disabled=true; btn.textContent='Opening…';
   try{
-    const dir=await loadDesignDirGet();
-    // asked with the tap still in hand — the one moment a browser will give a
-    // remembered folder's permission back
+    // Remembered: asked with the tap still in hand, which is the one moment a
+    // browser will give a folder's permission back. Never chosen: the picker,
+    // which is the same tap doing the same job a step further back.
+    let dir=await loadDesignDirGet();
+    if(!dir){
+      if(!canPickFolder()){
+        showMsg(out,'This browser cannot browse a folder — use Chrome or Edge on a PC.',false);
+        return;
+      }
+      dir=await window.showDirectoryPicker({mode:'read'}).catch(()=>null);
+      if(!dir) return;                       // the picker was cancelled
+      if(await loadDesignDirOk(dir,true)) await loadDesignDirSet(dir);
+    }
     if(dir&&await loadDesignDirOk(dir,true)){
       ldPending=false;
       showMsg(out,'Reading the designs folder…',true);
@@ -32770,8 +32796,9 @@ document.getElementById('mcSummaryConnectDesigns').addEventListener('click',asyn
   }catch(err){
     showMsg(out,'Could not read it: '+((err&&err.message)||'unknown error'),false);
   }finally{
-    btn.disabled=false; btn.textContent='📁 Connect designs folder';
-    mcRenderSummary(); mcSummaryFolderState();
+    btn.disabled=false;
+    if(typeof loadDesignFolderState==='function') loadDesignFolderState();
+    mcRenderSummary(); mcSummaryFolderState();   // which also puts its words back
   }
 });
 document.getElementById('mcSummaryCopyFolderBtn').addEventListener('click',async()=>{
