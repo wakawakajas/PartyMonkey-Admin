@@ -1976,6 +1976,29 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
    folding onto a second line on a laptop and the SKU was left the width of a
    thumbnail. The width of the sheet pop-up, so a row reads across in one go. */
 #mcSummarySheet > .sheet{max-width:940px;}
+/* The sheet an Add just built, kept beside the list rather than over it. A
+   column of its own rather than a float: the sheet is a flex box, and a float
+   inside one is not a float at all — it sat above the list, on the wrong side
+   of it, which is the layout this was written to avoid. Sticky, so the sheet
+   is still there after scrolling to the SKU being added. */
+.mc-sum-split{display:flex;align-items:flex-start;gap:12px;min-width:0;}
+.mc-sum-split>#mcSummaryBody{flex:1 1 auto;min-width:0;}
+.mc-sum-stage{flex:0 0 300px;max-width:300px;position:sticky;top:0;
+  border:1px solid var(--border);border-radius:12px;padding:8px;background:var(--nest);}
+.mc-sum-stage canvas{display:block;width:100%;height:auto;background:#fff;
+  border:1px solid var(--border);border-radius:6px;}
+.mc-sum-stage-bar{display:flex;align-items:center;justify-content:space-between;
+  gap:8px;flex-wrap:wrap;margin-top:6px;}
+/* the sheet gives every button inside it a full-width 50px row; this one is a
+   chip under a picture */
+.sheet .mc-sum-stage-bar button{width:auto;height:30px;min-height:30px;
+  padding:0 10px;font-size:11px;flex:0 0 auto;}
+/* narrow: the two stack, and the sheet goes on top where it is seen */
+@media (max-width:760px){
+  .mc-sum-split{flex-direction:column;}
+  .mc-sum-stage{flex:0 0 auto;max-width:none;width:auto;align-self:stretch;
+    order:-1;position:static;}
+}
 /* The sheet that was just built is looked at, not glanced at — it is given
    the width a sheet needs, and the drawing fills it. */
 #mcMadeSheet > .sheet{max-width:940px;}
@@ -5067,7 +5090,23 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
       <button type="button" class="btn-outline" id="mcSummaryBulkNone">Clear</button>
     </div>
     <div id="mcSummaryMsg"></div>
-    <div id="mcSummaryBody"></div>
+    <!-- The list, and beside it the sheet it is building. Add used to shut
+         this whole summary and open the sheet in a pop-up, so a morning of six
+         SKUs was six trips out of the list and back in. The sheet is drawn
+         here instead and redrawn on every Add and Remove; the pop-up — the
+         pager, the download, the way into the builder — is the button under
+         it. The list comes first in the markup so that a narrow screen, which
+         stacks them, can put the sheet on top where it is seen. -->
+    <div class="mc-sum-split">
+      <div id="mcSummaryBody"></div>
+      <div class="mc-sum-stage" id="mcSumStage" style="display:none;">
+        <canvas id="mcSumCanvas"></canvas>
+        <div class="mc-sum-stage-bar">
+          <span class="hint" id="mcSumStageLbl" style="margin:0;"></span>
+          <button type="button" class="btn-outline btn-sm" id="mcSumStageBig">⤢ The whole sheet</button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -20355,6 +20394,7 @@ document.getElementById('gtCutPanel').addEventListener('click',async e=>{
   if(!gtApplyCut(file,path,await file.text())){
     showMsg(msg,'No shapes found in that SVG.',false); return;
   }
+  gtSetBaseShape(path);
   document.getElementById('gtCutSearch').value='';
   document.getElementById('gtCutPanel').classList.remove('open');
   await gtSaveLib();
@@ -20406,7 +20446,7 @@ async function gtScanShape(known){
   let took=0;
   if(cut) try{
     const file=await cut.entry.getFile();
-    if(gtApplyCut(file,cut.path,await file.text())) took++;
+    if(gtApplyCut(file,cut.path,await file.text())){ gtSetBaseShape(cut.path); took++; }
   }catch(e){}
   if(art) try{
     const file=await art.entry.getFile();
@@ -21254,6 +21294,12 @@ function gtBaseShape(){
   if(!gtDefaultShape) gtDefaultShape=gtSheet.layoutFile||'';
   return gtDefaultShape||gtSheet.layoutFile||'';
 }
+// A cutting file chosen by hand — picked off the shape folder, dropped in, or
+// cleared — is this library's shape from then on. The base shape was written
+// down once, from the first sheet the library loaded, and never moved again:
+// every line went on planning onto the old shape, so gtDraw turned the sheet
+// straight back to it and the shape just chosen never came up at all.
+function gtSetBaseShape(path){ gtDefaultShape=path||''; }
 // the shape a line is cut to: the one its design's folder names, or the
 // order's own where the design names none
 function gtShapeOfLine(l){
@@ -22970,11 +23016,13 @@ document.getElementById('gtCutBtn').addEventListener('click',async()=>{
   gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   if(built.mm){ gtSheet.paperW=built.mm.w; gtSheet.paperH=built.mm.h; }
   gtRebuildSlots();
+  gtSetBaseShape(path);
   await gtSaveLib();
   gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
 });
 document.getElementById('gtCutDelBtn').addEventListener('click',async()=>{
   gtSheet.layoutFile=''; gtLayout=null; gtLayoutFrom='';
+  gtSetBaseShape('');
   gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   gtRebuildSlots();
   await gtSaveLib(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
@@ -28129,6 +28177,13 @@ const mcExtra=it=>{
 const mcQty=it=>Math.max(0,Math.round(Number(it&&it.qty)||0))+mcExtra(it);
 const mcTile=it=>(it&&it.tile&&MC_TILES[it.tile])||null;
 const mcReady=it=>{ const t=mcTile(it); return !!(t&&t.ready(it)); };
+// Has this line been put somewhere: the tile it was put on, the layout it was
+// given, or a sheet_item that actually places it. A line taken off a sheet
+// keeps whatever was typed into it and nothing else, so a sheet_item carrying
+// only words is not a line on a sheet — asked as `it.sheet_item` alone, those
+// words read as one.
+const mcLaid=it=>!!(it&&(it.tile||it.design||(it.sheet_item
+  &&(it.sheet_item.designId||it.sheet_item.path||it.sheet_item.copied))));
 // Every page a line can be built on, flattened into one list for the picker.
 // A tile that is several pages hands them over itself, so one added next year
 // appears in the list without the picker being touched.
@@ -28545,13 +28600,15 @@ function mcRenderItems(){
     // An order is put on a sheet as a whole and is taken off as one: line by
     // line is the same tap ten times, and the summary's Remove is by SKU,
     // which is the wrong grouping when the same card is on two orders.
-    const laid=g.items.filter(i=>i.tile||i.sheet_item||i.design).length;
+    const laid=g.items.filter(mcLaid).length;
     return `<div class="mc-order${all?' all-done':''}">
       <div class="mc-order-head" data-mc-ord-hold="${escapeHtml(g.order_id)}"
         title="Hold to delete this order from the batch">
-        <span class="mc-order-id">${escapeHtml(g.order_id)}</span>
+        <span class="mc-order-id">${oidCopy(g.order_id)}</span>
         ${buyer?`<span class="mc-order-buyer">${escapeHtml(buyer)}</span>`:''}
         <span class="mc-order-count">${done} of ${g.items.length} done</span>
+        <button type="button" class="mc-ord-clear" data-mc-ord-add="${escapeHtml(g.order_id)}"
+          title="Another line on this order — two designs bought on one order are two lines">＋ Line</button>
         <button type="button" class="mc-ord-clear ok" data-mc-ord-ok="${escapeHtml(g.order_id)}"
           title="${all?'Every line of this order is done'
                      :'Mark every line of this order done'}"${all?' disabled':''}>OK all</button>
@@ -28620,8 +28677,9 @@ function mcLineHtml(it){
       ? `<span class="mc-qty-more" title="${more} extra on top of the ${it.qty} ordered — `
         +`${mcQty(it)} in all">Extra ${more}</span>` : ''}</span>
     <span class="mc-line-acts">
-      <button type="button" data-mc-create="${it.id}"${it.status?' disabled':''}
-        title="${it.status?'This line is done — press Done to re-open it before working on it'
+      <button type="button" data-mc-create="${it.id}"
+        title="${it.status?'This line is ticked done — Create asks before taking the tick '
+                          +'off and opening it again'
                           :'Pick a print tile and work this line'}">Create</button>
       <button type="button" data-mc-extra="${it.id}"${more?' class="has"':''}
         title="${more?`${more} extra on top of the ${it.qty} ordered — ${mcQty(it)} in all. `
@@ -28846,7 +28904,59 @@ document.getElementById('mcItems').addEventListener('click',async e=>{
   if(oa&&!oa.disabled){ await mcOkOrder(oa.dataset.mcOrdOk); return; }
   const cl=e.target.closest('[data-mc-ord-clear]');
   if(cl&&!cl.disabled){ await mcClearOrder(cl.dataset.mcOrdClear); return; }
+  const ad=e.target.closest('[data-mc-ord-add]');
+  if(ad&&!ad.disabled){ await mcAddLineTo(ad.dataset.mcOrdAdd); return; }
 });
+// ---------- a second design on one order ----------
+// One customer, one order, two different cards. The sheet the batch came in on
+// has that as one row, and no amount of editing a row makes it two: a line is
+// one design at one quantity, which is the whole reason Download All can name
+// a file after it. So another line is added to the order instead — the order's
+// own number and buyer, one of it, and a name to be found by — and Create is
+// then pressed on it exactly like any other line.
+//
+// It opens in the builder on the way out, because adding a line nobody then
+// works is the same as not adding it.
+async function mcAddLineTo(orderId){
+  const out=document.getElementById('mcBatchMsg');
+  if(!sb||!mcBatch) return;
+  if(mcBatch.status!=='open'){
+    showMsg(out,'This batch is completed — re-open it to add to it.',false); return;
+  }
+  const sibs=mcItems.filter(i=>String(i.order_id||'')===String(orderId));
+  const from=sibs[0]||null;
+  // The name is asked for rather than guessed. A second design has a different
+  // name from the first by definition, and a line copied off its neighbour
+  // would go looking for its neighbour's artwork.
+  const typed=prompt(`Another line on ${orderId}.\n\n`
+    +'What is it? The SKU, or the design\'s name — whatever the artwork is filed under.',
+    from?String(from.sku||''):'');
+  if(typed===null) return;
+  const sku=String(typed).trim();
+  if(!sku){ showMsg(out,'A line needs a name to be found by.',false); return; }
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session){ showMsg(out,'Sign in first.',false); return; }
+  // the first hyphen splits product from variation, the same way the import does
+  const cut=sku.indexOf('-');
+  const row={
+    user_id:session.user.id, batch_id:mcBatch.id,
+    sort_order:Math.max(0,...mcItems.map(i=>Number(i.sort_order)||0))+1,
+    order_id:String(orderId), buyer:(from&&from.buyer)||'', sku,
+    product:cut<0?sku:sku.slice(0,cut),
+    design_name:cut<0?'':sku.slice(cut+1),
+    qty:1, message:'', note:'', image_url:'', raw:{}
+  };
+  const {data,error}=await sb.from('magic_items').insert(row).select().single();
+  if(error||!data){
+    showMsg(out,'Could not add it: '+((error&&error.message)||'nothing came back'),false);
+    return;
+  }
+  mcItems.push(data);
+  mcRenderItems(); mcSyncBatchButtons();
+  if(typeof mcRenderSummary==='function') mcRenderSummary();
+  showMsg(out,`✓ ${escapeHtml(sku)} added to ${escapeHtml(String(orderId))}.`,true);
+  await mcWinOpen(data.id);
+}
 // One line's file, filed. The SKU summary copies a SKU — every line of it at
 // once, which is what a morning's run wants — but a single line reprinted, or
 // one order asked for now, is worked from the batch itself, and walking round
@@ -29021,8 +29131,7 @@ async function mcClearOrder(orderId){
   if(!mcBatch||mcBatch.status!=='open'){
     showMsg(out,'This batch is completed — re-open it to change it.',false); return;
   }
-  const on=mcItems.filter(i=>String(i.order_id||'')===String(orderId)
-    &&(i.tile||i.sheet_item||i.design));
+  const on=mcItems.filter(i=>String(i.order_id||'')===String(orderId)&&mcLaid(i));
   if(!on.length){ showMsg(out,`Nothing on ${orderId} is on a sheet.`,false); return; }
   if(!confirm(`Take order ${orderId} off the sheets?\n\n`
     +`${on.length} line${on.length===1?'':'s'} — the page each was put on and the layout `
@@ -29117,7 +29226,7 @@ async function mcDeleteOrder(orderId){
   // printed — the same rule Clear follows
   let print=0,gift=0;
   lines.forEach(it=>{
-    if(!(it.tile||it.sheet_item||it.design)) return;
+    if(!mcLaid(it)) return;
     const sku=String(it.sku||'');
     const shared=mcItems.some(x=>x!==it&&String(x.sku||'')===sku
       &&String(x.order_id||'—')!==String(orderId)
@@ -29321,48 +29430,82 @@ function mcPlanTallySync(){
 // again after the rest are already in the folder — so every row carries the
 // button for its own file and nothing else is re-rendered or re-saved.
 // ---------- from the proof to the thing that made it ----------
-// Editing cannot happen in this window. The sheet on it was drawn on a builder
-// that was borrowed and is handed straight back — mcBorrowBuilder puts the
-// operator's own layout, designs and template back the moment the drawing ends,
-// so anything typed against that proof would be thrown away by the code that
-// keeps their work safe. So Edit goes to whatever actually owns the file and
-// opens it there, with the proof shut behind it.
+// Edit opens the builder on whatever made this file, and leaves it open there.
+// The proof itself cannot be typed on: it was drawn on a borrowed builder, and
+// mcBorrowBuilder puts the operator's own layout, designs and template back the
+// moment the drawing ends. So the file is laid out a second time, this time for
+// keeps — the same lines on the same template through the same code that drew
+// the proof — and then the builder is simply shown rather than handed back.
 //
-// A per-order file is one line, and the line's own window is where it is set.
-// A bundle is a sheet several lines share: the gift tag sheet is changed on the
-// Gift Tag screen, and the batch's print sheet from the SKU summary that built
-// it — which is what the print sheet's own window says when you open it.
+// A per-order file is one line: its own window opens with it, live, so Save to
+// line still writes where it always did, and the sheet behind the window is
+// that line's. The batch's print sheet is the whole set laid on its template.
+// The gift tag sheet has a builder of its own and is lent the batch's tags the
+// way the line window's "Open full builder" lends them, so what is changed
+// there comes back onto the lines on the way out.
+//
+// Nothing is shut until the builder is actually holding the thing. A failure
+// with the proof already closed is a message nobody sees, which reads exactly
+// like Edit doing nothing at all.
 function mcPlanEditWhat(e){
   if(!e) return 'Edit';
-  if(e.kind==='line') return `Open ${e.it&&e.it.order_id?e.it.order_id:'this line'} to change it`;
-  if(e.tile==='giftTag') return 'Open the Gift Tag screen — this sheet is built there';
-  if(e.tile==='sheetPrint') return 'Open the SKU summary — the batch print sheet is built there';
+  if(e.kind==='line') return `Open ${e.it&&e.it.order_id?e.it.order_id:'this line'} in the builder`;
+  if(e.tile==='giftTag') return 'Open this sheet in the gift tag builder';
+  if(e.tile==='sheetPrint') return 'Open this sheet in the builder';
   return 'Open where this file is built';
 }
 async function mcPlanEdit(i){
   const e=mcPlan[i]; if(!e||mcBusy||mcPlanDrawing) return;
+  const msg=document.getElementById('mcPlanMsg');
   const shut=()=>document.getElementById('mcPlanSheet').classList.remove('open');
-  if(e.kind==='line'&&e.it){
-    shut();
-    await mcWinOpen(e.it.id);
-    return;
-  }
-  if(e.tile==='giftTag'){
-    shut();
-    // onto the page this bundle was built on, not whichever was last open
-    const mode=e.meta&&e.meta.mode;
-    if(mode&&typeof gtSetMode==='function'&&mode!==gtMode) await gtSetMode(mode);
-    showScreen('tool-gift-tag');
-    return;
-  }
-  if(e.tile==='sheetPrint'){
-    shut();
-    const sum=document.getElementById('mcSummarySheet');
-    if(sum){ sum.classList.add('open'); if(typeof mcRenderSummary==='function') mcRenderSummary(); }
-    return;
-  }
-  showMsg(document.getElementById('mcPlanMsg'),
-    'That one has no window of its own to open.',false);
+  mcPlanDrawing=true; mcRenderPlan();
+  showMsg(msg,'Opening it in the builder…',true);
+  try{
+    if(e.kind==='line'&&e.it){
+      await mcWinOpen(e.it.id);
+      // it turned the trip down — a completed batch, or the tick left on —
+      // and said so itself where the finger was
+      if(mcWinItem!==e.it.id) return;
+      // Opening the window already put this line's layout into the builder.
+      // What is left is the gaps it does not fill, and waiting for the artwork
+      // — so the sheet is drawn before the screen is shown rather than a
+      // moment after it, which is what "Edit did nothing" looks like.
+      if(!mcWinLive&&e.it.design){ applyPrintState(e.it.design); mcWinLive=true; }
+      state.orderId=e.it.order_id||'';
+      state.paperType=e.it.paper_type||''; state.gsm=e.it.gsm||'';
+      const oid=document.getElementById('artOrderId');
+      if(oid) oid.value=state.orderId;
+      ppFillSelects();
+      await mcApplyArt(e.it);
+      shut();
+      showScreen('tool-custom');
+      return;
+    }
+    if(e.tile==='giftTag'){
+      // the page this bundle was built on, and that page's lines lent to it
+      await mcGtOpenFull((e.meta&&e.meta.mode)||'');
+      if(currentScreen!=='tool-gift-tag') return;    // it said why itself
+      shut();
+      return;
+    }
+    if(e.tile==='sheetPrint'){
+      // Laid for keeps rather than borrowed. mcLaidTemplate is cleared first
+      // because what is in `state` is the operator's own layout, whatever the
+      // combo happens to name — the template has to be loaded, not assumed.
+      mcLaidTemplate=null;
+      const {missing}=await mcPrintLay(e.set,e.meta&&e.meta.template);
+      mcFromBatch={summary:true};   // Back goes to the list this came off
+      shut();
+      showScreen('tool-custom');
+      if(missing&&missing.length) showMsg(exportMsgEl('front'),
+        `${missing.length} design${missing.length===1?'':'s'} on this sheet `
+        +'could not be found in the designs folder, so it is laid out without them.',false);
+      return;
+    }
+    showMsg(msg,'That one has no builder of its own to open.',false);
+  }catch(err){
+    showMsg(msg,'Could not open that one: '+((err&&err.message)||'unknown error'),false);
+  }finally{ mcPlanDrawing=false; if(mcPlan.length) mcRenderPlan(); }
 }
 // The ticked ones, in the order the plan lists them. One folder prompt and one
 // borrow of the builder for the lot rather than one of each per file — which is
@@ -30075,7 +30218,15 @@ async function mcSetSkuQty(sku,want){
   }
   let failed=0;
   for(const s of share){
-    const si={...(s.it.sheet_item||{}),qty:s.q};
+    // What is over the order is written down beside what goes on the sheet.
+    // Without it the figure typed here was saved and then read back through
+    // mcQty, which asks `extra_qty` first — so a line that had ever carried one
+    // reported the old total, the box redrew at the old number, and typing a
+    // bigger figure looked like a box that refuses to be typed in. Raising the
+    // sheet's figure is raising the run; lowering it is printing short, and the
+    // order is still the order, so that stays at nought.
+    const si={...(s.it.sheet_item||{}),qty:s.q,
+      extra_qty:Math.max(0,s.q-(Math.round(Number(s.it.qty))||0))};
     const was=s.it.sheet_item;
     s.it.sheet_item=si;
     if(!await mcSave(s.it,{sheet_item:si})){ s.it.sheet_item=was; failed++; }
@@ -30083,7 +30234,8 @@ async function mcSetSkuQty(sku,want){
   mcRenderSummary(); mcRenderItems();
   if(failed) showMsg(out,`${failed} of ${share.length} lines would not save — try again.`,false);
   else showMsg(out,`✓ ${escapeHtml(sku)} set to ${target} on the sheet`
-    +(target<ordered?` — ${ordered-target} short of the ${ordered} ordered.`:'.'),true);
+    +(target<ordered?` — ${ordered-target} short of the ${ordered} ordered.`
+     :target>ordered?` — ${target-ordered} over the ${ordered} ordered.`:'.'),true);
 }
 // The three buttons say how many they would act on, and go quiet where that
 // is none: "Add all shown" against a search that has left nothing addable is
@@ -30428,13 +30580,56 @@ async function mcAddSkusToSheet(rows,extra){
   // and the batch's own lines are told, the same as the tag side: the sheet is
   // built here, but Download All reads the lines
   await mcMarkPrintLines(usable,(tpl&&tpl.id)||selectedTemplate||'');
-  document.getElementById('mcSummarySheet').classList.remove('open');
   const note=[tplName?`on ${tplName}`:'',`${added} added`,updated?`${updated} updated`:'',
     missing.length?`${missing.length} without a PNG: ${missing.slice(0,4).join(', ')}`
       +(missing.length>4?'…':''):'',extra||'']
     .filter(Boolean).join(' · ');
-  mcOpenMade(note,!missing.length&&!extra);
+  const ok=!missing.length&&!extra;
+  // Where this came off the summary, the summary stays: the rows redraw as
+  // "on the print sheet" and the sheet itself appears beside them, so the next
+  // SKU is one tap away instead of a pop-up to shut and a list to reopen.
+  if(mcSummaryOpen()){
+    mcRenderSummary();
+    mcSumStageDraw('print',note);
+    showMsg(out,note,ok);
+  }else mcOpenMade(note,ok);
 }
+
+// ---------- the sheet, beside the list that is building it ----------
+// Whether the summary is the thing on screen. Add behaves differently when it
+// is: the sheet is drawn in the margin of the list rather than in a pop-up
+// that has to be shut before the next SKU can be added.
+const mcSummaryOpen=()=>
+  document.getElementById('mcSummarySheet').classList.contains('open');
+let mcSumStageMode='print';
+// note is what the Add did — added, updated, the ones with no artwork — said
+// on the sheet it produced rather than in a banner that fades.
+function mcSumStageDraw(mode,note){
+  const box=document.getElementById('mcSumStage');
+  const c=document.getElementById('mcSumCanvas');
+  if(!box||!c) return;
+  if(mode) mcSumStageMode=mode;
+  const gift=mcSumStageMode==='gift';
+  try{
+    const n=gift?gtPageCount():sheetCount();
+    const total=gift?gtQueue().length:designTotal();
+    if(!n||!total){ box.style.display='none'; return; }
+    box.style.display='';
+    // drawn well past the size the box shows and let down to fit by the CSS,
+    // the same way the pop-up does it — a sheet read at a thumbnail's size
+    // says nothing about the card on it
+    const w=Math.max(200,(box.clientWidth||280)-18);
+    renderSideOrTag(gift,c,Math.max(420,w*2.4));
+    const per=gift?gtSheet.slots.length:state.placeholders.length;
+    document.getElementById('mcSumStageLbl').textContent=
+      `${total} ${gift?'tag':'card'}${total===1?'':'s'} · ${per} per sheet · `
+      +`${n} sheet${n===1?'':'s'}`+(note?` · ${note}`:'');
+  }catch(e){ box.style.display='none'; }
+}
+const renderSideOrTag=(gift,c,dim)=>
+  gift?gtRenderPage(c,0,dim,false):renderSide('front',c,dim,{page:0});
+document.getElementById('mcSumStageBig').addEventListener('click',()=>
+  mcOpenMade('',true,mcSumStageMode==='gift'?'gift':'print'));
 
 // ---------- the sheet those SKUs made ----------
 // Its own small pop-up rather than the full-screen enlarge: this is a look at
@@ -31378,16 +31573,33 @@ async function mcMarkPrintLines(rows,template){
 // saying it had something to export that is no longer laid out anywhere. Only
 // the marks the summary itself made are cleared: a line built by hand in its
 // own window is that operator's work.
+// Takes one line off whatever sheet it was on. The tile and the design go,
+// because between them they are what puts the line on a sheet and what
+// Download All reads — but the words typed into it are kept. A name written
+// onto a tag is somebody's work, and taking the tag off the sheet is not a
+// decision to throw that away; mcMarkLinesOnSheet builds onto whatever is left
+// here, so putting the line back brings its words with it.
+//
+// Keeping the words used to mean skipping the line altogether, which took the
+// tag off the screen and left it on the sheet Download All builds: gone from
+// the gift tag order, still marked on the line, still in the PDF.
+async function mcUnmarkLine(it){
+  if(!it||!mcBatch||mcBatch.status!=='open') return false;
+  if(it.tile!=='sheetPrint'&&it.tile!=='giftTag') return false;
+  const was=it.sheet_item||{};
+  const vals=was.vals||{}, extra=was.extra||[];
+  // only the typing survives — anything that says "this is on a sheet" goes
+  const kept=(Object.keys(vals).length||extra.length)
+    ? {vals,...(extra.length?{extra}:{})} : null;
+  it.tile=null; it.sheet_item=kept;
+  await mcSave(it,{tile:null,sheet_item:kept,...mcDonePatch(it,false)});
+  return true;
+}
 async function mcUnmarkLines(sku){
   if(!mcBatch||mcBatch.status!=='open') return 0;
   let n=0;
-  for(const it of mcItems.filter(i=>String(i.sku||'')===String(sku))){
-    if(it.tile!=='sheetPrint'&&it.tile!=='giftTag') continue;
-    if(it.tile==='giftTag'&&it.sheet_item&&Object.keys(it.sheet_item.vals||{}).length) continue;
-    it.tile=null; it.sheet_item=null;
-    await mcSave(it,{tile:null,sheet_item:null,...mcDonePatch(it,false)});
-    n++;
-  }
+  for(const it of mcItems.filter(i=>String(i.sku||'')===String(sku)))
+    if(await mcUnmarkLine(it)) n++;
   if(n){ mcRenderItems(); mcSyncBatchButtons(); }
   return n;
 }
@@ -31479,9 +31691,14 @@ async function mcAddSkusToGiftTag(rows,opts){
   const note=[per.join(' · '),added?`${added} added`:'',updated?`${updated} updated`:'',
     missing.length?`${missing.length} with no design of that name: ${missing.slice(0,3).join(', ')}`
       +(missing.length>3?'…':''):'',o.extra||''].filter(Boolean).join(' · ');
-  // the sheet it made, in the pop-up — the same as the print side, rather than
-  // being dropped into the builder with no sight of what was done
-  mcOpenMade(note,!missing.length&&!o.extra,'gift');
+  // the sheet it made — beside the summary while that is what is on screen,
+  // and in the pop-up when it is not, the same as the print side
+  const ok=!missing.length&&!o.extra;
+  if(mcSummaryOpen()){
+    mcRenderSummary();
+    mcSumStageDraw('gift',note);
+    showMsg(out,note,ok);
+  }else mcOpenMade(note,ok,'gift');
   return {added,updated,missing,per};
 }
 // ---------- Magic Create: the folder copies are taken FROM ----------
@@ -31849,6 +32066,9 @@ async function mcOpenSummary(){
   document.querySelectorAll('#mcSummaryFilter [data-mc-sum-filter]')
     .forEach(x=>x.classList.toggle('on',x.dataset.mcSumFilter==='all'));
   document.getElementById('mcSummaryMsg').innerHTML='';
+  // the sheet in the margin is what this visit has built; a fresh look starts
+  // without one rather than showing whatever was last drawn
+  document.getElementById('mcSumStage').style.display='none';
   document.getElementById('mcSummarySheet').classList.add('open');
   mcRenderSummary();
   // the copy-to folder is a handle in the database until something asks for it,
@@ -32091,6 +32311,8 @@ async function mcSummaryRemove(on,which){
   if(p){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
   if(g&&typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
   mcRenderSummary();
+  // and the sheet beside the list, which is a SKU shorter than it was
+  if(p||g) mcSumStageDraw(p?'print':'gift');
   showMsg(out,[p?`${p} off the print sheet`:'',g?`${g} off the gift tag sheet`:'']
     .filter(Boolean).join(' · '),true);
 }
@@ -32264,7 +32486,7 @@ async function mcWinOpen(id){
   // line B and nothing would look wrong. One line is live; switching commits.
   if(mcWinItem&&mcWinItem!==id) await mcCommit();
   if(!mcHomeState) mcHomeState={meta:mcSnapshot(),orderId:state.orderId,
-    paperType:state.paperType,gsm:state.gsm};
+    paperType:state.paperType,gsm:state.gsm,tplFolder:ldTplFolder};
   mcWinItem=id;
   mcWinMin=false;                // Create always opens the window itself, not the bubble
   mcWinEl.classList.add('open');
@@ -32296,6 +32518,9 @@ function mcWinClose(){
       state.paperType=mcHomeState.paperType||''; state.gsm=mcHomeState.gsm||'';
       const oid=document.getElementById('artOrderId');
       if(oid) oid.value=state.orderId;
+      // the design picker was scoped to the batch's template; it goes back to
+      // the folder of whatever the operator had loaded
+      if(typeof mcHomeState.tplFolder==='string') ldSetTemplateFolder(mcHomeState.tplFolder);
       ppFillSelects();
       mcHomeState=null;
     }
@@ -32559,16 +32784,40 @@ function mcCustomBody(it){
 // The layout and the artwork a line's own name asks for. Same rules the SKU
 // summary uses, so a line worked here and a line added from the summary come
 // out on the same template with the same picture on it.
+// Magic Create puts a template's settings into the builder without touching
+// the name box — deliberately, so a batch's layout is never saved over the
+// template whose name is sitting there. But the design picker's folder follows
+// the name box, so it went on pointing at whatever template was last loaded by
+// hand. A <SKU>.png filed in two folders then resolved to the wrong one: the
+// mini card's line looked in the name card's folder, found a name card, and
+// printed that. The folder is the template's, so it is said here outright.
+function mcScopePickerTo(tpl){
+  if(typeof ldSetTemplateFolder!=='function') return;
+  const list=tpl&&Array.isArray(tpl.folders)?tpl.folders:[];
+  ldSetTemplateFolder(list[0]||'');
+}
 async function mcAutoLayoutFor(it,sel){
   const msg=document.getElementById('mcWinMsg');
   const names=mcNamesOf(it);
-  // the folder is read off the PNG match, so the folder's template is found
-  // even where the template is not named after the SKU itself
+  // Routing is asked about the line — its SKU, and the variation its lines
+  // carry — before anything is read off a file name. Asked with whichever of
+  // its names happened to match a PNG, a rule written against the SKU never
+  // fired, and the layout came out of a folder name instead.
+  const asked={sku:it.sku||names[0]||'',name:it.design_name||it.product||''};
+  const routed=mcRouteTemplate(asked);
+  // and the artwork is looked for in that layout's own folder, which is what
+  // settles a name that two folders both hold. The folder before the PNG, not
+  // after it: the other way round is the picker deciding which layout to print
+  // on, off whichever folder it happened to reach first.
+  if(routed) mcScopePickerTo(routed);
   let pick=null,sku='';
   for(const n of names){ const p=designFileForSku(n); if(p){ pick=p; sku=n; break; } }
-  const tpl=mcTemplateFor([{sku:sku||names[0]||''}]);
+  // failing a route, the folder the PNG was found in still names a template —
+  // which is how a shop that has never written a rule is served at all
+  const tpl=routed||mcTemplateFor([{sku:sku||names[0]||'',name:asked.name}]);
   if(!tpl&&!pick) return;
   if(tpl){
+    if(!routed) mcScopePickerTo(tpl);
     const {data,error}=await sb.from('templates').select('data').eq('id',tpl.id).single();
     if(!error&&data){
       applyPrintState(data.data);
@@ -32591,8 +32840,7 @@ async function mcAutoLayoutFor(it,sel){
     mcWinLive=true;
   }
   if(msg) showMsg(msg,[tpl?`Layout: ${tpl.name}`:'',pick?`Artwork: ${pick.name}`:'']
-    .filter(Boolean).join(' · ')+(mcRouteTemplate({sku:sku||names[0]||''})
-      ?' — from Routing.':' — matched by name.'),true);
+    .filter(Boolean).join(' · ')+(routed?' — from Routing.':' — matched by name.'),true);
   if(typeof mcLinePreview==='function') mcLinePreview();
 }
 // Open full builder leaves the panel where it is, over the screen being
@@ -32654,6 +32902,7 @@ function mcCustomWire(it){
     const {data,error}=await sb.from('templates').select('data').eq('id',sel.value).single();
     if(error||!data) return;
     applyPrintState(data.data);
+    mcScopePickerTo(mcTemplateById(sel.value));   // and the designs it prints
     state.orderId=it.order_id;
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
     ppFillSelects();
@@ -32678,6 +32927,7 @@ function mcCustomWire(it){
     }
     if(sel&&mcWinTplId&&sel.querySelector(`option[value="${mcWinTplId}"]`))
       sel.value=mcWinTplId;
+    if(mcWinTplId) mcScopePickerTo(mcTemplateById(mcWinTplId));
     mcApplyArt(it).then(mcLinePreview);
   }else{
     // Nothing saved on it yet, and the line's own name already says what it
@@ -33325,7 +33575,20 @@ async function mcGtReturn(){
       page:(it.sheet_item&&it.sheet_item.page)||home.page||gtMode};
     await mcSave(it,{sheet_item:it.sheet_item});
   }
+  // And the ones that are not in the list any more. A tag taken off with the ×
+  // over there only left the gift tag order; the mark on the batch line stayed,
+  // and Download All reads the mark — so the tag was gone from the screen and
+  // still on the exported sheet. The lines lent out are written down for
+  // exactly this, so whatever did not come back comes off the sheet here.
+  const still=new Set(edited.map(l=>String(l.id||''))
+    .filter(s=>s.startsWith('mc-')).map(s=>s.slice(3)));
+  for(const id of (home.ids||[])){
+    if(still.has(String(id))) continue;
+    const it=mcItem(id);
+    if(it) await mcUnmarkLine(it);
+  }
   if(currentScreen==='magic-batch') mcRenderItems();
+  mcSyncBatchButtons();
   if(mcWinItem) mcWinRender();
 }
 // ==================== export ====================
@@ -33383,7 +33646,7 @@ async function mcBorrowBuilder(fn){
     // and so is the template they had picked. Without this a batch that loaded
     // its own template left it selected: the next look at the picker named the
     // batch's layout, and loading "the same one" quietly did nothing.
-    template:selectedTemplate,
+    template:selectedTemplate,tplFolder:ldTplFolder,
     search:(document.getElementById('templateSearch')||{}).value||''};
   try{ return await fn(); }
   finally{
@@ -33394,6 +33657,7 @@ async function mcBorrowBuilder(fn){
     state.orderId=keep.orderId||'';
     state.paperType=keep.paperType||''; state.gsm=keep.gsm||'';
     setSelectedTemplate(keep.template);
+    ldSetTemplateFolder(keep.tplFolder||'');
     const box=document.getElementById('templateSearch');
     if(box) box.value=keep.search;
     // the geometry just put back is the operator's, whatever the combo says
