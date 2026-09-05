@@ -2355,6 +2355,13 @@ body.mc-docked .mc-bubble{display:none !important;}
      but which sheet this line goes on. */
   body.mc-split #mcWin .mc-gt-prev,body.mc-split #mcWin #mcGtWords,
   body.mc-split #mcWin #mcLineStage{display:none !important;}
+  /* The design and the Save were on both sides of the screen, doing the same
+     thing to the same line, and there is no reading of that which is not
+     confusing. The sheet keeps them — it is where the tag is — and the panel
+     keeps the two questions the sheet cannot answer: which page builds this
+     line, and which run it goes on. */
+  body.mc-split #mcWin #mcGtCombo,body.mc-split #mcWin #mcGtSaveBtn,
+  body.mc-split #mcWin #mcSaveLineBtn{display:none !important;}
   .mc-split-only{display:none;}
   body.mc-split .mc-split-only{display:block;}
   /* neither column slides: they are both on screen at once, and a screen
@@ -24720,11 +24727,19 @@ document.getElementById('gtPltSaveBtn').addEventListener('click',()=>{
 // sheet are the same — but they are two runs through the machine, so they
 // are two files, and the name is what tells them apart on the drive.
 let gtFinish='Matte';
-document.getElementById('gtFinishSeg').addEventListener('click',e=>{
+document.getElementById('gtFinishSeg').addEventListener('click',async e=>{
   const b=e.target.closest('[data-gt-finish]'); if(!b) return;
+  const was=gtFinish;
   gtFinish=b.dataset.gtFinish;
   document.querySelectorAll('#gtFinishSeg [data-gt-finish]')
     .forEach(x=>x.classList.toggle('on',x.dataset.gtFinish===gtFinish));
+  // A batch has lent this sheet one run's tags. Asking for the other run is
+  // asking for the other sheet — not for these tags on different paper, which
+  // is what it used to do: the same forty tags with a gloss name on the file.
+  if(typeof mcGtHome!=='undefined'&&mcGtHome&&was!==gtFinish){
+    await mcGtOpenFull(mcGtHome.page,gtFinish).catch(()=>{});
+    mcGtSetFinish(mcGtHome?mcGtHome.finish:gtFinish);
+  }
 });
 document.getElementById('gtExportBtn').addEventListener('click',async()=>{
   const out=document.getElementById('gtExportMsg');
@@ -33747,11 +33762,13 @@ function mcGiftBody(it){
       </div>
     </div>
     <div id="mcGtWords"></div>
-    <p class="hint mc-split-only" style="margin:10px 0 0;">The tag itself, its
-      words and their fonts are on the sheet beside this — tap the tag there to
-      work on that line, drag the words to move them, then <b>Save to the
-      batch</b>. What is set here is what the sheet cannot say: which page
-      builds this line, how many over the order, and which finish it goes on.</p>
+    <p class="hint mc-split-only" style="margin:10px 0 0;">The design, the tag,
+      its words and their fonts are all on the sheet beside this — pick the design
+      on that line, drag the words to move them, then <b>Save to the batch</b>.
+      What is set here is what the sheet cannot say: which page builds this line,
+      how many over the order it prints, and which run it goes on. Matte and gloss
+      are two runs and two PDFs, so changing the finish moves this line onto that
+      run's sheet — and the sheet beside this changes with it.</p>
     <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
       <button class="btn-outline" id="mcGtFullBtn" style="flex:1 1 150px;">Open full builder</button>
       <button class="btn-primary" id="mcGtSaveBtn" style="flex:1 1 150px;">Save to line</button>
@@ -33777,7 +33794,6 @@ async function mcGtMoveToPage(it,mode,id){
   mcRepaintRow(it);
   // the sheet beside it is the other page's now, and it is holding the other
   // page's tags — so it is lent again rather than left showing the old page
-  if(mcGtHome&&mcGtHome.page!==mode) await mcGtReturn();
   if(mcWinItem===it.id) await mcSplitFollow(it);
 }
 // the sheet_item, shaped as the gift tag tool's own order line — so gtVal and
@@ -34036,10 +34052,23 @@ function mcGiftWire(it){
   // typed, which is the whole reason for showing it here rather than a name
   words.addEventListener('input',drawPrev);
   words.addEventListener('change',drawPrev);
-  document.getElementById('mcGtFinish').addEventListener('click',e=>{
+  document.getElementById('mcGtFinish').addEventListener('click',async e=>{
     const b=e.target.closest('[data-mc-fin]'); if(!b) return;
+    const fin=b.dataset.mcFin;
+    if(fin===mcGtFinishOf(it)) return;
     document.querySelectorAll('#mcGtFinish [data-mc-fin]')
       .forEach(x=>x.classList.toggle('on',x===b));
+    // Matte and gloss are two runs through the machine and two PDFs, so this
+    // is less a setting on the line than which sheet the line goes on. It is
+    // written down here and the sheet beside it changed to match, rather than
+    // waiting for a Save with the tag sitting on the wrong run in between.
+    const was=it.sheet_item;
+    const si={...(was||{}),finish:fin};
+    it.sheet_item=si;
+    if(!await mcSave(it,{sheet_item:si})){ it.sheet_item=was; return; }
+    mcRepaintRow(it);
+    if(mcSplitFits()) await mcSplitFollow(it);
+    else if(mcGtHome) await mcGtOpenFull(si.page||mcLinePage(it),fin);
   });
 
   // everything typed into the panel, back in the shape the sheet is drawn from
@@ -34191,7 +34220,12 @@ document.getElementById('mcBackChip').addEventListener('click',async()=>{
 // on the way out — so a sheet being built on the Gift Tag screen is not lost
 // to a batch borrowing it, and edits made there land on the batch's rows.
 let mcGtHome=null;
-async function mcGtOpenFull(page){
+// Which sheet a line goes onto, said the way the export says it: the page it
+// is built on and the stock it is run on. Matte and gloss are two runs through
+// the machine and come out as two PDFs, so they are two sheets — and a sheet
+// that shows both is not a picture of anything that will ever be printed.
+const mcGtFinishOf=it=>((it&&it.sheet_item&&it.sheet_item.finish)||'Matte');
+async function mcGtOpenFull(page,finish){
   const msg=document.getElementById('mcWinMsg')||document.getElementById('mcBatchMsg');
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   // The page this line is on, and that page's lines alone. Lending the whole
@@ -34200,25 +34234,30 @@ async function mcGtOpenFull(page){
   // boxes, and words typed against a line that was never going to be saved.
   const here=mcItem(mcWinItem);
   const want=page||mcLinePage(here)||gtMode;
+  const fin=finish||mcGtFinishOf(here);
   if(want!==gtMode&&typeof gtSetMode==='function') await gtSetMode(want);
   const lines=mcPool().filter(x=>x.tile==='giftTag'&&x.sheet_item&&x.sheet_item.designId
-    &&(mcLinePage(x)||want)===want);
+    &&(mcLinePage(x)||want)===want&&mcGtFinishOf(x)===fin);
   // The line being worked has not been given a design yet — which is the whole
   // reason anybody is on this screen. It goes onto the lent sheet blank, so the
   // design is chosen on the screen that actually shows the designs and comes
   // back onto the line with the rest of them. Without this the sheet was lent
   // everything except the line you had just opened.
   if(here&&here.tile==='giftTag'&&!lines.some(x=>x.id===here.id)
-    &&(mcLinePage(here)||want)===want) lines.push(here);
+    &&(mcLinePage(here)||want)===want&&mcGtFinishOf(here)===fin) lines.push(here);
   if(!lines.length){
-    if(msg) showMsg(msg,`Nothing is on the ${mcGtPage(want).name} sheet yet.`,false);
+    if(msg) showMsg(msg,`Nothing is on the ${mcGtPage(want).name} ${
+      escapeHtml(fin.toLowerCase())} sheet yet.`,false);
     return;
   }
   // A sheet already lent is added to rather than built again. Saving a design
   // to the line brings us back through here, and rebuilding the order from the
   // rows would throw away every word dragged and every box resized on the sheet
   // since it was lent — work that has not been written back yet by definition.
-  if(mcGtHome&&mcGtHome.page===want){
+  // The next order worked lands on the sheet already open where it belongs on
+  // it, which is what "same finish, same page" means, and starts a sheet of its
+  // own where it does not.
+  if(mcGtHome&&mcGtHome.page===want&&mcGtHome.finish===fin){
     const on=new Map(gtOrder.map(l=>[String(l.id||''),l]));
     for(const x of lines){
       const key='mc-'+x.id, had=on.get(key);
@@ -34233,12 +34272,24 @@ async function mcGtOpenFull(page){
       }
     }
   }else{
-    if(!mcGtHome) mcGtHome={order:gtOrder,ids:lines.map(l=>l.id),page:want};
+    // a different sheet: whatever is on this one goes back onto its lines
+    // before it is put down, or a morning's dragging is lost changing stock
+    if(mcGtHome) await mcGtReturn();
+    mcGtHome={order:gtOrder,ids:lines.map(l=>l.id),page:want,finish:fin};
     gtOrder=lines.map(mcGtLine);
   }
+  // and the sheet says which run it is, because that is what names its PDF
+  mcGtSetFinish(fin);
   if(typeof gtRenderOrder==='function') gtRenderOrder();
   if(typeof gtDraw==='function') gtDraw();
   showScreen('tool-gift-tag');
+}
+// The stock the sheet on screen is being run on, and the segment that says so.
+function mcGtSetFinish(fin){
+  if(typeof gtFinish==='undefined') return;
+  gtFinish=(fin==='Gloss')?'Gloss':'Matte';
+  document.querySelectorAll('#gtFinishSeg [data-gt-finish]')
+    .forEach(x=>x.classList.toggle('on',x.dataset.gtFinish===gtFinish));
 }
 // A design chosen on the line's panel, onto the row that line was lent on the
 // sheet beside it. Nothing is written to the batch here: the row on the sheet
