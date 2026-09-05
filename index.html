@@ -29514,20 +29514,59 @@ async function mcClearOrder(orderId){
     +'it was given.\n\nThe order stays on the batch, and any artwork uploaded to a line '
     +'is kept.')) return;
   let print=0,gift=0;
+  // The tags this order was lent onto the gift tag sheet, taken off by line.
+  // Going by SKU could not do it: a lent row carries no SKU, so it was found by
+  // its design instead — which is somebody else's order as often as this one —
+  // and where two orders wanted the same card it was left alone altogether. The
+  // row is this line's; the id says so, and nothing else has to be guessed.
+  const ids=new Set(on.map(i=>'mc-'+String(i.id)));
+  const culled=new Set();
+  const cull=list=>list.filter(l=>{
+    const k=String(l.id||'');
+    if(!ids.has(k)) return true;
+    culled.add(k); return false;
+  });
+  if(typeof gtOrder!=='undefined'){
+    const was=gtOrder.length;
+    gtOrder=cull(gtOrder);
+    if(gtOrder.length!==was) gift++;
+  }
+  if(typeof gtOrders!=='undefined'&&gtOrders)
+    Object.keys(gtOrders).forEach(m=>{ gtOrders[m]=cull(gtOrders[m]||[]); });
+  // and the sheet stops expecting them back
+  if(mcGtHome&&Array.isArray(mcGtHome.ids))
+    mcGtHome.ids=mcGtHome.ids.filter(id=>!ids.has('mc-'+String(id)));
   for(const it of on){
-    // off the sheet being looked at as well — but only where no other order is
-    // still asking for that same card
     const sku=String(it.sku||'');
-    const shared=mcItems.some(x=>x!==it&&String(x.sku||'')===sku
-      &&String(x.order_id||'')!==String(orderId)
-      &&(x.tile==='sheetPrint'||x.tile==='giftTag'));
-    if(!shared){
-      const w=mcRemoveSku(sku);
-      if(w==='print') print++; else if(w==='gift') gift++;
+    if(!culled.has('mc-'+String(it.id))){
+      // Two orders of one card are one line on the print sheet, at the sum of
+      // the two — so clearing one takes its share off rather than the whole
+      // line, which used to leave the other order's cards unprinted or this
+      // order's still on the sheet depending on which way the guard fell.
+      const at=mcWhereIsSku(sku);
+      if(at&&at.on==='print'&&at.line){
+        const mine=Math.max(1,Math.round(
+          Number((it.sheet_item||{}).qty||mcQty(it))||1));
+        at.line.qty-=mine;
+        if(at.line.qty<=0) state.designs=state.designs.filter(d=>d.id!==at.line.id);
+        print++;
+      }else{
+        const shared=mcItems.some(x=>x!==it&&String(x.sku||'')===sku
+          &&String(x.order_id||'')!==String(orderId)
+          &&(x.tile==='sheetPrint'||x.tile==='giftTag'));
+        if(!shared){
+          const w=mcRemoveSku(sku);
+          if(w==='print') print++; else if(w==='gift') gift++;
+        }
+      }
     }
     it.tile=null; it.sheet_item=null; it.design=null;
     await mcSave(it,{tile:null,sheet_item:null,design:null,...mcDonePatch(it,false)});
   }
+  // a line open on the builder has just had its layout taken away, and the
+  // sheet beside it should not go on holding the tag either
+  if(mcWinItem&&on.some(i=>i.id===mcWinItem)&&typeof mcBuilderSaveSync==='function')
+    mcBuilderSaveSync();
   if(print){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
   if(gift&&typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
   mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
