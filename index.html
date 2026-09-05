@@ -2008,6 +2008,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   border:1px solid var(--border);border-radius:6px;}
 .mc-sum-stage-bar{display:flex;align-items:center;justify-content:space-between;
   gap:8px;flex-wrap:wrap;margin-top:6px;}
+.mc-sum-pager{display:flex;align-items:center;gap:6px;flex:0 0 auto;}
+.sheet .mc-sum-pager button{width:30px;padding:0;}
+.sheet .mc-sum-pager button:disabled{opacity:.35;}
 /* the sheet gives every button inside it a full-width 50px row; this one is a
    chip under a picture */
 .sheet .mc-sum-stage-bar button{width:auto;height:30px;min-height:30px;
@@ -5324,6 +5327,16 @@ body.mc-docked .mc-bubble{display:none !important;}
         <canvas id="mcSumCanvas"></canvas>
         <div class="mc-sum-stage-bar">
           <span class="hint" id="mcSumStageLbl" style="margin:0;"></span>
+          <!-- A run that fills more than one sheet was drawn here as its first
+               sheet and nothing else: the tally said "3 sheets" and there was
+               no way to look at the other two without leaving the list. -->
+          <span class="mc-sum-pager" id="mcSumPager" style="display:none;">
+            <button type="button" class="btn-outline btn-sm" id="mcSumPrev"
+                    aria-label="Previous sheet">‹</button>
+            <span class="hint" id="mcSumPageLbl" style="margin:0;"></span>
+            <button type="button" class="btn-outline btn-sm" id="mcSumNext"
+                    aria-label="Next sheet">›</button>
+          </span>
           <button type="button" class="btn-outline btn-sm" id="mcSumStageBig">⤢ The whole sheet</button>
         </div>
       </div>
@@ -30909,20 +30922,46 @@ function mcTemplateFor(rows){
 // leaves the redrawing to the caller — a hundred of them in a row should
 // repaint the sheet once, not a hundred times.
 function mcRemoveSku(sku){
-  const at=mcWhereIsSku(sku); if(!at) return '';
-  if(at.on==='gift'){
-    // the page it is on may not be the page on screen, and taking it off the
-    // one that is would leave it exactly where it was
-    if(at.line){
-      if(at.mode===gtMode) gtOrder=gtOrder.filter(l=>l.id!==at.line.id);
-      else gtOrders[at.mode]=(gtOrders[at.mode]||[]).filter(l=>l.id!==at.line.id);
+  const key=String(sku||'');
+  // Every row this SKU put on a sheet, not the first one found. A SKU ordered
+  // by three people is three tags on the gift tag sheet, and taking "it" off
+  // left two of them there — with the batch's lines already unmarked, so
+  // nothing on the screen said they were still going to be printed.
+  const ids=new Set(mcPool().filter(x=>String(x.sku||'')===key)
+    .map(x=>'mc-'+String(x.id)));
+  const mine=l=>ids.has(String(l.id||''))||String(l.sku||'')===key;
+  let hit='';
+  const sweep=list=>{
+    const was=list.length;
+    const out=list.filter(l=>!mine(l));
+    if(out.length!==was) hit='gift';
+    return out;
+  };
+  if(typeof gtOrder!=='undefined') gtOrder=sweep(gtOrder);
+  // the page it is on may not be the page on screen, and taking it off the one
+  // that is would leave it exactly where it was
+  if(typeof gtOrders!=='undefined'&&gtOrders)
+    Object.keys(gtOrders).forEach(m=>{ gtOrders[m]=sweep(gtOrders[m]||[]); });
+  // and the sheet stops expecting back what is no longer on it
+  if(mcGtHome&&Array.isArray(mcGtHome.ids))
+    mcGtHome.ids=mcGtHome.ids.filter(id=>!ids.has('mc-'+String(id)));
+  // failing all that, the row that carries the design of this name — a tag put
+  // on the sheet by hand knows its design and nothing about any SKU
+  if(!hit){
+    const g=mcGiftLineForSku(key);
+    if(g&&g.line){
+      if(g.mode===gtMode) gtOrder=gtOrder.filter(l=>l.id!==g.line.id);
+      else gtOrders[g.mode]=(gtOrders[g.mode]||[]).filter(l=>l.id!==g.line.id);
+      hit='gift';
     }
-    return 'gift';
   }
+  const p=mcLineForSku(key);
+  if(p){ state.designs=state.designs.filter(d=>d.id!==p.id); hit=hit||'print'; }
+  if(hit) return hit;
   // nothing in the builder to take off where the sheet was only ever a mark on
   // the lines — the caller clears that either way
-  if(at.line) state.designs=state.designs.filter(d=>d.id!==at.line.id);
-  return 'print';
+  const at=mcWhereIsSku(key);
+  return at?at.on:'';
 }
 // Puts SKUs onto the print sheet at the quantities the batch adds up to, then
 // shows the sheet they made. A SKU already on the sheet is set to the batch's
@@ -31025,6 +31064,8 @@ const mcSummaryOpen=()=>
 let mcSumStageMode='print';
 // note is what the Add did — added, updated, the ones with no artwork — said
 // on the sheet it produced rather than in a banner that fades.
+// which of that run's sheets is being looked at
+let mcSumPage=0;
 function mcSumStageDraw(mode,note){
   const box=document.getElementById('mcSumStage');
   const c=document.getElementById('mcSumCanvas');
@@ -31036,21 +31077,51 @@ function mcSumStageDraw(mode,note){
     const total=gift?gtQueue().length:designTotal();
     if(!n||!total){ box.style.display='none'; return; }
     box.style.display='';
+    // a sheet that was on screen and is not there any more — the run shrank,
+    // or a SKU came off it — leaves you on the last one there is
+    if(mcSumPage>=n) mcSumPage=n-1;
+    if(mcSumPage<0) mcSumPage=0;
     // drawn well past the size the box shows and let down to fit by the CSS,
     // the same way the pop-up does it — a sheet read at a thumbnail's size
     // says nothing about the card on it
     const w=Math.max(200,(box.clientWidth||280)-18);
-    renderSideOrTag(gift,c,Math.max(420,w*2.4));
+    renderSideOrTag(gift,c,Math.max(420,w*2.4),mcSumPage);
     const per=gift?gtSheet.slots.length:state.placeholders.length;
     document.getElementById('mcSumStageLbl').textContent=
       `${total} ${gift?'tag':'card'}${total===1?'':'s'} · ${per} per sheet · `
       +`${n} sheet${n===1?'':'s'}`+(note?` · ${note}`:'');
+    const pager=document.getElementById('mcSumPager');
+    if(pager){
+      pager.style.display=n>1?'':'none';
+      document.getElementById('mcSumPageLbl').textContent=`${mcSumPage+1} / ${n}`;
+      document.getElementById('mcSumPrev').disabled=mcSumPage<=0;
+      document.getElementById('mcSumNext').disabled=mcSumPage>=n-1;
+    }
   }catch(e){ box.style.display='none'; }
 }
-const renderSideOrTag=(gift,c,dim)=>
-  gift?gtRenderPage(c,0,dim,false):renderSide('front',c,dim,{page:0});
-document.getElementById('mcSumStageBig').addEventListener('click',()=>
-  mcOpenMade('',true,mcSumStageMode==='gift'?'gift':'print'));
+const renderSideOrTag=(gift,c,dim,page)=>{
+  const at=Math.max(0,Number(page)||0);
+  return gift?gtRenderPage(c,at,dim,false):renderSide('front',c,dim,{page:at});
+};
+// Turning the page here turns the tool's page too, on the tag side: a sheet cut
+// to another shape is another sheet, and it has to be put on the machine before
+// it can be drawn — the same step the arrows on the Gift Tag screen take.
+async function mcSumStagePage(step){
+  const gift=mcSumStageMode==='gift';
+  const n=gift?gtPageCount():sheetCount();
+  const at=Math.max(0,Math.min(n-1,mcSumPage+step));
+  if(at===mcSumPage) return;
+  mcSumPage=at;
+  if(gift&&typeof gtGoPage==='function') await gtGoPage(at);
+  mcSumStageDraw();
+}
+document.getElementById('mcSumPrev').addEventListener('click',()=>mcSumStagePage(-1));
+document.getElementById('mcSumNext').addEventListener('click',()=>mcSumStagePage(1));
+document.getElementById('mcSumStageBig').addEventListener('click',()=>{
+  mcOpenMade('',true,mcSumStageMode==='gift'?'gift':'print');
+  // opened on the sheet that was being looked at, not back at the first one
+  if(mcSumPage&&typeof mcRenderMade==='function'){ mcMadePage=mcSumPage; mcRenderMade(); }
+});
 
 // ---------- the sheet those SKUs made ----------
 // Its own small pop-up rather than the full-screen enlarge: this is a look at
@@ -33842,6 +33913,12 @@ async function mcGtMoveToPage(it,mode,id){
 // leaving them out here is what made a box added over there invisible on the
 // panel, undrawn in its preview, and gone by the time the line was saved.
 const mcGtLine=it=>({id:'mc-'+it.id,
+  // The SKU it was lent for. Everything that asks "where is this SKU" looks
+  // for it here first, and a lent row carried none — so Remove on the summary
+  // found the row by its design instead, which is another order as often as
+  // this one, and where nothing matched it took the mark off the lines and
+  // left the tags sitting on the sheet.
+  sku:(it&&it.sku)||'',
   designId:(it.sheet_item&&it.sheet_item.designId)||'',
   qty:(it.sheet_item&&it.sheet_item.qty)||mcQty(it)||1,
   vals:(it.sheet_item&&it.sheet_item.vals)||{},
