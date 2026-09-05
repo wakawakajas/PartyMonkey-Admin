@@ -4215,6 +4215,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
           <button class="combo-caret" id="gtCutCaret" type="button" aria-label="Show what is in the shape folder">▾</button>
           <div class="combo-panel" id="gtCutPanel" role="listbox"></div>
         </div>
+        <!-- what happened to the shape just chosen, said beside the button
+             that chose it: the export rail is a screen away from here -->
+        <div id="gtCutMsg"></div>
         <!-- a cutting file drawn in the wrong units, or at the wrong size for
              this sheet, is the normal case rather than the exception -->
         <div class="sect-label">Size of the layout on the sheet</div>
@@ -19669,14 +19672,24 @@ async function gtSaveLib(){
     return;
   }
   if(gtDir&&await gtDirOk(gtDir)){
-    await gtBackupLib();
-    for(const [file,blob] of gtAssets){
-      if(gtIsAdhoc(file)) continue;              // a one-off is nobody's file but this session's
-      // already on disk is the normal case — only what is new gets written
-      try{ await gtDirRead(gtDir,file); continue; }catch(e){}
-      await gtDirWrite(gtDir,file,blob);
+    // A folder that will not take the write — permission dropped, the drive
+    // pulled, a file held open — threw from here into whoever called it, and
+    // every caller ends "save, then redraw": the work was done and the screen
+    // never heard about it. The failure is said out loud instead.
+    try{
+      await gtBackupLib();
+      for(const [file,blob] of gtAssets){
+        if(gtIsAdhoc(file)) continue;            // a one-off is nobody's file but this session's
+        // already on disk is the normal case — only what is new gets written
+        try{ await gtDirRead(gtDir,file); continue; }catch(e){}
+        await gtDirWrite(gtDir,file,blob);
+      }
+      await gtDirWrite(gtDir,'library.json',new Blob([JSON.stringify(man,null,2)],{type:'application/json'}));
+    }catch(e){
+      const m=document.getElementById('gtLibMsg');
+      if(m) showMsg(m,'Could not write to the library folder ('+((e&&e.message)||e)
+        +') — what is on screen is not saved. Reconnect it under Choose folder.',false);
     }
-    await gtDirWrite(gtDir,'library.json',new Blob([JSON.stringify(man,null,2)],{type:'application/json'}));
     return;
   }
   await gtIdbPut(gtLibKey(),{manifest:man,
@@ -20388,17 +20401,22 @@ gtWireCombo('gtBaseSearch','gtBaseCaret','gtBasePanel',()=>{ gtShapeList().then(
 document.getElementById('gtCutPanel').addEventListener('click',async e=>{
   const row=e.target.closest('[data-gt-shape]'); if(!row) return;
   const path=row.dataset.gtShape;
-  const file=await gtShapeFile(path);
-  const msg=document.getElementById('gtExportMsg');
-  if(!file){ showMsg(msg,'That file is no longer in the folder.',false); return; }
-  if(!gtApplyCut(file,path,await file.text())){
-    showMsg(msg,'No shapes found in that SVG.',false); return;
+  const msg=document.getElementById('gtCutMsg');
+  try{
+    const file=await gtShapeFile(path);
+    if(!file){ showMsg(msg,'That file is no longer in the folder.',false); return; }
+    if(!gtApplyCut(file,path,await file.text())){
+      showMsg(msg,'No shapes found in that SVG.',false); return;
+    }
+    gtSetBaseShape(path);
+    document.getElementById('gtCutSearch').value='';
+    document.getElementById('gtCutPanel').classList.remove('open');
+    gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
+    showMsg(msg,`✓ ${path.split('/').pop()} is on the sheet.`,true);
+    await gtSaveLib();
+  }catch(e){
+    showMsg(msg,'That file could not be put on the sheet: '+((e&&e.message)||e),false);
   }
-  gtSetBaseShape(path);
-  document.getElementById('gtCutSearch').value='';
-  document.getElementById('gtCutPanel').classList.remove('open');
-  await gtSaveLib();
-  gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
 });
 document.getElementById('gtBasePanel').addEventListener('click',async e=>{
   const row=e.target.closest('[data-gt-shape]'); if(!row) return;
@@ -22999,26 +23017,37 @@ document.getElementById('gtForgetFolderBtn').addEventListener('click',async()=>{
   gtRefreshLibraryUi();
   showMsg(document.getElementById('gtLibMsg'),'✓ Folder forgotten — the library stays in this browser.',true);
 });
+// The shape goes on the sheet first and is written to the folder after. It
+// used to be the other way about, and a folder that would not take the write
+// threw out of here before the screen was ever told: the file was chosen, the
+// sheet was already on it underneath, and nothing whatever happened on screen.
+// Anything else that goes wrong now says so beside the button rather than in
+// the export rail, which is off the top of the screen from here.
 document.getElementById('gtCutBtn').addEventListener('click',async()=>{
-  await gtEnsureDir(true);
-  const file=await gtPickFile('image/svg+xml,.svg');
-  if(!file) return;
-  const built=gtBuildLayout(await file.text());
-  if(!built){
-    showMsg(document.getElementById('gtExportMsg'),
-      'No shapes found in that SVG — it needs at least one path, rectangle, circle, ellipse or polygon.',false);
-    return;
+  const msg=document.getElementById('gtCutMsg');
+  try{
+    await gtEnsureDir(true);
+    const file=await gtPickFile('image/svg+xml,.svg');
+    if(!file) return;
+    const built=gtBuildLayout(await file.text());
+    if(!built){
+      showMsg(msg,'No shapes found in that SVG — it needs at least one path, rectangle, circle, ellipse or polygon.',false);
+      return;
+    }
+    const path=await gtAssetPath('shape',file);
+    gtAssets.set(path,file);
+    gtSheet.layoutFile=path; gtLayout=built; gtLayoutFrom=path;
+    // a fresh file starts at its own size, and the size boxes are there to argue
+    gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
+    if(built.mm){ gtSheet.paperW=built.mm.w; gtSheet.paperH=built.mm.h; }
+    gtRebuildSlots();
+    gtSetBaseShape(path);
+    gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
+    showMsg(msg,`✓ ${file.name} — ${built.shapes.length} shape(s) on the sheet.`,true);
+    await gtSaveLib();
+  }catch(e){
+    showMsg(msg,'That file could not be put on the sheet: '+((e&&e.message)||e),false);
   }
-  const path=await gtAssetPath('shape',file);
-  gtAssets.set(path,file);
-  gtSheet.layoutFile=path; gtLayout=built; gtLayoutFrom=path;
-  // a fresh file starts at its own size, and the size boxes are there to argue
-  gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
-  if(built.mm){ gtSheet.paperW=built.mm.w; gtSheet.paperH=built.mm.h; }
-  gtRebuildSlots();
-  gtSetBaseShape(path);
-  await gtSaveLib();
-  gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
 });
 document.getElementById('gtCutDelBtn').addEventListener('click',async()=>{
   gtSheet.layoutFile=''; gtLayout=null; gtLayoutFrom='';
