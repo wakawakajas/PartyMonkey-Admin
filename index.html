@@ -1948,6 +1948,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .mc-dl-tag{display:inline-block;font-size:10px;letter-spacing:.04em;padding:1px 6px;
   border-radius:999px;border:1px solid var(--blueprint);color:var(--blueprint);
   margin-top:3px;margin-left:4px;}
+/* on the download list the row is a column, so the tag starts where the name
+   above it starts rather than four pixels in from it */
+.mc-sum-main .mc-dl-tag{margin-left:0;}
 
 /* the title's own row, so the summary button sits beside it rather than
    pushing it onto a line of its own */
@@ -4037,6 +4040,16 @@ body.mc-docked .mc-bubble{display:none !important;}
           <span class="tile-go">→</span>
         </span>
         <span class="tile-name">Custom Template</span>
+      </button>
+      <!-- a straight duplicate of Custom Template, opening the same screen -->
+      <button class="tile" id="goToPlaceCardBtn">
+        <span class="tile-top">
+          <svg class="tile-ico" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/>
+          </svg>
+          <span class="tile-go">→</span>
+        </span>
+        <span class="tile-name">Place Card</span>
       </button>
       <!-- Two ways in, because there are two libraries and mixing them was
            the whole trouble: the designs kept in the library folder, which
@@ -8075,6 +8088,9 @@ document.getElementById('navShipmentBtn').addEventListener('click',()=>showScree
 document.getElementById('goToToolBtn').addEventListener('click',()=>showScreen('tool'));
 // opens everything that used to be on the print template screen itself
 document.getElementById('goToCustomTemplateBtn')
+  .addEventListener('click',()=>showScreen('tool-custom'));
+// Place Card is a duplicate of Custom Template — same screen
+document.getElementById('goToPlaceCardBtn')
   .addEventListener('click',()=>showScreen('tool-custom'));
 // each tile is its own library; the screen is the same screen
 document.getElementById('goToGiftTagBtn')
@@ -17915,6 +17931,14 @@ async function saveTemplate(){
     showMsg(msgEl,'Could not save: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false;btn.textContent='Save template'; }
 }
+// The artwork a template names is read off the designs folder after the rest
+// of it has landed — a NAS read is slow, and the sheet is worth showing before
+// the pictures arrive on it. Anything that renders straight after applying a
+// template has to wait for that read, which is what this is: the load in
+// flight, or nothing. Without it Magic Create rendered a line's PDF out of a
+// sheet whose artwork was still on its way.
+let printArtLoading=null;
+async function printArtReady(){ try{ await printArtLoading; }catch(e){} }
 // Everything a saved template holds, put back into the tool and onto its form.
 // Undo hands back the same shape, so a step back and a template being loaded
 // are one act with one place to get it wrong.
@@ -17995,8 +18019,9 @@ function applyPrintState(meta,name){
   // pictures arrive on it.
   const designs=Array.isArray(meta.designs)?meta.designs:null;
   const single=meta.design&&meta.design.path?meta.design:null;
+  printArtLoading=null;
   if(designs&&designs.length){
-    (async()=>{
+    printArtLoading=(async()=>{
       const out=[], missing=[];
       await designBleedLoad();
       for(const d of designs){
@@ -18022,7 +18047,7 @@ function applyPrintState(meta,name){
   }else if(single){
     state.designs=[];
     renderDesignLines();
-    (async()=>{
+    printArtLoading=(async()=>{
       const file=await loadDesignFileByPath(single.path);
       if(file){
         await useArtFile('final','front',file,{dir:'loadDesignDir',path:single.path});
@@ -19230,6 +19255,8 @@ async function exportSide(side,msgId){
       downloadBlob(blob,filename);
       showMsg(out,'✓ Downloaded '+filename+many+blank,true);
     }
+    // and where a batch line is what was laid out here, the batch is told
+    if(typeof mcNoteBuilderExport==='function') await mcNoteBuilderExport();
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
   }finally{
@@ -28516,8 +28543,7 @@ const MC_TILES={
     // ready once it has a layout, something to print on it, and the two
     // answers its file name is made of — the tool blocks on those, so a batch
     // that did not ask for them would only fail later and in bulk
-    ready:it=>!!(it.design&&(it.art&&(it.art.front||it.art.back))
-      &&it.paper_type&&it.gsm),
+    ready:it=>!!(it.design&&mcSides(it).length&&it.paper_type&&it.gsm),
     body:mcCustomBody,
     wire:mcCustomWire
   },
@@ -28586,6 +28612,42 @@ const mcReady=it=>{ const t=mcTile(it); return !!(t&&t.ready(it)); };
 // words read as one.
 const mcLaid=it=>!!(it&&(it.tile||it.design||(it.sheet_item
   &&(it.sheet_item.designId||it.sheet_item.path||it.sheet_item.copied))));
+// Does the layout this line was saved with name its own artwork — the single
+// artwork it was laid out on, or the design lines it prints. Artwork uploaded
+// onto the line through the panel is the other way a line has a picture; both
+// count, and a line with neither has nothing to print.
+const mcDesignArt=d=>!!(d&&((d.design&&d.design.path)
+  ||(Array.isArray(d.designs)&&d.designs.length)));
+// The sides a per-order line comes out as. Front where either the layout or
+// the line carries artwork for it; back only where the line does, because a
+// template names a front design and nothing else. Read by the PDF button, by
+// the export plan and by the one-line download, so what a line is ready for
+// and what it actually writes are the same answer.
+function mcSides(it){
+  const art=(it&&it.art)||{};
+  const out=[];
+  if(art.front||mcDesignArt(it&&it.design)) out.push('front');
+  if(art.back) out.push('back');
+  return out;
+}
+// Why the PDF button is greyed out, said as the thing to go and do. It used
+// to read "Needs a layout and artwork first" on every line that was not ready
+// — including one that had both and was only missing the paper its file is
+// named after, which reads as the work having been lost.
+function mcWhyNotReady(it){
+  const t=mcTile(it);
+  if(!t) return 'Pick a print tile first — press Create';
+  if(t.mode!=='per-order') return 'Needs a design on it first — press Create';
+  const want=[];
+  if(!it.design) want.push('a layout');
+  if(!mcSides(it).length) want.push('artwork');
+  if(!it.paper_type) want.push('the paper type');
+  if(!it.gsm) want.push('the GSM');
+  if(!want.length) return '';
+  const last=want.pop();
+  return 'Needs '+(want.length?want.join(', ')+' and '+last:last)
+    +' — press Create';
+}
 // Every page a line can be built on, flattened into one list for the picker.
 // A tile that is several pages hands them over itself, so one added next year
 // appears in the list without the picker being touched.
@@ -29045,15 +29107,21 @@ function mcLineHtml(it){
   // has no tile at all.
   const pdf=t
     ? `<button type="button" data-mc-pdf="${it.id}"${mcReady(it)?'':' disabled'}
-         title="${!mcReady(it)?'Needs a layout and artwork first — press Create'
+         title="${!mcReady(it)?escapeHtml(mcWhyNotReady(it))
            :t.mode==='per-order'?'Save this line as a print-ready PDF'
            :`Save this line on a ${escapeHtml(t.name.toLowerCase())} of its own`}">PDF</button>` : '';
   const tag=t?`<span class="mc-tile-tag on">${escapeHtml(t.name)}</span>`:'';
   // when it went through the machine, rather than that it did: on a batch two
   // people are working, that is the question actually being asked
+  // and how many times it went: a line downloaded twice is a line somebody
+  // was not sure about the first time, which is worth seeing from the list.
+  // A line stamped before the count was kept says once, which it did.
+  const times=Math.max(1,Math.round(Number(it.export_count)||0));
   const dl=it.exported_at
     ? `<span class="mc-dl-tag" title="This line was written to a PDF ${
+        times===1?'once':times+' times'}, last ${
         escapeHtml(new Date(it.exported_at).toLocaleString())}">⬇ Downloaded ${
+        times} time${times===1?'':'s'} · ${
         escapeHtml(mcWhenWord(it.exported_at))}</span>`
     : '';
   // the file this line was finished by, and when. A copy-only design never
@@ -29814,6 +29882,25 @@ async function mcOpenPlan(){
     'Could not work that out: '+((err&&err.message)||'unknown error'),false); }
   mcRenderPlan();
 }
+// What has already gone out, said on the list of what is about to. A file
+// fetched on its own and then forgotten looks exactly like one nobody has
+// touched — and the answer is on the lines the file is made of: a per-order
+// file is one line, a sheet is all of them. Where only some of a sheet's lines
+// have been out, that is what it says rather than a number that is true of
+// neither.
+function mcPlanDlTag(e){
+  const set=(e&&e.set)||[];
+  const out=set.filter(it=>it&&it.exported_at);
+  if(!out.length) return '';
+  const last=out.map(it=>it.exported_at).sort().slice(-1)[0];
+  const times=Math.max(1,...out.map(it=>Math.round(Number(it.export_count)||0)));
+  const what=out.length<set.length
+    ? `${out.length} of ${set.length} lines downloaded`
+    : `Downloaded ${times} time${times===1?'':'s'}`;
+  return `<span class="mc-dl-tag" title="Last written to a PDF ${
+    escapeHtml(new Date(last).toLocaleString())}">⬇ ${what} · ${
+    escapeHtml(mcWhenWord(last))}</span>`;
+}
 function mcRenderPlan(){
   const el=document.getElementById('mcPlanList');
   if(!mcPlan.length){
@@ -29829,6 +29916,7 @@ function mcRenderPlan(){
       <span class="mc-sum-main">
         <span class="mc-sum-sku">${escapeHtml(e.name)}</span>
         <span class="mc-sum-name">${escapeHtml(e.what)}</span>
+        ${mcPlanDlTag(e)}
       </span>
       <button type="button" class="btn-outline" data-mc-plan="${i}"${
         mcBusy?' disabled':''}>${i===mcPlanAt?'Showing':'Look'}</button>
@@ -29959,6 +30047,7 @@ async function mcDownloadPlanSel(){
   const dir=await exportFolderReady(true);      // first, while the tap is still ours
   mcBusy=true; mcSyncBatchButtons(); mcRenderPlan();
   let done=0; const failed=[];
+  const run=new Set();            // one press of Download is one download
   try{
     await mcWinCommitAndPark();
     await mcBorrowBuilder(async()=>{
@@ -29970,10 +30059,7 @@ async function mcDownloadPlanSel(){
             ? await mcRenderLine(e.it,e.side)
             : await MC_TILES[e.tile].make(e);
           await mcPut(dir,e.name,bytes);
-          for(const it of e.set){
-            it.exported_at=new Date().toISOString();
-            await mcSave(it,{exported_at:it.exported_at});
-          }
+          for(const it of e.set) await mcMarkExported(it,run);
           done++;
         }catch(err){ failed.push(e.name); }
       }
@@ -30009,10 +30095,7 @@ async function mcDownloadPlanEntry(i){
     });
     // marked exported the way the whole run marks them, so a line fetched on
     // its own is not asked for again by the batch it came from
-    for(const it of e.set){
-      it.exported_at=new Date().toISOString();
-      await mcSave(it,{exported_at:it.exported_at});
-    }
+    for(const it of e.set) await mcMarkExported(it);
     mcRenderItems();
     showMsg(msg,`✓ ${escapeHtml(e.name)} ${dir?'saved into '+escapeHtml(dir.name):'downloaded'}`,true);
   }catch(err){
@@ -33177,10 +33260,23 @@ function mcWinPlace(){
 // there is one place to get it wrong instead of two.
 function mcSnapshot(){
   readLayoutInputs();
+  // The artwork as well, said the way a template says it: the path it came off
+  // the designs folder and nothing else. A line laid out with a single artwork
+  // used to keep only its geometry — the picture was in the builder and never
+  // on the line — so it came back not ready, its PDF button stayed greyed out
+  // and Download All walked past it. Paths rather than pixels, so the file is
+  // still placed whole at export and a row stays a row anybody can sync.
+  const front=state.final.front;
   return {paper:state.paper,layout:state.layout,placeholders:state.placeholders,
     showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
     refMark:state.refMark,foldLine:state.foldLine,bleed:state.bleed,
-    shift:state.shift,rotate:state.rotate};
+    shift:state.shift,rotate:state.rotate,
+    artMode:state.artMode,artFit:state.artFit,art:state.art,
+    design:front&&front.source&&front.source.path
+      ?{path:front.source.path,name:front.name||''}:null,
+    designs:(state.designs||[]).filter(d=>d.source&&d.source.path).map(d=>
+      ({path:d.source.path,name:d.name,qty:d.qty,bleedOn:!!d.bleedOn,
+        bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}))};
 }
 
 // ---------- the batch beside the builder, rather than over it ----------
@@ -33636,12 +33732,36 @@ let mcWinLive=false;             // has this line's layout been loaded into the 
 // layout, where it belongs, and read back on the way in.
 let mcWinTplId='';
 const mcLineSnapshot=()=>({...mcSnapshot(),template:mcWinTplId||''});
+// A column this database has not been given yet, because the migration that
+// adds it has not been run. The rest of the write still belongs on the row —
+// so the unknown column is dropped and the write goes again, rather than a
+// line losing its stamp over a counter. Asked once per column, then remembered.
+const mcMissingCols=new Set();
+function mcMissingCol(error,body){
+  const m=String((error&&error.message)||'');
+  if(!/column|schema cache/i.test(m)) return '';
+  return Object.keys(body).find(k=>m.includes("'"+k+"'"))||'';
+}
 async function mcSave(it,patch){
   // `return` on its own handed back undefined, which every caller reads as
   // failure anyway — but says so out loud now, because "no connection" and
   // "the write was refused" are worth telling apart when nothing saved.
   if(!sb) return false;
-  const {error}=await sb.from('magic_items').update(patch).eq('id',it.id);
+  let body=patch;
+  if(mcMissingCols.size){
+    body={};
+    Object.keys(patch).forEach(k=>{ if(!mcMissingCols.has(k)) body[k]=patch[k]; });
+  }
+  if(!Object.keys(body).length) return true;
+  let {error}=await sb.from('magic_items').update(body).eq('id',it.id);
+  const gone=error?mcMissingCol(error,body):'';
+  if(gone){
+    mcMissingCols.add(gone);
+    const rest={};
+    Object.keys(body).forEach(k=>{ if(k!==gone) rest[k]=body[k]; });
+    if(!Object.keys(rest).length) return true;
+    ({error}=await sb.from('magic_items').update(rest).eq('id',it.id));
+  }
   const msg=document.getElementById('mcWinMsg');
   if(error&&msg) showMsg(msg,'Could not save: '+error.message,false);
   return !error;
@@ -33856,9 +33976,18 @@ function mcCustomWire(it){
   document.getElementById('mcSaveLineBtn').addEventListener('click',async()=>{
     const msg=document.getElementById('mcWinMsg');
     if(!mcWinLive){ showMsg(msg,'Choose a saved layout first.',false); return; }
+    const kept=await mcKeepBuilderArt(it);
     it.design=mcLineSnapshot();
-    if(await mcSave(it,{design:it.design,...mcDonePatch(it,true)})){
-      showMsg(msg,'✓ Saved to this line',true);
+    // and what the builder was set to, where the line has not been told
+    // itself: paper and GSM are two thirds of the file name, and a line
+    // missing them is a line whose PDF button stays greyed out with the
+    // layout and the artwork both sitting on it
+    it.paper_type=it.paper_type||state.paperType||'';
+    it.gsm=it.gsm||state.gsm||'';
+    if(await mcSave(it,{design:it.design,paper_type:it.paper_type,
+      gsm:it.gsm,...(kept||{}),...mcDonePatch(it,true)})){
+      const why=mcWhyNotReady(it);
+      showMsg(msg,'✓ Saved to this line'+(why?' — '+why:''),true);
       mcRepaintRow(it);
       // saved is finished with, and the next line is on the list behind this
       // window — so it gets out of the way by itself, still going in the bubble
@@ -33868,6 +33997,52 @@ function mcCustomWire(it){
 }
 // artwork on a line lives in the bucket, not in the row: a 300dpi PNG as a
 // data URL inside jsonb would put megabytes in a row read on every refresh
+//
+// The file goes up as it arrived rather than as a PNG of itself. A PDF design
+// is placed whole by the export — that is the whole point of it — and it can
+// only be placed while the bytes are still there, so a line that kept only a
+// picture of one printed the picture. The name carries the extension, which is
+// how what comes back says what it is.
+const MC_ART_EXT=/\.(pdf|ai|png|jpe?g|webp)$/i;
+async function mcPutArt(it,side,file,dataURL,img){
+  const uid=await mcWhoAmI();
+  const m=String(file.name||'').match(MC_ART_EXT);
+  const ext=(m?m[0]:'.png').toLowerCase().replace('.jpeg','.jpg');
+  const path=`${uid}/magic/${it.id}-${side}${ext}`;
+  const up=await sb.storage.from(PHOTO_BUCKET)
+    .upload(path,file,{contentType:file.type||'application/octet-stream',upsert:true});
+  if(up.error) throw up.error;
+  // upsert: the same name now holds different bytes, so what was kept under
+  // it is no longer what is there
+  mcArtCache.set(path,{data:dataURL,img:img||null,file});
+  return path;
+}
+// The artwork the builder is holding, put onto the line so that the line can
+// be printed without the builder. One picked off the designs folder is kept by
+// its path in the layout itself and is passed over here; one uploaded by hand
+// has no path to keep, and until this it was kept nowhere at all — which is a
+// line laid out, saved, and still not ready to download.
+async function mcKeepBuilderArt(it){
+  if(!sb||!it||!state.final) return null;
+  const art=Object.assign({},it.art||{});
+  let changed=false;
+  for(const side of ['front','back']){
+    const o=state.final[side];
+    if(!o||!o.data||!o.file) continue;
+    // the front the layout names is kept by its path; a back has no path in a
+    // template, so it is filed here whatever it came off
+    if(side==='front'&&o.source&&o.source.path) continue;
+    if(o.mcPath&&o.mcPath===art[side]) continue; // this is the line's own, back again
+    try{
+      art[side]=await mcPutArt(it,side,o.file,o.data,o.img);
+      o.mcPath=art[side];
+      changed=true;
+    }catch(e){ /* the layout still saves — the picture can be put on again */ }
+  }
+  if(!changed) return null;
+  it.art=art;
+  return {art};
+}
 async function mcPickArt(it,side){
   const inp=document.createElement('input');
   inp.type='file';
@@ -33880,18 +34055,13 @@ async function mcPickArt(it,side){
     try{
       const dataURL=await fileToImageData(f);
       const img=await loadImage(dataURL);
-      state.final[side]={data:dataURL,img,name:f.name};
+      // the file itself beside the picture of it, the way the tool's own
+      // upload keeps it — the export places the real thing where it can
+      state.final[side]={data:dataURL,img,name:f.name,file:f};
       fitArtToCard(side);
       refreshSlots(); refreshArtInputs(); drawAll();
-      const uid=await mcWhoAmI();
-      const path=`${uid}/magic/${it.id}-${side}.png`;
-      const blob=await (await fetch(dataURL)).blob();
-      const up=await sb.storage.from(PHOTO_BUCKET)
-        .upload(path,blob,{contentType:'image/png',upsert:true});
-      if(up.error) throw up.error;
-      // upsert: the same name now holds different bytes, so what was kept
-      // under it is no longer what is there
-      mcArtCache.set(path,{data:dataURL,img});
+      const path=await mcPutArt(it,side,f,dataURL,img);
+      state.final[side].mcPath=path;
       it.art=Object.assign({},it.art,{[side]:path});
       await mcSave(it,{art:it.art});
       if(info) info.textContent=side==='front'?'Front loaded':'Back loaded';
@@ -33921,10 +34091,13 @@ async function mcArtDataURL(path){
   if(had){ mcArtCache.delete(path); mcArtCache.set(path,had); return had; }
   const {data,error}=await sb.storage.from(PHOTO_BUCKET).download(path);
   if(error||!data) throw error||new Error('missing');
-  const made={data:await new Promise((res,rej)=>{
-    const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej;
-    r.readAsDataURL(data);
-  })};
+  // As a file, named the way it was filed: a PDF is drawn for the screen and
+  // kept whole for the export, exactly as an upload into the tool is. A line
+  // from before this holds a PNG under a .png name and reads the same way.
+  const file=new File([data],String(path).split('/').pop(),
+    {type:data.type||''});
+  const made={file};
+  made.data=await fileToImageData(file);
   made.img=await loadImage(made.data);
   mcArtCache.set(path,made);
   while(mcArtCache.size>MC_ART_KEEP)
@@ -33933,15 +34106,31 @@ async function mcArtDataURL(path){
 }
 async function mcApplyArt(it){
   const art=it.art||{};
-  // A batch line's own artwork is the whole of that line, and it is a single
-  // artwork. A design list left over from working the tool by hand would
-  // otherwise sit on top of it and print somebody else's job.
-  state.designs=[]; state.page=0; setArtMode('single',true); renderDesignLines();
+  // The layout this line was saved with may name its own artwork off the
+  // designs folder, and applying it started that read — so it is waited for
+  // here. It used to be wiped instead, which is what left a line laid out with
+  // a single artwork holding a blank sheet: the picture was loading, the wipe
+  // won, and the line came out unprintable.
+  await printArtReady();
+  // A picture uploaded onto the line itself beats it: that is this line's own
+  // artwork, and a design list left over from working the tool by hand would
+  // sit on top of it and print somebody else's job. Cleared as it always was
+  // unless the layout carries designs of its own, which are this line's too.
+  const kept=mcDesignArt(it.design);
+  if(art.front||!kept){
+    state.designs=[]; state.page=0; setArtMode('single',true); renderDesignLines();
+  }
   for(const side of ['front','back']){
-    if(!art[side]){ state.final[side]={data:null,img:null,name:''}; continue; }
+    if(!art[side]){
+      // the front the layout named is already on the sheet; anything else is
+      // the last line's artwork, and it does not belong on this one
+      if(!(side==='front'&&kept)) state.final[side]={data:null,img:null,name:''};
+      continue;
+    }
     try{
       const got=await mcArtDataURL(art[side]);
-      state.final[side]={data:got.data,img:got.img,name:side};
+      state.final[side]={data:got.data,img:got.img,name:side,
+        file:got.file||null,mcPath:art[side]};
       fitArtToCard(side);
     }catch(e){ state.final[side]={data:null,img:null,name:''}; }
   }
@@ -34705,6 +34894,35 @@ async function mcBorrowBuilder(fn){
     ppFillSelects(); renderDesignLines(); drawAll();
   }
 }
+// A line has gone out. The stamp, the count of how many times, and the tick:
+// a line that has been written to a PDF has been dealt with, which is the same
+// rule putting one on a sheet already follows. `run` is one export's worth of
+// lines — a per-order line writes a front and a back, and two files out of one
+// press of Download All is one download, not two.
+async function mcMarkExported(it,run){
+  if(!it) return false;
+  it.exported_at=new Date().toISOString();
+  const again=run&&run.has(it.id);
+  if(run) run.add(it.id);
+  if(!again) it.export_count=Math.max(0,Math.round(Number(it.export_count)||0))+1;
+  return await mcSave(it,{exported_at:it.exported_at,
+    export_count:it.export_count,...mcDonePatch(it,true)});
+}
+// The same, for a line downloaded from the full builder rather than from the
+// batch. Front and Back down there are this line going out as surely as the
+// PDF button up here is — and until this, they said nothing back to the batch:
+// no download stamp, no tick, and a line reading as untouched beside a PDF
+// that was already on the drive.
+async function mcNoteBuilderExport(){
+  try{
+    if(mcSaveChipMode()!=='line') return;
+    const it=mcWinItem?mcItem(mcWinItem):null;
+    if(!it) return;
+    await mcMarkExported(it);
+    mcRepaintRow(it);
+    mcSyncBatchButtons();
+  }catch(e){ /* the batch is not the builder's to break */ }
+}
 async function mcRenderLine(it,side){
   applyPrintState(it.design);
   state.orderId=it.order_id;
@@ -34739,15 +34957,13 @@ async function mcDownloadOne(id){
         return;
       }
       let n=0;
-      for(const side of ['front','back']){
-        if(!(it.art&&it.art[side])) continue;
+      for(const side of mcSides(it)){
         await mcPut(dir,mcFilename(it,side),await mcRenderLine(it,side));
         n++;
       }
       showMsg(out,`✓ ${n} file${n===1?'':'s'} ${dir?'saved into '+dir.name:'downloaded'}`,true);
     });
-    it.exported_at=new Date().toISOString();
-    await mcSave(it,{exported_at:it.exported_at});
+    await mcMarkExported(it);
     mcRepaintRow(it);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
@@ -34771,8 +34987,7 @@ async function mcExportPlan(){
     const lines=(tile.mode==='per-order'?ready:pool).filter(i=>i.tile===key);
     if(!lines.length) continue;
     if(tile.mode==='per-order'){
-      lines.forEach(it=>['front','back'].forEach(side=>{
-        if(!(it.art&&it.art[side])) return;
+      lines.forEach(it=>mcSides(it).forEach(side=>{
         plan.push({kind:'line',tile:key,it,side,set:[it],
           name:mcFilename(it,side),what:`${it.order_id||'—'} · ${side}`});
       }));
@@ -34798,6 +35013,7 @@ async function mcDownloadAll(){
   const guard=e=>{ e.preventDefault(); e.returnValue=''; };
   window.addEventListener('beforeunload',guard);
   let files=0,bundles=0;
+  const run=new Set();            // one press of Download All is one download
   try{
     await mcWinCommitAndPark();
     const plan=await mcExportPlan();
@@ -34812,10 +35028,7 @@ async function mcDownloadAll(){
         await mcPut(dir,e.name,bytes);
         if(e.kind==='line') files++; else bundles++;
         // marked as it goes: a crash at 180 of 214 then costs 34, not 214
-        for(const it of e.set){
-          it.exported_at=new Date().toISOString();
-          await mcSave(it,{exported_at:it.exported_at});
-        }
+        for(const it of e.set) await mcMarkExported(it,run);
       }
     });
     mcRenderItems();
@@ -35427,11 +35640,12 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     // into the builder. Working the sheet here IS putting one in, so it is
     // said outright rather than left to whether the panel got there first.
     mcWinLive=true;
+    const kept=await mcKeepBuilderArt(it);
     it.design=mcLineSnapshot();
     it.paper_type=state.paperType||it.paper_type||'';
     it.gsm=state.gsm||it.gsm||'';
     const ok=await mcSave(it,{design:it.design,paper_type:it.paper_type,
-      gsm:it.gsm,...mcDonePatch(it,true)});
+      gsm:it.gsm,...(kept||{}),...mcDonePatch(it,true)});
     if(!ok){ mcSaveChipSaid('It did not save — try again',false); return; }
     mcRepaintRow(it);
     mcSyncBatchButtons();
