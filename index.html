@@ -5139,52 +5139,16 @@ body.mc-docked .mc-bubble{display:none !important;}
     </div>
   </div>
 
-  <!-- PLACE CARD — text objects. Hidden unless pcMode==='placecard'. -->
-  <div class="card" data-card id="pcTextCard" hidden>
-    <div class="card-head"><span class="num">T</span><h3>Text</h3><span class="chev">▾</span></div>
+  <!-- PLACE CARD — categories. Hidden unless pcMode==='placecard'. -->
+  <div class="card" data-card id="pcCatsCard" hidden>
+    <div class="card-head"><span class="num">T</span><h3>Categories</h3><span class="chev">▾</span></div>
     <div class="card-body">
-      <p class="hint">Names and words laid straight on the sheet. Drag to move, drag a corner to
-        resize, double-click to retype. Delete removes the selected text.</p>
-
-      <div class="grid2" style="margin-bottom:10px;">
-        <button class="btn-outline" id="pcAddTextBtn">+ Add text</button>
-        <button class="btn-outline" id="pcClearTextBtn">Clear all text</button>
-      </div>
-
-      <div class="sect-label" style="margin-top:0;">Paste a list</div>
-      <p class="hint">One line per name — each line becomes its own text, stacked down the sheet.</p>
-      <textarea id="pcPasteLines" rows="4" placeholder="Jasmine&#10;Anna&#10;Bob"
-        style="width:100%;resize:vertical;font:inherit;padding:8px;border-radius:10px;
-               border:1px solid var(--border-strong);background:var(--card);color:var(--ink);"></textarea>
-      <button class="btn-outline" id="pcPasteLinesBtn" style="width:100%;margin-top:8px;">Add one text per line</button>
-
-      <div class="al-panel" id="pcTextPanel" style="margin-top:14px;">
-        <div class="al-head">
-          <span id="pcTextCount">No text selected</span>
-        </div>
-        <div id="pcTextProps" style="display:none;">
-          <label class="field" id="pcTextWordsWrap" style="margin-bottom:8px;"><span>WORDS</span>
-            <input type="text" id="pcTextWords" placeholder="the words on this text"/></label>
-          <div class="grid3e">
-            <label class="field"><span>FONT</span><select id="pcTextFont"></select></label>
-            <label class="field"><span>SIZE <span class="unitHint">mm</span></span><input type="number" step="0.5" min="0.5" id="pcTextSize"/></label>
-            <label class="field"><span>COLOUR</span><input type="text" id="pcTextColor" placeholder="#232323"/></label>
-            <label class="field"><span>ALIGN</span><select id="pcTextAlign">
-              <option value="left">Left</option><option value="center">Centre</option><option value="right">Right</option>
-            </select></label>
-            <label class="field"><span>ROTATE °</span><input type="number" step="1" id="pcTextRot"/></label>
-          </div>
-          <p class="hint" id="pcFontFolderNote" style="margin:6px 0 0;"></p>
-          <div class="grid2" style="margin-top:10px;">
-            <button class="btn-outline btn-sm" id="pcCentreInPhBtn">Centre in placeholder</button>
-            <button class="btn-outline btn-sm" id="pcStackSeqBtn">Stack in sequence</button>
-          </div>
-          <p class="hint" style="margin:8px 0 0;">Centre needs one placeholder selected on the sheet.
-            Stack lays the selected texts top-to-bottom in the order they were added.</p>
-        </div>
-      </div>
-
-      <div id="pcTextListWrap" style="margin-top:12px;"></div>
+      <p class="hint">A category is a named group of cards on the sheet. Say how many you need and
+        what they say; the words are centred in that group's boxes and run onto further sheets when
+        there are more wanted than there are boxes.</p>
+      <button class="btn-outline" id="pcAddCatBtn" style="width:100%;margin-bottom:6px;">+ Add category</button>
+      <p class="hint" id="pcCatFontNote" style="margin:0 0 12px;"></p>
+      <div id="pcCatList"></div>
     </div>
   </div>
   </div><!-- /#appScreen -->
@@ -5921,11 +5885,13 @@ const uid=()=>'p'+Math.random().toString(36).slice(2,9);
 // ---------- Place Card ----------
 // The Custom Template builder (#appScreen) serves two tiles: "Custom Template"
 // and "Place Card". currentScreen stays 'tool-custom' for both — pcMode is the
-// only discriminator. Place Card adds a text layer (state.texts) that is only
-// rendered / interactive / saved while pcMode==='placecard', so Custom Template,
-// Magic Create and Saved sheets never see it.
+// only discriminator. Place Card adds categories (state.cats) that are only
+// rendered / editable / saved while pcMode==='placecard', so Custom Template,
+// Magic Create and Saved sheets never see them.
 let pcMode='custom';                       // 'custom' | 'placecard'
-const pcTextSel=new Set();                 // ids of selected text objects
+// how a category's boxes are marked on the builder preview, so which card
+// belongs to which group is visible at a glance. Preview only, never exported.
+const PC_CAT_TINTS=['#CCF344','#FF8A6B','#318CE7','#C08BFF','#F5C044','#BFEEEE'];
 const PC_FONTS={
   plex:"'IBM Plex Sans','Helvetica Neue',Arial,sans-serif",
   grotesk:"'Space Grotesk','IBM Plex Sans',sans-serif",
@@ -5936,9 +5902,8 @@ const PC_FONTS={
 };
 const PC_FONT_LABEL={plex:'Plex Sans',grotesk:'Space Grotesk',serif:'Serif',
   mono:'Mono',script:'Script',cond:'Condensed'};
-const nextSeq=()=>state.texts.reduce((m,t)=>Math.max(m,t.seq||0),0)+1;
 
-// A text's `font` is either a PC_FONTS key ('plex'…) or 'file:<path>' for a
+// A category's `font` is either a PC_FONTS key ('plex'…) or 'file:<path>' for a
 // typeface found in the Place Card designs folder. loadDesignFonts entries carry
 // a stable `family` ('pcf-<hash of path>'); pcRegisterFolderFonts loads the file
 // into a FontFace under that name — the same mechanism as Gift Tag's gtHydrate.
@@ -5965,15 +5930,52 @@ function pcFamily(key){
   }
   return PC_FONTS[key]||PC_FONTS.plex;
 }
+// ---------- what a category says on card k ----------
+// k runs across every sheet, not per sheet. The count is the authority: past it
+// the card is left blank however long the pasted list is. A list beats the
+// numbering pattern whenever it holds anything.
+function pcCatValue(c,k){
+  if(!c||k<0) return '';
+  const count=Math.max(0,Math.floor(Number(c.count)||0));
+  if(k>=count) return '';
+  const lines=c.lines||[];
+  if(lines.length) return String(lines[k]==null?'':lines[k]);
+  const from=Number(c.start);
+  return String(c.pattern==null?'{n}':c.pattern)
+    .replace(/\{n\}/g,String((isFinite(from)?from:1)+k));
+}
+const pcCatById=id=>(state.cats||[]).find(c=>c.id===id)||null;
+// this category's boxes, in the order the sheet is filled — bottom row first,
+// the same order the artwork queue uses
+const pcCatSlots=c=>c?fillOrder().filter(ph=>ph.cat===c.id):[];
+const pcCatTint=c=>{
+  const i=(state.cats||[]).findIndex(x=>x.id===(c&&c.id));
+  return i<0?'#8E9196':PC_CAT_TINTS[i%PC_CAT_TINTS.length];
+};
+// how many sheets the categories need between them
+function pcSheetCount(){
+  let n=1;
+  (state.cats||[]).forEach(c=>{
+    const per=pcCatSlots(c).length;
+    if(!per) return;
+    n=Math.max(n,Math.ceil(Math.max(0,Math.floor(Number(c.count)||0))/per));
+  });
+  return n;
+}
 
 const state={
   paper:{w:210,h:297,unit:'mm'},
   layout:{cardW:89,cardH:54,cols:2,rows:5,mode:'center',leadTrim:20.5,sideTrim:20,slit:5,cut:5},
   placeholders:[],
-  // Place Card text objects. Each: {id,text,xMm,yMm,wMm,hMm,font,sizeMm,color,
-  // align,rot,seq}. Only drawn / editable / persisted in pcMode==='placecard';
-  // applyPrintState resets this to [] for every print template and snapshot.
-  texts:[],
+  // Place Card categories — a named group of cards on the sheet, each with its
+  // own count, its own words and its own styling. A placeholder names the group
+  // it belongs to in its `cat`; nothing per-card is stored, every card's words
+  // are worked out at draw time from the count, the pattern or the pasted list,
+  // and which sheet is being drawn. Each:
+  //   {id,name,count,start,pattern,lines[],font,sizeMm,color,align,rot,padMm}
+  // Only drawn / editable / persisted in pcMode==='placecard'; applyPrintState
+  // resets this to [] for every print template and Magic Create snapshot.
+  cats:[],
   showCut:true,
   cutColor:'red',
   foldOverlay:false,
@@ -6113,9 +6115,12 @@ function generateGrid(){
   const g=gridMetrics(),L=g.L;
   const out=[];
   let n=1;
+  // a fresh grid joins the first category, so a Place Card sheet says something
+  // the moment it is generated rather than waiting to be assigned box by box
+  const cat=(pcMode==='placecard'&&(state.cats||[]).length)?state.cats[0].id:'';
   for(let r=0;r<L.rows;r++){
     for(let c=0;c<L.cols;c++){
-      out.push({id:uid(),label:'C'+(n++),
+      out.push({id:uid(),label:'C'+(n++),cat,
         xMm:g.originX+c*(L.cardW+L.slit),
         yMm:g.originY+r*(L.cardH+L.cut),
         wMm:L.cardW,hMm:L.cardH});
@@ -6173,10 +6178,16 @@ const designTotal=()=>designQueue().length;
 const usingPreset=()=>state.artMode==='preset';
 // as many sheets as the quantities need — always at least the one on screen.
 // Single artwork is one sheet however many are wanted: it is the same sheet.
+// On Place Card the words are the other half of it: a category asked for more
+// cards than its boxes hold runs onto further sheets, whichever artwork mode
+// the sheet happens to be in, so this is worked out past the returns above.
 function sheetCount(){
   const per=state.placeholders.length;
-  if(!per||!usingPreset()||!state.designs.length) return 1;
-  return Math.max(1,Math.ceil(designTotal()/per));
+  let n=1;
+  if(per&&usingPreset()&&state.designs.length)
+    n=Math.max(1,Math.ceil(designTotal()/per));
+  if(pcMode==='placecard') n=Math.max(n,pcSheetCount());
+  return n;
 }
 function clampPage(){
   const n=sheetCount();
@@ -6367,19 +6378,28 @@ function renderSide(side,canvas,maxDim,opts){
     ctx.restore();
   }
   // the placeholder's name, in its top-left corner — so a renamed box is
-  // recognisable on the sheet. Builder furniture: front only, never exported.
+  // recognisable on the sheet, and on Place Card the category it belongs to is
+  // named beside it in that category's own colour. Builder furniture: front
+  // only, never exported.
   if(!opts.forExport&&side==='front'){
     ctx.save();
-    ctx.fillStyle='rgba(142,145,150,0.95)';
     ctx.font='600 '+Math.max(8,Math.round(3.1*sc))+'px "IBM Plex Sans",system-ui,sans-serif';
     ctx.textBaseline='top'; ctx.textAlign='left';
-    state.placeholders.forEach(ph=>{ if(ph.label) ctx.fillText(ph.label,ph.xMm*sc+3,ph.yMm*sc+3); });
+    const placecard=pcMode==='placecard';
+    state.placeholders.forEach(ph=>{
+      const c=placecard?pcCatById(ph.cat):null;
+      const txt=(ph.label||'')+(c?' · '+c.name:'');
+      if(!txt) return;
+      ctx.fillStyle=c?pcCatTint(c):'rgba(142,145,150,0.95)';
+      ctx.fillText(txt,ph.xMm*sc+3,ph.yMm*sc+3);
+    });
     ctx.restore();
   }
-  // Place Card text sits above the cut boxes and their labels, below the
-  // selection chrome. Only in Place Card mode — Custom Template never has texts.
-  if(side==='front'&&pcMode==='placecard'&&state.texts&&state.texts.length){
-    drawTextObjects(ctx,sc,!!(opts.forExport||opts.vec));
+  // Place Card words sit above the cut boxes and their labels, below the
+  // selection chrome. Only in Place Card mode — Custom Template has no
+  // categories. This one takes the page: it is what makes the words run on.
+  if(side==='front'&&pcMode==='placecard'&&(state.cats||[]).length){
+    drawCategoryText(ctx,sc,opts.page||0);
   }
   // What is selected, and the handle that resizes it — front only, because the
   // front is the side the cards are laid out on and the back is one picture
@@ -6404,22 +6424,6 @@ function renderSide(side,canvas,maxDim,opts){
     }
     ctx.restore();
   }
-  // selected text objects — same lime outline + resize grip as a placeholder
-  if(!opts.forExport&&side==='front'&&pcMode==='placecard'&&pcTextSel.size){
-    ctx.save();
-    (state.texts||[]).forEach(t=>{
-      if(!pcTextSel.has(t.id)) return;
-      const cx=(t.xMm+t.wMm/2)*sc, cy=(t.yMm+t.hMm/2)*sc;
-      ctx.save();
-      if(t.rot){ ctx.translate(cx,cy); ctx.rotate(t.rot*Math.PI/180); ctx.translate(-cx,-cy); }
-      ctx.strokeStyle='#CCF344'; ctx.lineWidth=2;
-      ctx.strokeRect(t.xMm*sc,t.yMm*sc,t.wMm*sc,t.hMm*sc);
-      ctx.fillStyle='#CCF344';
-      ctx.fillRect((t.xMm+t.wMm)*sc-7,(t.yMm+t.hMm)*sc-7,7,7);
-      ctx.restore();
-    });
-    ctx.restore();
-  }
   // the marquee being dragged out, drawn over everything
   if(!opts.forExport&&side==='front'&&phBand){
     ctx.save();
@@ -6434,37 +6438,40 @@ function renderSide(side,canvas,maxDim,opts){
   // the Order ID is keyed for the export file name only — it is never drawn
   // on the sheet, on screen or in the PDF.
 }
-// Place Card text objects, painted in creation order (later = on top). Reuses
-// the gift tag's word-wrap and auto-shrink so a long name wraps then shrinks to
-// fit its box, and its vertical-centring maths. mm coordinates throughout.
-function drawTextObjects(ctx,sc,forExport){
-  (state.texts||[]).forEach(t=>{
-    const words=String(t.text==null?'':t.text);
-    if(!words.trim() && !forExport){
-      // an empty box still shows its outline in the builder so it can be found
+// The words on this sheet. For each category, its boxes in fill order take the
+// slice of its run belonging to this page — the same page*per+i arithmetic the
+// artwork queue uses, so words and pictures land on the same card. Each box's
+// words are centred in it, inset by the category's padding, and wrapped then
+// shrunk to fit by the gift tag's gtFitText. mm coordinates throughout.
+function drawCategoryText(ctx,sc,page){
+  const order=fillOrder();
+  (state.cats||[]).forEach(c=>{
+    const slots=order.filter(ph=>ph.cat===c.id);
+    if(!slots.length) return;
+    const start=(page||0)*slots.length;
+    const fam=pcFamily(c.font);
+    const pad=Math.max(0,Number(c.padMm)||0);
+    const align=c.align||'center';
+    slots.forEach((ph,i)=>{
+      const words=pcCatValue(c,start+i);
+      if(!words||!words.trim()) return;
+      const bx=ph.xMm+pad, by=ph.yMm+pad;
+      const bw=Math.max(1,ph.wMm-pad*2), bh=Math.max(1,ph.hMm-pad*2);
       ctx.save();
-      ctx.strokeStyle='rgba(142,145,150,0.5)'; ctx.setLineDash([3,3]); ctx.lineWidth=1;
-      ctx.strokeRect(t.xMm*sc,t.yMm*sc,t.wMm*sc,t.hMm*sc);
+      if(c.rot){
+        const cx=(bx+bw/2)*sc, cy=(by+bh/2)*sc;
+        ctx.translate(cx,cy); ctx.rotate(c.rot*Math.PI/180); ctx.translate(-cx,-cy);
+      }
+      ctx.fillStyle=c.color||'#232323';
+      ctx.textBaseline='alphabetic';
+      const fit=gtFitText(ctx,words,fam,Math.max(0.8,Number(c.sizeMm)||6),sc,bw,bh);
+      const lines=fit.lines, lh=fit.size*1.25;
+      ctx.textAlign=align;
+      const tx=align==='left'?bx:align==='right'?bx+bw:bx+bw/2;
+      let ty=by+(bh-lines.length*lh)/2+lh*0.8;
+      lines.forEach(ln=>{ ctx.fillText(ln,tx*sc,ty*sc); ty+=lh; });
       ctx.restore();
-      return;
-    }
-    if(!words.trim()) return;
-    const bw=Math.max(1,t.wMm), bh=Math.max(1,t.hMm);
-    ctx.save();
-    if(t.rot){
-      const cx=(t.xMm+bw/2)*sc, cy=(t.yMm+bh/2)*sc;
-      ctx.translate(cx,cy); ctx.rotate(t.rot*Math.PI/180); ctx.translate(-cx,-cy);
-    }
-    ctx.fillStyle=t.color||'#232323';
-    ctx.textBaseline='alphabetic';
-    const fam=pcFamily(t.font);
-    const fit=gtFitText(ctx,words,fam,Math.max(0.8,Number(t.sizeMm)||6),sc,bw,bh);
-    const lines=fit.lines, lh=fit.size*1.25;
-    ctx.textAlign=t.align||'center';
-    const tx=t.align==='left'?t.xMm:t.align==='right'?t.xMm+bw:t.xMm+bw/2;
-    let ty=t.yMm+(bh-lines.length*lh)/2+lh*0.8;
-    lines.forEach(ln=>{ ctx.fillText(ln,tx*sc,ty*sc); ty+=lh; });
-    ctx.restore();
+    });
   });
 }
 function drawAll(){
@@ -6517,7 +6524,7 @@ async function loadDesignSwitchRefresh(){
     if(typeof loadDesignFolderState==='function') loadDesignFolderState();
     if(typeof loadDesignRenderList==='function') loadDesignRenderList();
     if(typeof renderDesignLines==='function') renderDesignLines();
-    if(typeof pcFillFontSelect==='function') pcFillFontSelect();
+    if(typeof pcRenderCats==='function') pcRenderCats();
     drawAll();
   }catch(e){}
 }
@@ -6531,11 +6538,11 @@ function pcPaintMode(){
   const show=(id,on)=>{ const el=document.getElementById(id); if(el) el.hidden=!on; };
   show('printTplCard',!placecard);
   show('pcTemplateCard',placecard);
-  show('pcTextCard',placecard);
+  show('pcCatsCard',placecard);
   const pj=document.getElementById('pjPrintBtn');
   if(pj) pj.style.display=placecard?'none':'';
   if(placecard&&typeof pcRefreshTemplateList==='function') pcRefreshTemplateList();
-  if(typeof pcRenderTextList==='function') pcRenderTextList();
+  if(typeof pcRenderCats==='function') pcRenderCats();
 }
 // SHEET n OF m over the front preview, shown only once there is more than one
 function refreshSheetNav(){
@@ -6609,6 +6616,7 @@ document.getElementById('addPlaceholderBtn').addEventListener('click',()=>{
   const n=state.placeholders.length;
   const stag=(n%6)*4;                                  // a small staircase, capped
   const ph={id:uid(), label:'C'+(n+1),
+    cat:(pcMode==='placecard'&&(state.cats||[]).length)?state.cats[0].id:'',
     xMm:Math.max(0,Math.min(p.w-w,(p.w-w)/2+stag)),
     yMm:Math.max(0,Math.min(p.h-h,(p.h-h)/2+stag)),
     wMm:w, hMm:h};
@@ -6638,8 +6646,6 @@ function phSelSync(){
   document.querySelectorAll('#distRow .al-btn,#gapRow .al-btn').forEach(b=>b.disabled=n<3);
   document.querySelectorAll('#phListWrap .ph-card').forEach(c=>
     c.classList.toggle('sel',phSel.has(c.dataset.id)));
-  // Place Card's "Centre in placeholder" lights up on exactly one card picked
-  if(typeof pcSyncActionBtns==='function') pcSyncActionBtns();
 }
 function phSelSet(ids){
   phSel.clear();
@@ -6731,227 +6737,181 @@ document.getElementById('gapRow').addEventListener('click',e=>{
 });
 document.getElementById('alignTo').addEventListener('change',phSelSync);
 
-// ---------- Place Card text objects ----------
-// A parallel of the placeholder list + gift-tag text panel, kept to its own
-// selection set (pcTextSel) so text and cards can both be picked at once — which
-// is what "Centre in placeholder" needs.
-const pcTextSelList=()=>(state.texts||[]).filter(t=>pcTextSel.has(t.id));
-const pcTextById=id=>(state.texts||[]).find(t=>t.id===id)||null;
-const pcSame=(list,f)=>list.every(t=>f(t)===f(list[0]));
-
-function pcFillFontSelect(){
-  const sel=document.getElementById('pcTextFont'); if(!sel) return;
-  const keep=sel.value;
+// ---------- Place Card categories ----------
+// A category is a named group of cards. It says how many are wanted, what they
+// say and how the words look; the boxes on the sheet say where. Nothing here is
+// placed by hand — the words are centred in whichever boxes carry the category's
+// name, and run onto further sheets when more are wanted than there are boxes.
+function pcFontOptions(sel){
   const folder=(loadDesignFonts||[]);
-  sel.innerHTML=Object.keys(PC_FONTS).map(k=>
-      `<option value="${k}">${escapeHtml(PC_FONT_LABEL[k]||k)}</option>`).join('')
+  return Object.keys(PC_FONTS).map(k=>
+      `<option value="${k}"${k===sel?' selected':''}>${escapeHtml(PC_FONT_LABEL[k]||k)}</option>`).join('')
     +(folder.length?'<option disabled>── from your folder ──</option>':'')
-    +folder.map(f=>`<option value="${escapeHtml(f.key)}">${escapeHtml(f.name)}</option>`).join('');
-  if(keep) sel.value=keep;
-  const note=document.getElementById('pcFontFolderNote');
-  if(note) note.textContent=folder.length
-    ? `${folder.length} font${folder.length===1?'':'s'} from your Place Card folder`
-    : 'Connect a folder in Load design to use your own fonts';
+    +folder.map(f=>
+      `<option value="${escapeHtml(f.key)}"${f.key===sel?' selected':''}>${escapeHtml(f.name)}</option>`).join('');
 }
-const PC_TEXT_FIELDS=[
-  ['pcTextFont','font',String],['pcTextSize','sizeMm',Number],
-  ['pcTextColor','color',String],['pcTextAlign','align',String],
-  ['pcTextRot','rot',Number]];
-
-function pcTextPanelSync(){
-  const card=document.getElementById('pcTextCard'); if(!card) return;
-  pcFillFontSelect();
-  const sel=pcTextSelList();
-  const count=document.getElementById('pcTextCount');
-  const props=document.getElementById('pcTextProps');
-  const wordsWrap=document.getElementById('pcTextWordsWrap');
-  if(!sel.length){
-    if(count) count.textContent=(state.texts||[]).length?'No text selected':'No text yet — add one below';
-    if(props) props.style.display='none';
-    pcSyncActionBtns();
-    return;
-  }
-  if(count) count.textContent=sel.length===1?'1 text selected':sel.length+' texts selected';
-  if(props) props.style.display='';
-  if(wordsWrap) wordsWrap.style.display=sel.length===1?'':'none';
-  const wordsEl=document.getElementById('pcTextWords');
-  if(wordsEl&&sel.length===1) wordsEl.value=sel[0].text||'';
-  PC_TEXT_FIELDS.forEach(([id,key])=>{
-    const el=document.getElementById(id); if(!el) return;
-    if(pcSame(sel,t=>t[key])){ el.value=sel[0][key]; if(el.tagName==='INPUT') el.placeholder=''; }
-    else { el.value=''; if(el.tagName==='INPUT') el.placeholder='—'; }
-  });
-  pcSyncActionBtns();
+function pcFontNote(){
+  const el=document.getElementById('pcCatFontNote'); if(!el) return;
+  const n=(loadDesignFonts||[]).length;
+  el.textContent=n?`${n} font${n===1?'':'s'} from your Place Card folder`
+    :'Connect a folder in Load design to use your own fonts';
 }
-function pcSyncActionBtns(){
-  const sel=pcTextSel.size;
-  const centre=document.getElementById('pcCentreInPhBtn');
-  const stack=document.getElementById('pcStackSeqBtn');
-  if(centre) centre.disabled=!(sel>=1&&phSel.size===1);
-  if(stack) stack.disabled=sel<2;
+function pcNewCat(){
+  return {id:uid(),name:'Cards '+((state.cats||[]).length+1),
+    count:10,start:1,pattern:'{n}',lines:[],
+    font:'plex',sizeMm:6,color:'#232323',align:'center',rot:0,padMm:2};
 }
-function pcTextSelSync(){ pcTextPanelSync(); }
-
-function pcTextWrite(key,raw,cast){
-  const sel=pcTextSelList(); if(!sel.length) return;
-  let v=cast===Number?Number(raw):String(raw);
-  if(cast===Number&&!isFinite(v)) return;
-  if(key==='sizeMm') v=Math.max(0.5,v);
-  sel.forEach(t=>{ t[key]=v; });
-  pcRenderTextList(); drawAll();
-}
-PC_TEXT_FIELDS.forEach(([id,key,cast])=>{
-  document.addEventListener('input',e=>{
-    if(e.target&&e.target.id===id) pcTextWrite(key,e.target.value,cast);
-  });
-});
-document.addEventListener('input',e=>{
-  if(e.target&&e.target.id==='pcTextWords'){
-    const sel=pcTextSelList();
-    if(sel.length===1){ sel[0].text=e.target.value; pcRenderTextList(); drawAll(); }
-  }
-});
-
-function pcNewText(over){
-  const p=paperMm(), n=(state.texts||[]).length;
-  return Object.assign({
-    id:'t'+Math.random().toString(36).slice(2,9),
-    text:'', wMm:Math.min(60,p.w*0.5), hMm:14,
-    xMm:Math.max(0,(p.w-Math.min(60,p.w*0.5))/2),
-    yMm:Math.max(0,Math.min(p.h-14,18+n*16)),
-    font:'plex', sizeMm:6, color:'#232323', align:'center', rot:0,
-    seq:nextSeq()
-  },over||{});
-}
-function pcAddText(){
-  const t=pcNewText();
-  state.texts.push(t);
-  pcTextSel.clear(); pcTextSel.add(t.id);
-  pcRenderTextList(); pcTextPanelSync(); drawAll();
-  const box=document.getElementById('pcTextWords');
+function pcAddCat(){
+  const first=!(state.cats||[]).length;
+  const c=pcNewCat();
+  state.cats.push(c);
+  // whatever is picked on the sheet joins it; failing that the first category
+  // takes every box that has none yet, so a freshly generated grid just works
+  const take=phSel.size?state.placeholders.filter(p=>phSel.has(p.id))
+    :(first?state.placeholders.filter(p=>!p.cat):[]);
+  take.forEach(p=>{ p.cat=c.id; });
+  if(take.length) c.count=take.length;
+  pcRenderCats(); renderPlaceholderList(); drawAll();
+  const box=document.querySelector(`#pcCatList [data-cid="${c.id}"] [data-cf="name"]`);
   if(box){ box.focus(); box.select(); }
 }
-function pcPasteLines(){
-  const ta=document.getElementById('pcPasteLines'); if(!ta) return;
-  const lines=String(ta.value||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
-  if(!lines.length) return;
-  const p=paperMm();
-  const w=Math.min(60,p.w*0.5), h=14, x=Math.max(0,(p.w-w)/2);
-  let y=Math.max(0,Math.min(p.h-h,18+(state.texts||[]).length*16));
-  pcTextSel.clear();
-  lines.forEach(line=>{
-    const t=pcNewText({text:line,wMm:w,hMm:h,xMm:x,yMm:Math.min(p.h-h,y)});
-    state.texts.push(t); pcTextSel.add(t.id);
-    y+=h+3;
-  });
-  ta.value='';
-  pcRenderTextList(); pcTextPanelSync(); drawAll();
+function pcDeleteCat(id){
+  state.cats=(state.cats||[]).filter(c=>c.id!==id);
+  // its boxes are not deleted with it — they go back to carrying no words
+  state.placeholders.forEach(p=>{ if(p.cat===id) p.cat=''; });
+  pcRenderCats(); renderPlaceholderList(); drawAll();
 }
-function pcCentreInPh(){
-  const sel=pcTextSelList();
-  if(!sel.length||phSel.size!==1) return;
-  const ph=state.placeholders.find(p=>phSel.has(p.id)); if(!ph) return;
-  sel.forEach(t=>{ t.xMm=ph.xMm; t.yMm=ph.yMm; t.wMm=ph.wMm; t.hMm=ph.hMm; });
-  pcRenderTextList(); drawAll();
+function pcAssignSelected(id){
+  if(!phSel.size) return;
+  state.placeholders.forEach(p=>{ if(phSel.has(p.id)) p.cat=id; });
+  pcRenderCats(); renderPlaceholderList(); drawAll();
 }
-function pcStackInSeq(){
-  const sel=pcTextSelList().slice().sort((a,b)=>(a.seq||0)-(b.seq||0));
-  if(sel.length<2) return;
-  let frame;
-  if(phSel.size===1){
-    const ph=state.placeholders.find(p=>phSel.has(p.id));
-    frame={x:ph.xMm,y:ph.yMm,w:ph.wMm,h:ph.hMm};
-  }else{
-    const x=Math.min(...sel.map(t=>t.xMm)), y=Math.min(...sel.map(t=>t.yMm));
-    const r=Math.max(...sel.map(t=>t.xMm+t.wMm)), b=Math.max(...sel.map(t=>t.yMm+t.hMm));
-    frame={x,y,w:r-x,h:b-y};
+function pcCatTally(c){
+  const per=pcCatSlots(c).length;
+  const count=Math.max(0,Math.floor(Number(c.count)||0));
+  if(!per) return 'No boxes yet — pick some on the sheet, then Assign.';
+  const sheets=Math.max(1,Math.ceil(count/per));
+  const spare=sheets*per-count;
+  return `${per} box${per===1?'':'es'} a sheet · ${count} card${count===1?'':'s'} · `
+    +`${sheets} sheet${sheets===1?'':'s'}`+(spare?` · ${spare} blank on the last`:'');
+}
+// the tally only, so a field being typed into is not rebuilt under the caret
+function pcCatTallyOnly(c){
+  const card=document.querySelector(`#pcCatList [data-cid="${c.id}"]`);
+  const el=card&&card.querySelector('[data-ctally]');
+  if(el) el.textContent=pcCatTally(c);
+}
+function pcRenderCats(){
+  const wrap=document.getElementById('pcCatList'); if(!wrap) return;
+  pcFontNote();
+  const cats=state.cats||[];
+  if(!cats.length){
+    wrap.innerHTML='<p class="hint" style="margin:0;">No categories yet — add one and it takes the boxes on the sheet.</p>';
+    return;
   }
-  const sumH=sel.reduce((n,t)=>n+t.hMm,0);
-  const gap=sel.length>1?Math.max(0,(frame.h-sumH)/(sel.length-1)):0;
-  let y=frame.y;
-  sel.forEach(t=>{ t.yMm=y; t.xMm=frame.x+(frame.w-t.wMm)/2; y+=t.hMm+gap; });
-  pcRenderTextList(); drawAll();
-}
-function pcRenderTextList(){
-  const wrap=document.getElementById('pcTextListWrap'); if(!wrap) return;
-  const u=state.paper.unit;
-  const ts=state.texts||[];
-  if(!ts.length){ wrap.innerHTML='<p class="hint" style="margin:0;">No text yet.</p>'; pcTextPanelSync(); return; }
-  wrap.innerHTML='<div class="ph-list">'+ts.map((t,i)=>`
-    <div class="ph-card${pcTextSel.has(t.id)?' sel':''}" data-tid="${t.id}">
+  wrap.innerHTML=cats.map(c=>{
+    const list=(c.lines||[]).length>0;
+    return `
+    <div class="ph-card" data-cid="${c.id}" style="border-left:4px solid ${pcCatTint(c)};">
       <div class="ph-card-head">
-        <span style="display:flex;gap:4px;align-items:center;">
-          <button class="pc-ord" data-ord="up" ${i===0?'disabled':''} aria-label="Earlier in sequence">↑</button>
-          <button class="pc-ord" data-ord="down" ${i===ts.length-1?'disabled':''} aria-label="Later in sequence">↓</button>
-          <span style="color:var(--faint);">#${t.seq}</span>
-        </span>
-        <button class="del-btn" data-tdel="${t.id}">×</button>
+        <input class="ph-label-inp" type="text" data-cf="name" value="${escapeHtml(c.name||'')}" aria-label="Category name"/>
+        <button class="del-btn" data-cdel="${c.id}">×</button>
       </div>
-      <label class="field" style="margin-bottom:6px;"><span>WORDS</span>
-        <input type="text" data-tfield="text" value="${escapeHtml(t.text||'')}"/></label>
-      <div class="grid4">
-        <label class="field"><span>X</span><input type="number" step="0.1" value="${round(fromMm(t.xMm,u))}" data-tfield="x"/></label>
-        <label class="field"><span>Y</span><input type="number" step="0.1" value="${round(fromMm(t.yMm,u))}" data-tfield="y"/></label>
-        <label class="field"><span>W</span><input type="number" step="0.1" value="${round(fromMm(t.wMm,u))}" data-tfield="w"/></label>
-        <label class="field"><span>H</span><input type="number" step="0.1" value="${round(fromMm(t.hMm,u))}" data-tfield="h"/></label>
+      <div class="grid2" style="margin-bottom:8px;">
+        <label class="field"><span>HOW MANY</span>
+          <input type="number" min="0" step="1" data-cf="count" value="${Math.max(0,Math.floor(Number(c.count)||0))}"/></label>
+        <div class="seg" data-cseg>
+          <button type="button" data-cmode="pattern" class="${list?'':'on'}">Numbering</button>
+          <button type="button" data-cmode="list" class="${list?'on':''}">List</button>
+        </div>
       </div>
-    </div>`).join('')+'</div>';
-  wrap.querySelectorAll('input[data-tfield]').forEach(inp=>{
-    inp.addEventListener('input',e=>{
-      const t=pcTextById(e.target.closest('[data-tid]').dataset.tid); if(!t) return;
-      const f=e.target.dataset.tfield;
-      if(f==='text'){ t.text=e.target.value; drawAll(); return; }
-      const v=toMm(parseFloat(e.target.value)||0,state.paper.unit);
-      if(f==='x')t.xMm=v; if(f==='y')t.yMm=v;
-      if(f==='w')t.wMm=Math.max(3,v); if(f==='h')t.hMm=Math.max(3,v);
-      drawAll();
-    });
-  });
-  wrap.querySelectorAll('[data-tdel]').forEach(b=>{
-    b.addEventListener('click',e=>{
-      e.stopPropagation();
-      state.texts=state.texts.filter(x=>x.id!==b.dataset.tdel);
-      pcTextSel.delete(b.dataset.tdel);
-      pcRenderTextList(); pcTextPanelSync(); drawAll();
-    });
-  });
-  wrap.querySelectorAll('.pc-ord').forEach(b=>{
-    b.addEventListener('click',e=>{
-      e.stopPropagation();
-      if(b.disabled) return;
-      const id=b.closest('[data-tid]').dataset.tid;
-      const idx=state.texts.findIndex(x=>x.id===id);
-      const j=b.dataset.ord==='up'?idx-1:idx+1;
-      if(j<0||j>=state.texts.length) return;
-      // swap both array position and seq so "Stack in sequence" follows suit
-      const a=state.texts[idx], c=state.texts[j];
-      const s=a.seq; a.seq=c.seq; c.seq=s;
-      state.texts[idx]=c; state.texts[j]=a;
-      pcRenderTextList(); drawAll();
-    });
-  });
-  wrap.querySelectorAll('.ph-card').forEach(card=>{
-    card.addEventListener('click',e=>{
-      if(e.target.closest('input,[data-tdel],.pc-ord')) return;
-      const id=card.dataset.tid;
-      if(e.shiftKey){ if(pcTextSel.has(id)) pcTextSel.delete(id); else pcTextSel.add(id); }
-      else { pcTextSel.clear(); pcTextSel.add(id); }
-      pcRenderTextList(); pcTextPanelSync(); drawAll();
-    });
-  });
-  pcTextPanelSync();
+      <div data-cpane="pattern" style="display:${list?'none':''};">
+        <div class="grid2">
+          <label class="field"><span>PATTERN</span>
+            <input type="text" data-cf="pattern" value="${escapeHtml(c.pattern==null?'{n}':c.pattern)}" placeholder="Table {n}"/></label>
+          <label class="field"><span>START AT</span>
+            <input type="number" step="1" data-cf="start" value="${isFinite(Number(c.start))?Number(c.start):1}"/></label>
+        </div>
+        <p class="hint" style="margin:4px 0 0;">{n} is the card's number — “Table {n}” gives Table 1, Table 2…</p>
+      </div>
+      <div data-cpane="list" style="display:${list?'':'none'};">
+        <textarea data-cf="lines" rows="4" placeholder="Jasmine&#10;Anna&#10;Bob"
+          style="width:100%;resize:vertical;font:inherit;padding:8px;border-radius:10px;
+                 border:1px solid var(--border-strong);background:var(--card);color:var(--ink);">${escapeHtml((c.lines||[]).join('\n'))}</textarea>
+        <p class="hint" style="margin:4px 0 0;">One line per card. This sets How many to match.</p>
+      </div>
+      <div class="grid3e" style="margin-top:8px;">
+        <label class="field"><span>FONT</span><select data-cf="font">${pcFontOptions(c.font)}</select></label>
+        <label class="field"><span>SIZE <span class="unitHint">mm</span></span>
+          <input type="number" step="0.5" min="0.5" data-cf="sizeMm" value="${Number(c.sizeMm)||6}"/></label>
+        <label class="field"><span>COLOUR</span>
+          <input type="text" data-cf="color" value="${escapeHtml(c.color||'#232323')}" placeholder="#232323"/></label>
+        <label class="field"><span>ALIGN</span><select data-cf="align">
+          <option value="left"${c.align==='left'?' selected':''}>Left</option>
+          <option value="center"${(c.align||'center')==='center'?' selected':''}>Centre</option>
+          <option value="right"${c.align==='right'?' selected':''}>Right</option>
+        </select></label>
+        <label class="field"><span>ROTATE °</span>
+          <input type="number" step="1" data-cf="rot" value="${Number(c.rot)||0}"/></label>
+        <label class="field"><span>PADDING <span class="unitHint">mm</span></span>
+          <input type="number" step="0.5" min="0" data-cf="padMm" value="${Number(c.padMm)||0}"/></label>
+      </div>
+      <button class="btn-outline btn-sm" data-cassign="${c.id}" style="width:100%;margin-top:9px;">Assign the selected boxes to this</button>
+      <div class="calc" data-ctally style="margin-top:8px;">${escapeHtml(pcCatTally(c))}</div>
+    </div>`;
+  }).join('');
 }
-document.getElementById('pcAddTextBtn').addEventListener('click',pcAddText);
-document.getElementById('pcPasteLinesBtn').addEventListener('click',pcPasteLines);
-document.getElementById('pcClearTextBtn').addEventListener('click',()=>{
-  state.texts=[]; pcTextSel.clear(); pcRenderTextList(); pcTextPanelSync(); drawAll();
+const pcCatOf=el=>{ const card=el.closest('[data-cid]'); return card?pcCatById(card.dataset.cid):null; };
+document.getElementById('pcCatList').addEventListener('input',e=>{
+  const el=e.target.closest('[data-cf]'); if(!el) return;
+  const c=pcCatOf(el); if(!c) return;
+  const f=el.dataset.cf;
+  if(f==='name'){ c.name=el.value; drawAll(); return; }
+  if(f==='pattern'){ c.pattern=el.value; drawAll(); return; }
+  if(f==='color'){ c.color=el.value; drawAll(); return; }
+  if(f==='lines'){
+    // a list is what it says, blank lines dropped — and the count follows it
+    c.lines=String(el.value||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+    c.count=c.lines.length;
+    const cnt=el.closest('[data-cid]').querySelector('[data-cf="count"]');
+    if(cnt) cnt.value=c.count;
+    pcCatTallyOnly(c); drawAll(); return;
+  }
+  const n=Number(el.value);
+  if(f==='count'){ c.count=Math.max(0,Math.floor(n)||0); pcCatTallyOnly(c); }
+  else if(f==='start') c.start=isFinite(n)?Math.floor(n):1;
+  else if(f==='sizeMm') c.sizeMm=Math.max(0.5,n||6);
+  else if(f==='rot') c.rot=isFinite(n)?n:0;
+  else if(f==='padMm') c.padMm=Math.max(0,n||0);
+  drawAll();
 });
-document.getElementById('pcCentreInPhBtn').addEventListener('click',pcCentreInPh);
-document.getElementById('pcStackSeqBtn').addEventListener('click',pcStackInSeq);
-document.getElementById('pcPasteLines').addEventListener('paste',()=>{
-  setTimeout(()=>{ const ta=document.getElementById('pcPasteLines');
-    if(ta&&/\r?\n/.test(ta.value)) pcPasteLines(); },0);
+document.getElementById('pcCatList').addEventListener('change',e=>{
+  const el=e.target.closest('[data-cf]'); if(!el) return;
+  const c=pcCatOf(el); if(!c) return;
+  if(el.dataset.cf==='font'){ c.font=el.value; drawAll(); }
+  else if(el.dataset.cf==='align'){ c.align=el.value; drawAll(); }
 });
+document.getElementById('pcCatList').addEventListener('click',e=>{
+  const del=e.target.closest('[data-cdel]');
+  if(del){ pcDeleteCat(del.dataset.cdel); return; }
+  const asg=e.target.closest('[data-cassign]');
+  if(asg){ pcAssignSelected(asg.dataset.cassign); return; }
+  const seg=e.target.closest('[data-cmode]');
+  if(!seg) return;
+  const c=pcCatOf(seg); if(!c) return;
+  const card=seg.closest('[data-cid]');
+  const toList=seg.dataset.cmode==='list';
+  card.querySelectorAll('[data-cseg] button').forEach(b=>b.classList.toggle('on',b===seg));
+  card.querySelector('[data-cpane="pattern"]').style.display=toList?'none':'';
+  card.querySelector('[data-cpane="list"]').style.display=toList?'':'none';
+  // going back to numbering drops the list, or it would keep winning over it
+  if(!toList&&(c.lines||[]).length){
+    c.lines=[];
+    const ta=card.querySelector('[data-cf="lines"]'); if(ta) ta.value='';
+  }
+  pcCatTallyOnly(c); drawAll();
+});
+document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
 
 // ---------- the sheet as something to point at ----------
 // Click one, shift-click to add, drag a box round several; drag to move, drag
@@ -6984,50 +6944,14 @@ document.getElementById('pcPasteLines').addEventListener('paste',()=>{
     }
     return null;
   };
-  // a point in a text box's own (un-rotated) frame, so a turned box still hits
-  const unrot=(q,t)=>{
-    if(!t.rot) return q;
-    const cx=t.xMm+t.wMm/2, cy=t.yMm+t.hMm/2, a=-t.rot*Math.PI/180;
-    const dx=q.x-cx, dy=q.y-cy;
-    return {x:cx+dx*Math.cos(a)-dy*Math.sin(a), y:cy+dx*Math.sin(a)+dy*Math.cos(a)};
-  };
-  const hitText=q=>{
-    if(!q||pcMode!=='placecard') return null;
-    const g=grip(), ts=state.texts||[];
-    for(let i=ts.length-1;i>=0;i--){
-      const t=ts[i], l=unrot(q,t);
-      if(l.x<t.xMm||l.y<t.yMm||l.x>t.xMm+t.wMm||l.y>t.yMm+t.hMm) continue;
-      const corner=(t.xMm+t.wMm-l.x)<=Math.min(g,t.wMm*0.35)
-                 &&(t.yMm+t.hMm-l.y)<=Math.min(g,t.hMm*0.35);
-      return {txt:t,corner};
-    }
-    return null;
-  };
   let drag=null, band=null;
   c.addEventListener('pointerdown',e=>{
     const q=at(e); if(!q) return;
-    // Place Card: a text under the finger wins over a placeholder beneath it
-    const ht=hitText(q);
-    if(ht){
-      if(e.shiftKey){
-        if(pcTextSel.has(ht.txt.id)) pcTextSel.delete(ht.txt.id); else pcTextSel.add(ht.txt.id);
-        pcTextSelSync(); drawAll();
-        return;
-      }
-      if(!pcTextSel.has(ht.txt.id)){ pcTextSel.clear(); pcTextSel.add(ht.txt.id); pcTextSelSync(); }
-      const sel=pcTextSelList();
-      drag={kind:'text',mode:ht.corner?'resize':'move',txt:ht.txt,x:q.x,y:q.y,
-        from:sel.map(t=>({t,x:t.xMm,y:t.yMm,w:t.wMm,h:t.hMm}))};
-      try{ c.setPointerCapture(e.pointerId); }catch(err){}
-      e.preventDefault();
-      return;
-    }
     const h=hit(q);
     if(!h){
       // empty paper: start a marquee, and a plain click clears the selection
       band={x0:q.x,y0:q.y,add:e.shiftKey};
       if(!e.shiftKey&&phSel.size) phSelSet([]);
-      if(!e.shiftKey&&pcTextSel.size){ pcTextSel.clear(); pcTextSelSync(); }
       try{ c.setPointerCapture(e.pointerId); }catch(err){}
       e.preventDefault();
       return;
@@ -7045,14 +6969,6 @@ document.getElementById('pcPasteLines').addEventListener('paste',()=>{
     try{ c.setPointerCapture(e.pointerId); }catch(err){}
     e.preventDefault();
   });
-  c.addEventListener('dblclick',e=>{
-    if(pcMode!=='placecard') return;
-    const ht=hitText(at(e)); if(!ht) return;
-    pcTextSel.clear(); pcTextSel.add(ht.txt.id); pcTextSelSync();
-    pcRenderTextList(); drawAll();
-    const box=document.getElementById('pcTextWords');
-    if(box){ box.focus(); box.select(); }
-  });
   c.addEventListener('pointermove',e=>{
     const q=at(e); if(!q) return;
     if(band){
@@ -7065,16 +6981,6 @@ document.getElementById('pcPasteLines').addEventListener('paste',()=>{
     if(!drag) return;
     e.preventDefault();
     const dx=q.x-drag.x, dy=q.y-drag.y;
-    if(drag.kind==='text'){
-      if(drag.mode==='move') drag.from.forEach(f=>{ f.t.xMm=f.x+dx; f.t.yMm=f.y+dy; });
-      else{
-        const f=drag.from.find(z=>z.t===drag.txt)||{x:drag.txt.xMm,y:drag.txt.yMm,
-          w:drag.txt.wMm,h:drag.txt.hMm,t:drag.txt};
-        f.t.wMm=Math.max(3,f.w+dx); f.t.hMm=Math.max(3,f.h+dy);
-      }
-      drawAll();
-      return;
-    }
     if(drag.mode==='move') drag.from.forEach(f=>{ f.p.xMm=f.x+dx; f.p.yMm=f.y+dy; });
     else{
       const f=drag.from.find(z=>z.p===drag.ph)||{x:drag.ph.xMm,y:drag.ph.yMm,
@@ -7089,13 +6995,6 @@ document.getElementById('pcPasteLines').addEventListener('paste',()=>{
       // everything the box touched, added to what was already held if shift
       const b=phBand;
       if(b&&b.w>0.5&&b.h>0.5){
-        if(pcMode==='placecard'){
-          const inT=(state.texts||[]).filter(t=>
-            t.xMm+t.wMm>b.x&&t.xMm<b.x+b.w&&t.yMm+t.hMm>b.y&&t.yMm<b.y+b.h);
-          if(!band.add) pcTextSel.clear();
-          inT.forEach(t=>pcTextSel.add(t.id));
-          pcTextSelSync();
-        }
         const inside=state.placeholders.filter(p=>
           p.xMm+p.wMm>b.x&&p.xMm<b.x+b.w&&p.yMm+p.hMm>b.y&&p.yMm<b.y+b.h);
         const ids=band.add?[...phSel,...inside.map(p=>p.id)]:inside.map(p=>p.id);
@@ -7106,9 +7005,7 @@ document.getElementById('pcPasteLines').addEventListener('paste',()=>{
       return;
     }
     if(!drag) return;
-    const wasText=drag.kind==='text';
     drag=null;
-    if(wasText){ pcRenderTextList(); pcTextSelSync(); drawAll(); return; }
     renderPlaceholderList(); phSelSync(); drawAll();
   };
   c.addEventListener('pointerup',stop);
@@ -7117,9 +7014,7 @@ document.getElementById('pcPasteLines').addEventListener('paste',()=>{
 // Arrow keys nudge, Delete drops, Ctrl+A takes the lot — the keys that go with
 // a canvas you can point at.
 document.addEventListener('keydown',e=>{
-  if(currentScreen!=='tool-custom') return;
-  const placecard=pcMode==='placecard';
-  if(!state.placeholders.length && !(placecard&&(state.texts||[]).length)) return;
+  if(currentScreen!=='tool-custom'||!state.placeholders.length) return;
   const t=e.target;
   if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.tagName==='SELECT'||t.isContentEditable)) return;
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'){
@@ -7127,22 +7022,6 @@ document.addEventListener('keydown',e=>{
   }
   const step=e.shiftKey?2:e.altKey?0.1:0.5;
   const move={ArrowLeft:[-step,0],ArrowRight:[step,0],ArrowUp:[0,-step],ArrowDown:[0,step]}[e.key];
-  // Place Card: a text selection takes the keys, so a name can be nudged or
-  // dropped the same way a card can
-  if(placecard&&pcTextSel.size&&!phSel.size){
-    if(e.key==='Delete'||e.key==='Backspace'){
-      e.preventDefault();
-      state.texts=state.texts.filter(x=>!pcTextSel.has(x.id));
-      pcTextSel.clear();
-      pcRenderTextList(); pcTextSelSync(); drawAll();
-      return;
-    }
-    if(!move) return;
-    e.preventDefault();
-    pcTextSelList().forEach(x=>{ x.xMm+=move[0]; x.yMm+=move[1]; });
-    pcRenderTextList(); drawAll();
-    return;
-  }
   if(!phSel.size) return;
   if(e.key==='Delete'||e.key==='Backspace'){
     e.preventDefault();
@@ -7162,6 +7041,15 @@ function renderPlaceholderList(){
   document.querySelectorAll('.unitHint').forEach(e=>e.textContent=u);
   const wrap=document.getElementById('phListWrap');
   if(!state.placeholders.length){wrap.innerHTML='<p class="hint" style="margin:0;">No placeholders yet.</p>';return;}
+  // which group each box belongs to — Place Card only, since Custom Template
+  // has no categories to put it in
+  const catPick=p=>pcMode!=='placecard'?'':`
+      <label class="field" style="margin-top:6px;"><span>CATEGORY</span>
+        <select data-field="cat">
+          <option value=""${p.cat?'':' selected'}>— none —</option>
+          ${(state.cats||[]).map(c=>
+            `<option value="${escapeHtml(c.id)}"${p.cat===c.id?' selected':''}>${escapeHtml(c.name||'')}</option>`).join('')}
+        </select></label>`;
   wrap.innerHTML='<div class="ph-list">'+state.placeholders.map(p=>`
     <div class="ph-card" data-id="${p.id}">
       <div class="ph-card-head"><input class="ph-label-inp" type="text" data-field="label" value="${escapeHtml(p.label||'')}" aria-label="Placeholder name"/><button class="del-btn" data-del="${p.id}">×</button></div>
@@ -7170,8 +7058,17 @@ function renderPlaceholderList(){
         <label class="field"><span>Y</span><input type="number" step="0.1" value="${round(fromMm(p.yMm,u))}" data-field="y"/></label>
         <label class="field"><span>W</span><input type="number" step="0.1" value="${round(fromMm(p.wMm,u))}" data-field="w"/></label>
         <label class="field"><span>H</span><input type="number" step="0.1" value="${round(fromMm(p.hMm,u))}" data-field="h"/></label>
-      </div>
+      </div>${catPick(p)}
     </div>`).join('')+'</div>';
+  wrap.querySelectorAll('select[data-field="cat"]').forEach(sel=>{
+    sel.addEventListener('change',e=>{
+      const ph=state.placeholders.find(x=>x.id===e.target.closest('.ph-card').dataset.id);
+      if(!ph) return;
+      ph.cat=e.target.value;
+      if(typeof pcRenderCats==='function') pcRenderCats();
+      drawAll();
+    });
+  });
   wrap.querySelectorAll('input').forEach(inp=>{
     inp.addEventListener('input',e=>{
       const ph=state.placeholders.find(x=>x.id===e.target.closest('.ph-card').dataset.id);
@@ -7194,7 +7091,7 @@ function renderPlaceholderList(){
   // both — and shift adds, exactly as it does on the canvas
   wrap.querySelectorAll('.ph-card').forEach(card=>{
     card.addEventListener('click',e=>{
-      if(e.target.closest('input,[data-del]')) return;
+      if(e.target.closest('input,select,[data-del]')) return;
       const id=card.dataset.id;
       if(e.shiftKey){
         if(phSel.has(id)) phSel.delete(id); else phSel.add(id);
@@ -7317,6 +7214,11 @@ document.querySelectorAll('#bleedPresets [data-bleed]').forEach(b=>{
 function designTallyText(){
   const per=state.placeholders.length, total=designTotal(), sheets=sheetCount();
   const spare=per?sheets*per-total:0;
+  // on Place Card the sheets are the categories' business, so the design list
+  // says only what it is: so many pictures over so many boxes
+  if(pcMode==='placecard')
+    return `${total} design card${total===1?'':'s'} · ${per} box${per===1?'':'es'} a sheet`
+      +` · ${sheets} sheet${sheets===1?'':'s'} in all`;
   return `${total} card${total===1?'':'s'} · ${per} per sheet · ${sheets} sheet${sheets===1?'':'s'}`
     +(spare?` · ${spare} placeholder${spare===1?'':'s'} empty on the last sheet`:'');
 }
@@ -18537,11 +18439,11 @@ function applyPrintState(meta,name){
   if(meta.layout) state.layout=Object.assign(state.layout,meta.layout);
   writeLayoutInputs();
   state.placeholders=meta.placeholders||[];
-  // Place Card text. A print template / Magic Create snapshot carries none, so
-  // this also clears any text left over from a Place Card session — the one
-  // guarantee that keeps text off the Custom Template sheet.
-  state.texts=Array.isArray(meta.texts)?meta.texts.map(t=>({...t})):[];
-  if(typeof pcTextSel!=='undefined') pcTextSel.clear();
+  // Place Card categories. A print template / Magic Create snapshot carries
+  // none, so this also clears any left over from a Place Card session — the one
+  // guarantee that keeps words off the Custom Template sheet.
+  state.cats=Array.isArray(meta.cats)
+    ? meta.cats.map(c=>({...c,lines:Array.isArray(c.lines)?c.lines.slice():[]})) : [];
   state.showCut=meta.showCut!==false;
   document.getElementById('cutToggle').checked=state.showCut;
   state.cutColor=meta.cutColor||'red';
@@ -18605,7 +18507,7 @@ function applyPrintState(meta,name){
   state.page=0;
   renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();
   renderDesignLines();refreshPdfNamingPreview();
-  if(typeof pcRenderTextList==='function') pcRenderTextList();
+  if(typeof pcRenderCats==='function') pcRenderCats();
   drawAll();
   // The artwork loads separately and after: a NAS read shouldn't hold up the
   // rest of the template landing, and the sheet is worth showing before the
@@ -18764,7 +18666,7 @@ async function pcSaveTemplate(){
       ({path:d.source.path,name:d.name,qty:d.qty,
         bleedOn:!!d.bleedOn,bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}));
     const meta={name,kind:'place-card',
-      paper:state.paper,layout:state.layout,placeholders:state.placeholders,texts:state.texts,
+      paper:state.paper,layout:state.layout,placeholders:state.placeholders,cats:state.cats,
       showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
       refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate,
       design,designs,orderId:state.orderId,pdfNaming:state.pdfNaming,
@@ -20277,8 +20179,7 @@ async function loadDesignRescan(){
     fonts.sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'}));
     loadDesignFonts=fonts;
     await pcRegisterFolderFonts();
-    if(typeof pcFillFontSelect==='function') pcFillFontSelect();
-    if(typeof pcRenderTextList==='function') pcRenderTextList();
+    if(typeof pcRenderCats==='function') pcRenderCats();
   }
   fillTemplateFolderOptions();
 }
@@ -20432,8 +20333,8 @@ document.getElementById('loadDesignForgetFolderBtn').addEventListener('click',as
   loadDesignFiles=[]; loadDesignFonts=[]; loadDesignSelected=null;
   document.getElementById('loadDesignQtyRow').style.display='none';
   loadDesignFolderState(); loadDesignRenderList();
-  if(typeof pcFillFontSelect==='function') pcFillFontSelect();
-  if(ldActiveMode()==='placecard'){ if(typeof pcRenderTextList==='function') pcRenderTextList(); drawAll(); }
+  if(typeof pcRenderCats==='function') pcRenderCats();
+  if(ldActiveMode()==='placecard') drawAll();
 });
 // Redrawn a moment after the typing stops rather than on every letter: a
 // six-letter SKU typed into a folder of thousands was six full redraws, and
@@ -25822,7 +25723,7 @@ undoDef('print',{
     refMark:state.refMark,foldLine:state.foldLine,bleed:state.bleed,
     rotate:state.rotate,shift:state.shift,
     // Place Card text — carried in the shared 'print' history; [] in Custom Template
-    texts:pcMode==='placecard'?state.texts:undefined}),
+    cats:pcMode==='placecard'?state.cats:undefined}),
   put:v=>applyPrintState(v)});
 undoDef('gift',{
   snap:()=>({order:gtOrder,sheet:{...gtSheet},designs:gtLib.designs,
