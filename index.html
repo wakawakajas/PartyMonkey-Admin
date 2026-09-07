@@ -5174,6 +5174,7 @@ body.mc-docked .mc-bubble{display:none !important;}
             </select></label>
             <label class="field"><span>ROTATE °</span><input type="number" step="1" id="pcTextRot"/></label>
           </div>
+          <p class="hint" id="pcFontFolderNote" style="margin:6px 0 0;"></p>
           <div class="grid2" style="margin-top:10px;">
             <button class="btn-outline btn-sm" id="pcCentreInPhBtn">Centre in placeholder</button>
             <button class="btn-outline btn-sm" id="pcStackSeqBtn">Stack in sequence</button>
@@ -5937,6 +5938,34 @@ const PC_FONT_LABEL={plex:'Plex Sans',grotesk:'Space Grotesk',serif:'Serif',
   mono:'Mono',script:'Script',cond:'Condensed'};
 const nextSeq=()=>state.texts.reduce((m,t)=>Math.max(m,t.seq||0),0)+1;
 
+// A text's `font` is either a PC_FONTS key ('plex'…) or 'file:<path>' for a
+// typeface found in the Place Card designs folder. loadDesignFonts entries carry
+// a stable `family` ('pcf-<hash of path>'); pcRegisterFolderFonts loads the file
+// into a FontFace under that name — the same mechanism as Gift Tag's gtHydrate.
+const pcFontReg=new Set();
+async function pcRegisterFolderFonts(){
+  let added=false;
+  for(const f of (loadDesignFonts||[])){
+    if(pcFontReg.has(f.key)||!f.handle) continue;
+    try{
+      const file=await f.handle.getFile();
+      const face=new FontFace(f.family,await file.arrayBuffer());
+      await face.load(); document.fonts.add(face);
+      pcFontReg.add(f.key); added=true;
+    }catch(e){ /* a font that will not load simply falls back to Plex */ }
+  }
+  // a face can be a beat behind the canvas even after load() resolves — redraw
+  // once the browser confirms everything is ready
+  if(added) document.fonts.ready.then(()=>{ if(currentScreen==='tool-custom') drawAll(); });
+}
+function pcFamily(key){
+  if(typeof key==='string'&&key.startsWith('file:')){
+    const f=(loadDesignFonts||[]).find(x=>x.key===key);
+    return f?`"${f.family}", 'IBM Plex Sans', sans-serif`:PC_FONTS.plex;
+  }
+  return PC_FONTS[key]||PC_FONTS.plex;
+}
+
 const state={
   paper:{w:210,h:297,unit:'mm'},
   layout:{cardW:89,cardH:54,cols:2,rows:5,mode:'center',leadTrim:20.5,sideTrim:20,slit:5,cut:5},
@@ -6428,7 +6457,7 @@ function drawTextObjects(ctx,sc,forExport){
     }
     ctx.fillStyle=t.color||'#232323';
     ctx.textBaseline='alphabetic';
-    const fam=PC_FONTS[t.font]||PC_FONTS.plex;
+    const fam=pcFamily(t.font);
     const fit=gtFitText(ctx,words,fam,Math.max(0.8,Number(t.sizeMm)||6),sc,bw,bh);
     const lines=fit.lines, lh=fit.size*1.25;
     ctx.textAlign=t.align||'center';
@@ -6468,8 +6497,29 @@ function drawAll(){
 // navigation into the builder — the Place Card tile sets 'placecard', every
 // other way in (Custom Template tile, Magic Create, Saved sheets) sets 'custom'.
 function pcSetMode(m){
-  pcMode=(m==='placecard')?'placecard':'custom';
+  const next=(m==='placecard')?'placecard':'custom';
+  const changed=next!==pcMode;
+  pcMode=next;
   if(currentScreen==='tool-custom') pcPaintMode();
+  // the two modes have separate designs folders — swap the active set when the
+  // mode actually changes, and only while the builder is the screen on show
+  if(changed&&currentScreen==='tool-custom')
+    ldModeJob=ldModeJob.then(loadDesignSwitchRefresh,loadDesignSwitchRefresh);
+}
+// Re-reads the folder for the mode now active, rescans it, and repaints
+// everything that shows designs or fonts. Serialised so a fast toggle can't
+// interleave two scans. Mirrors gtSwitchFolder.
+let ldModeJob=Promise.resolve();
+async function loadDesignSwitchRefresh(){
+  try{
+    const dir=await loadDesignDirGet();
+    if(dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan();
+    if(typeof loadDesignFolderState==='function') loadDesignFolderState();
+    if(typeof loadDesignRenderList==='function') loadDesignRenderList();
+    if(typeof renderDesignLines==='function') renderDesignLines();
+    if(typeof pcFillFontSelect==='function') pcFillFontSelect();
+    drawAll();
+  }catch(e){}
 }
 // Repaints the parts of #appScreen that differ between the two: the title, the
 // template card (shared print library vs Place Card's own list), the Text card,
@@ -6690,9 +6740,18 @@ const pcTextById=id=>(state.texts||[]).find(t=>t.id===id)||null;
 const pcSame=(list,f)=>list.every(t=>f(t)===f(list[0]));
 
 function pcFillFontSelect(){
-  const sel=document.getElementById('pcTextFont'); if(!sel||sel.options.length) return;
+  const sel=document.getElementById('pcTextFont'); if(!sel) return;
+  const keep=sel.value;
+  const folder=(loadDesignFonts||[]);
   sel.innerHTML=Object.keys(PC_FONTS).map(k=>
-    `<option value="${k}">${escapeHtml(PC_FONT_LABEL[k]||k)}</option>`).join('');
+      `<option value="${k}">${escapeHtml(PC_FONT_LABEL[k]||k)}</option>`).join('')
+    +(folder.length?'<option disabled>── from your folder ──</option>':'')
+    +folder.map(f=>`<option value="${escapeHtml(f.key)}">${escapeHtml(f.name)}</option>`).join('');
+  if(keep) sel.value=keep;
+  const note=document.getElementById('pcFontFolderNote');
+  if(note) note.textContent=folder.length
+    ? `${folder.length} font${folder.length===1?'':'s'} from your Place Card folder`
+    : 'Connect a folder in Load design to use your own fonts';
 }
 const PC_TEXT_FIELDS=[
   ['pcTextFont','font',String],['pcTextSize','sizeMm',Number],
@@ -8300,7 +8359,13 @@ function showScreen(name,viaBack){
   }
   closeDrawer();
   syncAddButton(name);
-  if(name==='tool-custom'){ pcPaintMode(); drawAll(); ppLoad(); } // canvases were hidden (0 size) while off-screen; redraw now they're visible
+  if(name==='tool-custom'){
+    pcPaintMode(); drawAll(); ppLoad(); // canvases were hidden (0 size) while off-screen; redraw now they're visible
+    // arriving with the active designs-folder set to the wrong mode (e.g. left
+    // in Place Card, came back through Magic Create) — bring it in line
+    if(loadDesignDirMode!==ldActiveMode())
+      ldModeJob=ldModeJob.then(loadDesignSwitchRefresh,loadDesignSwitchRefresh);
+  }
   if(name==='tool-gift-tag') gtOpen();
   if(name==='gift-tag-settings') gtSettingsOpen();
   if(name==='print-paper') ppOpen();
@@ -18733,6 +18798,10 @@ async function pcLoadTemplate(id){
   if(error||!data){showMsg(msg,'Could not find that template.',false);return;}
   applyPrintState(data.data,name);
   document.getElementById('pcTemplateName').value=name;
+  // the template's text may name folder fonts — make sure they are scanned and
+  // registered (the folder could have been connected since entering Place Card)
+  const dir=await loadDesignDirGet();
+  if(dir&&await loadDesignDirOk(dir,false)){ await loadDesignRescan(); drawAll(); }
   showMsg(msg,'✓ Loaded "'+name+'"',true);
 }
 async function pcDeleteTemplate(id){
@@ -19973,8 +20042,18 @@ document.getElementById('wholeArtToggle').addEventListener('change',e=>{
 // Library further down — and every visit after that just searches what's in it.
 const LOAD_DESIGN_FOLDER_HINT=String.raw`C:\NAS Folders\Partymonkey NAS\Pigu\Big TY Card`;
 const LOAD_DESIGN_ART=/\.(png|jpe?g|webp|pdf|ai)$/i;
+// font files sitting in the same folder — Place Card reads these so its text can
+// be set in a real typeface, the way Gift Tag reads its fonts/ folder
+const LOAD_DESIGN_FACE=/\.(ttf|otf|woff2?)$/i;
 let loadDesignDir=null, loadDesignDirRead=false;
 let loadDesignFiles=[], loadDesignSelected=null;
+// Place Card has its own designs folder, kept apart from Custom Template's. The
+// active set (dir + files + fonts) is whichever mode is on screen; loadDesignDirMode
+// records which, so loadDesignDirGet knows when to swap. Magic Create never runs
+// on the tool-custom screen so it always resolves to the 'custom' folder.
+let loadDesignFonts=[], loadDesignDirMode='custom';
+const ldActiveMode=()=>(currentScreen==='tool-custom'&&pcMode==='placecard')?'placecard':'custom';
+const ldDirKey=()=>ldActiveMode()==='placecard'?'loadDesignDir:placecard':'loadDesignDir';
 // A folder handle survives a reload; the permission to read it does not, and
 // asking again has to come off a tap. Until somebody taps, the folder is
 // remembered and unreadable — which every list downstream saw as an empty
@@ -20026,15 +20105,18 @@ let mcSummaryPickFor=null;
 // artwork to a sheet, the other writes a path onto the shop's routing.
 let mcRoutePickFor=null;
 async function loadDesignDirGet(){
-  if(!loadDesignDirRead){
-    loadDesignDir=await gtIdbGet('loadDesignDir').catch(()=>null)||null;
-    loadDesignDirRead=true;
+  const m=ldActiveMode();
+  if(!loadDesignDirRead||loadDesignDirMode!==m){
+    loadDesignDir=await gtIdbGet(ldDirKey()).catch(()=>null)||null;
+    // the scanned set belonged to the other mode's folder
+    loadDesignFiles=[]; loadDesignFonts=[]; loadDesignSelected=null;
+    loadDesignDirRead=true; loadDesignDirMode=m;
   }
   return loadDesignDir;
 }
 async function loadDesignDirSet(dir){
-  loadDesignDir=dir; loadDesignDirRead=true;
-  await gtIdbPut('loadDesignDir',dir);
+  loadDesignDir=dir; loadDesignDirRead=true; loadDesignDirMode=ldActiveMode();
+  await gtIdbPut(ldDirKey(),dir);
 }
 // read-only — nothing here is ever written back into the presets folder
 async function loadDesignDirOk(handle,ask){
@@ -20111,34 +20193,54 @@ function loadDesignFolderState(){
       +(mcSrcFiles.length?` — ${mcSrcFiles.length} file${mcSrcFiles.length===1?'':'s'}`:'');
     return;
   }
+  // "Place Card" or "Print template" — each names its own folder
+  const lbl=ldActiveMode()==='placecard'?'Place Card':'Print template';
+  const fontBit=(ldActiveMode()==='placecard'&&loadDesignFonts.length)
+    ? `, ${loadDesignFonts.length} font${loadDesignFonts.length===1?'':'s'}` : '';
   if(!loadDesignDir){
-    el.textContent=`Print template — not chosen yet — pick ${LOAD_DESIGN_FOLDER_HINT}`;
+    el.textContent=`${lbl} — not chosen yet — pick ${LOAD_DESIGN_FOLDER_HINT}`;
     return;
   }
-  if(!ldTplFolder){ el.textContent=`Print template — looking in ${loadDesignDir.name}`; return; }
+  if(!ldTplFolder){
+    el.textContent=`${lbl} — looking in ${loadDesignDir.name}`
+      +(fontBit?` — ${loadDesignFiles.length} design${loadDesignFiles.length===1?'':'s'}${fontBit}`:'');
+    return;
+  }
   // A template naming a folder that is not under the chosen one is the usual
   // trouble: the folder chosen is one product's own folder, so every other
   // template points somewhere it cannot see. Said plainly, with the way out.
   if(!(loadDesignFiles||[]).some(f=>ldUnder(f,ldTplFolder))){
-    el.textContent=`Print template — looking in ${loadDesignDir.name}. This template prints `
+    el.textContent=`${lbl} — looking in ${loadDesignDir.name}. This template prints `
       +`“${ldTplFolder}”, which is not in there — choose the folder those folders sit inside.`;
     return;
   }
   el.textContent=ldShowAll
-    ? `Print template — looking in ${loadDesignDir.name}, all of it. This template prints “${ldTplFolder}”.`
-    : `Print template — looking in ${loadDesignDir.name} › ${ldTplFolder}, the folder this template prints.`;
+    ? `${lbl} — looking in ${loadDesignDir.name}, all of it. This template prints “${ldTplFolder}”.`
+    : `${lbl} — looking in ${loadDesignDir.name} › ${ldTplFolder}, the folder this template prints.`;
 }
-// recursive: "a few folders" of presets sit under the chosen root
-async function loadDesignScan(dir,prefix){
+// recursive: "a few folders" of presets sit under the chosen root. Font files
+// found alongside the artwork go in their own list for the Place Card text panel.
+async function loadDesignScan(dir,prefix,fonts){
   const out=[];
   for await (const entry of dir.values()){
     if(entry.kind==='directory'){
-      out.push(...await loadDesignScan(entry,prefix+entry.name+'/'));
+      out.push(...await loadDesignScan(entry,prefix+entry.name+'/',fonts));
     }else if(entry.kind==='file'&&LOAD_DESIGN_ART.test(entry.name)){
       out.push({name:entry.name,path:prefix+entry.name,folder:prefix.replace(/\/$/,'')||'—',handle:entry});
+    }else if(fonts&&entry.kind==='file'&&LOAD_DESIGN_FACE.test(entry.name)){
+      const path=prefix+entry.name;
+      fonts.push({name:entry.name.replace(/\.[^.]+$/,''),path,
+        key:'file:'+path, family:'pcf-'+pcHash(path), handle:entry});
     }
   }
   return out;
+}
+// small deterministic hash → a stable, CSS-safe FontFace family name, so a
+// template's "file:fonts/Foo.ttf" resolves to the same face on every reconnect
+function pcHash(s){
+  let h=2166136261>>>0;
+  for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619)>>>0; }
+  return h.toString(36);
 }
 // walks straight to a known path (e.g. one saved with a template) rather
 // than rescanning the whole folder — null if the folder isn't connected or
@@ -20155,15 +20257,29 @@ async function loadDesignFileByPath(path){
       return await fh.getFile();
     }catch(e){ return null; }
   };
-  return await under(await loadDesignDirGet());
+  const hit=await under(await loadDesignDirGet());
+  if(hit) return hit;
+  // a template saved against the other mode's folder (or from before the split)
+  const otherKey=ldActiveMode()==='placecard'?'loadDesignDir':'loadDesignDir:placecard';
+  return await under(await gtIdbGet(otherKey).catch(()=>null));
 }
 async function loadDesignRescan(){
-  loadDesignFiles=[];
+  loadDesignFiles=[]; loadDesignFonts=[];
   const dir=await loadDesignDirGet();
   if(!dir||!await loadDesignDirOk(dir,false)) return;
-  const out=await loadDesignScan(dir,'');
+  // fonts are only Place Card's concern — don't scan or register them otherwise
+  const wantFonts=ldActiveMode()==='placecard';
+  const fonts=wantFonts?[]:null;
+  const out=await loadDesignScan(dir,'',fonts);
   out.sort((a,b)=>a.path.localeCompare(b.path,undefined,{numeric:true,sensitivity:'base'}));
   loadDesignFiles=out;
+  if(wantFonts){
+    fonts.sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'}));
+    loadDesignFonts=fonts;
+    await pcRegisterFolderFonts();
+    if(typeof pcFillFontSelect==='function') pcFillFontSelect();
+    if(typeof pcRenderTextList==='function') pcRenderTextList();
+  }
   fillTemplateFolderOptions();
 }
 document.getElementById('loadDesignCount').addEventListener('click',e=>{
@@ -20298,7 +20414,8 @@ document.getElementById('loadDesignPickFolderBtn').addEventListener('click',asyn
     }
     await loadDesignDirSet(dir); loadDesignFolderState();
     await loadDesignRescan(); loadDesignRenderList();
-    showMsg(out,`✓ Looking in ${dir.name} — ${loadDesignFiles.length} design(s) found.`,true);
+    showMsg(out,`✓ Looking in ${dir.name} — ${loadDesignFiles.length} design(s) found`
+      +(ldActiveMode()==='placecard'&&loadDesignFonts.length?`, ${loadDesignFonts.length} font(s)`:'')+'.',true);
   }catch(e){ /* cancelled */ }
 });
 document.getElementById('loadDesignForgetFolderBtn').addEventListener('click',async()=>{
@@ -20310,10 +20427,13 @@ document.getElementById('loadDesignForgetFolderBtn').addEventListener('click',as
     loadDesignFolderState(); loadDesignRenderList();
     return;
   }
-  loadDesignDir=null; loadDesignDirRead=true; await gtIdbPut('loadDesignDir',null);
-  loadDesignFiles=[]; loadDesignSelected=null;
+  loadDesignDir=null; loadDesignDirRead=true; loadDesignDirMode=ldActiveMode();
+  await gtIdbPut(ldDirKey(),null);
+  loadDesignFiles=[]; loadDesignFonts=[]; loadDesignSelected=null;
   document.getElementById('loadDesignQtyRow').style.display='none';
   loadDesignFolderState(); loadDesignRenderList();
+  if(typeof pcFillFontSelect==='function') pcFillFontSelect();
+  if(ldActiveMode()==='placecard'){ if(typeof pcRenderTextList==='function') pcRenderTextList(); drawAll(); }
 });
 // Redrawn a moment after the typing stops rather than on every letter: a
 // six-letter SKU typed into a folder of thousands was six full redraws, and
