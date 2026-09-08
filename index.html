@@ -30277,7 +30277,7 @@ async function mcAddExtra(id){
   const was=it.sheet_item;
   it.sheet_item=si;
   if(!await mcSave(it,{sheet_item:si})){ it.sheet_item=was; return; }
-  mcExtraToSheet(it);
+  await mcExtraToSheet(it);
   mcRepaintRow(it);
   if(typeof mcRenderSummary==='function') mcRenderSummary();
   if(mcWinItem===it.id) mcWinRender();
@@ -30289,7 +30289,38 @@ async function mcAddExtra(id){
 // And onto the sheet in the builder, where this line may already be laid out.
 // The export reads the line either way; this is so somebody standing in front
 // of the sheet sees the change they just made instead of the figure it had.
-function mcExtraToSheet(it){
+async function mcExtraToSheet(it){
+  // A per-order print line has a sheet of its own, and what that sheet runs is
+  // the count on its design list. Extras were written onto the batch line and
+  // nowhere else, so the row said "3 extra" and the PDF still came out at the
+  // figure that was ordered. The list is told here — the one in the builder if
+  // this line is the one open, and the one saved on the line either way, since
+  // that is what Download All reads.
+  if(it.tile==='custom'){
+    const want=Math.max(1,mcQty(it));
+    const base=x=>String(x||'').split('/').pop();
+    const stem=x=>base(x).replace(LOAD_DESIGN_ART,'').trim().toLowerCase();
+    const names=mcNamesOf(it).map(x=>String(x).trim().toLowerCase());
+    // one design on the sheet is this line's card by definition; more than one
+    // and it is the one this line's own name picks out
+    const mine=list=>list.length===1?[list[0]]
+      :list.filter(d=>(d.sku&&names.includes(String(d.sku).trim().toLowerCase()))
+        ||names.includes(stem(d.name||d.path)));
+    if(mcWinItem===it.id&&(state.designs||[]).length){
+      mine(state.designs).forEach(d=>{ d.qty=want; });
+      state.page=0;
+      renderDesignLines(); refreshArtInputs(); drawAll();
+    }
+    const kept=it.design&&Array.isArray(it.design.designs)?it.design.designs:null;
+    if(kept&&kept.length){
+      const rows=mine(kept);
+      if(rows.length&&rows.some(d=>Number(d.qty)!==want)){
+        rows.forEach(d=>{ d.qty=want; });
+        await mcSave(it,{design:it.design});
+      }
+    }
+    return;
+  }
   if(it.tile==='giftTag'){
     const l=(typeof gtOrder!=='undefined'&&gtOrder||[])
       .find(x=>String(x.id||'')==='mc-'+it.id);
@@ -31564,6 +31595,17 @@ function mcSummaryButtons(shown){
 // on the summary reading "no artwork of that name" against files the picker
 // lists, the builder loads and the export prints. The name itself is still
 // matched whole: guessing here prints the wrong card a hundred times.
+// The designs folder, read if nothing has read it yet. A machine that has just
+// been opened holds the folder as a handle and not one file name, so matching a
+// SKU against it answered "no artwork" for every line — the layout landed and
+// the picture never did. Everything that looks a SKU up asks for this first.
+async function mcDesignsReady(){
+  if(loadDesignFiles.length) return true;
+  const dir=await loadDesignDirGet();
+  if(!dir||!await loadDesignDirOk(dir,false)) return false;
+  await loadDesignRescan();
+  return !!loadDesignFiles.length;
+}
 function designFileForSku(sku){
   const want=String(sku||'').trim().toLowerCase();
   if(!want) return null;
@@ -34580,6 +34622,9 @@ function mcScopePickerTo(tpl){
 async function mcAutoLayoutFor(it,sel){
   const msg=document.getElementById('mcWinMsg');
   const names=mcNamesOf(it);
+  // the folder is what the SKU is matched against, so it is read before the
+  // matching rather than after it
+  await mcDesignsReady();
   // Routing is asked about the line — its SKU, and the variation its lines
   // carry — before anything is read off a file name. Asked with whichever of
   // its names happened to match a PNG, a rule written against the SKU never
@@ -34615,8 +34660,17 @@ async function mcAutoLayoutFor(it,sel){
     }
   }
   if(pick){
+    // The template's own artwork loads after the template lands — a Preset
+    // layout saved with designs on it starts a read and fills state.designs
+    // when it comes back. Clearing the list before that had finished let it
+    // land afterwards, over the top of this line's design: the layout was
+    // right, the picture was the template's, and Create looked like it had
+    // added nothing at all.
+    await printArtReady();
     state.designs=[]; setArtMode('preset',true);
-    await addDesignLine(pick,it.qty||1,sku);
+    // what this line prints, not what was ordered: extras added on the batch
+    // page are part of the run and the sheet has to be laid out for them
+    await addDesignLine(pick,mcQty(it)||1,sku);
     setArtMode('preset');
     mcWinLive=true;
   }
@@ -35435,6 +35489,10 @@ document.getElementById('mcBackChip').addEventListener('click',async()=>{
 // on the way out — so a sheet being built on the Gift Tag screen is not lost
 // to a batch borrowing it, and edits made there land on the batch's rows.
 let mcGtHome=null;
+// A row on the gift tag sheet that came from the batch rather than from
+// somebody typing it in there. The two share one order now, so every place
+// that has to tell them apart asks this rather than spelling out the prefix.
+const mcGtLent=l=>String((l&&l.id)||'').startsWith('mc-');
 // Which sheet a line goes onto, said the way the export says it: the page it
 // is built on and the stock it is run on. Matte and gloss are two runs through
 // the machine and come out as two PDFs, so they are two sheets — and a sheet
@@ -35450,6 +35508,10 @@ async function mcGtOpenFull(page,finish){
   const here=mcItem(mcWinItem);
   const want=page||mcLinePage(here)||gtMode;
   const fin=finish||mcGtFinishOf(here);
+  // A sheet lent for another page or another run is handed back before the
+  // page under it changes. Done after the switch, the batch's rows were
+  // written back against whichever page had just been opened.
+  if(mcGtHome&&(mcGtHome.page!==want||mcGtHome.finish!==fin)) await mcGtReturn();
   if(want!==gtMode&&typeof gtSetMode==='function') await gtSetMode(want);
   const lines=mcPool().filter(x=>x.tile==='giftTag'&&x.sheet_item&&x.sheet_item.designId
     &&(mcLinePage(x)||want)===want&&mcGtFinishOf(x)===fin);
@@ -35472,7 +35534,7 @@ async function mcGtOpenFull(page,finish){
   // The next order worked lands on the sheet already open where it belongs on
   // it, which is what "same finish, same page" means, and starts a sheet of its
   // own where it does not.
-  if(mcGtHome&&mcGtHome.page===want&&mcGtHome.finish===fin){
+  if(mcGtHome){
     const on=new Map(gtOrder.map(l=>[String(l.id||''),l]));
     for(const x of lines){
       const key='mc-'+x.id, had=on.get(key);
@@ -35487,11 +35549,14 @@ async function mcGtOpenFull(page,finish){
       }
     }
   }else{
-    // a different sheet: whatever is on this one goes back onto its lines
-    // before it is put down, or a morning's dragging is lost changing stock
-    if(mcGtHome) await mcGtReturn();
-    mcGtHome={order:gtOrder,ids:lines.map(l=>l.id),page:want,finish:fin};
-    gtOrder=lines.map(mcGtLine);
+    // The page's own lines stay where they are and the batch's go on the end.
+    // They used to be swept aside for the loan and put back on the way out, so
+    // opening the full builder read as the sheet being emptied — an afternoon
+    // of lines keyed in by hand gone, with nothing to say they were coming
+    // back. Only the rows the batch lent are ever taken away again.
+    const own=gtOrder.filter(l=>!mcGtLent(l));
+    mcGtHome={ids:lines.map(l=>l.id),page:want,finish:fin};
+    gtOrder=own.concat(lines.map(mcGtLine));
   }
   // and the sheet says which run it is, because that is what names its PDF
   mcGtSetFinish(fin);
@@ -35524,8 +35589,26 @@ function mcGtLiveDesign(it,id){
 async function mcGtReturn(){
   if(!mcGtHome) return;
   const home=mcGtHome; mcGtHome=null;
-  const edited=gtOrder;
-  gtOrder=home.order;
+  // Rows lent to a page that was then switched away from are parked in that
+  // page's own order rather than sitting in gtOrder, and they are the batch's
+  // work just the same — so they are gathered up before anything is put back,
+  // and taken out of the orders they were parked in.
+  const seen=new Set(gtOrder.map(l=>String(l.id||'')));
+  const parked=[];
+  if(typeof gtOrders!=='undefined'&&gtOrders)
+    Object.keys(gtOrders).forEach(k=>{
+      if(!Array.isArray(gtOrders[k])) return;
+      gtOrders[k].forEach(l=>{
+        if(mcGtLent(l)&&!seen.has(String(l.id||''))){
+          seen.add(String(l.id||'')); parked.push(l);
+        }
+      });
+      gtOrders[k]=gtOrders[k].filter(l=>!mcGtLent(l));
+    });
+  const edited=gtOrder.concat(parked);
+  // the batch's rows go back to the batch; everything else on the sheet is the
+  // page's own and stays exactly as it was left, edits and all
+  gtOrder=gtOrder.filter(l=>!mcGtLent(l));
   if(typeof gtRenderOrder==='function') gtRenderOrder();
   await mcGtWriteBack(edited,home);
   if(mcOnBatch()) mcRenderItems();
@@ -35678,7 +35761,10 @@ async function mcRenderLine(it,side){
   state.orderId=it.order_id;
   state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
   await mcApplyArt(it);
-  return await renderSidePdf(side);
+  // every sheet this line comes to, not the first one. A per-order sheet is
+  // one page until the design list outgrows it — which is exactly what adding
+  // extras does — and the pages past the first were being left off the PDF.
+  return await renderSidePdfAll(side,Math.max(1,sheetCount()));
 }
 // This line, on its own, now. A per-order tile has always made one file out of
 // one line; a sheet tile is given one line and lays a sheet with only that on
@@ -35854,10 +35940,7 @@ function mcPrintBundles(lines){
 // many sheets they came to. Both the preview and the export go through it, so
 // what is looked at and what is saved cannot drift apart.
 async function mcPrintLay(lines,template){
-  if(!loadDesignFiles.length){
-    const dir=await loadDesignDirGet();
-    if(dir&&await loadDesignDirOk(dir,false)) await loadDesignRescan();
-  }
+  await mcDesignsReady();
   // Asked of the geometry, not of the combo. Going by the selection was the
   // bug behind a sheet that looked right on page one and wrong on page two:
   // the first look loaded the template and left it selected, the builder was
@@ -35869,6 +35952,9 @@ async function mcPrintLay(lines,template){
     setSelectedTemplate(template);
     mcLaidTemplate=template;
   }
+  // and its own artwork is in before the list is emptied, or it arrives after
+  // the batch's lines are on and takes the sheet back
+  await printArtReady();
   state.designs=[]; state.page=0;
   state.final.front={data:null,img:null,name:'',source:null};
   // the sheet is the batch's, not one order's — and the template just loaded
@@ -36375,7 +36461,7 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
       // this is measured against this rather than against what was lent
       mcGtHome.ids=gtOrder.map(l=>String(l.id||''))
         .filter(x=>x.startsWith('mc-')).map(x=>x.slice(3));
-      const n=gtOrder.filter(l=>l&&l.designId).length;
+      const n=gtOrder.filter(l=>l&&l.designId&&mcGtLent(l)).length;
       if(mcOnBatch()) mcRenderItems();
       mcSyncBatchButtons();
       if(mcWinItem) mcWinRender();
