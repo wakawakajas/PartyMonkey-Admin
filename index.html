@@ -31066,6 +31066,19 @@ const mcSelRows=()=>mcSummaryRows().filter(r=>mcSel.has(String(r.sku)));
 // dest '' means take that SKU's own row away and leave it to the rules. Two
 // hundred separate saves is a minute of watching a spinner, so the ones that
 // already have a row go up in one upsert and the rest in one insert.
+// What a routing write failed on, said in words the person at the machine can
+// act on. "row-level security" is the table refusing the row, and the two
+// reasons it does are worth naming outright rather than being looked up.
+function mcRouteErr(err){
+  const m=(err&&err.message)||'unknown error';
+  if(/row-level security/i.test(m))
+    return m+' · routing is shared, so it is saved under your own account — '
+      +'sign out and back in, and if it keeps happening your account is not on '
+      +'the team yet.';
+  if(/copy_path|copy_to/.test(m))
+    return m+' · run supabase-migration-MAGIC-COPY.sql in Supabase.';
+  return m;
+}
 async function mcBulkWrite(entries){
   const out=document.getElementById('mcSummaryMsg');
   if(!entries||!entries.length) return false;
@@ -31086,11 +31099,21 @@ async function mcBulkWrite(entries){
       mcRoutes=mcRoutes.filter(r=>!gone.has(r.id));
     }
     if(keep.length){
+      // Written as updates rather than as one upsert. An upsert is an insert
+      // with a fallback, and the insert side of the table's rules says a row
+      // belongs to whoever wrote it — so re-mapping a SKU a colleague had
+      // already routed came back as "new row violates row-level security
+      // policy" and the whole selection was refused. Editing a row the team
+      // shares is an update, which is what the table lets the team do. They go
+      // up together, so it is one wait rather than one per SKU.
       const rows=keep.map(r=>{ const e=byKey.get(key(r.match));
-        return {...r,dest:e.dest,...(e.patch||{})}; });
-      const {error}=await sb.from('magic_routes').upsert(rows);
-      if(error) throw error;
-      rows.forEach(n=>{ const r=mcRoutes.find(x=>x.id===n.id); if(r) Object.assign(r,n); });
+        return {id:r.id,patch:{dest:e.dest,...(e.patch||{})}}; });
+      const res=await Promise.all(rows.map(n=>
+        sb.from('magic_routes').update(n.patch).eq('id',n.id)));
+      const bad=res.find(x=>x&&x.error);
+      if(bad) throw bad.error;
+      rows.forEach(n=>{ const r=mcRoutes.find(x=>x.id===n.id);
+        if(r) Object.assign(r,n.patch); });
     }
     if(fresh.length){
       const uid=await mcWhoAmI();
@@ -31101,7 +31124,7 @@ async function mcBulkWrite(entries){
       mcRoutes.push(...(data||[]));
     }
   }catch(err){
-    showMsg(out,'Could not save that — '+((err&&err.message)||'unknown error'),false);
+    showMsg(out,'Could not save that — '+mcRouteErr(err),false);
     return false;
   }
   // Read back from the table rather than trusted: an insert that RLS refused,
@@ -32292,9 +32315,7 @@ async function mcRouteWrite(id,patch){
     // put back what was there: the screen must not go on showing a mapping the
     // rest of the team will never see
     Object.assign(row,was);
-    showMsg(out,'Could not save that — '+error.message
-      +(/copy_path|copy_to/.test(error.message||'')
-        ? ' · run supabase-migration-MAGIC-COPY.sql in Supabase.':''),false);
+    showMsg(out,'Could not save that — '+mcRouteErr(error),false);
     mcRenderSummary();
     return;
   }
@@ -32340,8 +32361,10 @@ async function mcRouteMove(id,dir){
   const [na,nb]=av===bv?(dir==='up'?[bv-1,bv]:[bv+1,bv]):[bv,av];
   a.sort_order=na; b.sort_order=nb;
   mcRoutes.sort((x,y)=>(Number(x.sort_order)||0)-(Number(y.sort_order)||0));
-  if(sb) await sb.from('magic_routes').upsert([
-    {...a,sort_order:na},{...b,sort_order:nb}]);
+  // two updates rather than an upsert of the pair: a rule somebody else wrote
+  // is not ours to insert, and an upsert of it is refused by the table's rules
+  if(sb) await Promise.all([[a.id,na],[b.id,nb]].map(([id,v])=>
+    sb.from('magic_routes').update({sort_order:v}).eq('id',id)));
   mcRenderRoutes(); mcRenderSummary();
 }
 // One SKU, named outright. '' takes the override away and leaves the SKU to
@@ -32356,7 +32379,7 @@ async function mcSetDest(sku,dest){
   const {data,error}=await sb.from('magic_routes')
     .insert({user_id:uid,kind:'sku',how:'exact',match:String(sku),dest,sort_order:0})
     .select().single();
-  if(error){ showMsg(out,'Could not save that — '+error.message,false); return; }
+  if(error){ showMsg(out,'Could not save that — '+mcRouteErr(error),false); return; }
   mcRoutes.push(data);
   mcRenderSummary();
 }
