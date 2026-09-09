@@ -169,6 +169,9 @@ button:focus-visible{outline:2px solid var(--blueprint);outline-offset:2px;}
 .upload-slot .thumb img{width:100%;height:100%;object-fit:contain;}
 .upload-slot .thumb .ico{color:var(--faint);font-size:17px;}
 .upload-slot .info{flex:1;font-size:12px;color:var(--muted);min-width:0;word-break:break-word;}
+/* Clear is only there while there is a picture to clear, and a button given
+   the hidden attribute inside a flex row still needs telling */
+.upload-slot [data-clear-art][hidden]{display:none;}
 .slot-label{font-size:11.5px;font-weight:600;margin-bottom:5px;}
 .ph-list{max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:14px;padding:8px;background:transparent;}
 .ph-card{border:1px solid var(--border);border-radius:14px;padding:11px;margin-bottom:8px;background:var(--nest);}
@@ -2400,14 +2403,23 @@ body.mc-docked .mc-bubble{display:none !important;}
    settings and the sheet go back to sitting beside each other, with the sheet
    riding down the page the way it does on a full-width builder. */
 @media (min-width:1700px){
+  /* The settings are set once for a job; the sheet is looked at all morning.
+     So the middle column is half what it was and what it gives up goes to the
+     canvas, which takes whatever is left rather than sitting in a 520px cap. */
   body.mc-split #appScreen,body.mc-split #giftTagScreen{display:grid;
     column-gap:16px;align-items:start;
-    grid-template-columns:minmax(0,1fr) minmax(380px,520px);}
+    grid-template-columns:minmax(300px,0.5fr) minmax(0,1fr);}
   body.mc-split #appScreen > *,body.mc-split #giftTagScreen > *{grid-column:1;
     min-width:0;}
+  /* and the sheet scrolls in its own column. Three columns on one page scroll
+     meant reaching the foot of a tall sheet took the batch list and the
+     settings up past the top with it; the wheel over the sheet now moves the
+     sheet, and nothing else on the screen moves with it. */
   body.mc-split #appScreen > .preview-wrap,
   body.mc-split #giftTagScreen > .preview-wrap{grid-column:2;
-    grid-row:1 / span 999;position:sticky;top:8px;align-self:start;}
+    grid-row:1 / span 999;position:sticky;top:8px;align-self:start;
+    max-height:calc(100vh - 16px);overflow-y:auto;overscroll-behavior:contain;
+    padding-right:4px;}
 }
 
 /* ---- Saved sheets: the one on the builder now, and the ones waiting ---- */
@@ -4943,6 +4955,7 @@ body.mc-docked .mc-bubble{display:none !important;}
               <div class="thumb" id="finalThumbFront"><span class="ico">＋</span></div>
               <div class="info" id="finalInfoFront">No file</div>
               <button class="btn-outline btn-sm" data-pick="final|front">Upload</button>
+              <button class="btn-outline btn-sm" data-clear-art="front" hidden>Clear</button>
             </div>
             <div class="grid2" style="margin-top:8px;">
               <label class="field"><span>WIDTH</span><input type="number" step="0.1" id="artWFront" placeholder="—"/></label>
@@ -4953,6 +4966,7 @@ body.mc-docked .mc-bubble{display:none !important;}
               <div class="thumb" id="finalThumbBack"><span class="ico">＋</span></div>
               <div class="info" id="finalInfoBack">No file</div>
               <button class="btn-outline btn-sm" data-pick="final|back">Upload</button>
+              <button class="btn-outline btn-sm" data-clear-art="back" hidden>Clear</button>
             </div>
             <div class="grid2" style="margin-top:8px;">
               <label class="field"><span>WIDTH</span><input type="number" step="0.1" id="artWBack" placeholder="—"/></label>
@@ -6084,8 +6098,34 @@ function pickFileFor(group,side){
   inp.onchange=()=>{ const f=inp.files[0]; if(f) useArtFile(group,side,f); };
   inp.click();
 }
+// The other half of Upload. A single artwork could be swapped for another one
+// but never taken off: a sheet laid out with the wrong picture had to have its
+// template loaded again to be rid of it, and a Magic Create line kept the file
+// it was once given for good. `it` is the line the picture belongs to where
+// there is one — clearing it in the builder alone would put it back on the
+// next render, because the panel re-applies whatever the line carries.
+async function clearArtSide(side,it){
+  state.final[side]={data:null,img:null,name:'',source:null,file:null};
+  refreshSlots(); refreshArtInputs(); drawAll();
+  const line=it||((typeof mcWinItem!=='undefined'&&mcWinItem&&typeof mcItem==='function')
+    ?mcItem(mcWinItem):null);
+  if(!(line&&line.art&&line.art[side])) return;
+  const art={...line.art}; delete art[side];
+  const was=line.art;
+  line.art=art;
+  if(typeof mcSave==='function'&&!await mcSave(line,{art})){ line.art=was; return; }
+  const th=document.getElementById('mcThumb-'+side);
+  if(th) th.innerHTML='<span class="ico">＋</span>';
+  const info=document.getElementById('mcInfo-'+side);
+  if(info) info.textContent='No file';
+  if(typeof mcRepaintRow==='function') mcRepaintRow(line);
+  if(typeof mcLinePreview==='function') mcLinePreview();
+}
 document.querySelectorAll('[data-pick]').forEach(b=>{
   b.addEventListener('click',()=>{const[g,s]=b.dataset.pick.split('|');pickFileFor(g,s);});
+});
+document.querySelectorAll('[data-clear-art]').forEach(b=>{
+  b.addEventListener('click',()=>clearArtSide(b.dataset.clearArt));
 });
 function setSlot(t,i,o){
   document.getElementById(t).innerHTML=o.data?`<img src="${o.data}"/>`:'<span class="ico">＋</span>';
@@ -6094,6 +6134,11 @@ function setSlot(t,i,o){
 function refreshSlots(){
   setSlot('finalThumbFront','finalInfoFront',state.final.front);
   setSlot('finalThumbBack','finalInfoBack',state.final.back);
+  // and Clear is offered only where there is something to clear
+  ['front','back'].forEach(side=>{
+    const b=document.querySelector(`[data-clear-art="${side}"]`);
+    if(b) b.hidden=!state.final[side].data;
+  });
 }
 
 // ---------- geometry ----------
@@ -34170,6 +34215,10 @@ async function mcSplitFollow(it){
   }
   if(it.tile==='sheetPrint'&&await mcPrintOpenFull(it)) return;
   pcSetMode('custom');
+  // the builder beside the list is this line's, so it is stamped with this
+  // line's order — including a line that has not been told what it is yet,
+  // which has no panel of its own to say it
+  mcSetOrderId(it.order_id);
   mcSplitEnter('tool-custom');
 }
 // The batch's print sheet, put in front of whoever opened a line that is on it.
@@ -34585,6 +34634,8 @@ function mcCustomBody(it){
             ? '<span class="ico">✓</span>' : '<span class="ico">＋</span>'}</div>
           <div class="info" id="mcInfo-${side}">${art[side]?side==='front'?'Front loaded':'Back loaded':'No file'}</div>
           <button class="btn-outline btn-sm" data-mc-art="${side}">${side==='front'?'Front':'Back'}</button>
+          ${art[side]?`<button class="btn-outline btn-sm" data-mc-art-clear="${side}"
+            title="Take this line's ${side} artwork off">Clear</button>`:''}
         </div>`).join('')}
     </div>
 
@@ -34709,6 +34760,12 @@ function mcLinePreview(){
 }
 function mcCustomWire(it){
   mcWinLive=false; mcWinTplId='';
+  // This line's order stamps the sheet and names the files it comes out as, so
+  // the box says it the moment the line is opened rather than only when a
+  // layout happens to land. A line with no layout of its own and no rule to
+  // find one reached the builder with the last job's order ID sitting in it —
+  // and where it was Downloaded before anybody noticed, under that name.
+  mcSetOrderId(it.order_id);
   // The two lists this body is made of live on other screens. Where a batch is
   // worked without ever visiting them the selects come up empty — paper and
   // GSM stuck on "—" with nothing to pick — so they are fetched here and the
@@ -34773,6 +34830,12 @@ function mcCustomWire(it){
   document.getElementById('mcWinBody').querySelectorAll('[data-mc-art]').forEach(b=>{
     b.addEventListener('click',()=>mcPickArt(it,b.dataset.mcArt));
   });
+  document.getElementById('mcWinBody').querySelectorAll('[data-mc-art-clear]').forEach(b=>{
+    b.addEventListener('click',async()=>{
+      await clearArtSide(b.dataset.mcArtClear,it);
+      mcWinRender();          // and the slot says "No file" rather than a tick
+    });
+  });
   document.getElementById('mcOpenFullBtn').addEventListener('click',async()=>{
     await mcCommit();
     if(!mcWinLive&&it.design){ applyPrintState(it.design); mcSetOrderId(it.order_id); mcWinLive=true; }
@@ -34781,7 +34844,15 @@ function mcCustomWire(it){
   });
   document.getElementById('mcSaveLineBtn').addEventListener('click',async()=>{
     const msg=document.getElementById('mcWinMsg');
-    if(!mcWinLive){ showMsg(msg,'Choose a saved layout first.',false); return; }
+    // The same rule the chip on the builder follows: a sheet with a layout on
+    // it is a sheet that can be saved. mcWinLive only says the panel itself put
+    // a template in — a line laid out by hand, or one whose layout came off the
+    // routing before the panel got there, was turned away with "Choose a saved
+    // layout first" over a sheet that plainly had one on it.
+    if(!mcWinLive&&!(state.placeholders||[]).length){
+      showMsg(msg,'Choose a saved layout first.',false); return;
+    }
+    mcWinLive=true;
     const kept=await mcKeepBuilderArt(it);
     it.design=mcLineSnapshot();
     // and what the builder was set to, where the line has not been told
