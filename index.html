@@ -319,6 +319,12 @@ input:checked + .slider:before{transform:translateX(18px);}
   accent-color:var(--blueprint);cursor:pointer;}
 .design-line .bleed input[type=number]{height:38px;min-height:38px;text-align:center;}
 .design-line .bleed input[type=number]:disabled{opacity:.42;}
+/* and its own quarter turn, beside the bleed it is remembered with */
+.design-line .turn{flex:0 0 58px;margin:0;}
+.design-line .turn button{width:100%;height:38px;min-height:38px;
+  background:var(--card);border:1px solid var(--border);border-radius:9px;
+  color:var(--ink);font-size:13px;cursor:pointer;}
+.design-line .turn button.on{border-color:var(--blueprint);color:var(--blueprint);}
 .sheet-nav{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:9px;}
 .sheet-nav span{font-family:'IBM Plex Sans',sans-serif;font-size:10px;color:var(--faint);letter-spacing:.08em;}
 .sheet-nav .icon-btn{min-width:34px;}
@@ -6395,7 +6401,10 @@ function renderSide(side,canvas,maxDim,opts){
     // the sheet's bleed unless this design keeps its own
     const bleedMm=bleedMmFor(line);
     const effW=wMm+bleedMm*2, effH=hMm+bleedMm*2;
-    const rotDeg=state.rotate[side]||0;
+    // the sheet's turn and the design's own, one on top of the other: the
+    // sheet turns everything printed on it, and a design that arrived on its
+    // side turns again inside its own box
+    const rotDeg=(((state.rotate[side]||0)+designRotOf(line))%360+360)%360;
     const swapped=(rotDeg%180)!==0; // 90 or 270: image is drawn on its side
     const boxW=swapped?effH:effW, boxH=swapped?effW:effH;   // the box before the turn
     const srcW=boxW*sc, srcH=boxH*sc;
@@ -7336,13 +7345,22 @@ function designBleedLoad(force){
   designBleedLoading=(async()=>{
     try{
       const local=designBleedStore();   // what this browser had, before the table answers
-      const {data,error}=await sb.from('design_bleeds').select('path,mm');
+      // rot is asked for by name and may not be there yet — a database without
+      // supabase-migration-DESIGN-ROTATE.sql run on it answers with an error
+      // rather than with the bleeds, and the bleeds are the older promise, so
+      // the question is asked again without it.
+      let {data,error}=await sb.from('design_bleeds').select('path,mm,rot');
+      if(error){ ({data,error}=await sb.from('design_bleeds').select('path,mm')); }
       if(error) return designBleedStore();
       const store={};
       (data||[]).forEach(r=>{
         const key=r&&r.path?String(r.path).trim().toLowerCase():'';
         const mm=Number(r&&r.mm);
-        if(key&&isFinite(mm)&&mm>=0) store[key]={on:true,mm};
+        const on=r&&r.mm!==null&&r.mm!==undefined&&isFinite(mm)&&mm>=0;
+        const rot=designRotOf({rotate:r&&r.rot});
+        // a row that says nothing — no bleed of its own and standing the way
+        // the file has it — is not carried about as though it did
+        if(key&&(on||rot)) store[key]={on,mm:on?mm:null,rot};
       });
       designBleedMemo=await designBleedLift(local,store);
       designBleedLoaded=true;
@@ -7389,21 +7407,33 @@ async function designBleedLift(local,store){
 // It says so when the write does not land. A bleed that looks saved on this
 // screen and reaches nobody else is the exact failure this table was added to
 // end, so it is not allowed to fail quietly.
-async function designBleedWrite(key,mm,on){
+async function designBleedWrite(key,mm,on,rot){
   if(!key) return;
   if(!sb){ designBleedTold('Sync is unavailable — that bleed is on this browser only.'); return; }
+  const turn=designRotOf({rotate:rot});
+  const what=on&&turn?'bleed and turn':(turn?'turn':'bleed');
   try{
     const {data:{session}}=await sb.auth.getSession();
-    if(!session){ designBleedTold('Sign in for the team to see that bleed — it is on this browser only for now.'); return; }
-    const {error}=on
+    if(!session){ designBleedTold(`Sign in for the team to see that ${what} — it is on this browser only for now.`); return; }
+    // The row carries both, so it lives while the design has either: its own
+    // bleed, its own turn, or both. Neither, and there is nothing to say.
+    const {error}=(on||turn)
       ? await sb.from('design_bleeds').upsert(
-          {path:key,mm:Number(mm),user_id:session.user.id,updated_at:new Date().toISOString()},
+          {path:key,mm:on?Number(mm):null,rot:turn,
+           user_id:session.user.id,updated_at:new Date().toISOString()},
           {onConflict:'path'})
       : await sb.from('design_bleeds').delete().eq('path',key);
     if(error) throw error;
   }catch(err){
-    designBleedTold('Could not share that bleed: '+((err&&err.message)||'unknown error')
-      +' — it is on this browser only.');
+    const msg=(err&&err.message)||'unknown error';
+    // the one failure that has an answer somebody can act on
+    if(/rot/i.test(msg)&&/column|schema cache/i.test(msg)){
+      designBleedTold('The turn a design keeps cannot be shared until '
+        +'supabase-migration-DESIGN-ROTATE.sql is run in Supabase — it is on '
+        +'this browser only until then.');
+      return;
+    }
+    designBleedTold(`Could not share that ${what}: ${msg} — it is on this browser only.`);
   }
 }
 function designBleedTold(text){
@@ -7421,8 +7451,9 @@ function designBleedRefreshLines(){
     const saved=designBleedSaved(d);
     const on=!!(saved&&saved.on&&isFinite(Number(saved.mm)));
     const mm=on?Number(saved.mm):null;
-    if(!!d.bleedOn===on&&(!on||Number(d.bleedMm)===mm)) return;
-    d.bleedOn=on; d.bleedMm=on?mm:null; changed=true;
+    const rot=designRotOf({rotate:saved&&saved.rot});
+    if(!!d.bleedOn===on&&(!on||Number(d.bleedMm)===mm)&&designRotOf(d)===rot) return;
+    d.bleedOn=on; d.bleedMm=on?mm:null; d.rotate=rot; changed=true;
   });
   if(changed){ renderDesignLines(); drawAll(); }
 }
@@ -7432,6 +7463,36 @@ function designBleedRefreshLines(){
 function designBleedKey(line){
   const path=line&&line.source&&line.source.path;
   return path?String(path).trim().toLowerCase():'';
+}
+// The quarter turns a design keeps for itself. Quarters only: anything else
+// leaves a rectangle that no longer fits the box it is printed in, and the
+// three the button offers are the three a design ever actually needs.
+const DESIGN_ROTS=[0,90,180,270];
+function designRotOf(line){
+  const v=((Math.round(Number(line&&line.rotate)||0)%360)+360)%360;
+  return DESIGN_ROTS.includes(v)?v:0;
+}
+// Turns this one design and writes the turn down against the design itself,
+// exactly as its bleed is: the file is the identity, so the next sheet it is
+// laid on — by anybody, on any machine — lays it down the way round it was
+// proved. Zero is not "no opinion" here, it is the design standing up the way
+// the file has it, so a turn taken back off deletes the row rather than
+// leaving a 0 behind.
+function setDesignRotate(line,deg){
+  if(!line) return null;
+  line.rotate=DESIGN_ROTS.includes(deg)?deg:0;
+  line.bleedTouched=true;   // as with bleed: a shared list arriving late leaves it alone
+  const key=designBleedKey(line);
+  if(key){
+    const store=designBleedStore();
+    const was=store[key]||{};
+    const on=!!line.bleedOn;
+    if(on||line.rotate) store[key]={on,mm:on?Number(line.bleedMm):(was.mm??null),rot:line.rotate};
+    else delete store[key];
+    designBleedSaveStore();
+    designBleedWrite(key,line.bleedMm,on,line.rotate);
+  }
+  return line;
 }
 // how far this design bleeds when it is drawn: its own figure if it keeps one,
 // the sheet's otherwise. Everything that draws artwork asks this and never
@@ -7457,10 +7518,14 @@ function setDesignBleed(line,mm,on){
   const key=designBleedKey(line);
   if(key){
     const store=designBleedStore();
-    if(line.bleedOn) store[key]={on:true,mm:Number(line.bleedMm)};
+    // one row holds both, so handing the bleed back to the sheet must not take
+    // the design's turn off with it
+    const rot=designRotOf(line);
+    if(line.bleedOn) store[key]={on:true,mm:Number(line.bleedMm),rot};
+    else if(rot) store[key]={on:false,mm:null,rot};
     else delete store[key];
     designBleedSaveStore();
-    designBleedWrite(key,line.bleedMm,line.bleedOn);
+    designBleedWrite(key,line.bleedMm,line.bleedOn,rot);
   }
   return line;
 }
@@ -7502,6 +7567,9 @@ function applyRememberedBleed(line){
   }else if(line.bleedOn===undefined){
     line.bleedOn=false; line.bleedMm=null;
   }
+  // and the way round it was last proved
+  if(saved&&saved.rot) line.rotate=designRotOf({rotate:saved.rot});
+  else if(line.rotate===undefined) line.rotate=0;
   return line;
 }
 function renderDesignLines(){
@@ -7529,6 +7597,10 @@ function renderDesignLines(){
           <span><input type="checkbox" data-design-bleed-on ${d.bleedOn?'checked':''}/>BLEED ${escapeHtml(u)}</span>
           <input type="number" min="0" step="0.1" ${d.bleedOn?'':'disabled'}
                  value="${round(fromMm(d.bleedOn&&isFinite(Number(d.bleedMm))?Number(d.bleedMm):state.bleed.mm,u))}" data-design-bleed/>
+        </div>
+        <div class="field turn" title="A quarter turn of this design alone. The sheet's own ↺ ↻ turn everything on it; this turns one design inside its box, and is remembered against the design the way its bleed is.">
+          <span>TURN</span>
+          <button type="button" data-design-rot${designRotOf(d)?' class="on"':''}>${designRotOf(d)}°</button>
         </div>
         <button class="icon-btn" data-design-remove title="Take this design off the sheet">×</button>
       </div>`).join('');
@@ -7614,6 +7686,17 @@ document.getElementById('designLines').addEventListener('focusin',e=>{
   panel.classList.add('open'); search.setAttribute('aria-expanded','true');
 });
 document.getElementById('designLines').addEventListener('click',async e=>{
+  // a quarter turn per press, round to where it started. The row is not drawn
+  // again — only this button's face changes — so nothing under the finger moves
+  const rot=e.target.closest('[data-design-rot]');
+  if(rot){
+    const d=designLineOf(rot); if(!d) return;
+    setDesignRotate(d,(designRotOf(d)+90)%360);
+    rot.textContent=designRotOf(d)+'°';
+    rot.classList.toggle('on',!!designRotOf(d));
+    drawAll();
+    return;
+  }
   const rm=e.target.closest('[data-design-remove]');
   if(rm){
     const row=rm.closest('[data-design-id]');
@@ -18473,7 +18556,7 @@ async function saveTemplate(){
     // a design keeping its own bleed keeps it in the template too, so a job
     // reopened next month lays down what it laid down the first time
     const designs=state.designs.filter(d=>d.source).map(d=>
-      ({path:d.source.path,name:d.name,qty:d.qty,
+      ({path:d.source.path,name:d.name,qty:d.qty,rotate:designRotOf(d),
         bleedOn:!!d.bleedOn,bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}));
     const meta={name,folders,
       paper:state.paper,layout:state.layout,placeholders:state.placeholders,
@@ -18629,6 +18712,9 @@ function applyPrintState(meta,name){
           // remembered by — the template is the job, and the job was saved
           if(d.bleedOn&&isFinite(Number(d.bleedMm))){ line.bleedOn=true; line.bleedMm=Number(d.bleedMm); }
           else applyRememberedBleed(line);
+          // the turn the same way round: a job saved on its side comes back on
+          // its side, whatever the design has been remembered as since
+          if(d.rotate!==undefined) line.rotate=designRotOf(d);
           out.push(line);
         }catch(e){ missing.push(d.name||d.path); }
       }
@@ -18762,7 +18848,7 @@ async function pcSaveTemplate(){
     const design=state.final.front.source
       ? {path:state.final.front.source.path,name:state.final.front.name} : null;
     const designs=state.designs.filter(d=>d.source).map(d=>
-      ({path:d.source.path,name:d.name,qty:d.qty,
+      ({path:d.source.path,name:d.name,qty:d.qty,rotate:designRotOf(d),
         bleedOn:!!d.bleedOn,bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}));
     const meta={name,kind:'place-card',
       paper:state.paper,layout:state.layout,placeholders:state.placeholders,cats:state.cats,
@@ -34213,7 +34299,7 @@ function mcSnapshot(){
     design:front&&front.source&&front.source.path
       ?{path:front.source.path,name:front.name||''}:null,
     designs:(state.designs||[]).filter(d=>d.source&&d.source.path).map(d=>
-      ({path:d.source.path,name:d.name,qty:d.qty,bleedOn:!!d.bleedOn,
+      ({path:d.source.path,name:d.name,qty:d.qty,rotate:designRotOf(d),bleedOn:!!d.bleedOn,
         bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}))};
 }
 
@@ -36361,7 +36447,7 @@ const PJ_KINDS={
     snap(){
       readLayoutInputs();
       const designs=(state.designs||[]).filter(d=>d.source).map(d=>
-        ({path:d.source.path,name:d.name,qty:d.qty,sku:d.sku||'',
+        ({path:d.source.path,name:d.name,qty:d.qty,sku:d.sku||'',rotate:designRotOf(d),
           bleedOn:!!d.bleedOn,bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}));
       const design=state.final.front.source
         ? {path:state.final.front.source.path,name:state.final.front.name} : null;
