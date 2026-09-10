@@ -35106,11 +35106,32 @@ async function mcAutoLayoutFor(it,sel){
   // which is how a shop that has never written a rule is served at all
   const tpl=routed||mcTemplateFor([{sku:sku||names[0]||'',name:asked.name}]);
   if(!tpl&&!pick) return;
-  if(tpl){
+  // The sheet in the builder may be the very one this line belongs on: the
+  // same template, with designs already laid on it. Then this is another card
+  // for that sheet, not a reason to start a fresh one — and starting a fresh
+  // one is what taking the template down and putting it up again amounted to.
+  // It is how a second line off the same order, added from the batch, threw
+  // away the sheet the first one had just built.
+  const sameSheet=!!tpl&&(state.designs||[]).length>0
+    &&(String(selectedTemplate||'')===String(tpl.id)
+      ||String(mcLaidTemplate||'')===String(tpl.id));
+  if(tpl&&sameSheet){
+    mcWinLive=true;
+    mcWinTplId=String(tpl.id);
+    // the order ID is left alone: a sheet holding two orders is not one
+    // order's sheet, and the last line opened is not the answer either
+    const now=document.getElementById('mcTplSel')||sel;
+    if(now&&now.querySelector(`option[value="${tpl.id}"]`)) now.value=tpl.id;
+  }
+  if(tpl&&!sameSheet){
     if(!routed) mcScopePickerTo(tpl);
     const {data,error}=await sb.from('templates').select('data').eq('id',tpl.id).single();
     if(!error&&data){
       applyPrintState(data.data);
+      // what the builder is now holding, said out loud: it is what the next
+      // line opened checks against to know whether it belongs on this sheet
+      // or on one of its own
+      mcLaidTemplate=String(tpl.id);
       mcSetOrderId(it.order_id);
       state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
       ppFillSelects();
@@ -35131,14 +35152,27 @@ async function mcAutoLayoutFor(it,sel){
     // right, the picture was the template's, and Create looked like it had
     // added nothing at all.
     await printArtReady();
-    state.designs=[]; setArtMode('preset',true);
+    if(!sameSheet){ state.designs=[]; }
+    setArtMode('preset',true);
     // what this line prints, not what was ordered: extras added on the batch
     // page are part of the run and the sheet has to be laid out for them
-    await addDesignLine(pick,mcQty(it)||1,sku);
+    const want=mcQty(it)||1;
+    // A line already on this sheet is set rather than added to: opening it a
+    // second time is looking at it again, not ordering it again. Another line
+    // that happens to print the same card is a second order for it, and those
+    // do add up — which is what mcPrintLay does when it lays the whole set.
+    const mine=(state.designs||[]).find(d=>d.mcLine&&d.mcLine===it.id);
+    const same=mine||(sameSheet
+      ?(state.designs||[]).find(d=>d.source&&d.source.path===pick.path):null);
+    if(mine) mine.qty=want;
+    else if(same) same.qty=Math.max(1,(Number(same.qty)||0)+want);
+    else { const line=await addDesignLine(pick,want,sku); if(line) line.mcLine=it.id; }
+    if(mine||same){ renderDesignLines(); drawAll(); }
     setArtMode('preset');
     mcWinLive=true;
   }
-  if(msg) showMsg(msg,[tpl?`Layout: ${tpl.name}`:'',pick?`Artwork: ${pick.name}`:'']
+  if(msg) showMsg(msg,[tpl?`${sameSheet?'Added to the sheet on':'Layout:'} ${tpl.name}`:'',
+    pick?`Artwork: ${pick.name}`:'']
     .filter(Boolean).join(' · ')+(routed?' — from Routing.':' — matched by name.'),true);
   if(typeof mcLinePreview==='function') mcLinePreview();
 }
