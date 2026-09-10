@@ -2084,6 +2084,10 @@ img.mc-shot,img.mc-sum-shot{cursor:zoom-in;}
    anything carrying it goes. Wide enough to read as a sentence on a laptop
    and wrapped into three lines on a phone rather than squeezed. */
 #mcRouteSheet > .sheet{max-width:630px;}
+/* the weights on offer are a row to pick from, not a column of full-width
+   answers — the sheet's blanket button rule would give each one its own line */
+#mcGsmPicks button{width:auto;min-width:78px;height:40px;min-height:40px;
+  font-size:13px;flex:0 0 auto;}
 .mc-route-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 0;
   border-bottom:1px solid var(--paper-line);}
 .mc-route-row:last-child{border-bottom:0;}
@@ -5627,6 +5631,24 @@ body.mc-docked .mc-bubble{display:none !important;}
     <div class="sheet-title">Which shape?</div>
     <p class="hint" style="margin:0 0 10px;" id="mcShapeWhy"></p>
     <div id="mcShapeOpts"></div>
+  </div>
+</div>
+
+<!-- ---- Magic Create: the weight, asked for at the moment it is wanted ----
+     A line saves perfectly well without a GSM and then cannot be printed: the
+     PDF button stays grey and Download All walks past it, with the layout and
+     the artwork both sitting on it. Asked here instead, because the save is
+     the moment somebody is thinking about that line. -->
+<div class="sheet-bg" id="mcGsmSheet">
+  <div class="sheet">
+    <div class="sheet-title">Which GSM?</div>
+    <p class="hint" style="margin:0 0 8px;" id="mcGsmWhy"></p>
+    <div class="chips" id="mcGsmPicks" style="margin-bottom:10px;"></div>
+    <label class="field" style="margin-bottom:10px;"><span>OR A WEIGHT NOT ON THE LIST</span>
+      <input type="text" id="mcGsmNew" placeholder="e.g. 350" autocomplete="off"/></label>
+    <button class="btn-primary" id="mcGsmUse">Use this GSM</button>
+    <div id="mcGsmMsg"></div>
+    <button class="btn-outline" id="mcGsmCancel">Cancel — do not save yet</button>
   </div>
 </div>
 
@@ -29346,6 +29368,81 @@ async function ppAdd(kind){
   showMsg(out,`✓ Added “${escapeHtml(value)}”`,true);
   box.focus();
 }
+// One value onto one of those lists, if it is not already on it. The settings
+// screen owns them; this is the same write from the one other place that has
+// to be able to answer "there is no such weight yet" — and it matters that it
+// lands, because a weight the shared list has never heard of is cleared off
+// the job by the very next read of that list.
+async function ppEnsureValue(kind,value){
+  const v=String(value||'').trim();
+  if(!v) return false;
+  if(ppOf(kind).some(r=>String(r.value).trim().toLowerCase()===v.toLowerCase())) return true;
+  if(!sb) return false;
+  try{
+    const {data:{session}}=await sb.auth.getSession();
+    if(!session) return false;
+    const {error}=await sb.from('print_papers').insert({
+      user_id:session.user.id,kind,value:v,sort_order:ppOf(kind).length});
+    if(error) return false;
+    await ppLoad(true);
+    return true;
+  }catch(e){ return false; }
+}
+// The weight, asked for at the moment it is wanted. A line saved without one
+// saves, and then sits on the batch unprintable: the PDF button greyed out,
+// Download All walking past it, with the layout and the artwork both on it.
+// Nobody goes looking for the reason at the foot of a batch screen, so the
+// save asks the question instead of leaving the hole.
+// Answers with the weight, or null — and null means the save does not happen,
+// which is the whole point: a line is not quietly saved unprintable.
+function askGsm(why){
+  const sheet=document.getElementById('mcGsmSheet');
+  const picks=document.getElementById('mcGsmPicks');
+  const box=document.getElementById('mcGsmNew');
+  const msg=document.getElementById('mcGsmMsg');
+  document.getElementById('mcGsmWhy').textContent=why||'';
+  msg.innerHTML=''; box.value='';
+  const rows=ppOf('gsm');
+  picks.innerHTML=rows.length
+    ? rows.map(r=>`<button type="button" class="btn-outline" data-gsm="${
+        escapeHtml(r.value)}">${escapeHtml(r.value)}</button>`).join('')
+    : '<span class="hint" style="margin:0;">No weights on the shared list yet — type one below.</span>';
+  sheet.classList.add('open');
+  if(!rows.length) setTimeout(()=>box.focus(),0);
+  return new Promise(res=>{
+    const done=v=>{
+      sheet.classList.remove('open');
+      picks.onclick=null; box.onkeydown=null;
+      document.getElementById('mcGsmUse').onclick=null;
+      document.getElementById('mcGsmCancel').onclick=null;
+      res(v||null);
+    };
+    picks.onclick=e=>{ const b=e.target.closest('[data-gsm]'); if(b) done(b.dataset.gsm); };
+    // A weight typed here goes onto the shared list first. It is said out loud
+    // when that write does not land, because the job would otherwise look
+    // answered and be cleared the next time the list is read.
+    const typed=async()=>{
+      const v=box.value.trim();
+      if(!v){ box.focus(); return; }
+      showMsg(msg,'Putting it on the shared list…',true);
+      if(!await ppEnsureValue('gsm',v))
+        showMsg(msg,`“${escapeHtml(v)}” could not be added to the shared list — `
+          +'this job keeps it, but add it under ⚙ beside the GSM box or it will '
+          +'not stick.',false);
+      done(v);
+    };
+    document.getElementById('mcGsmUse').onclick=typed;
+    box.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); typed(); } };
+    document.getElementById('mcGsmCancel').onclick=()=>done(null);
+  });
+}
+// The weight taken as the answer: onto the job, into the boxes that show it,
+// and into the file name the preview is writing.
+function useGsm(v){
+  state.gsm=String(v||'');
+  if(typeof ppFillSelects==='function') ppFillSelects();
+  if(typeof refreshPdfNamingPreview==='function') refreshPdfNamingPreview();
+}
 document.querySelectorAll('[data-pp-add]').forEach(b=>
   b.addEventListener('click',()=>ppAdd(b.dataset.ppAdd)));
 ['ppPaperNew','ppGsmNew'].forEach(id=>{
@@ -35084,6 +35181,13 @@ function mcCustomWire(it){
     if(!mcWinLive&&!(state.placeholders||[]).length){
       showMsg(msg,'Choose a saved layout first.',false); return;
     }
+    // asked before anything is written, so a cancelled answer costs nothing
+    if(!(it.gsm||state.gsm)){
+      const g=await askGsm(`${it.design_name||it.sku||'This line'} has no GSM yet. `
+        +'It is a third of the file name, and a line without one cannot be printed.');
+      if(!g){ showMsg(msg,'Not saved — this line needs a GSM to be printable.',false); return; }
+      useGsm(g);
+    }
     mcWinLive=true;
     const kept=await mcKeepBuilderArt(it);
     it.design=mcLineSnapshot();
@@ -36775,6 +36879,14 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     if(!it){ mcSaveChipSaid('No line is open',false); return; }
     if(!(state.placeholders||[]).length){
       mcSaveChipSaid('No layout on this sheet yet',false); return;
+    }
+    // the same question the panel's Save asks, for the same reason: this sheet
+    // is about to become a line that has to print
+    if(!(state.gsm||it.gsm)){
+      const g=await askGsm(`${it.design_name||it.sku||'This line'} has no GSM yet. `
+        +'It is a third of the file name, and a line without one cannot be printed.');
+      if(!g){ mcSaveChipSaid('Not saved — it needs a GSM',false); return; }
+      useGsm(g);
     }
     // mcWinLive is what the panel sets once a template has actually been put
     // into the builder. Working the sheet here IS putting one in, so it is
