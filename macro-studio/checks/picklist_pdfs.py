@@ -113,7 +113,7 @@ def main() -> int:
             bad += 1
             continue
         for path in matches:
-            ok, note = inspect_pdf(path)
+            ok, note, _ = inspect_pdf(path)
             print(f'   {"ok  " if ok else "FAIL"}  {path.name}  --  {note}')
             bad += 0 if ok else 1
 

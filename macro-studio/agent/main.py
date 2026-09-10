@@ -29,11 +29,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import cdp, config, library, macro_store, run_reports, settings, video
+from agent import cdp, config, library, macro_store, run_reports, scheduler as scheduler_mod, settings, video
 from agent.macro_store import MacroNotFoundError
 from agent.panic import PanicWatcher
 from agent.recorder import Recorder
 from agent.replay import ReplayBusyError, ReplayEngine
+from agent.scheduler import QueueItemNotFoundError, ScheduleNotFoundError, Scheduler
 from agent.web_recorder import WebRecorder
 
 START_TIME = time.time()
@@ -88,6 +89,36 @@ replay_engine = ReplayEngine(broadcast=broadcast)
 web_recorder = WebRecorder(broadcast=broadcast)
 
 
+def _queued_macro_name(macro_id: str) -> Optional[str]:
+    """None means "gone" -- the scheduler drops those rather than failing
+    a whole run over a macro somebody deleted last week."""
+    try:
+        return macro_store.get_macro(macro_id).get("name", macro_id)
+    except (MacroNotFoundError, ValueError):
+        return None
+
+
+def _run_queued_macro(macro_id: str, allow_foreground: bool) -> dict:
+    """How the queue worker runs one macro. Same engine and the same
+    last_run bookkeeping as pressing play, minus the HTTP wrapping --
+    and it lets ReplayBusyError through so the worker can re-queue."""
+    macro = macro_store.get_macro(macro_id)
+    steps = macro.get("steps", [])
+    if not steps:
+        raise ValueError("This macro has no steps to replay.")
+    if recorder.state in ("recording", "paused"):
+        raise ValueError("A recording is in progress, so this was not run.")
+    result = replay_engine.run(steps, allow_foreground=allow_foreground, macro_id=macro_id,
+                                macro_name=macro.get("name", macro_id),
+                                video_config=macro.get("video"))
+    macro_store.record_run_result(macro_id, result["summary"])
+    return result
+
+
+scheduler = Scheduler(run_macro=_run_queued_macro, get_macro_name=_queued_macro_name,
+                       broadcast=broadcast)
+
+
 def _handle_panic() -> None:
     """Esc held for 1s: halt everything immediately, regardless of what's
     running. Both calls are individually safe to make when there's
@@ -125,6 +156,7 @@ async def _on_startup() -> None:
     global MAIN_LOOP
     MAIN_LOOP = asyncio.get_running_loop()
     panic_watcher.start()
+    scheduler.start()
     threading.Thread(target=_video_cleanup_loop, daemon=True).start()
 
 
@@ -688,6 +720,131 @@ def replay_macro(macro_id: str, body: ReplayRequest) -> JSONResponse:
         result = json.loads(response.body)
         macro_store.record_run_result(macro_id, result["summary"])
     return response
+
+
+# -- scheduling and the run queue -------------------------------------------
+# Everything that runs without somebody watching goes through the queue:
+# one macro at a time, because replay drives the real mouse.
+
+class ScheduleBody(BaseModel):
+    name: str
+    macro_ids: list[str]
+    start_time: str
+    end_time: Optional[str] = None
+    repeat_minutes: Optional[int] = None
+    days: list[int] = []
+    allow_foreground: bool = False
+    skip_if_busy: bool = True
+    enabled: bool = True
+
+
+class ScheduleEnabled(BaseModel):
+    enabled: bool
+
+
+class QueueBody(BaseModel):
+    macro_ids: list[str]
+    allow_foreground: bool = False
+
+
+class QueuePaused(BaseModel):
+    paused: bool
+
+
+def _schedule_error(exc: Exception) -> JSONResponse:
+    if isinstance(exc, ScheduleNotFoundError):
+        return JSONResponse(status_code=404, content={
+            "error": "schedule_not_found", "detail": f"No schedule with id {exc}."})
+    if isinstance(exc, QueueItemNotFoundError):
+        return JSONResponse(status_code=404, content={
+            "error": "queue_item_not_found", "detail": "That queue entry is gone."})
+    return JSONResponse(status_code=400, content={"error": "invalid_schedule", "detail": str(exc)})
+
+
+def _known_macro_ids() -> set[str]:
+    return {m["id"] for m in macro_store.list_macros()}
+
+
+@app.get("/api/schedules")
+def list_schedules() -> list[dict]:
+    return scheduler.list_schedules()
+
+
+@app.post("/api/schedules")
+def create_schedule(body: ScheduleBody) -> JSONResponse:
+    try:
+        return JSONResponse(content=scheduler.create_schedule(body.model_dump(), _known_macro_ids()))
+    except ValueError as exc:
+        return _schedule_error(exc)
+
+
+@app.put("/api/schedules/{schedule_id}")
+def update_schedule(schedule_id: str, body: ScheduleBody) -> JSONResponse:
+    try:
+        return JSONResponse(content=scheduler.update_schedule(schedule_id, body.model_dump(), _known_macro_ids()))
+    except (ScheduleNotFoundError, ValueError) as exc:
+        return _schedule_error(exc)
+
+
+@app.put("/api/schedules/{schedule_id}/enabled")
+def set_schedule_enabled(schedule_id: str, body: ScheduleEnabled) -> JSONResponse:
+    try:
+        return JSONResponse(content=scheduler.set_enabled(schedule_id, body.enabled))
+    except (ScheduleNotFoundError, ValueError) as exc:
+        return _schedule_error(exc)
+
+
+@app.delete("/api/schedules/{schedule_id}")
+def delete_schedule(schedule_id: str) -> JSONResponse:
+    try:
+        return JSONResponse(content={"deleted": scheduler.delete_schedule(schedule_id)})
+    except ScheduleNotFoundError as exc:
+        return _schedule_error(exc)
+
+
+@app.post("/api/schedules/{schedule_id}/run-now")
+def run_schedule_now(schedule_id: str) -> JSONResponse:
+    try:
+        return JSONResponse(content={"queued": scheduler.run_schedule_now(schedule_id)})
+    except (ScheduleNotFoundError, ValueError) as exc:
+        return _schedule_error(exc)
+
+
+@app.get("/api/queue")
+def get_queue() -> dict:
+    return scheduler.queue_state()
+
+
+@app.post("/api/queue")
+def add_to_queue(body: QueueBody) -> JSONResponse:
+    try:
+        queued = scheduler.enqueue(body.macro_ids, body.allow_foreground)
+    except ValueError as exc:
+        return _schedule_error(exc)
+    return JSONResponse(content={"queued": queued})
+
+
+@app.put("/api/queue/paused")
+def set_queue_paused(body: QueuePaused) -> dict:
+    return scheduler.set_paused(body.paused)
+
+
+@app.delete("/api/queue/{item_id}")
+def cancel_queue_item(item_id: str) -> JSONResponse:
+    try:
+        return JSONResponse(content={"cancelled": scheduler.cancel_item(item_id)})
+    except (QueueItemNotFoundError, ValueError) as exc:
+        return _schedule_error(exc)
+
+
+@app.post("/api/queue/clear")
+def clear_queue() -> dict:
+    return {"cleared": scheduler.clear_waiting()}
+
+
+@app.post("/api/queue/clear-history")
+def clear_queue_history() -> dict:
+    return {"cleared": scheduler.clear_history()}
 
 
 @app.websocket("/ws")

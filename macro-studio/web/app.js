@@ -989,13 +989,13 @@ if (logMinimiseBtn) {
   stopRunBtn.addEventListener("click", () => stopActiveReplay(stopRunBtn));
 }
 
-async function runMacro(id, name, allowForeground, startAt = 0) {
-  activeRunTarget = id;
+// Opening the log panel is the same whether a person pressed play or the
+// queue reached this macro on its own -- only the title differs.
+function beginLogs(target, title) {
+  activeRunTarget = target;
   runFinished = false;
   logList.innerHTML = "";
-  logTitle.textContent = startAt
-    ? `Current Logs · ${name} — from #${startAt}`
-    : `Current Logs · ${name}`;
+  logTitle.textContent = title;
   logChip.className = "chip warn";
   logChip.textContent = "running";
   logPip.className = "pip now";
@@ -1005,6 +1005,10 @@ async function runMacro(id, name, allowForeground, startAt = 0) {
   hideNote(logNote);
   openLogs();
   renderViewer();
+}
+
+async function runMacro(id, name, allowForeground, startAt = 0) {
+  beginLogs(id, startAt ? `Current Logs · ${name} — from #${startAt}` : `Current Logs · ${name}`);
 
   try {
     const res = await fetch(`/api/macros/${id}/replay`, {
@@ -1193,6 +1197,12 @@ function connectWebSocket() {
           if (activeRunTarget === "last") replaySummary.textContent = `Running 0/${msg.step_count}...`;
         }
         break;
+      case "schedules_changed":
+        loadSchedules();
+        break;
+      case "queue_changed":
+        loadQueue();
+        break;
       case "panic_triggered": {
         const parts = [];
         if (msg.stopped_recording) parts.push("recording");
@@ -1276,7 +1286,7 @@ const STEP_TEMPLATES = {
   },
   web_click: {
     label: "Web: click",
-    make: () => ({ type: "web_click", port: 9222, tab_match: "", selector: "", text: "", exact: false, match_index: 0, button: "left", hover_selector: "", hover_text: "", hover_exact: true, until_selector: "", until_text: "", until_exact: false, timeout_ms: 8000, delay_ms: 0 }),
+    make: () => ({ type: "web_click", port: 9222, tab_match: "", selector: "", text: "", exact: false, match_index: 0, button: "left", hover_selector: "", hover_text: "", hover_exact: true, until_selector: "", until_text: "", until_exact: false, until_gone: false, timeout_ms: 8000, delay_ms: 0 }),
   },
   web_hover: {
     label: "Web: hover (opens hover menus)",
@@ -1951,6 +1961,10 @@ function buildStepRow(step, index, stepsArray, containerEl) {
       addField("button", editorSelect(step.button || "left", ["left", "right"], (v) => (step.button = v)));
       addField("until this appears: selector", editorInput("text", step.until_selector, (v) => (step.until_selector = v), "150px"));
       addField("until this appears: text", editorInput("text", step.until_text, (v) => (step.until_text = v), "130px"));
+      // A close button is the other case: what proves it worked is the
+      // panel being gone, and while it fades out the page still says it
+      // is there -- so the step after it starts too early.
+      addField("...or wait for it to go away instead", editorCheckbox(step.until_gone, (v) => (step.until_gone = v)));
       addField("open menu: hover selector (>> for nested)", editorInput("text", step.hover_selector, (v) => (step.hover_selector = v), "150px"));
       addField("open menu: hover text (>> for nested)", editorInput("text", step.hover_text, (v) => (step.hover_text = v), "150px"));
     }
@@ -2531,6 +2545,8 @@ setInterval(pollStatus, 5000);
 loadRecordingState();
 loadHotkey();
 loadMacros();
+loadSchedules();
+loadQueue();
 checkFfmpegStatus();
 connectWebSocket();
 
@@ -2701,4 +2717,459 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     undoOnce();
   }
+});
+
+// -- schedules and the run queue --------------------------------------------
+// The panel answers two questions without being asked: what fires next, and
+// what is running right now. A schedule is a window with days -- "weekdays,
+// 09:00 to 17:00, every 30 minutes" -- because that is the shape of the thing
+// people mean by "run it through the morning". Nothing here starts a macro
+// itself: it all goes in the queue, which runs one at a time.
+
+const scheduleNote = document.getElementById("scheduleNote");
+const scheduleList = document.getElementById("scheduleList");
+const scheduleEmpty = document.getElementById("scheduleEmpty");
+const queueList = document.getElementById("queueList");
+const queueEmpty = document.getElementById("queueEmpty");
+const queueChip = document.getElementById("queueChip");
+const queuePauseBtn = document.getElementById("queuePauseBtn");
+const queueClearBtn = document.getElementById("queueClearBtn");
+const queueHistoryBtn = document.getElementById("queueHistoryBtn");
+const newScheduleBtn = document.getElementById("newScheduleBtn");
+const queueMacrosBtn = document.getElementById("queueMacrosBtn");
+const schedOverlay = document.getElementById("schedOverlay");
+const schedTitle = document.getElementById("schedTitle");
+const schedCloseBtn = document.getElementById("schedCloseBtn");
+const schedCancelBtn = document.getElementById("schedCancelBtn");
+const schedSaveBtn = document.getElementById("schedSaveBtn");
+const schedFormNote = document.getElementById("schedFormNote");
+const schedName = document.getElementById("schedName");
+const schedMacroPick = document.getElementById("schedMacroPick");
+const schedDays = document.getElementById("schedDays");
+const schedStart = document.getElementById("schedStart");
+const schedEnd = document.getElementById("schedEnd");
+const schedRepeat = document.getElementById("schedRepeat");
+const schedSkipBusy = document.getElementById("schedSkipBusy");
+const schedForeground = document.getElementById("schedForeground");
+const schedPreview = document.getElementById("schedPreview");
+const queuePickOverlay = document.getElementById("queuePickOverlay");
+const queuePickList = document.getElementById("queuePickList");
+const queuePickNote = document.getElementById("queuePickNote");
+const queuePickAddBtn = document.getElementById("queuePickAddBtn");
+const queuePickCloseBtn = document.getElementById("queuePickCloseBtn");
+
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+let schedules = [];
+let queueState = { paused: false, running_id: null, items: [] };
+let editingScheduleId = null;      // null while adding a new one
+let schedPicked = [];              // macro ids, in the order they were ticked
+let schedPickedDays = [];
+let queuePicked = [];
+let queueLogItemId = null;         // the queue item the log panel is following
+
+async function sendJson(url, method, body) {
+  const res = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let parsed = null;
+  try { parsed = await res.json(); } catch { parsed = null; }
+  return { ok: res.ok, body: parsed || {} };
+}
+
+function formatClock(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const sameDay = d.toDateString() === new Date().toDateString();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return sameDay ? time : `${DAY_NAMES[(d.getDay() + 6) % 7]} ${time}`;
+}
+
+// -- reading the two lists ---------------------------------------------------
+
+async function loadSchedules() {
+  try {
+    const res = await fetch("/api/schedules");
+    schedules = await res.json();
+    renderSchedules();
+  } catch (err) {
+    showNote(scheduleNote, `Could not read the schedules: ${err.message}`, "error");
+  }
+}
+
+async function loadQueue() {
+  try {
+    const res = await fetch("/api/queue");
+    queueState = await res.json();
+    renderQueue();
+    followQueueInLogs();
+  } catch {
+    // The websocket reconnect brings us back -- no note for a blip.
+  }
+}
+
+// -- schedules ---------------------------------------------------------------
+
+function renderSchedules() {
+  scheduleList.innerHTML = "";
+  scheduleEmpty.style.display = schedules.length ? "none" : "";
+  schedules.forEach((s) => {
+    const row = document.createElement("div");
+    row.className = `sched${s.enabled ? "" : " off"}`;
+
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = s.name;
+
+    const when = document.createElement("span");
+    when.className = "when";
+    when.textContent = s.summary;
+
+    const next = document.createElement("span");
+    next.className = "next";
+    next.textContent = s.enabled ? (s.next_run ? `next ${formatClock(s.next_run)}` : "no next run") : "off";
+
+    const runs = document.createElement("span");
+    runs.className = "runs";
+    runs.textContent = s.macro_names.join(" → ");
+    runs.title = runs.textContent;
+
+    const tools = document.createElement("span");
+    tools.className = "tools";
+
+    const toggle = document.createElement("button");
+    toggle.className = "btn-xs";
+    toggle.textContent = s.enabled ? "Turn off" : "Turn on";
+    toggle.addEventListener("click", async () => {
+      const { ok, body } = await sendJson(`/api/schedules/${s.id}/enabled`, "PUT", { enabled: !s.enabled });
+      if (!ok) showNote(scheduleNote, body.detail || "Could not change that.", "error");
+      else hideNote(scheduleNote);
+      loadSchedules();
+    });
+
+    const runNow = document.createElement("button");
+    runNow.className = "btn-xs";
+    runNow.textContent = "Run now";
+    runNow.title = "Queue this schedule's macros immediately, without changing its timing";
+    runNow.addEventListener("click", async () => {
+      const { ok, body } = await sendJson(`/api/schedules/${s.id}/run-now`, "POST");
+      if (!ok) showNote(scheduleNote, body.detail || "Could not queue that.", "error");
+      else showNote(scheduleNote, `Queued ${body.queued.length} macro(s) from "${s.name}".`, "info");
+      loadQueue();
+    });
+
+    const edit = document.createElement("button");
+    edit.className = "btn-xs";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => openScheduleEditor(s));
+
+    const del = document.createElement("button");
+    del.className = "btn-xs";
+    del.textContent = "Delete";
+    del.addEventListener("click", async () => {
+      if (!window.confirm(`Delete the schedule "${s.name}"? The macros themselves stay.`)) return;
+      const { ok, body } = await sendJson(`/api/schedules/${s.id}`, "DELETE");
+      if (!ok) showNote(scheduleNote, body.detail || "Could not delete that.", "error");
+      loadSchedules();
+    });
+
+    tools.append(toggle, runNow, edit, del);
+    row.append(nm, when, next, runs, tools);
+
+    if (s.last_fired_at) {
+      const last = document.createElement("span");
+      last.className = "last";
+      last.textContent = `Last fired ${formatTimestamp(s.last_fired_at)}${s.last_outcome ? ` — ${s.last_outcome}` : ""}`;
+      row.append(last);
+    }
+    scheduleList.append(row);
+  });
+}
+
+// -- the queue ---------------------------------------------------------------
+
+function renderQueue() {
+  const items = queueState.items || [];
+  const waiting = items.filter((i) => i.state === "queued");
+  const running = items.find((i) => i.state === "running");
+
+  if (queueState.paused) {
+    queueChip.className = "chip bad";
+    queueChip.textContent = `paused · ${waiting.length} waiting`;
+  } else if (running) {
+    queueChip.className = "chip warn";
+    queueChip.textContent = `running · ${waiting.length} waiting`;
+  } else if (waiting.length) {
+    queueChip.className = "chip";
+    queueChip.textContent = `${waiting.length} waiting`;
+  } else {
+    queueChip.className = "chip";
+    queueChip.textContent = "idle";
+  }
+  queuePauseBtn.textContent = queueState.paused ? "Resume" : "Pause";
+
+  // Running first, then the line in order, then what already happened
+  // newest-first -- the reading order of "now, next, and what went wrong".
+  const finished = items.filter((i) => i.state !== "queued" && i.state !== "running").reverse();
+  const ordered = [...(running ? [running] : []), ...waiting, ...finished];
+
+  queueList.innerHTML = "";
+  queueEmpty.style.display = ordered.length ? "none" : "";
+  ordered.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = `q-item ${item.state}`;
+
+    const pip = document.createElement("span");
+    pip.className = `pip ${item.state === "running" ? "now" : item.state === "done" ? "ok"
+      : item.state === "queued" ? "" : "no"}`;
+
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = item.macro_name;
+
+    const src = document.createElement("span");
+    src.className = "src";
+    // A waiting item's label already carries the time it is waiting for --
+    // stamping the moment it joined the line beside it just reads as two
+    // clocks disagreeing.
+    const stamp = item.finished_at || item.started_at;
+    src.textContent = `${item.source_label}${stamp ? ` · ${formatClock(stamp)}` : ""}`;
+    src.title = src.textContent;
+
+    row.append(pip, nm, src);
+
+    if (item.state === "queued") {
+      const cancel = document.createElement("button");
+      cancel.className = "btn-xs";
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", async () => {
+        const { ok, body } = await sendJson(`/api/queue/${item.id}`, "DELETE");
+        if (!ok) showNote(scheduleNote, body.detail || "Could not cancel that.", "warn");
+        loadQueue();
+      });
+      row.append(cancel);
+    }
+    if (item.state === "running") {
+      const stop = document.createElement("button");
+      stop.className = "btn-xs";
+      stop.textContent = "Stop";
+      stop.addEventListener("click", () => stopActiveReplay(stop));
+      row.append(stop);
+    }
+    if (item.detail) {
+      const det = document.createElement("span");
+      det.className = "det";
+      det.textContent = item.detail;
+      row.append(det);
+    }
+    queueList.append(row);
+  });
+}
+
+// A queued run has no fetch to hang the log panel off, so the queue's own
+// state drives it: opening when an item starts, closing it out when it ends.
+function followQueueInLogs() {
+  const running = (queueState.items || []).find((i) => i.state === "running");
+  if (running && running.id !== queueLogItemId && (activeRunTarget === null || queueLogItemId)) {
+    queueLogItemId = running.id;
+    beginLogs(running.macro_id, `Current Logs · ${running.macro_name} — from the queue`);
+  }
+  if (queueLogItemId && !running) {
+    const item = (queueState.items || []).find((i) => i.id === queueLogItemId);
+    queueLogItemId = null;
+    if (item) {
+      const good = item.state === "done";
+      finishLogs(good ? "done" : "bad", item.detail || `Run ${item.state}.`, good ? "info" : "warn");
+    }
+  }
+}
+
+if (queuePauseBtn) {
+  queuePauseBtn.addEventListener("click", async () => {
+    await sendJson("/api/queue/paused", "PUT", { paused: !queueState.paused });
+    loadQueue();
+  });
+  queueClearBtn.addEventListener("click", async () => {
+    const { body } = await sendJson("/api/queue/clear", "POST");
+    showNote(scheduleNote, `Cleared ${body.cleared || 0} waiting run(s). Anything mid-run keeps going.`, "info");
+    loadQueue();
+  });
+  queueHistoryBtn.addEventListener("click", async () => {
+    await sendJson("/api/queue/clear-history", "POST");
+    loadQueue();
+  });
+}
+
+// -- picking macros ----------------------------------------------------------
+// Ticking builds an order, not just a set: the numbers down the right say
+// which runs first, because a queue that ran them alphabetically would be
+// the wrong queue.
+
+function renderPickList(el, picked) {
+  el.innerHTML = "";
+  if (!macros.length) {
+    el.innerHTML = '<div class="empty-state">No macros to pick yet.</div>';
+    return;
+  }
+  [...macros].sort((a, b) => a.name.localeCompare(b.name)).forEach((m) => {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = picked.includes(m.id);
+    box.addEventListener("change", () => {
+      if (box.checked) picked.push(m.id);
+      else picked.splice(picked.indexOf(m.id), 1);
+      renderPickList(el, picked);
+    });
+    const nm = document.createElement("span");
+    nm.textContent = m.name;
+    const ord = document.createElement("span");
+    ord.className = "ord";
+    const at = picked.indexOf(m.id);
+    ord.textContent = at === -1 ? "" : `#${at + 1}`;
+    label.append(box, nm, ord);
+    el.append(label);
+  });
+}
+
+// -- the schedule form -------------------------------------------------------
+
+function renderDayChips() {
+  schedDays.innerHTML = "";
+  DAY_NAMES.forEach((name, index) => {
+    const btn = document.createElement("button");
+    btn.className = `day${schedPickedDays.includes(index) ? " on" : ""}`;
+    btn.textContent = name;
+    btn.addEventListener("click", () => {
+      if (schedPickedDays.includes(index)) schedPickedDays.splice(schedPickedDays.indexOf(index), 1);
+      else schedPickedDays.push(index);
+      schedPickedDays.sort((a, b) => a - b);
+      renderDayChips();
+      renderSchedPreview();
+    });
+    schedDays.append(btn);
+  });
+}
+
+// Says back what was typed, in the same words the list will use. The point
+// is catching "every 5 minutes, all night" before it runs unattended.
+function renderSchedPreview() {
+  const joined = schedPickedDays.join();
+  const days = schedPickedDays.length === 0 || schedPickedDays.length === 7 ? "Every day"
+    : joined === "0,1,2,3,4" ? "Weekdays"
+    : joined === "5,6" ? "Weekends"
+    : schedPickedDays.map((d) => DAY_NAMES[d]).join(", ");
+  const start = schedStart.value || "--:--";
+  if (schedEnd.value && schedRepeat.value) {
+    schedPreview.textContent = `${days}, ${start}-${schedEnd.value}, every ${schedRepeat.value} min`;
+  } else if (schedEnd.value) {
+    schedPreview.textContent = `${days}, once between ${start} and ${schedEnd.value}`;
+  } else {
+    schedPreview.textContent = `${days} at ${start}`;
+  }
+}
+
+function openScheduleEditor(existing) {
+  editingScheduleId = existing ? existing.id : null;
+  schedTitle.textContent = existing ? `Edit: ${existing.name}` : "New schedule";
+  schedName.value = existing ? existing.name : "";
+  schedPicked = existing ? [...existing.macro_ids] : [];
+  schedPickedDays = existing ? [...existing.days] : [0, 1, 2, 3, 4];
+  schedStart.value = existing ? existing.start_time : "09:00";
+  schedEnd.value = existing && existing.end_time ? existing.end_time : "";
+  schedRepeat.value = existing && existing.repeat_minutes ? existing.repeat_minutes : "";
+  schedSkipBusy.checked = existing ? existing.skip_if_busy !== false : true;
+  schedForeground.checked = existing ? !!existing.allow_foreground : false;
+  hideNote(schedFormNote);
+  renderPickList(schedMacroPick, schedPicked);
+  renderDayChips();
+  renderSchedPreview();
+  schedOverlay.style.display = "flex";
+  schedName.focus();
+}
+
+function closeScheduleEditor() {
+  schedOverlay.style.display = "none";
+  editingScheduleId = null;
+}
+
+if (newScheduleBtn) {
+  newScheduleBtn.addEventListener("click", () => openScheduleEditor(null));
+  schedCloseBtn.addEventListener("click", closeScheduleEditor);
+  schedCancelBtn.addEventListener("click", closeScheduleEditor);
+  schedOverlay.addEventListener("click", (event) => {
+    if (event.target === schedOverlay) closeScheduleEditor();
+  });
+  [schedStart, schedEnd, schedRepeat].forEach((el) => el.addEventListener("input", renderSchedPreview));
+
+  document.querySelectorAll("[data-days]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const kind = btn.dataset.days;
+      schedPickedDays = kind === "weekdays" ? [0, 1, 2, 3, 4]
+        : kind === "all" ? [0, 1, 2, 3, 4, 5, 6] : [];
+      renderDayChips();
+      renderSchedPreview();
+    });
+  });
+
+  schedSaveBtn.addEventListener("click", async () => {
+    const payload = {
+      name: schedName.value.trim(),
+      macro_ids: schedPicked,
+      days: schedPickedDays,
+      start_time: schedStart.value,
+      end_time: schedEnd.value || null,
+      repeat_minutes: schedRepeat.value ? Number(schedRepeat.value) : null,
+      allow_foreground: schedForeground.checked,
+      skip_if_busy: schedSkipBusy.checked,
+      enabled: true,
+    };
+    const url = editingScheduleId ? `/api/schedules/${editingScheduleId}` : "/api/schedules";
+    const { ok, body } = await sendJson(url, editingScheduleId ? "PUT" : "POST", payload);
+    if (!ok) {
+      showNote(schedFormNote, body.detail || "That did not save.", "error");
+      return;
+    }
+    closeScheduleEditor();
+    showNote(scheduleNote, `Saved "${body.name}" — ${body.summary}.`, "info");
+    loadSchedules();
+  });
+}
+
+// -- queueing by hand --------------------------------------------------------
+
+if (queueMacrosBtn) {
+  queueMacrosBtn.addEventListener("click", () => {
+    queuePicked = [];
+    hideNote(queuePickNote);
+    renderPickList(queuePickList, queuePicked);
+    queuePickOverlay.style.display = "flex";
+  });
+  queuePickCloseBtn.addEventListener("click", () => { queuePickOverlay.style.display = "none"; });
+  queuePickOverlay.addEventListener("click", (event) => {
+    if (event.target === queuePickOverlay) queuePickOverlay.style.display = "none";
+  });
+  queuePickAddBtn.addEventListener("click", async () => {
+    if (!queuePicked.length) {
+      showNote(queuePickNote, "Tick at least one macro.", "warn");
+      return;
+    }
+    const { ok, body } = await sendJson("/api/queue", "POST", { macro_ids: queuePicked, allow_foreground: false });
+    if (!ok) {
+      showNote(queuePickNote, body.detail || "Could not queue those.", "error");
+      return;
+    }
+    queuePickOverlay.style.display = "none";
+    showNote(scheduleNote, `Queued ${body.queued.length} macro(s).`, "info");
+    loadQueue();
+  });
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (schedOverlay.style.display === "flex") closeScheduleEditor();
+  if (queuePickOverlay.style.display === "flex") queuePickOverlay.style.display = "none";
 });

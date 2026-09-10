@@ -31,7 +31,19 @@ NIIF_ERROR = 0x00000003
 WS_OVERLAPPED = 0x00000000
 WM_DESTROY = 0x0002
 
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
+# LRESULT and the message parameters are pointer-sized on 64-bit Windows,
+# and Windows really does pass values that need all 64 bits. Left to guess
+# from the Python ints it is handed, ctypes assumes a 32-bit int and
+# raises mid-callback on the first message that doesn't fit -- so every
+# type here is spelled out, both for the callback and for the default
+# handler it hands unhandled messages to.
+LRESULT = ctypes.c_ssize_t
+WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM)
+
+user32.DefWindowProcW.argtypes = [wintypes.HWND, ctypes.c_uint, wintypes.WPARAM, wintypes.LPARAM]
+user32.DefWindowProcW.restype = LRESULT
+user32.CreateWindowExW.restype = wintypes.HWND
+user32.RegisterClassW.restype = wintypes.ATOM
 
 
 class _WNDCLASSW(ctypes.Structure):

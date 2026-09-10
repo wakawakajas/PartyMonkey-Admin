@@ -336,26 +336,25 @@ def download_by_clicking(port: int, page: dict, folder: str, selector: str = "",
 
 
 def open_tab(port: int, url: str) -> dict:
-    """Opens a tab without bringing the window forward.
+    """Opens a tab in the Chrome window that is already there.
 
-    The HTTP /json/new endpoint raises and focuses the window, which is the
-    one thing a background macro must not do -- the user is working in
-    something else. Target.createTarget takes `background`, so the page
-    opens behind whatever they're doing.
+    The step says "new tab", so it opens a tab -- Target.createTarget with
+    newWindow off puts the page in the existing window rather than giving
+    it one of its own.
 
-    It opens as a window rather than a tab, and that distinction decides
-    whether the macro works at all. A background *tab* is hidden:
-    visibilityState says so, and requestAnimationFrame never fires, which
-    means any menu that mounts or animates through rAF -- ant's, and most
-    component libraries' -- never opens, so nothing after the hover can be
-    clicked. A background *window* is visible in exactly the sense the
-    renderer cares about, without taking focus."""
+    It has to be that window's *active* tab, and that is not a nicety. A
+    background tab is hidden: visibilityState says so, and
+    requestAnimationFrame never fires, which means any menu that mounts or
+    animates through rAF -- ant's, and most component libraries' -- never
+    opens, so nothing after the hover can be clicked. Being active inside
+    its own window is what the renderer cares about; the window itself is
+    not raised over whatever else the user is looking at."""
     version = _http_json(port, "/json/version") or {}
     browser_ws = version.get("webSocketDebuggerUrl")
     if browser_ws:
         try:
             result = _send({"webSocketDebuggerUrl": browser_ws}, "Target.createTarget",
-                           {"url": url, "newWindow": True, "background": True}, timeout=10)
+                           {"url": url, "newWindow": False, "background": False}, timeout=10)
             target_id = result.get("targetId")
             if target_id:
                 for page in list_pages(port):
@@ -365,7 +364,7 @@ def open_tab(port: int, url: str) -> dict:
                 return {"id": target_id, "url": url,
                         "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/page/{target_id}"}
         except RuntimeError:
-            pass  # older Chrome, or background unsupported -- fall through
+            pass  # older Chrome, or those params unsupported -- fall through
 
     quoted = urllib.parse.quote(url, safe="")
     request = urllib.request.Request(f"http://127.0.0.1:{port}/json/new?{quoted}", method="PUT")
@@ -840,7 +839,7 @@ def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
     if not spot.get("hit"):
         # The point doesn't resolve back to the element -- something is
         # over it, or it is still moving. Dispatch on the node itself.
-        return dict(_dispatch_click(page, selector, text, exact, button), covered=True)
+        return dict(_dispatch_click(page, selector, text, exact, button, match_index), covered=True)
     try:
         # Browser-level input, not a dispatched DOM event: it carries
         # isTrusted, it moves the pointer first (so hover state settles
@@ -857,7 +856,7 @@ def click(page: dict, selector: str = "", text: str = "", exact: bool = False,
     except RuntimeError:
         # Some pages tear down and rebuild between locate and press; the
         # DOM-event path doesn't depend on coordinates staying valid.
-        return dict(_dispatch_click(page, selector, text, exact, button), covered=True)
+        return dict(_dispatch_click(page, selector, text, exact, button, match_index), covered=True)
 
 
 def _locate_reopening(page: dict, selector: str, text: str, exact: bool, timeout_ms: int,
@@ -908,12 +907,17 @@ def _locate_reopening(page: dict, selector: str, text: str, exact: bool, timeout
 
 
 def _dispatch_click(page: dict, selector: str, text: str, exact: bool,
-                    button: str = "left") -> dict:
+                    button: str = "left", match_index: int = 0) -> dict:
+    # The match number has to come along. This path is where a covered or
+    # still-moving target lands, and falling back to the first match here
+    # means "the second View details" quietly becomes "the first" -- a
+    # click that succeeds on the wrong row, which is worse than a miss.
     args = json.dumps({"selector": selector, "text": text, "exact": exact,
+                       "index": max(0, int(match_index or 0)),
                        "right": str(button).lower().startswith("r")})
     result = evaluate(page, _js(
         "const a = " + args + ";"
-        "const el = __ms.find(a.selector, a.text, a.exact)[0] || null;"
+        "const el = __ms.find(a.selector, a.text, a.exact)[a.index] || null;"
         "if (!el) return { ok: false };"
         "if (a.right) {"
         "  const r = el.getBoundingClientRect();"
@@ -941,7 +945,18 @@ def _dispatch_click(page: dict, selector: str, text: str, exact: bool,
 
 
 def type_text(page: dict, selector: str, value: str, submit: bool = False) -> dict:
-    args = json.dumps({"selector": selector, "value": value, "submit": submit})
+    """Puts the value in the box, and optionally presses Enter on it.
+
+    The Enter is a real key through the browser, not `form.requestSubmit()`.
+    Calling that goes straight to the form's native submission and skips
+    the page's own keydown handler -- so a single-page app that would have
+    filtered a list in place instead reloads the whole document, losing
+    the search and (on a site that re-checks the session) landing on the
+    login page. Nothing fails: the box gets the value, the step reports
+    success, and every step after it works on the unfiltered list, taking
+    the top row every time. A pressed key is what a person does, and it
+    leaves the page free to preventDefault the way it means to."""
+    args = json.dumps({"selector": selector, "value": value})
     result = evaluate(page, _js(
         "const a = " + args + ";"
         "const el = __ms.query(a.selector);"
@@ -953,14 +968,16 @@ def type_text(page: dict, selector: str, value: str, submit: bool = False) -> di
         "if (d && d.set) d.set.call(el, a.value); else el.value = a.value;"
         "el.dispatchEvent(new Event('input', { bubbles: true }));"
         "el.dispatchEvent(new Event('change', { bubbles: true }));"
-        "if (a.submit) {"
-        "  el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));"
-        "  if (el.form) { el.form.requestSubmit ? el.form.requestSubmit() : el.form.submit(); }"
-        "}"
         "return { ok: true };"
     ))
     if not result or not result.get("ok"):
         raise RuntimeError(f'No element matched selector "{selector}" to type into.')
+    if submit:
+        for kind in ("rawKeyDown", "char", "keyUp"):
+            _send(page, "Input.dispatchKeyEvent", {
+                "type": kind, "key": "Enter", "code": "Enter", "text": "\r",
+                "unmodifiedText": "\r", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13,
+            })
     return result
 
 
@@ -1073,6 +1090,29 @@ def wait_for(page: dict, selector: str = "", text: str = "", exact: bool = False
     if not result or not result.get("ok"):
         what = f'selector "{selector}"' if selector else f'text "{text}"'
         raise RuntimeError(f"{what} never appeared within {timeout_ms}ms.")
+    return result
+
+
+def wait_gone(page: dict, selector: str = "", text: str = "", exact: bool = False,
+              timeout_ms: int = 10000) -> dict:
+    """Waits for something to stop being on the page.
+
+    The other half of waiting. A panel that closes on an animation is
+    still in the document, and still the answer to "is it open?", for a
+    few hundred milliseconds after the click that dismissed it -- long
+    enough for the next step to open the same one again, or to be told
+    the thing it wants is already there when what it can see is the last
+    one on its way out. Absence is what says the page is ready for the
+    next thing, and nothing else does."""
+    args = json.dumps({"selector": selector, "text": text, "exact": exact, "timeout": timeout_ms})
+    result = evaluate(page, _js(
+        "const a = " + args + ";"
+        "const gone = await __ms.poll(() => (__ms.find(a.selector, a.text, a.exact).length ? null : true), a.timeout);"
+        "return { ok: !!gone };"
+    ), timeout=max(_WS_TIMEOUT, timeout_ms / 1000.0 + 5))
+    if not result or not result.get("ok"):
+        what = f'selector "{selector}"' if selector else f'text "{text}"'
+        raise RuntimeError(f"{what} was still on the page after {timeout_ms}ms.")
     return result
 
 

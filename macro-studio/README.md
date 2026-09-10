@@ -345,11 +345,66 @@ this. When that happens the step now says so, because the two look identical
 from the outside: a modal left open over the page swallows the press, the run
 reports success, and no file ever appears.
 
+## Running a macro at a set time
+
+**Schedule & Queue**, on the main screen. A schedule is a *window*, not a single
+alarm, because "run it through the morning" is what people actually mean:
+
+- **Days** -- pick them, or leave them all off for every day.
+- **From** -- the time it starts. On its own, that is the whole schedule: one run,
+  at that time.
+- **until** + **repeating every N min** -- fill both in and it keeps going through
+  the window. `Weekdays, 09:00-17:00, every 30 min` is 17 runs a day.
+
+The line under the buttons says the schedule back to you in those words before
+you save it, which is the moment to notice you typed every 5 minutes all night.
+
+Times are this machine's own clock, and **nothing fires while the agent is
+closed**. A slot missed by more than five minutes -- the machine was asleep, the
+agent was shut -- is skipped rather than fired late; a 09:00 job running at 16:00
+is worse than not running. Turning a schedule off and back on, or editing its
+times, never fires a slot that has already passed.
+
+Schedules live in `schedules.json` beside `settings.json`, so they survive a
+restart and can be backed up with the rest of the folder.
+
+## The queue
+
+Nothing starts a macro on the spot except your own press of the play button.
+Everything else -- schedules, **Run now**, **Queue macros** -- joins the queue,
+and the queue runs **one macro at a time**. Replay drives the real mouse and
+keyboard, so two at once would fight over them.
+
+The list reads in the order things happen: what is running now, then what is
+waiting, then what already went. Current Logs opens itself for a queued run the
+same as for one you started by hand.
+
+- **Queue macros** -- tick several and they run back to back, in the order you
+  ticked them. The numbers down the right say which is which.
+- **Pause** -- stops the *next* one starting. Whatever is mid-run keeps going;
+  stopping that is what **Stop the run** and the panic hotkey are for.
+- **Cancel** on a waiting item, **Clear waiting** for all of them.
+- **Skip a turn if something else is still running** (on by default) -- a schedule
+  whose moment arrives while the queue is busy lets that turn go rather than
+  stacking up behind it. Turn it off for work that must not be missed.
+
+The queue is not saved across restarts, on purpose: a queue rebuilt from
+yesterday would replay work whose moment has passed. Whatever was still waiting
+is dropped, and the schedule that put it there puts it back at its next slot.
+
 ## Checking a run actually worked
 
 A run report tells you about steps, not results. Every step can go green while
 an order ends up one PDF short, or holding a 98-byte "session expired" page
 saved under a `.pdf` name -- the click landed, the file arrived, nothing lied.
+Worse, the folder can hold three full-size, perfectly readable PDFs that belong
+to the order *before* it, which looks exactly like success from the outside.
+
+So the order check opens every PDF in every order folder and reads it: the
+order number has to be printed on the file it is filed under, in as many words.
+The 1688 order detail says it in Chinese and the WorldFirst statements say it
+in English, and both are read the same way -- all pages, spaces removed before
+looking, so a font that draws the digits apart can't fake a miss.
 
 There is a **Check a Run** panel in the web UI -- pick one, press **Run check**,
 and the output appears underneath. The same thing without the browser open:
@@ -358,15 +413,33 @@ double-click [`Check.bat`](Check.bat) and pick from the menu:
 ```
 What do you want to check?
 
-  1. WorldFirst PDFs -- did every order download, and is any of them blank?
+  1. Order PDFs -- did every order download, is any blank, and does each name its own order?
 
-  2. All of them
+  2. Pick lists and bundles -- are today's PDFs there, and not blank?
+
+  3. All of them
   0. Nothing, close this
 ```
 
 It also takes an argument, for chaining or a shortcut: `Check.bat
 worldfirst_downloads`, or `Check.bat all`. Exit code is 0 when everything is
-fine and non-zero when it isn't.
+fine and non-zero when it isn't. A good run reads:
+
+```
+Sheet   : 1688 capture.xlsx  (4 order(s))
+Expect  : 3 PDF(s) per order -> 12 file(s) total
+
+3316358283343072877
+   ok    3316358283343072877 - 1688.pdf  --  210,530 bytes, 1 page(s), says 3316358283343072877
+   ok    3316358283343072877 - WorldFirst 1.pdf  --  98,526 bytes, 1 page(s), says 3316358283343072877
+   ok    3316358283343072877 - WorldFirst 2.pdf  --  98,316 bytes, 1 page(s), says 3316358283343072877
+```
+
+and a wrong file reads `FAIL ... 3316371639001027685 is nowhere in it -- this
+is order 3316358283343072877's PDF`. How many PDFs an order should have is
+counted off the macros themselves -- every download or print step whose
+destination names `{{row}}` writes one file per order -- so adding a step to a
+macro doesn't leave this expecting the old number.
 
 Each check is one file in [`checks/`](checks/) with a `TITLE` line and a
 `main()` that returns 0 or non-zero. The menu is built by reading that folder,
@@ -594,6 +667,7 @@ macro-studio/
   checks/         "Did that run actually work?" -- one file per check, menu in Check.bat
   macros/         Saved macros as JSON (gitignored — this is your data)
   macros/versions/  Last 10 versions per macro (gitignored)
+  schedules.json  Saved schedules (your data -- the queue itself is memory-only)
   runs/           Run logs, failure screenshots, videos (gitignored)
   requirements.txt
   start.bat       Start Macro Studio

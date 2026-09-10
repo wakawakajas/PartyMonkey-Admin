@@ -172,6 +172,12 @@ def _row_text(value) -> str:
 
 _WHOLE_VARIABLE = re.compile(r"^\s*\{\{\s*([A-Za-z0-9_]+)\s*\}\}\s*$")
 
+# Splits before anything that can only be the start of a path -- a drive
+# letter, a \\server share, or %VAR%\ -- and only when something precedes
+# it, so a single well-formed path is left whole.
+_RUN_ON_PATHS = re.compile(
+    r'(?<=[^\s"])(?=(?:[A-Za-z]:[\\/]|\\\\[^\\/]|%[^%\\/\s]+%[\\/]))')
+
 
 def _path_list(raw, variables: dict) -> list:
     """One field, one or several files.
@@ -181,7 +187,9 @@ def _path_list(raw, variables: dict) -> list:
     as a path, and not safely splittable back since a filename may itself
     contain a comma. So when the field is nothing but the variable, the
     list is taken as it stands and never stringified. Anything else is one
-    path per line."""
+    path per line -- or several run together on one, which is what a paste
+    of three copied paths looks like, so a new path starting mid-line
+    (a drive letter, a UNC share, an %ENVVAR%) starts a new entry."""
     if isinstance(raw, list):
         parts = [str(item) for item in raw]
     else:
@@ -192,6 +200,7 @@ def _path_list(raw, variables: dict) -> list:
             parts = [str(item) for item in value]
         else:
             parts = actions.substitute(text, variables).splitlines()
+            parts = [piece for line in parts for piece in _RUN_ON_PATHS.split(line)]
     return [actions.expand_path(part.strip().strip('"')) for part in parts if part.strip()]
 
 
@@ -943,25 +952,52 @@ class ReplayEngine:
             return {"status": "success", "tier": "cdp",
                     "reason": f'Read "{preview}"' + (f" into {{{{{store_as}}}}}." if store_as else ".")}
         except RuntimeError as exc:
-            return {"status": "failed", "tier": None, "reason": str(exc)}
+            # Say which page it was looking at. Half the time a selector
+            # "never appeared" because the tab is somewhere else entirely
+            # -- signed out, redirected, still on the page before -- and
+            # the URL turns a hunt through the selector into reading one
+            # line.
+            where = ""
+            try:
+                current = cdp.find_page(port, context.get("cdp_tab", "")).get("url", "")
+                if current:
+                    where = f" The tab was on {current[:120]}"
+            except Exception:
+                pass
+            return {"status": "failed", "tier": None, "reason": str(exc) + where}
 
     def _click_until(self, step: dict, context: dict, page: dict, press, until_selector: str,
                      until_text: str, timeout_ms: int):
         """Presses until the thing the press was for shows up.
 
-        The expectation is checked before each press as well as after: a
-        click that worked but took its time would otherwise be repeated,
-        and a second press on a button now behind a modal is at best
-        wasted."""
+        The expectation is checked after every press, so a click that
+        worked but took its time isn't repeated, and a second press on a
+        button now behind a modal is not wasted.
+
+        It is deliberately *not* checked before the first press. What is
+        on screen at that moment is the previous step's leftover -- a
+        drawer still fading out, a modal not yet dismissed -- and it looks
+        exactly like this step's own success. Treating it as such returns
+        green without ever pressing, and the step after it acts on the
+        panel that was already open: the row nobody asked for, downloaded
+        under the name of the row they did. A press that turns out to be
+        unnecessary costs a click; one that never happens costs the wrong
+        file, with a report saying it went fine."""
         port = int(step.get("port") or cdp.DEFAULT_PORT)
         exact = bool(step.get("until_exact"))
+        # A close button's press is finished when the panel is *gone*, not
+        # when something else shows up -- and until then the page still
+        # answers yes to every question about the panel that is leaving.
+        gone = bool(step.get("until_gone"))
         deadline = time.time() + min(max(1000, timeout_ms), 120_000) / 1000.0
         wanted = f'"{until_selector or until_text}"'
+        did, never = ("went away", "never went away") if gone else ("appeared", "never appeared")
         presses, last = 0, None
 
-        def appeared(window_ms: int) -> bool:
+        def settled(window_ms: int) -> bool:
+            wait = cdp.wait_gone if gone else cdp.wait_for
             try:
-                cdp.through_navigation(port, page, window_ms, lambda p: cdp.wait_for(
+                cdp.through_navigation(port, page, window_ms, lambda p: wait(
                     p, selector=until_selector, text=until_text, exact=exact,
                     timeout_ms=window_ms))
                 return True
@@ -971,11 +1007,11 @@ class ReplayEngine:
         while True:
             if self._stop_event.is_set():
                 return {"status": "stopped", "tier": None, "reason": "Stopped by user."}
-            if appeared(400 if not presses else 250):
+            if presses and settled(250):
                 label = (last or {}).get("label") or sub_label(step)
                 tries = "" if presses <= 1 else f" (took {presses} presses)"
                 return {"status": "success", "tier": "cdp",
-                        "reason": f'Clicked "{label}" and {wanted} appeared{tries}.'}
+                        "reason": f'Clicked "{label}" and {wanted} {did}{tries}.'}
             if time.time() >= deadline:
                 if last is None:
                     return None  # never got as far as pressing; let the caller report the miss
@@ -983,14 +1019,14 @@ class ReplayEngine:
                           " real -- which some pages ignore." if last.get("covered") else ""
                 return {"status": "failed", "tier": None,
                         "reason": f'Clicked "{last.get("label") or sub_label(step)}" {presses} time(s) '
-                                  f'but {wanted} never appeared.{covered}'}
+                                  f'but {wanted} {never}.{covered}'}
             try:
                 last = press()
             except RuntimeError as exc:
                 return {"status": "failed", "tier": None, "reason": str(exc)}
             presses += 1
             remaining = max(0.0, deadline - time.time())
-            appeared(int(min(2500, remaining * 1000)))
+            settled(int(min(2500, remaining * 1000)))
 
     def _run_open_url(self, step: dict, context: dict) -> dict:
         url = actions.substitute(step.get("url", ""), context["variables"])
