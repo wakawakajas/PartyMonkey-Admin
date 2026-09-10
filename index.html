@@ -31906,11 +31906,49 @@ async function mcSetSkuQty(sku,want){
     s.it.sheet_item=si;
     if(!await mcSave(s.it,{sheet_item:si})){ s.it.sheet_item=was; failed++; }
   }
+  // and the sheet this SKU is already on is set to the same figure. It used
+  // to be told only when the SKU was taken off and put on again: the box said
+  // four, the sheet still had two on it, and the two did not disagree out loud
+  // until the PDF came out short.
+  mcSkuQtyToSheet(sku,target);
   mcRenderSummary(); mcRenderItems();
   if(failed) showMsg(out,`${failed} of ${share.length} lines would not save — try again.`,false);
   else showMsg(out,`✓ ${escapeHtml(sku)} set to ${target} on the sheet`
     +(target<ordered?` — ${ordered-target} short of the ${ordered} ordered.`
      :target>ordered?` — ${target-ordered} over the ${ordered} ordered.`:'.'),true);
+}
+// One SKU's figure onto the sheet it is already on — the design line on the
+// print sheet, or the line on whichever gift tag page carries it. Nothing is
+// added and nothing is taken off: a SKU that is not on a sheet has no figure
+// here to change, and saying so is the row's job, not this one's.
+function mcSkuQtyToSheet(sku,qty){
+  const want=Math.max(1,Math.round(Number(qty)||0));
+  const on=mcWhereIsSku(sku);
+  if(!on||!on.line||on.line.qty===want) return false;
+  on.line.qty=want;
+  if(on.on==='print'){
+    ensureGridFor(want);
+    renderDesignLines(); drawAll();
+  }else{
+    if(typeof gtRenderOrder==='function') gtRenderOrder();
+    if(typeof gtDraw==='function') gtDraw();
+    if(typeof gtSaveSoon==='function') gtSaveSoon();
+  }
+  if(mcSummaryOpen()) mcSumStageDraw(on.on==='gift'?'gift':'print');
+  return true;
+}
+// Typed rather than finished with. The figure is put on the sheet as it is
+// keyed so the tally and the sheet count answer while somebody is still
+// deciding — the batch's own lines are left alone until the box is left,
+// because 1 and 12 on the way to 120 are not three decisions.
+let mcQtyLiveTimer=null;
+function mcSkuQtyLive(sku,value){
+  clearTimeout(mcQtyLiveTimer);
+  const v=Math.round(Number(value));
+  if(!isFinite(v)||v<1) return;          // mid-edit, or empty: nothing said yet
+  mcQtyLiveTimer=setTimeout(()=>{
+    try{ mcSkuQtyToSheet(sku,v); }catch(e){}
+  },160);
 }
 // The three buttons say how many they would act on, and go quiet where that
 // is none: "Add all shown" against a search that has left nothing addable is
@@ -34098,6 +34136,12 @@ document.getElementById('mcSummaryBody').addEventListener('change',e=>{
   const sku=String(box.dataset.mcSumSel);
   if(box.checked) mcSel.add(sku); else mcSel.delete(sku);
   mcSelSync();
+});
+// and while it is being typed the sheet keeps up, without a word being said
+// to the batch — what is on screen is the run being decided
+document.getElementById('mcSummaryBody').addEventListener('input',e=>{
+  const qty=e.target.closest('[data-mc-sum-qty]'); if(!qty) return;
+  mcSkuQtyLive(String(qty.dataset.mcSumQty),qty.value);
 });
 // Enter means "that is the figure", the way it does in every other box here
 document.getElementById('mcSummaryBody').addEventListener('keydown',e=>{
