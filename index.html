@@ -1903,6 +1903,11 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   background:var(--paper);border:1px solid var(--border);}
 .mc-shot.blank{display:flex;align-items:center;justify-content:center;
   color:var(--faint);font-size:28px;}
+/* A 76px thumbnail is enough to tell two cards apart and not enough to check
+   one: the wording, the spelling of a name, whether the picture the customer
+   bought is the picture in the folder. So the picture opens, in the viewer
+   the box photos already use. */
+img.mc-shot,img.mc-sum-shot{cursor:zoom-in;}
 .mc-line-main{flex:1;min-width:0;}
 .mc-line-name{font-size:13px;font-weight:600;overflow-wrap:anywhere;}
 .mc-line-sub{font-size:11px;color:var(--faint);margin-top:2px;overflow-wrap:anywhere;}
@@ -29796,6 +29801,18 @@ function mcGroups(){
 }
 function mcRenderItems(){
   const el=document.getElementById('mcItems');
+  // A redraw is not a journey. Every row is written again — a tick, a copy, a
+  // colleague's edit arriving down the channel — and the list emptying for the
+  // instant between the two innerHTMLs is enough for the browser to clamp the
+  // scroll to nothing. Somebody halfway down two hundred lines is put back
+  // where they were rather than at the top: in a split the list is its own
+  // scroll box, off it the page is, so both are remembered.
+  const box=document.getElementById('magicBatchScreen');
+  const wasBox=box?box.scrollTop:0,wasWin=window.scrollY||0;
+  const keepScroll=()=>{
+    if(box&&wasBox&&box.scrollTop!==wasBox) box.scrollTop=wasBox;
+    if(wasWin&&(window.scrollY||0)!==wasWin) window.scrollTo(0,wasWin);
+  };
   if(!mcItems.length){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">— no lines on this batch —</p>';
     return;
@@ -29844,6 +29861,7 @@ function mcRenderItems(){
       ${g.shown.map(mcLineHtml).join('')}
     </div>`;
   }).join('');
+  keepScroll();
 }
 // The time it went out, and the day too where that was not today — a batch
 // lives three days after it is finished, and "14:20" on a Thursday morning
@@ -30119,13 +30137,29 @@ document.getElementById('mcShareBody').addEventListener('click',async e=>{
     :`${mcShareName(id)} shares these sheets — ${mine} line${mine===1?'':'s'} of theirs `
      +'on a sheet.',true);
 });
+// The order's own picture, opened. A thumbnail says which card this is and
+// nothing more: the wording, the spelling of the name on it, and whether the
+// picture the customer bought is the design about to be printed are all read
+// at full size or not at all. It opens in the viewer the box photos use —
+// same tap to fit or to actual pixels, same Escape, same close.
+// Bound to the document rather than to the list: the same thumbnail is on the
+// batch line and on the SKU summary, and the summary is drawn into a sheet
+// that is torn down and built again every time it opens.
+document.addEventListener('click',e=>{
+  const img=e.target.closest&&e.target.closest('img.mc-shot,img.mc-sum-shot');
+  if(!img||!img.getAttribute('src')) return;
+  const row=img.closest('.mc-line,.mc-sum-row');
+  // what the row calls it, so the picture is not on its own with no name
+  const name=row&&(row.querySelector('.mc-line-name')||row.querySelector('.mc-sum-sku'));
+  openPhotoModal(null,(name&&name.textContent.trim())||'Order picture',img.src);
+});
 // One listener for every line on the screen. Re-rendering a row then costs
 // nothing and leaves nothing bound to an element that has gone.
 document.getElementById('mcItems').addEventListener('click',async e=>{
   const ok=e.target.closest('[data-mc-ok]');
   if(ok){ await mcToggleDone(ok.dataset.mcOk); return; }
   const cpy=e.target.closest('[data-mc-copy]');
-  if(cpy){ await mcCopyLine(cpy.dataset.mcCopy); return; }
+  if(cpy){ await mcCopyLine(cpy.dataset.mcCopy,cpy); return; }
   const cr=e.target.closest('[data-mc-create]');
   if(cr){ await mcWinOpen(cr.dataset.mcCreate); return; }
   const pd=e.target.closest('[data-mc-pdf]');
@@ -30193,14 +30227,17 @@ async function mcAddLineTo(orderId){
 // once, which is what a morning's run wants — but a single line reprinted, or
 // one order asked for now, is worked from the batch itself, and walking round
 // to the summary to press Copy there marks the whole SKU done with it.
-async function mcCopyLine(id){
+async function mcCopyLine(id,btn){
   const it=mcItem(id); if(!it) return;
   const out=document.getElementById('mcBatchMsg');
+  const free=btn?mcBtnBusy(btn,'Copying…'):()=>{};
+  try{
   if(!mcBatch||mcBatch.status!=='open'){
     showMsg(out,'This batch is completed — re-open it first.',false); return; }
   if(!canPickFolder()){
     showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false);
     return; }
+  showMsg(out,`Copying ${escapeHtml(it.sku||'')}…`,true);
   // the copy-from folder is read on the way in: a line copied before anything
   // has opened it would otherwise be told there is no file of that name
   await mcSrcReady('mcSummaryMsg');
@@ -30227,6 +30264,7 @@ async function mcCopyLine(id){
   }catch(err){
     showMsg(out,'Could not copy that: '+((err&&err.message)||'unknown error'),false);
   }
+  }finally{ free(); }
 }
 // A whole order ticked at once. An order is packed as one thing — the lines of
 // it are on the bench together — so ticking ten of them one at a time is the
@@ -33512,8 +33550,24 @@ const mcCopyMsgEl=()=>{
     ? document.getElementById('mcSummaryMsg')
     : document.getElementById('mcBatchMsg');
 };
-async function mcCopySku(sku){
+// A copy reads a file and writes it out again, and over a folder on the NAS
+// that is seconds, not nothing. The press has to answer on the button itself:
+// the message line of a batch sits below two hundred lines, so a button that
+// looks untouched reads as a button that did not work, and gets pressed again.
+function mcBtnBusy(btn,label){
+  if(!btn) return ()=>{};
+  const was=btn.textContent,dis=btn.disabled;
+  btn.disabled=true; btn.textContent=label;
+  // the row it is in is redrawn while the copy runs, so the button this puts
+  // back is often no longer on the screen — which is fine, and why it never
+  // looks anything up again
+  return ()=>{ btn.textContent=was; btn.disabled=dis; };
+}
+async function mcCopySku(sku,btn){
   const out=mcCopyMsgEl();
+  const free=btn?mcBtnBusy(btn,'Copying…'):()=>{};
+  try{
+  showMsg(out,`Copying ${escapeHtml(String(sku||''))}…`,true);
   await mcSrcReady();
   if(!canPickFolder()){
     showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false); return; }
@@ -33541,6 +33595,7 @@ async function mcCopySku(sku){
   }catch(err){
     showMsg(out,`Could not copy that: ${(err&&err.message)||'unknown error'}`,false);
   }
+  }finally{ free(); }
 }
 // What a row says it copies.
 const mcCopyWhat=src=>!src?'':src.name;
@@ -33576,7 +33631,13 @@ async function mcCopyRows(rows){
   if(!dir){ showMsg(out,'No folder to copy into — pick one and try again.',false); return 0; }
   let done=0,already=0,ticked=0;
   const missing=[],failed=[];
+  // Two hundred files is a minute of work, and one line written at the end of
+  // it is a minute of a screen that looks stuck. Each one says where it has
+  // got to as it goes — the count is what tells somebody it is moving, and
+  // the SKU is what tells them which file it is on when it stops.
+  let i=0;
   for(const r of rows){
+    showMsg(out,`Copying ${++i} of ${rows.length}… ${escapeHtml(String(r.sku||''))}`,true);
     const src=mcCopySource(r.sku);
     if(!src){ missing.push(r.sku); continue; }
     try{
@@ -33813,11 +33874,12 @@ document.getElementById('mcSummaryBulkMap').addEventListener('click',async()=>{
 });
 // and the same selection, filed. The file each one copies is its own — mapped,
 // or <SKU>.png where it is not — so this is the whole press of the button.
-document.getElementById('mcSummaryBulkCopy').addEventListener('click',async()=>{
+document.getElementById('mcSummaryBulkCopy').addEventListener('click',async e=>{
   const rows=mcSelRows();
   if(!rows.length){
     showMsg(document.getElementById('mcSummaryMsg'),'Nothing is selected.',false); return; }
-  await mcCopyRows(rows);
+  const free=mcBtnBusy(e.currentTarget,`⧉ Copying ${rows.length}…`);
+  try{ await mcCopyRows(rows); }finally{ free(); }
 });
 document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
   // taking one back off: the row says so again straight away, and the summary
@@ -33867,7 +33929,7 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
   }
   // file this row's artwork — the folder, not the sheet
   const cp=e.target.closest('[data-mc-sum-copy]');
-  if(cp){ await mcCopySku(cp.dataset.mcSumCopy); return; }
+  if(cp){ await mcCopySku(cp.dataset.mcSumCopy,cp); return; }
   // ticked off by SKU — the same tick the batch's own OK makes
   const ok=e.target.closest('[data-mc-sum-ok]');
   if(ok){ await mcOkSku(ok.dataset.mcSumOk); return; }
@@ -34200,6 +34262,28 @@ function mcSplitScreenFor(it){
 }
 // Put the right column on the builder this line belongs to, with this line's
 // work already in it.
+// Where the finger was. Create opens the builder, and on a wide screen that
+// gives the list its own scroll box — a box that starts at the top, so the
+// line just tapped is suddenly a hundred rows above it and has to be found
+// again. Narrower, the panel is put in at the head of the list and pushes the
+// same line down off the bottom. Either way the line being worked is the one
+// thing that must stay in front of whoever is working it.
+function mcScrollToLine(id){
+  const row=document.querySelector(`[data-mc-row="${id}"]`); if(!row) return;
+  const box=document.getElementById('magicBatchScreen');
+  // in a split the list scrolls inside itself; off it, it scrolls with the page
+  let inner=false;
+  try{ inner=!!box&&getComputedStyle(box).overflowY==='auto'
+    &&box.scrollHeight>box.clientHeight+4; }catch(e){}
+  if(inner){
+    const r=row.getBoundingClientRect(),b=box.getBoundingClientRect();
+    const to=box.scrollTop+(r.top-b.top)-Math.max(12,(box.clientHeight-r.height)/2);
+    box.scrollTo({top:Math.max(0,to),behavior:'smooth'});
+    return;
+  }
+  try{ row.scrollIntoView({block:'center',behavior:'smooth'}); }
+  catch(e){ row.scrollIntoView(); }
+}
 async function mcSplitFollow(it){
   if(!mcSplitFits()||!it) return;
   const want=mcSplitScreenFor(it);
@@ -34309,13 +34393,19 @@ async function mcWinOpen(id){
   mcWinPlace();
   mcWinRender();
   mcBubbleSync();
-  mcSplitFollow(it);
+  // the columns, the docked panel and a print sheet's own laying all move the
+  // list about, so the line is put back in front twice: once the layout has
+  // been through a frame, and again when whatever the follow was doing is done
+  mcSplitFollow(it).finally(()=>{ if(mcWinItem===id) mcScrollToLine(id); });
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    if(mcWinItem===id) mcScrollToLine(id); }));
   // Routing already says where this SKU goes, so being asked again on every
   // line is the same answer given two hundred times. A line that has not been
   // told what it is takes the answer the shop already wrote down.
   if(!it.tile) mcAutoTile(it).then(()=>{
     if(mcWinItem!==id) return;
-    mcWinRender(); mcSplitFollow(it);
+    mcWinRender();
+    mcSplitFollow(it).finally(()=>{ if(mcWinItem===id) mcScrollToLine(id); });
   });
   // and what both gift tag libraries are called, so the design picker can say
   // "it is on the other page" instead of "no design matches"
