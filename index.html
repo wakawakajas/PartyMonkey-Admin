@@ -2693,6 +2693,20 @@ body.mc-docked .mc-bubble{display:none !important;}
   flex:0 0 auto;white-space:nowrap;padding-top:2px;}
 /* What is being answered, quoted above the draft: without it a draft on a
    phone is an answer to a question that has scrolled away. */
+/* The conversation, live: the buyer's lines on the left, the shop's on the
+   right, the newest at the bottom. This is the whole point of the right
+   column — a person, not a row of a table. */
+.rp-thread{max-height:44vh;overflow-y:auto;display:flex;flex-direction:column;gap:5px;
+  padding:2px 0;}
+.rp-thread .rp-line{max-width:88%;}
+.rp-line.new{border:1px solid var(--blueprint);}
+.rp-thread-head{display:flex;align-items:baseline;gap:8px;margin-bottom:6px;}
+.rp-thread-who{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:15px;
+  overflow-wrap:anywhere;}
+.rp-thread-sub{font-family:'IBM Plex Sans',sans-serif;font-size:11px;color:var(--faint);}
+/* how many of a person's messages are still unanswered */
+.rp-many{font-family:'IBM Plex Mono',monospace;font-size:11px;background:var(--blueprint);
+  color:var(--lime-ink);border-radius:999px;padding:1px 7px;flex:0 0 auto;}
 .rp-quote{border-left:3px solid var(--border-strong);padding:2px 0 2px 10px;
   font-family:'IBM Plex Sans',sans-serif;font-size:13px;color:var(--ink);
   overflow-wrap:anywhere;white-space:pre-wrap;}
@@ -3709,7 +3723,11 @@ body.mc-docked .mc-bubble{display:none !important;}
     <!-- The one being answered. Hidden until there is one, because an empty
          draft box above a list of waiting messages reads as broken. -->
     <div class="card" id="rpAnswerCard" style="display:none;"><div class="card-body" style="padding:14px;">
-      <div class="rp-quote"><span class="rp-quote-who" id="rpWho"></span><span id="rpSaid"></span></div>
+      <div class="rp-thread-head">
+        <span class="rp-thread-who" id="rpWho"></span>
+        <span class="rp-thread-sub" id="rpSaid"></span>
+      </div>
+      <div class="rp-thread" id="rpThread"></div>
       <label for="rpDraft" class="hint" style="display:block;margin:12px 0 4px;">The draft
         — edit it if it is not right, and the edit is what gets remembered</label>
       <textarea id="rpDraft" spellcheck="false" placeholder="Drafting&hellip;"></textarea>
@@ -38266,9 +38284,31 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
 // into DuoKe. Away from that PC the same button copies it to the clipboard,
 // which is the whole job on a phone.
 let rpFacts=[],rpExamples=[],rpQueue=[],rpNow=null,rpUsed=[],rpBeatRow=null;
+// The conversation on screen, and what this session has sent into it. rpNowKey
+// outlives rpNow: a reply answers one message, but the person stays open until
+// somebody taps a different one.
+let rpNowKey=null,rpSent={},rpAsked={};
 let rpChannel=null,rpBusy=false,rpDraftBase='',rpMissing=false;
 
 const rpEl=id=>document.getElementById(id);
+// One entry per person, newest first, each carrying every message of theirs
+// that is still unanswered. A buyer who sends four lines in a row is one
+// conversation with four lines in it, not four things to answer.
+function rpChats(){
+  const by={};
+  rpQueue.forEach(r=>{
+    const key=r.chat_key||r.buyer||r.id;
+    if(!by[key]) by[key]={key:key,buyer:r.buyer||key,store:r.store||'',rows:[]};
+    by[key].rows.push(r);
+  });
+  return Object.values(by).map(c=>{
+    c.rows.sort((a,b)=>String(a.received_at||'').localeCompare(String(b.received_at||'')));
+    c.last=c.rows[c.rows.length-1];
+    return c;
+  }).sort((a,b)=>String((b.last||{}).received_at||'')
+    .localeCompare(String((a.last||{}).received_at||'')));
+}
+function rpChat(key){ return rpChats().find(c=>c.key===key)||null; }
 // A reply photo is a size chart or a care label — it is read, not glanced at,
 // so it keeps its pixels and is squeezed on quality only, like a pick up photo
 // and unlike a SKU thumbnail.
@@ -38328,9 +38368,13 @@ async function refreshReplies(){
   rpShelf=(shelf&&shelf.data)||[];
   rpProducts=(prods&&prods.data)||[];
   rpCatalogRow=rpBeatRow;
-  // the one being answered may have been answered by somebody else since
-  if(rpNow&&rpNow.id&&!rpQueue.some(r=>r.id===rpNow.id)) rpClose();
+  // The open conversation survives a refresh: what may have gone is the
+  // particular message, not the person.
+  if(rpNow&&rpNow.id&&!rpQueue.some(r=>r.id===rpNow.id)) rpNow=rpChat(rpNowKey)
+    ? rpChat(rpNowKey).last
+    : Object.assign({},rpNow,{id:null});
   rpRender();
+  if(rpNowKey) rpRenderThread();
   rpWatch();
 }
 
@@ -38345,23 +38389,26 @@ function rpWatch(){
       if(eventType==='DELETE'){
         const id=(gone||{}).id;
         rpQueue=rpQueue.filter(r=>r.id!==id);
-        if(rpNow&&rpNow.id===id) rpClose();
-        rpRender(); return;
+        if(rpNow&&rpNow.id===id) rpNow=null;
+        rpRender(); rpRenderThread(); return;
       }
       if(!row||!row.id) return;
-      // the row on screen is the same row: history that has just been read
-      // belongs to it, and so does a reply somebody else sent from a phone
-      if(rpNow&&rpNow.id===row.id&&row.status==='new'){
+      const mine=rpNowKey&&(row.chat_key||row.buyer)===rpNowKey;
+      // history that has just been read belongs to the row that asked for it
+      if(mine&&rpNow&&rpNow.id===row.id){
         const had=(rpNow.history||[]).length;
         rpNow=Object.assign(rpNow,row);
         if((row.history||[]).length!==had) rpHistoryWaiting=false;
-        rpRenderHistory();
       }
       rpQueue=rpQueue.filter(r=>r.id!==row.id);
       if(row.status==='new') rpQueue.push(row);
-      else if(rpNow&&rpNow.id===row.id) rpClose();
+      // A person whose last waiting message was answered somewhere else stays
+      // on screen: their thread is still their thread, and there may be more
+      // to say. Only a different conversation closes this one.
+      if(mine&&row.status==='new'&&!rpNow) rpNow=row;
       rpQueue.sort((a,b)=>String(a.received_at).localeCompare(String(b.received_at)));
       rpRender();
+      if(mine){ rpRenderHistory(); rpRenderThread(); }
       // a new message while the screen is open is worth hearing, once
       if(eventType==='INSERT'&&row.status==='new'&&currentScreen==='replies') chime('request');
     })
@@ -38406,8 +38453,9 @@ function rpRenderBeat(){
 function rpRenderWaiting(){
   const box=rpEl('rpWaiting'),count=rpEl('rpCount');
   if(!box) return;
-  count.textContent=rpQueue.length?String(rpQueue.length):'';
-  count.hidden=!rpQueue.length;
+  const chats=rpChats().length;
+  count.textContent=chats?String(chats):'';
+  count.hidden=!chats;
   if(rpMissing){
     box.innerHTML='<p class="hint" style="margin:0;">Nothing can be read until the migration has run.</p>';
     return;
@@ -38416,19 +38464,20 @@ function rpRenderWaiting(){
     box.innerHTML='<p class="hint" style="margin:0;">Nothing waiting. Messages appear here on their own while the shop PC is reading DuoKe.</p>';
     return;
   }
-  box.innerHTML=rpQueue.map(r=>
-    '<button class="rp-row'+(rpNow&&rpNow.id===r.id?' on':'')+'" data-id="'+r.id+'">'
+  box.innerHTML=rpChats().map(c=>
+    '<button class="rp-row'+(rpNowKey===c.key?' on':'')+'" data-key="'+escapeHtml(c.key)+'">'
     +'<span class="rp-row-main">'
-    +'<span class="rp-who">'+escapeHtml(r.buyer||r.chat_key||'A buyer')
-    +(r.store?' · '+escapeHtml(r.store):'')+'</span>'
-    +'<span class="rp-said">'+escapeHtml((r.message||'').slice(0,180))+'</span>'
+    +'<span class="rp-who">'+escapeHtml(c.buyer||'A buyer')
+    +(c.store?' · '+escapeHtml(c.store):'')+'</span>'
+    +'<span class="rp-said">'+escapeHtml(((c.last||{}).message||'').slice(0,180))+'</span>'
     +'</span>'
-    +'<span class="rp-when">'+rpAgo(r.sent_at||r.received_at)+'</span>'
+    +(c.rows.length>1?'<span class="rp-many">'+c.rows.length+'</span>':'')
+    +'<span class="rp-when">'+rpAgo((c.last||{}).sent_at||(c.last||{}).received_at)+'</span>'
     +'</button>').join('');
   box.querySelectorAll('.rp-row').forEach(btn=>{
     btn.addEventListener('click',()=>{
-      const row=rpQueue.find(r=>r.id===btn.dataset.id);
-      if(row) rpOpen(row);
+      const c=rpChat(btn.dataset.key);
+      if(c) rpOpen(c);
     });
   });
 }
@@ -38801,28 +38850,70 @@ async function rpShelfDrop(id){
   await sb.storage.from(PHOTO_BUCKET).remove([ph.photo_path]);
 }
 
-// The lines before the one being answered, oldest first, the buyer's on the
-// left. Empty until somebody asks for them.
+// The conversation as it stands: whatever history was pulled, then every
+// message of theirs still unanswered, then whatever has been sent from here.
+// One person, oldest line at the top, which is how a chat reads.
+function rpThreadLines(){
+  const c=rpNowKey?rpChat(rpNowKey):null;
+  const out=[];
+  const seen=new Set();
+  // The longest history any of their waiting messages carries, not the newest
+  // one's: each message records what was on screen when IT was read, so the
+  // first of a run has the conversation before it and the last has almost
+  // nothing.
+  const rows=c?c.rows:(rpNow?[rpNow]:[]);
+  let hist=[];
+  rows.forEach(r=>{
+    const h=Array.isArray(r.history)?r.history:[];
+    if(h.length>hist.length) hist=h;
+  });
+  hist.forEach(l=>{
+    const t=String((l&&l.text)||'').trim();
+    if(!t||seen.has(t)) return;
+    seen.add(t);
+    out.push({inbound:!!(l&&l.inbound),text:t});
+  });
+  // the waiting messages: the ones this screen exists to answer
+  rows.forEach(r=>{
+    const t=String(r.message||'').trim();
+    if(!t) return;
+    // a message already in the history is the same message, read twice
+    const had=out.findIndex(l=>l.inbound&&l.text===t);
+    if(had>=0) out[had].waiting=true;      // same line, read twice, shown once
+    else out.push({inbound:true,text:t,waiting:true});
+    seen.add(t);
+  });
+  (rpSent[rpNowKey]||[]).forEach(t=>out.push({inbound:false,text:t,mine:true}));
+  return out;
+}
+
+function rpRenderThread(){
+  const box=rpEl('rpThread');
+  if(!box) return;
+  const lines=rpThreadLines();
+  box.innerHTML=lines.length
+    ? lines.map(l=>'<span class="rp-line '+(l.inbound?'them':'us')+(l.waiting?' new':'')+'">'
+        +escapeHtml(l.text)+'</span>').join('')
+    : '<span class="rp-line them">Nothing to show yet — pull the chat history to see what was said before.</span>';
+  box.scrollTop=box.scrollHeight;
+}
+
+// The history button still belongs to the thread: it is how the lines above
+// the waiting message get there in the first place.
 function rpRenderHistory(){
-  const box=rpEl('rpHistory'),btn=rpEl('rpHistoryBtn');
-  if(!box||!btn) return;
-  const lines=(rpNow&&Array.isArray(rpNow.history))?rpNow.history:[];
-  btn.disabled=rpHistoryWaiting||!rpNow||!rpNow.id;
+  const btn=rpEl('rpHistoryBtn');
+  if(!btn) return;
+  const c=rpNowKey?rpChat(rpNowKey):null;
+  const lines=(c&&c.last&&Array.isArray(c.last.history))?c.last.history:[];
+  btn.disabled=rpHistoryWaiting||!c||!c.last||!c.last.id;
   btn.textContent=rpHistoryWaiting
     ? 'Asking the shop PC…'
     : (lines.length?'Pull it again':'Pull chat history');
-  const head=rpEl('rpHistoryHead');
-  if(!lines.length){
-    box.style.display='none'; box.innerHTML='';
-    if(head) head.style.display='none';
-    return;
-  }
-  if(head) head.style.display='';
-  box.innerHTML=lines.map(l=>
-    '<span class="rp-line '+(l&&l.inbound?'them':'us')+'">'
-    +escapeHtml(String((l&&l.text)||''))+'</span>').join('');
-  box.style.display='';
-  box.scrollTop=box.scrollHeight;
+  const head=rpEl('rpHistoryHead'),old=rpEl('rpHistory');
+  // the old separate history block is gone: the thread above is the history
+  if(head) head.style.display='none';
+  if(old){ old.style.display='none'; old.innerHTML=''; }
+  rpRenderThread();
 }
 
 // Asking is a row being stamped, not a call: the PC that can read DuoKe is the
@@ -38878,7 +38969,7 @@ function rpRender(){
 }
 
 function rpClose(){
-  rpNow=null; rpUsed=[]; rpDraftBase='';
+  rpNow=null; rpNowKey=null; rpUsed=[]; rpDraftBase='';
   const none=rpEl('rpNothingOpen');
   if(none) none.style.display='';
   rpPhotoOffer=[]; rpPhotoSend=new Set();
@@ -38951,14 +39042,22 @@ async function rpDraftFor(message,tone){
   }
 }
 
-function rpOpen(row){
-  rpNow=row;
+// A conversation, not a row. It stays open until somebody taps another one,
+// so two replies to the same person are two presses of Enter rather than two
+// journeys back through the list.
+function rpOpen(chat){
+  const isChat=chat&&Array.isArray(chat.rows);
+  const rows=isChat?chat.rows:[chat];
+  const last=isChat?chat.last:chat;
+  rpNowKey=isChat?chat.key:(chat.chat_key||chat.buyer||'pasted');
+  rpNow=last;
   rpEl('rpAnswerCard').style.display='';
   const none=rpEl('rpNothingOpen');
   if(none) none.style.display='none';
-  rpEl('rpWho').textContent=(row.buyer||row.chat_key||'A buyer')+(row.store?' · '+row.store:'');
-  rpEl('rpSaid').textContent=row.message||'';
-  rpEl('rpSkipBtn').style.display=row.id?'':'none';
+  rpEl('rpWho').textContent=(last.buyer||last.chat_key||'A buyer');
+  rpEl('rpSaid').textContent=[last.store,
+    rows.length>1?rows.length+' messages waiting':''].filter(Boolean).join(' · ');
+  rpEl('rpSkipBtn').style.display=last.id?'':'none';
   rpHistoryWaiting=false;
   rpRenderHistory();
   rpRenderShelf();
@@ -38966,16 +39065,20 @@ function rpOpen(row){
   rpRenderWaiting();
   if(!window.matchMedia('(min-width:1040px)').matches)
     rpEl('rpAnswerCard').scrollIntoView({block:'nearest',behavior:'smooth'});
+  // Everything of theirs that is still waiting is one question: a buyer who
+  // says "hello", then the order number, then "so tomorrow?" is asking one
+  // thing, and a draft answering only the last line answers the wrong one.
+  rpAsked[rpNowKey]=rows.map(r=>r.message||'').filter(Boolean).join('\n');
   // a draft the shop PC already wrote is shown as it is rather than asked for
   // twice: the same message drafted again costs a call and says the same thing
-  if(row.draft){
-    rpEl('rpDraft').value=row.draft;
-    rpDraftBase=row.draft;
+  if(last.draft){
+    rpEl('rpDraft').value=last.draft;
+    rpDraftBase=last.draft;
     rpUsed=[]; rpShowBasis();
     rpEl('rpDraft').focus();
     return;
   }
-  rpDraftFor(row.message,'');
+  rpDraftFor(rpAsked[rpNowKey],'');
 }
 
 // ---- sending, which is also learning ----
@@ -38994,13 +39097,15 @@ async function rpSend(){
   const box=rpEl('rpDraft'),msg=rpEl('rpMsg');
   const text=box.value.trim();
   if(!text){ showMsg(msg,'There is nothing to send yet.',false); box.focus(); return; }
-  if(!rpNow){ showMsg(msg,'Nothing is open to answer.',false); return; }
+  if(!rpNow&&!rpNowKey){ showMsg(msg,'Nothing is open to answer.',false); return; }
   const uid=await currentUserId();
   if(!uid){ showMsg(msg,'Your login has expired — sign out and back in.',false); return; }
   rpEl('rpSendBtn').disabled=true;
   const edited=!!rpDraftBase&&text!==rpDraftBase.trim();
-  const asked=rpNow.message||'';
-  const rowId=rpNow.id||null;
+  const chat=rpNowKey?rpChat(rpNowKey):null;
+  const waiting=chat?chat.rows:[];
+  const asked=rpAsked[rpNowKey]||(rpNow&&rpNow.message)||'';
+  const rowId=(rpNow&&rpNow.id)||null;
   // read before rpClose empties them
   const sent=[...rpPhotoSend];
   const cards=[...rpProdSend].map(q=>{
@@ -39016,6 +39121,13 @@ async function rpSend(){
         // what actually went, not what the matching would pick again later
         photos:sent,products:cards};
       let {error}=await sb.from('reply_messages').update(answered).eq('id',rowId);
+      // Everything else of theirs that was waiting has just been answered by
+      // the same reply. Skipped rather than answered: nothing more is going to
+      // be typed for them, and a second row with a reply on it would send the
+      // same words twice.
+      const also=waiting.filter(r=>r.id&&r.id!==rowId).map(r=>r.id);
+      if(!error&&also.length)
+        await sb.from('reply_messages').update({status:'skipped'}).in('id',also);
       // The app can reach a project whose photo migration has not been run —
       // and a reply that will not send because of a column it does not need is
       // a worse failure than a reply that goes without its picture noted.
@@ -39033,6 +39145,26 @@ async function rpSend(){
           'The reply went. Run supabase-migration-REPLIES-PHOTO.sql for photos to go with it.',false);
       }
       if(error){ showMsg(msg,'Could not send that — '+escapeHtml(error.message),false); return; }
+    }
+    // 'pasted' is the one conversation with no thread behind it: it was typed
+    // into the box on this screen, so there is nothing in DuoKe to type into
+    // and nothing to write down but the example it teaches.
+    if(!rowId&&rpNowKey==='pasted'){
+      /* nothing to record: the reply is copied out by hand */
+    }else if(!rowId&&rpNowKey){
+      // A second reply to the same person, with nothing new from them: there
+      // is no waiting message to answer, so the reply is written down as its
+      // own row. The shop PC types it into the conversation by name, which is
+      // all it ever needed.
+      const uid2=await currentUserId();
+      const {error:insErr}=await sb.from('reply_messages').insert({
+        user_id:uid2,chat_key:rpNowKey,buyer:(rpNow&&rpNow.buyer)||rpNowKey,
+        store:(rpNow&&rpNow.store)||'',message:'',
+        fingerprint:'again-'+Date.now().toString(36)+Math.random().toString(36).slice(2,8),
+        source:'paste',status:'answered',reply:text,
+        answered_at:new Date().toISOString(),photos:sent,products:cards
+      });
+      if(insErr){ showMsg(msg,'Could not send that — '+escapeHtml(insErr.message),false); return; }
     }
     const copied=await rpCopy(text);
     // What was approved is what teaches the next draft — the edit, not the
@@ -39072,10 +39204,18 @@ async function rpSend(){
       sb.from('reply_photos').update({used_at:shelved.used_at}).eq('id',shelved.id)
         .then(()=>{},()=>{});
     }
-    if(rowId) rpQueue=rpQueue.filter(r=>r.id!==rowId);
-    rpClose();
-    if(!rowId) rpEl('rpPaste').value='';
+    // the waiting messages are dealt with; the person is not closed
+    const doneIds=new Set([rowId,...waiting.map(r=>r.id)].filter(Boolean));
+    rpQueue=rpQueue.filter(r=>!doneIds.has(r.id));
+    (rpSent[rpNowKey]=rpSent[rpNowKey]||[]).push(text);
+    rpNow=rpNow?Object.assign({},rpNow,{id:null,status:'answered'}):null;
+    rpUsed=[]; rpDraftBase=''; rpPhotoSend=new Set(); rpProdSend=new Set();
+    box.value='';
+    rpRenderThread();
+    rpRenderShelf(); rpRenderProducts(); rpShowBasis();
+    if(!rowId&&!chat) rpEl('rpPaste').value='';
     rpRender();
+    box.focus();
     const withPhotos=sent.length
       ? ' The '+(sent.length===1?'photo goes':'photos go')+' with it from the shop PC —'
         +' away from it, use Copy photo and paste it after the words.'
@@ -39083,9 +39223,12 @@ async function rpSend(){
     const withCards=cards.length
       ? ' The shop PC sends the '+(cards.length===1?'product card':'product cards')+' too.'
       : '';
-    showMsg(rpEl(rowId?'rpMsg':'rpPasteMsg'),
-      rowId
+    const onThread=rpNowKey&&rpNowKey!=='pasted';
+    showMsg(rpEl(onThread?'rpMsg':'rpPasteMsg'),
+      onThread
         ? ((edited?'✓ Sent — and your edit is what it learned.':'✓ Sent.')
+           +' Still on '+escapeHtml((rpNow&&rpNow.buyer)||rpNowKey||'them')
+           +' — type another and press Enter.'
            +escapeHtml(withPhotos)+escapeHtml(withCards))
         : ((copied?'✓ Copied — paste it into DuoKe.':'✓ Saved. Copy it out of the box above.')
            +escapeHtml(withPhotos)+escapeHtml(withCards)),true);
@@ -39094,12 +39237,15 @@ async function rpSend(){
   }
 }
 
+// Skip is the whole conversation: a person dealt with by hand is dealt with,
+// not dealt with one line at a time.
 async function rpSkip(){
-  if(!rpNow||!rpNow.id){ rpClose(); return; }
-  const id=rpNow.id;
-  const {error}=await sb.from('reply_messages').update({status:'skipped'}).eq('id',id);
+  const chat=rpNowKey?rpChat(rpNowKey):null;
+  if(!chat){ rpClose(); rpRender(); return; }
+  const ids=chat.rows.map(r=>r.id).filter(Boolean);
+  const {error}=await sb.from('reply_messages').update({status:'skipped'}).in('id',ids);
   if(error){ showMsg(rpEl('rpMsg'),'Could not skip that — '+escapeHtml(error.message),false); return; }
-  rpQueue=rpQueue.filter(r=>r.id!==id);
+  rpQueue=rpQueue.filter(r=>!ids.includes(r.id));
   rpClose(); rpRender();
 }
 
@@ -39156,8 +39302,9 @@ async function rpDistil(){
 rpEl('rpSendBtn').addEventListener('click',rpSend);
 rpEl('rpSkipBtn').addEventListener('click',rpSkip);
 rpEl('rpRedoBtn').addEventListener('click',()=>{
-  if(!rpNow) return;
-  rpDraftFor(rpNow.message,rpEl('rpTone').value||'worded differently, and no longer');
+  const asked=rpAsked[rpNowKey]||(rpNow&&rpNow.message);
+  if(!asked) return;
+  rpDraftFor(asked,rpEl('rpTone').value||'worded differently, and no longer');
 });
 rpEl('rpFactBtn').addEventListener('click',rpAddFact);
 rpEl('rpDistilBtn').addEventListener('click',rpDistil);
@@ -39169,7 +39316,7 @@ rpEl('rpFactInput').addEventListener('keydown',e=>{
 rpEl('rpPasteBtn').addEventListener('click',()=>{
   const text=rpEl('rpPaste').value.trim();
   if(!text){ rpEl('rpPaste').focus(); return; }
-  rpOpen({message:text,buyer:'Pasted in',store:''});
+  rpOpen({message:text,buyer:'Pasted in',store:'',chat_key:'pasted',history:[]});
 });
 rpEl('rpPaste').addEventListener('keydown',e=>{
   if(e.key!=='Enter'||e.shiftKey) return;
