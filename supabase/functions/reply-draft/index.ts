@@ -94,24 +94,38 @@ async function ask(body: Record<string, unknown>) {
       body: JSON.stringify(payload),
     });
 
-  // Thinking off. A two-sentence chat reply needs none, and left on it spends
-  // the output budget before the reply is written — which is how a draft came
-  // back as a bare asterisk. Not every model takes the setting, so a refusal
-  // of the setting alone is retried without it rather than failing the draft.
-  let res = await send(body);
-  if (res.status === 400) {
-    const detail = await res.text().catch(() => "");
-    if (/thinking/i.test(detail)) {
-      const { generationConfig, ...rest } = body as { generationConfig?: Record<string, unknown> };
-      const config = { ...(generationConfig ?? {}) };
-      delete config.thinkingConfig;
-      res = await send({ ...rest, generationConfig: config });
-    } else {
-      throw new Error(`Gemini said 400: ${detail.slice(0, 240)}`);
-    }
+  // Thinking off where the model allows it. A two-sentence chat reply has no
+  // use for it, and left on it spends the whole output budget before the reply
+  // is written — which is how a draft once came back as a bare asterisk.
+  //
+  // Which models take which switch is a moving target: some want
+  // thinkingConfig.thinkingBudget, some want thinkingLevel, and the ones that
+  // always think reject both. Worse, the refusal is a bare "Request contains an
+  // invalid argument" that names no field — so the asking is a ladder rather
+  // than a guess, and the rung that works is the one used. A model that
+  // refuses every rung is asked plainly, with room to think AND answer, since
+  // a thinking model's reply only needs the thoughts dropped, which
+  // answerText does anyway.
+  const { generationConfig, ...rest } = body as { generationConfig?: Record<string, unknown> };
+  const config = { ...(generationConfig ?? {}) };
+  const asked = Number(config.maxOutputTokens ?? 700);
+  const rungs: Record<string, unknown>[] = [
+    { ...rest, generationConfig: { ...config, thinkingConfig: { thinkingBudget: 0 } } },
+    { ...rest, generationConfig: { ...config, thinkingConfig: { thinkingLevel: "low" } } },
+    // No switch, and three times the room: the thinking is paid for in tokens
+    // here rather than in a truncated reply.
+    { ...rest, generationConfig: { ...config, maxOutputTokens: Math.max(asked, 2400) } },
+  ];
+  let res = await send(rungs[0]);
+  let refused = "";
+  for (let rung = 1; rung < rungs.length && res.status === 400; rung++) {
+    // read the refusal rather than abandoning the body, and keep it: if every
+    // rung is refused, the FIRST refusal is the one that says something
+    refused = refused || await res.text().catch(() => "");
+    res = await send(rungs[rung]);
   }
   if (!res.ok) {
-    const detail = await res.text().catch(() => "");
+    const detail = (await res.text().catch(() => "")) || refused;
     const hint = res.status === 404
       ? ` — "${name}" is not available to this key. Set the GEMINI_MODEL secret to one that is;` +
         ` the list is at https://generativelanguage.googleapis.com/v1beta/models`
@@ -316,7 +330,6 @@ Deno.serve(async (req) => {
           responseMimeType: "application/json",
           responseSchema: DISTIL_SCHEMA,
           maxOutputTokens: 900,
-          thinkingConfig: { thinkingBudget: 0 },
         },
       });
       let parsed: unknown;
@@ -353,7 +366,6 @@ Deno.serve(async (req) => {
         // Room for a long reply in a script with no short words, and no more:
         // a draft that arrives as an essay is the wrong answer anyway.
         maxOutputTokens: 700,
-        thinkingConfig: { thinkingBudget: 0 },
       },
     })).trim()
       // A model told "no quotes around it" still quotes it sometimes, and a
