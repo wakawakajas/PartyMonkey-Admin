@@ -5478,11 +5478,23 @@ body.mc-docked .mc-bubble{display:none !important;}
       <div class="calc" id="layoutCalc"></div>
 
       <button class="btn-primary" id="genGridBtn" style="width:100%;margin-top:12px;">Generate placeholder grid</button>
-      <!-- A set at a time, on top of whatever is already there — a whole grid of
-           the size above, for a sheet that carries two sets rather than one.
-           Generate replaces; this adds. Each set lands a little down and to the
-           right of the last so a stack is not one set hiding the rest. -->
+      <!-- A set at a time, on top of whatever is already there — for a sheet
+           that carries two sets rather than one. Generate replaces; this adds.
+           The four boxes are the set being added, so a second set can be a
+           different card at a different count without touching the size above
+           that the artwork is fitted to. Blank follows the size above. Each set
+           lands a little down and to the right of the last so a stack is not
+           one set hiding the rest. -->
+      <div class="sect-label">The set being added</div>
+      <div class="grid4">
+        <label class="field"><span>WIDTH</span><input type="number" step="0.1" id="setCardW" placeholder="—"/></label>
+        <label class="field"><span>HEIGHT</span><input type="number" step="0.1" id="setCardH" placeholder="—"/></label>
+        <label class="field"><span>ACROSS</span><input type="number" min="1" step="1" id="setCols" placeholder="—"/></label>
+        <label class="field"><span>DOWN</span><input type="number" min="1" step="1" id="setRows" placeholder="—"/></label>
+      </div>
+      <div class="calc" id="setCalc" style="margin-top:9px;"></div>
       <button class="btn-outline" id="addPlaceholderBtn" style="width:100%;margin-top:9px;">+ Add one set of placeholders</button>
+      <button class="btn-outline" id="resizeSetBtn" style="width:100%;margin-top:6px;">Resize the selected set to this</button>
       <button class="btn-danger" id="clearPhBtn" style="width:100%;margin-top:9px;">Clear all placeholders</button>
 
       <div class="sect-label">Fine tune — bulk (blank = unchanged)</div>
@@ -7005,6 +7017,8 @@ function updateCalc(){
                `origin ${round(fromMm(g.originX,u))}, ${round(fromMm(g.originY,u))} ${u} · ${fit}`;
   el.style.borderColor=g.fits?'var(--border)':'var(--rust)';
   el.style.color=g.fits?'var(--muted)':'var(--rust)';
+  // the set's own tally follows the layout it falls back to
+  updateSetCalc();
 }
 function setLayoutMode(mode,skipDraw){
   state.layout.mode=mode;
@@ -7026,29 +7040,79 @@ document.getElementById('genGridBtn').addEventListener('click',()=>{
 document.getElementById('clearPhBtn').addEventListener('click',()=>{
   state.placeholders=[];renderPlaceholderList();renderDesignLines();drawAll();
 });
-// A place card sheet is asked for by the set, not by the box: this lays down
-// another whole grid — the cols × rows above, at the card size above — beside
-// whatever is already on the sheet, where Generate would have thrown it away.
-document.getElementById('addPlaceholderBtn').addEventListener('click',()=>{
+// ---------- the set being added ----------
+// A place card sheet is asked for by the set, not by the box. The set has its
+// own card size and its own count, read from the four boxes beside the button
+// and falling back to the layout above when they are left blank — the size
+// above is what the artwork is fitted to, so a second set of a different card
+// must be able to say so without moving it.
+function setSpecMm(){
   readLayoutInputs();
-  const g=gridMetrics(), L=g.L, p=paperMm();
-  const w=Math.min(L.cardW||89,p.w), h=Math.min(L.cardH||54,p.h);
+  const u=state.paper.unit, L=layoutMm(), p=paperMm();
+  const num=(id,fb)=>{ const el=document.getElementById(id);
+    const v=el?parseFloat(el.value):NaN; return isFinite(v)&&v>0?v:fb; };
+  const cardW=Math.min(toMm(num('setCardW',fromMm(L.cardW,u)),u),p.w);
+  const cardH=Math.min(toMm(num('setCardH',fromMm(L.cardH,u)),u),p.h);
+  const cols=Math.max(1,Math.round(num('setCols',L.cols)));
+  const rows=Math.max(1,Math.round(num('setRows',L.rows)));
+  const totalW=cols*cardW+(cols-1)*L.slit, totalH=rows*cardH+(rows-1)*L.cut;
+  const originX=L.mode==='center'?(p.w-totalW)/2:L.side;
+  const originY=L.mode==='center'?(p.h-totalH)/2:L.lead;
+  return {cardW,cardH,cols,rows,slit:L.slit,cut:L.cut,totalW,totalH,
+          originX,originY,p,fits:totalW<=p.w+0.01&&totalH<=p.h+0.01};
+}
+function updateSetCalc(){
+  const el=document.getElementById('setCalc'); if(!el) return;
+  const S=setSpecMm(), u=state.paper.unit;
+  el.innerHTML=`${S.cols*S.rows} cards at ${round(fromMm(S.cardW,u))} × ${round(fromMm(S.cardH,u))} ${u}`
+    +` · set ${round(fromMm(S.totalW,u))} × ${round(fromMm(S.totalH,u))} ${u}`
+    +`<br>${S.fits?'fits the sheet':'⚠ larger than the sheet'}`;
+  el.style.borderColor=S.fits?'var(--border)':'var(--rust)';
+  el.style.color=S.fits?'var(--muted)':'var(--rust)';
+}
+['setCardW','setCardH','setCols','setRows'].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el) el.addEventListener('input',updateSetCalc);
+});
+document.getElementById('addPlaceholderBtn').addEventListener('click',()=>{
+  const S=setSpecMm(), p=S.p;
   const n=state.placeholders.length;
-  const per=Math.max(1,L.cols*L.rows);
+  const per=Math.max(1,S.cols*S.rows);
   const stag=(Math.floor(n/per)%6)*4;                  // a staircase by the set, capped
   const cat=(pcMode==='placecard'&&(state.cats||[]).length)?state.cats[0].id:'';
   const added=[];
-  for(let r=0;r<L.rows;r++){
-    for(let c=0;c<L.cols;c++){
+  for(let r=0;r<S.rows;r++){
+    for(let c=0;c<S.cols;c++){
       added.push({id:uid(), label:'C'+(n+added.length+1), cat,
-        xMm:Math.max(0,Math.min(p.w-w,g.originX+c*(L.cardW+L.slit)+stag)),
-        yMm:Math.max(0,Math.min(p.h-h,g.originY+r*(L.cardH+L.cut)+stag)),
-        wMm:w, hMm:h});
+        xMm:Math.max(0,Math.min(p.w-S.cardW,S.originX+c*(S.cardW+S.slit)+stag)),
+        yMm:Math.max(0,Math.min(p.h-S.cardH,S.originY+r*(S.cardH+S.cut)+stag)),
+        wMm:S.cardW, hMm:S.cardH});
     }
   }
   state.placeholders.push(...added);
-  renderPlaceholderList();refreshArtInputs();updateCalc();renderDesignLines();
+  renderPlaceholderList();refreshArtInputs();updateCalc();updateSetCalc();renderDesignLines();
   phSelSet(added.map(a=>a.id));drawAll();
+});
+// The same size, after the set has landed: the boxes picked on the sheet are
+// re-laid as a grid at the size asked for, from the corner the set already
+// occupies, so a set that came out wrong is corrected rather than deleted. The
+// count stays the selection's — only the size and the spacing are redone.
+document.getElementById('resizeSetBtn').addEventListener('click',()=>{
+  const sel=phSelected();
+  if(!sel.length) return;                              // the button is disabled anyway
+  const S=setSpecMm(), p=S.p;
+  // the order they sit in now: rows top to bottom, each row left to right
+  const sorted=sel.slice().sort((a,b)=>
+    (Math.abs(a.yMm-b.yMm)>Math.min(a.hMm,b.hMm)/2)?a.yMm-b.yMm:a.xMm-b.xMm);
+  const x0=Math.min(...sel.map(q=>q.xMm)), y0=Math.min(...sel.map(q=>q.yMm));
+  const cols=Math.max(1,Math.min(S.cols,sorted.length));
+  sorted.forEach((q,i)=>{
+    const c=i%cols, r=Math.floor(i/cols);
+    q.wMm=S.cardW; q.hMm=S.cardH;
+    q.xMm=Math.max(0,Math.min(p.w-S.cardW,x0+c*(S.cardW+S.slit)));
+    q.yMm=Math.max(0,Math.min(p.h-S.cardH,y0+r*(S.cardH+S.cut)));
+  });
+  renderPlaceholderList();refreshArtInputs();updateCalc();renderDesignLines();drawAll();
 });
 
 // ---------- placeholder list ----------
@@ -7070,6 +7134,8 @@ function phSelSync(){
   document.querySelectorAll('#alignRow .al-btn').forEach(b=>
     b.disabled=to==='paper'?n<1:n<2);
   document.querySelectorAll('#distRow .al-btn,#gapRow .al-btn').forEach(b=>b.disabled=n<3);
+  // re-laying a set needs a set picked out first
+  const rs=document.getElementById('resizeSetBtn'); if(rs) rs.disabled=n<1;
   document.querySelectorAll('#phListWrap .ph-card').forEach(c=>
     c.classList.toggle('sel',phSel.has(c.dataset.id)));
 }
