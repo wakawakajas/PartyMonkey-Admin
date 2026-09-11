@@ -84,11 +84,34 @@ function answerText(out: unknown): string {
     .trim();
 }
 
+// What this key may actually call. Asked only when a request has already been
+// refused: the answer is what turns "invalid argument" into something a person
+// can act on, because the refusal itself names no field and no model.
+async function usableModels(): Promise<string[]> {
+  try {
+    const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models", {
+      headers: { "x-goog-api-key": geminiKey() },
+    });
+    if (!res.ok) return [];
+    const body = await res.json();
+    const models = (body as {
+      models?: { name?: string; supportedGenerationMethods?: string[] }[];
+    })?.models ?? [];
+    return models
+      .filter((m) => (m?.supportedGenerationMethods ?? []).includes("generateContent"))
+      .map((m) => String(m?.name ?? "").replace(/^models\//, ""))
+      .filter((n) => n && !/embedding|aqa|imagen|veo|tts/i.test(n));
+  } catch { return []; }
+}
+
 async function ask(body: Record<string, unknown>) {
-  const name = model();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${name}:generateContent`;
-  const send = (payload: unknown) =>
-    fetch(url, {
+  // The model from the secret is tried first, then two that have outlived
+  // several retirements. A model name that is wrong is answered 404 by some
+  // endpoints and 400 by others, so a refusal is never taken as proof the
+  // request was the problem — the next name is tried before giving up.
+  const names = [...new Set([model(), "gemini-flash-latest", "gemini-2.5-flash"])];
+  const send = (name: string, payload: unknown) =>
+    fetch(`https://generativelanguage.googleapis.com/v1beta/models/${name}:generateContent`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": geminiKey() },
       body: JSON.stringify(payload),
@@ -116,21 +139,40 @@ async function ask(body: Record<string, unknown>) {
     // here rather than in a truncated reply.
     { ...rest, generationConfig: { ...config, maxOutputTokens: Math.max(asked, 2400) } },
   ];
-  let res = await send(rungs[0]);
+  // Every rung of every name, stopping the moment one is answered. The first
+  // refusal is the one kept: a later one says even less than the first.
+  let res: Response | null = null;
   let refused = "";
-  for (let rung = 1; rung < rungs.length && res.status === 400; rung++) {
-    // read the refusal rather than abandoning the body, and keep it: if every
-    // rung is refused, the FIRST refusal is the one that says something
-    refused = refused || await res.text().catch(() => "");
-    res = await send(rungs[rung]);
+  let refusedBy = "";
+  let settled = false;
+  for (const name of names) {
+    for (const rung of rungs) {
+      const attempt = await send(name, rung);
+      // Answered, or refused for a reason another name or rung cannot fix —
+      // a rate limit, a dead key, an outage. Either way the asking is over.
+      if (attempt.ok || (attempt.status !== 400 && attempt.status !== 404)) {
+        res = attempt;
+        settled = true;
+        break;
+      }
+      const detail = await attempt.text().catch(() => "");
+      if (!refused) { refused = detail; refusedBy = name; }
+      res = attempt;
+    }
+    if (settled) break;
   }
-  if (!res.ok) {
-    const detail = (await res.text().catch(() => "")) || refused;
-    const hint = res.status === 404
-      ? ` — "${name}" is not available to this key. Set the GEMINI_MODEL secret to one that is;` +
-        ` the list is at https://generativelanguage.googleapis.com/v1beta/models`
-      : "";
-    throw new Error(`Gemini said ${res.status}${hint}: ${detail.slice(0, 240)}`);
+  if (!res || !res.ok) {
+    const status = res?.status ?? 0;
+    const detail = res && !refused ? await res.text().catch(() => "") : refused;
+    // Which models the key may call is the answer nine times in ten, and the
+    // refusal never says. So it is asked and put in the message.
+    const can = await usableModels();
+    const hint = can.length
+      ? ` — "${refusedBy || names[0]}" was refused. This key can call: ${can.slice(0, 10).join(", ")}` +
+        `${can.length > 10 ? ", …" : ""}. Set the GEMINI_MODEL secret to one of those.`
+      : " — and this key could not list any models at all, so check GEMINI_API_KEY itself" +
+        " (a restricted key, or one from a project without the Generative Language API enabled).";
+    throw new Error(`Gemini said ${status}${hint}: ${detail.slice(0, 200)}`);
   }
   const out = await res.json();
   const text = answerText(out);
