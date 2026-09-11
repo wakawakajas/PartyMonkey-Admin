@@ -148,6 +148,8 @@ def get_foreground_window() -> int:
 SW_SHOWNOACTIVATE = 4
 HWND_BOTTOM = 1
 SWP_NOACTIVATE = 0x0010
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
 
 
@@ -179,6 +181,28 @@ def set_foreground(hwnd: int) -> bool:
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
     user32.SetForegroundWindow(hwnd)
     return bool(user32.GetForegroundWindow() == hwnd)
+
+
+def raise_without_focus(hwnd: int) -> None:
+    """Put a window at the top of the pile without giving it the keyboard.
+
+    This is what makes a click inside another app's window possible at all. A
+    click goes to whatever is drawn at that point, so a window that is covered
+    cannot be clicked -- and SetForegroundWindow is refused to a background
+    process, which is the whole reason for the dance. Raising is allowed; it
+    just does not move the focus, so the click that follows is the thing that
+    takes it, legitimately.
+    """
+    HWND_TOP = 0
+    user32.SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+
+
+def minimize(hwnd: int) -> None:
+    """Put a window back where it was found. SW_MINIMIZE rather than
+    SW_FORCEMINIMIZE: the polite one, which lets the app animate and lets the
+    next window in the stack take the foreground normally."""
+    user32.ShowWindow(hwnd, 6)
 
 
 def move_window(hwnd: int, x: int, y: int, width: int, height: int, to_back: bool = True) -> None:

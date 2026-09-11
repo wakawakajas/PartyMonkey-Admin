@@ -97,6 +97,15 @@ DEFAULTS: dict[str, Any] = {
     "window_title": "",
     "window_process": "duoke",
     "poll_seconds": 20,
+    # A minimised DuoKe cannot be read at all: minimising it makes Chromium
+    # tear down the accessibility tree, and restoring it from here does not
+    # build it again -- only a real click does, because our process has no
+    # claim on the foreground and Windows refuses to hand it over. So this
+    # restores the window and LEAVES IT UP, which is the state it has to be in
+    # anyway. It may sit behind everything else; it may not sit in the taskbar.
+    # Off means a minimised DuoKe is left alone and the heartbeat says why
+    # nothing was read.
+    "restore_if_minimized": True,
     # Off means read-only: messages come up, nothing is ever typed into DuoKe.
     # Worth leaving off for the first day, to watch what it drafts before it
     # can act.
@@ -107,6 +116,10 @@ DEFAULTS: dict[str, Any] = {
     # to a window in the background the way a character can. Off means the
     # words go and the picture waits to be pasted by hand.
     "send_photos": True,
+    # A reply can carry a product card -- the same one DuoKe's own Product tab
+    # sends, with the picture, the price and the link in it. Off means the
+    # words go and the product does not.
+    "send_products": True,
     # Where reply photos live. The same private bucket the rest of the app
     # uses; the path is what the row carries.
     "photo_bucket": "shipment-photos",
@@ -130,6 +143,18 @@ DEFAULTS: dict[str, Any] = {
         # how far left of the conversation the thread list reaches. Beyond it
         # is the shop switcher, whose entries are text too and are not people.
         "list_width": 560,
+        # The Product tab on the right-hand panel: its tab, its search box, the
+        # Send button on a row, and how tall a row is. Names as the app writes
+        # them in English; a build in another language needs these changed and
+        # nothing else.
+        "product_tab": "Product",
+        "product_search": "Search Product Name",
+        "product_send": "Send",
+        "product_row_height": 252,
+        # where the right-hand panel starts, in pixels from the window's left
+        # edge. Only the panel is searched for product rows: the conversation
+        # has titles in it too, in the strip above the messages.
+        "panel_left": 4250,
         # the strip above the conversation: the buyer's name, the product, the
         # order number. Text, in the same column, said by nobody.
         "header_height": 300,
@@ -138,13 +163,26 @@ DEFAULTS: dict[str, Any] = {
         # a row in the conversation list, and where the list begins under its
         # tabs and its Sort control
         "row_height": 100,
-        "list_top": 230,
+        "list_top": 150,
         # What an unread thread looks like in the list. DuoKe shows a count;
         # a thread whose name matches this is opened and read.
         "unread_pattern": r"\((\d+)\)|\b(\d+)\s*条|·\s*(\d+)$",
+        # Narrower than this at the bottom of the window is not the reply box:
+        # it is a search field, or the Select on an order panel.
+        "min_input_width": 700,
         # A message bubble shorter than this is a sticker, a timestamp or a
         # read receipt, not a question.
         "min_message_chars": 2,
+        # The same again for lines that carry a name or a number in them, so a
+        # whole-line match cannot catch them: "partymonkeysg:main has joined
+        # the conversation" was landing in Pigu as the thing a buyer said.
+        "ignore_patterns": [
+            r"has joined the conversation",
+            r"has left the conversation",
+            r"(?:已|已经)(?:加入|离开)(?:会话|对话)",
+            r"^(?:assigned|transferred) to ",
+            r"^you (?:have been )?assigned",
+        ],
         # DuoKe's own furniture, sitting in the conversation looking like
         # things somebody said: the label on an auto-reply, the heading over a
         # translation, the order panel's field names. Matched as a
@@ -351,7 +389,7 @@ class Cloud:
 
     def replies_to_type(self) -> list[dict]:
         query = (
-            "/reply_messages?select=id,chat_key,reply,store,photos"
+            "/reply_messages?select=id,chat_key,reply,store,photos,products"
             "&status=eq.answered&typed_at=is.null&reply=neq."
             "&order=answered_at.asc&limit=20"
         )
@@ -432,6 +470,13 @@ def find_window() -> Optional[int]:
         # not the app either.
         if config.WEB_WINDOW_TITLE_HINT.lower() in title.lower():
             continue
+        # A minimised window reports a placeholder 314x50 strip, which the
+        # size test below would throw out -- and then nothing would ever
+        # restore it, which is how "DuoKe is not open" came to mean "DuoKe is
+        # sitting in the taskbar". Size can only be judged once it is up.
+        if winapi.is_minimized(hwnd):
+            best = hwnd
+            break
         left, top, right, bottom = winapi.window_rect(hwnd)
         if right - left < 400 or bottom - top < 300:
             continue
@@ -447,21 +492,48 @@ def find_window() -> Optional[int]:
 # 22 nodes, the second 1476. So the tree is touched, given a moment, and only
 # then walked. Nothing is a bug about this; it is how Chromium avoids building
 # a tree nobody reads.
-TREE_WARM_SECONDS = 1.6
+TREE_WARM_SECONDS = 0.9
 # Below this many named elements the window is assumed to be still cold rather
 # than genuinely empty, and it is asked again.
 TREE_COLD_NAMES = 12
 
 
 def warm_tree(hwnd: int) -> list[dict]:
-    """The window's elements, after however long it takes them to exist."""
-    root = uia.element_from_handle(hwnd)
-    nodes = _walk(root, max_depth=16, budget=[9000])
-    named = sum(1 for n in nodes if (n.get("name") or "").strip())
-    if named >= TREE_COLD_NAMES:
-        return nodes
-    time.sleep(TREE_WARM_SECONDS)
-    return _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[9000])
+    """The window's elements, after however long it takes them to exist.
+
+    Asking is what makes Chromium build the tree, so this asks repeatedly
+    rather than waiting once: a window just restored from the taskbar has been
+    seen to take three or four seconds to answer with anything at all, and the
+    only way to find out is to keep asking.
+    """
+    nodes: list[dict] = []
+    for attempt in range(6):
+        nodes = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[9000])
+        named = sum(1 for n in nodes if (n.get("name") or "").strip())
+        if named >= TREE_COLD_NAMES:
+            return nodes
+        time.sleep(TREE_WARM_SECONDS)
+    return nodes
+
+
+def _show_for_reading(hwnd: int) -> bool:
+    """Bring a minimised window back up, never to the front.
+
+    Returns True when this call is what restored it -- which is now only worth
+    knowing so the pass can say so. It is deliberately NOT put back
+    afterwards: minimising the window is what kills the tree, and it stays
+    killed until somebody clicks the app, so a sync that tidied up after
+    itself would break every pass after the first.
+    """
+    if not winapi.is_minimized(hwnd):
+        return False
+    if not load().get("restore_if_minimized"):
+        return False
+    winapi.restore_without_focus(hwnd)
+    # Layout first, then the accessibility tree on top of it. Restoring and
+    # walking in the same breath reads a window that has not been laid out.
+    time.sleep(1.2)
+    return True
 
 
 def _rect(element) -> Optional[tuple[int, int, int, int]]:
@@ -539,8 +611,10 @@ def probe() -> dict:
     """
     hwnd = find_window()
     if not hwnd:
-        return {"ok": False, "error": f"no window whose title contains "
-                                     f"\"{load().get('window_title')}\" is open"}
+        cfg = load()
+        looked = cfg.get("window_title") or cfg.get("window_process") or "duoke"
+        return {"ok": False, "error": f"no open window belongs to \"{looked}\""}
+    probe_restored = _show_for_reading(hwnd)
     root = uia.element_from_handle(hwnd)
     if root is None:
         return {"ok": False, "error": "Windows would not hand over that window's elements"}
@@ -681,6 +755,18 @@ _NOISE = re.compile(
 )
 
 
+def _patterns(reader: dict) -> list:
+    """The ignore_patterns, compiled, with a broken one dropped rather than
+    taking the whole pass down with it."""
+    out = []
+    for raw in (reader.get("ignore_patterns") or []):
+        try:
+            out.append(re.compile(str(raw), re.IGNORECASE))
+        except re.error:
+            continue
+    return out
+
+
 def _is_noise(text: str) -> bool:
     t = text.strip()
     return (not t or bool(_TIME_ONLY.match(t)) or bool(_NOISE.match(t))
@@ -697,16 +783,20 @@ def message_band(nodes: list[dict], window: tuple[int, int, int, int],
     somebody drags the window onto a different screen. An explicit x_band in
     duoke.json still wins, for a build where it is not true.
     """
-    named = reader.get("messages") or {}
-    if named.get("x_band"):
-        return list(named["x_band"])
+    told = list((reader.get("messages") or {}).get("x_band") or [])
     box = _input_box(nodes, reader)
-    if not box or not box.get("rect"):
-        return None
-    left = box["rect"][0] - window[0]
-    right = box["rect"][2] - window[0]
-    # a little slack each side: a bubble can be indented past the box's edge
-    return [max(0, left - 40), right + 40]
+    rect = box.get("rect") if box else None
+    # Measured first, told second -- but only when what was measured can
+    # plausibly be a reply box. With no conversation open there is no reply box
+    # at all, and the widest field at the bottom is then a 476px search box,
+    # which would put the conversation in the wrong half of the window.
+    if rect:
+        left = rect[0] - window[0]
+        right = rect[2] - window[0]
+        if (right - left) >= float(reader.get("min_input_width") or 700):
+            # a little slack each side: a bubble can be indented past the edge
+            return [max(0, left - 40), right + 40]
+    return told or None
 
 
 def read_open_who(nodes: list[dict], window: tuple[int, int, int, int],
@@ -747,8 +837,10 @@ def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
               else _find_region(nodes, reader.get("messages") or {}, "x_band", window))
     header = int(reader.get("header_height") or 300)
     skip = {str(x).strip().lower().rstrip(":：") for x in (reader.get("ignore_lines") or [])}
+    junk = _patterns(reader)
     lines = [l for l in _texts(region, int(reader.get("min_message_chars") or 2))
-             if l["text"].strip().lower().rstrip(":：") not in skip]
+             if l["text"].strip().lower().rstrip(":：") not in skip
+             and not any(rx.search(l["text"]) for rx in junk)]
     # The strip above the conversation carries the buyer's name, the product and
     # the order number. All of it is text in the same column and none of it was
     # said by anybody.
@@ -759,10 +851,16 @@ def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
     left = min(l["rect"][0] for l in lines)
     right = max(l["rect"][2] for l in lines)
     middle = (left + right) / 2
-    out = []
+    out: list[dict] = []
     for line in lines[-tail:]:
         centre = (line["rect"][0] + line["rect"][2]) / 2
-        out.append({"text": line["text"], "inbound": centre < middle})
+        text = line["text"]
+        # DuoKe draws its own translation under each message, so every line
+        # arrives twice in a row when the languages match -- which is what made
+        # one sent reply look like two sent replies.
+        if out and out[-1]["text"] == text:
+            continue
+        out.append({"text": text, "inbound": centre < middle})
     return out
 
 
@@ -794,6 +892,13 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
         width = float(named.get("list_width") or 560)
         region = ([n for n in nodes if _in_band(n, [max(0, band[0] - width), band[0]], window)]
                   if band else [])
+        if not region:
+            # No conversation open, so nothing measured the columns. The list
+            # is still there to be read, and its own band is the one thing
+            # worth writing down in duoke.json for this build.
+            told = list(named.get("x_band") or [])
+            if told:
+                region = [n for n in nodes if _in_band(n, told, window)]
     pattern = reader.get("unread_pattern") or ""
     rx = None
     if pattern:
@@ -804,9 +909,14 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
     row_height = float(reader.get("row_height") or 100)
     top = float(reader.get("list_top") or 230)
 
-    # everything in the column, below its own tabs and sort header
+    # everything in the column, below its own tabs -- and not the column's own
+    # controls, which sit among the rows and are not people
+    skip = {str(x).strip().lower().rstrip(":：") for x in (reader.get("ignore_lines") or [])}
+    junk = _patterns(reader)
     items = [i for i in _texts(region, 1)
-             if (i["rect"][1] - window[1]) >= top]
+             if (i["rect"][1] - window[1]) >= top
+             and i["text"].strip().lower().rstrip(":：") not in skip
+             and not any(rx.search(i["text"]) for rx in junk)]
     if not items:
         return []
     items.sort(key=lambda i: (i["rect"][1], i["rect"][0]))
@@ -830,7 +940,11 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
         # the top line of the row: the name, the shop, the time. The preview
         # sits below it and is not what the conversation is called.
         top_line = [i for i in words if i["rect"][1] - first_y <= 30]
-        named = max(top_line or words, key=lambda i: i["rect"][2] - i["rect"][0])
+        # Leftmost, not widest. Widest was the obvious rule and it picked the
+        # shop a conversation came through over the person in it: "bnair" is
+        # 69 pixels wide and "PartyMonkey" beside it is 177. The buyer's name
+        # is the first thing on the line, at the same left edge in every row.
+        named = min(top_line or words, key=lambda i: i["rect"][0])
         name = named["text"].strip()
         if not name or name in seen:
             continue
@@ -954,41 +1068,183 @@ def type_reply(nodes: list[dict], window: tuple[int, int, int, int], reader: dic
         return False, "no text box found in the window"
     element = box.get("_el")
 
+    # The quiet route first, because it needs neither the foreground nor the
+    # mouse: set the value, and believe it only if the box kept it. This box
+    # does not -- it is a React editor, which accepts SetValue, reports success
+    # and then re-renders itself empty -- but a different build or a different
+    # app might, and a reply typed without taking the screen is worth trying
+    # for.
     if element is not None and uia.try_set_value(element, text):
         value = uia.get_current_value(element) or ""
-        if text[:40] not in value:
-            return False, "the text box took the reply but did not keep it"
-    else:
-        handle = None
-        rect = box.get("rect")
-        if rect:
-            cx, cy = winapi.screen_to_client(hwnd, (rect[0] + rect[2]) // 2,
-                                             (rect[1] + rect[3]) // 2)
-            handle = winapi.child_window_from_point(hwnd, cx, cy)
-        if not handle:
-            return False, "the text box would not take the reply"
-        for ch in text:
-            winapi.post_char(handle, ch)
-        time.sleep(0.2)
-        vk = winapi.vk_for("enter")
-        if vk:
-            winapi.post_key_down(handle, vk)
-            winapi.post_key_up(handle, vk)
-        return True, "typed character by character"
+        if text[:40] in value:
+            handle = None
+            rect = box.get("rect")
+            if rect:
+                cx, cy = winapi.screen_to_client(hwnd, (rect[0] + rect[2]) // 2,
+                                                 (rect[1] + rect[3]) // 2)
+                handle = winapi.child_window_from_point(hwnd, cx, cy)
+            vk = winapi.vk_for("enter")
+            if handle and vk:
+                winapi.post_key_down(handle, vk)
+                winapi.post_key_up(handle, vk)
+                return True, "set and sent without taking the screen"
 
-    # Enter, to the control that holds the text.
-    handle = None
-    rect = box.get("rect")
-    if rect:
-        cx, cy = winapi.screen_to_client(hwnd, (rect[0] + rect[2]) // 2,
-                                         (rect[1] + rect[3]) // 2)
-        handle = winapi.child_window_from_point(hwnd, cx, cy)
-    vk = winapi.vk_for("enter")
-    if handle and vk:
-        winapi.post_key_down(handle, vk)
-        winapi.post_key_up(handle, vk)
-        return True, "sent"
-    return False, "the reply is in the box but Enter could not be delivered — send it by hand"
+    # And the route that works on a Chromium chat box.
+    was = winapi.get_foreground_window()
+    try:
+        actions.clipboard_write(text)
+    except RuntimeError as exc:
+        return False, f"the reply would not go on the clipboard: {exc}"
+    try:
+        return _paste_and_send(box, hwnd, verify=True)
+    finally:
+        # Whatever had the screen gets it back. The click that sent the reply
+        # took it legitimately; keeping it would mean the next thing somebody
+        # types goes into DuoKe.
+        if was and was != hwnd:
+            winapi.set_foreground(was)
+
+
+def _post_target(hwnd: int, x: int, y: int) -> Optional[int]:
+    """The child window that will accept posted input for a screen point.
+
+    Chromium draws everything into one Chrome_RenderWidgetHostHWND, and that
+    window answers posted mouse and character messages whether or not it is
+    visible, focused, or on a monitor anybody is looking at. That is what lets
+    all of this happen behind the work somebody is doing -- no raising, no
+    stealing the foreground, no moving windows between screens. It was found
+    by trying it: a raise is refused to a background process and a click aimed
+    at a covered window lands in whatever is drawn on top of it.
+    """
+    cx, cy = winapi.screen_to_client(hwnd, x, y)
+    child = winapi.child_window_from_point(hwnd, cx, cy)
+    return child or None
+
+
+def _post_click_at(hwnd: int, x: int, y: int) -> bool:
+    child = _post_target(hwnd, x, y)
+    if not child:
+        return False
+    kx, ky = winapi.screen_to_client(child, x, y)
+    winapi.post_click(child, kx, ky)
+    time.sleep(0.35)
+    return True
+
+
+def _post_click_element(hwnd: int, node: dict) -> bool:
+    rect = (node or {}).get("rect")
+    if not rect:
+        return False
+    return _post_click_at(hwnd, (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+
+
+def _post_type(hwnd: int, node: dict, text: str, clear: int = 60) -> bool:
+    """Put text in a field by posting the keystrokes, caret and all.
+
+    End first, then backspaces: a click lands the caret wherever it lands, and
+    a field with yesterday's search still in it returns yesterday's results.
+    """
+    if not _post_click_element(hwnd, node):
+        return False
+    rect = node["rect"]
+    child = _post_target(hwnd, (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+    if not child:
+        return False
+    end = winapi.vk_for("end")
+    bs = winapi.vk_for("backspace")
+    if end:
+        winapi.post_key_down(child, end)
+        winapi.post_key_up(child, end)
+    for _ in range(clear):
+        if bs:
+            winapi.post_key_down(child, bs)
+            winapi.post_key_up(child, bs)
+    time.sleep(0.4)
+    for ch in text:
+        winapi.post_char(child, ch)
+    time.sleep(0.3)
+    return True
+
+
+def _post_key(hwnd: int, node: dict, key: str) -> bool:
+    rect = (node or {}).get("rect")
+    vk = winapi.vk_for(key)
+    if not rect or not vk:
+        return False
+    child = _post_target(hwnd, (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+    if not child:
+        return False
+    winapi.post_key_down(child, vk)
+    winapi.post_key_up(child, vk)
+    return True
+
+
+def _click_box(box: dict, hwnd: int) -> bool:
+    """Put the caret in the message box with a real click.
+
+    A real click is also how the window legitimately comes to the front:
+    SetForegroundWindow from here is refused outright, because Windows only
+    grants the foreground to a process that has some claim to it, and a
+    background agent has none. A synthesised click has one.
+    """
+    rect = box.get("rect") if box else None
+    if not rect:
+        return False
+    x, y = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+    return _click_at(hwnd, x, y)
+
+
+def _click_at(hwnd: int, x: int, y: int) -> bool:
+    """Click a point inside DuoKe, wherever DuoKe happens to be.
+
+    Raised to the top of the pile first, because a click goes to whatever is
+    drawn at that point and the window is usually covered by whatever the
+    person is actually working in -- a click aimed at DuoKe was landing in
+    another app's window entirely. Raising does not move the focus; the first
+    click does, and a window that has just been raised takes the second one
+    properly, which is why there are two.
+    """
+    winapi.raise_without_focus(hwnd)
+    time.sleep(0.25)
+    if winapi.window_from_point(x, y) and             winapi.root_window(winapi.window_from_point(x, y)) != hwnd:
+        return False
+    winapi.physical_move_and_click(x, y)
+    time.sleep(0.3)
+    winapi.physical_move_and_click(x, y)
+    time.sleep(0.35)
+    return True
+
+
+def _paste_and_send(box: dict, hwnd: int, verify: bool) -> tuple[bool, str]:
+    """Ctrl+V into the message box, then Enter.
+
+    Chromium is why. The box is a React-controlled editor: UIA's SetValue
+    reports success and the value does not stick, and characters posted to a
+    background window never reach the renderer. Pasting is the one route in
+    that a chat box built out of HTML cannot tell from a person, which is also
+    why it needs the window in front for the second it takes.
+    """
+    ctrl, v, enter = winapi.vk_for("ctrl"), winapi.vk_for("v"), winapi.vk_for("enter")
+    if not (ctrl and v and enter):
+        return False, "this machine reports no Ctrl, V or Enter key"
+    if not _click_box(box, hwnd):
+        return False, "the message box has no place to click"
+    winapi.physical_key(ctrl)
+    winapi.physical_key(v)
+    winapi.physical_key(v, key_up=True)
+    winapi.physical_key(ctrl, key_up=True)
+    # An attachment takes a moment to become an attachment, and a long reply
+    # takes a moment to land; Enter before either is an empty message sent to
+    # a customer.
+    time.sleep(1.2)
+    if verify:
+        got = uia.get_current_value(box.get("_el")) if box.get("_el") else None
+        if got is not None and not got.strip():
+            return False, "the paste did not land in the box, so nothing was sent"
+    winapi.physical_key(enter)
+    winapi.physical_key(enter, key_up=True)
+    time.sleep(0.4)
+    return True, "pasted and sent"
 
 
 def paste_photo(nodes: list[dict], window: tuple[int, int, int, int], reader: dict,
@@ -1020,32 +1276,13 @@ def paste_photo(nodes: list[dict], window: tuple[int, int, int, int], reader: di
         if proc.returncode != 0:
             return False, "the photo would not go on the clipboard"
 
-        # Click the message box first: a paste lands wherever the caret is, and
-        # after the words went in the caret is where it should be -- but a
-        # window just brought forward may have put it somewhere else.
-        if not winapi.set_foreground(hwnd):
-            return False, "Windows would not bring DuoKe to the front, so the photo was not pasted"
-        time.sleep(0.35)
         box = _input_box(nodes, reader)
-        if box and box.get("rect"):
-            rect = box["rect"]
-            winapi.physical_move_and_click((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
-            time.sleep(0.2)
-
-        ctrl, v, enter = winapi.vk_for("ctrl"), winapi.vk_for("v"), winapi.vk_for("enter")
-        if not (ctrl and v and enter):
-            return False, "this machine reports no Ctrl, V or Enter key"
-        winapi.physical_key(ctrl)
-        winapi.physical_key(v)
-        winapi.physical_key(v, key_up=True)
-        winapi.physical_key(ctrl, key_up=True)
-        # A pasted picture takes a moment to become an attachment; Enter before
-        # that sends an empty message and loses the picture.
-        time.sleep(1.2)
-        winapi.physical_key(enter)
-        winapi.physical_key(enter, key_up=True)
-        time.sleep(0.4)
-        return True, "pasted"
+        if not box:
+            return False, "no message box to paste the photo into"
+        # A pasted file cannot be read back out of the box, so there is nothing
+        # to verify -- the click and the paste either worked or the picture is
+        # still on the clipboard.
+        return _paste_and_send(box, hwnd, verify=False)
     finally:
         if was and was != hwnd:
             winapi.set_foreground(was)
@@ -1053,6 +1290,119 @@ def paste_photo(nodes: list[dict], window: tuple[int, int, int, int], reader: di
             temp.unlink()
         except OSError:
             pass
+
+
+def send_product(nodes: list[dict], window: tuple[int, int, int, int], reader: dict,
+                 hwnd: int, query: str) -> tuple[bool, str]:
+    """Send one product card into the open conversation.
+
+    The same three moves a person makes: open the Product tab, search the
+    listing by name, press Send on the row. All of it posted rather than
+    clicked for real, so the shop PC can be in use while it happens.
+
+    The row is chosen by how much of the query its title actually contains,
+    and a title that matches nothing is not sent: a wrong product card is
+    worse to a buyer than no product card, because it reads as an answer.
+    """
+    want = (query or "").strip()
+    if not want:
+        return False, "no product named"
+
+    tab_name = str(reader.get("product_tab") or "Product")
+    tab = next((n for n in nodes
+                if n["control_type"] == "TabItem" and (n.get("name") or "").strip() == tab_name), None)
+    if not tab:
+        return False, f'no "{tab_name}" tab in the window'
+    if not _post_click_element(hwnd, tab):
+        return False, "the Product tab would not take a click"
+    time.sleep(1.2)
+
+    tree = warm_tree(hwnd)
+    search_name = str(reader.get("product_search") or "Search Product Name")
+    search = next((n for n in tree
+                   if n["control_type"] == "Edit" and search_name in (n.get("name") or "")), None)
+    if not search:
+        return False, "the product search box is not there"
+    if not _post_type(hwnd, search, want):
+        return False, "the product search box would not take the name"
+    _post_key(hwnd, search, "enter")
+    time.sleep(2.0)
+
+    tree = warm_tree(hwnd)
+    rows = _product_rows(tree, window, reader)
+    if not rows:
+        return False, f'no product in the shop matches "{want[:40]}"'
+    best = _best_product(rows, want)
+    if best is None:
+        return False, f'nothing in the list looks like "{want[:40]}", so nothing was sent'
+    if not _post_click_element(hwnd, best["send"]):
+        return False, "the row's Send button would not take a click"
+    time.sleep(1.5)
+    return True, f'sent "{best["title"][:50]}"'
+
+
+def _product_rows(nodes: list[dict], window: tuple[int, int, int, int],
+                  reader: dict) -> list[dict]:
+    """The listings on screen: each one's title and its own Send button.
+
+    A row is a band of the panel, the same way a conversation is a band of the
+    list -- the title, the stock, the price, the SKU and the button are five
+    separate elements that only a shared y range ties together.
+    """
+    band = [float(reader.get("panel_left") or 4250), 99999.0]
+    pitch = float(reader.get("product_row_height") or 252)
+    send_name = str(reader.get("product_send") or "Send")
+
+    sends = [n for n in nodes
+             if n["control_type"] == "Button" and (n.get("name") or "").strip() == send_name
+             and n.get("rect") and _in_band(n, band, window)]
+    titles = [n for n in nodes
+              if n["control_type"] == "Text" and n.get("rect") and _in_band(n, band, window)
+              and len((n.get("name") or "").strip()) > 15
+              and not _is_noise(n.get("name") or "")]
+    out = []
+    for send in sends:
+        top = send["rect"][1] - pitch
+        near = [t for t in titles if top <= t["rect"][1] <= send["rect"][3]]
+        if not near:
+            continue
+        # the title is the first line of the row; the SKU and the price sit
+        # under it and are shorter
+        near.sort(key=lambda t: t["rect"][1])
+        out.append({"title": near[0]["name"].strip(), "send": send})
+    return out
+
+
+def _best_product(rows: list[dict], want: str) -> Optional[dict]:
+    asked = set(words(want))
+    if not asked:
+        return None
+    best, score_best = None, 0.0
+    for row in rows:
+        have = set(words(row["title"]))
+        if not have:
+            continue
+        hit = len(asked & have) / len(asked)
+        if hit > score_best:
+            best, score_best = row, hit
+    # Half the words, or it is a different product. "Kawaii Sticker" must not
+    # match "Personalised Gift Tag" because both say PartyMonkey.
+    return best if score_best >= 0.5 else None
+
+
+def words(text: str) -> list[str]:
+    """The words worth matching on, shop name and packaging noise dropped."""
+    out = []
+    for raw in re.split(r"[^\w]+", (text or "").lower()):
+        if len(raw) > 2 and raw not in _PRODUCT_STOP:
+            out.append(raw)
+    return out
+
+
+_PRODUCT_STOP = {
+    "the", "and", "for", "with", "pcs", "pack", "set", "sgd", "sku", "new",
+    "ready", "stock", "free", "gift", "shipping",
+}
 
 
 # ---------------------------------------------------------------- one pass
@@ -1091,12 +1441,15 @@ def sync_once() -> dict:
     the loop writes into the heartbeat note."""
     cfg = load()
     report: dict[str, Any] = {"sent": 0, "threads": 0, "typed": 0, "photos": 0,
-                              "history": 0, "skipped": 0, "notes": []}
+                              "products": 0, "history": 0, "skipped": 0, "notes": []}
     cloud = Cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
                   cfg.get("email", ""), cfg.get("password", ""))
     device = (platform.node() or "shop PC")[:60]
 
     hwnd = find_window()
+    restored = False
+    if hwnd:
+        restored = _show_for_reading(hwnd)
     if not hwnd:
         report["notes"].append("DuoKe is not open")
         try:
@@ -1116,6 +1469,24 @@ def sync_once() -> dict:
     window = winapi.window_rect(hwnd)
     reader = cfg.get("reader") or {}
     nodes = warm_tree(hwnd)
+    named = sum(1 for n in nodes if (n.get("name") or "").strip())
+    if named < TREE_COLD_NAMES:
+        # The window is open and its elements are not there. That is one thing
+        # and one thing only: Chromium has the renderer switched off for this
+        # window, which happens when it has been minimised and not clicked
+        # since. Reported as itself rather than as "no messages".
+        note = ("DuoKe is open but showing nothing to read — click its window once. "
+                "(It was minimised; Chromium does not rebuild a hidden window's "
+                "elements until the app is clicked. Launch it with "
+                "--force-renderer-accessibility to stop this happening.)")
+        report["notes"].append(note)
+        try:
+            cloud.beat(device, True, 0, note)
+        except CloudError:
+            pass
+        _state["last_report"] = report
+        _state["last_pass_at"] = datetime.now(timezone.utc).isoformat()
+        return report
     threads = read_threads(nodes, window, reader)
     report["threads"] = len(threads)
 
@@ -1254,6 +1625,19 @@ def sync_once() -> dict:
             # The words have gone. A photo that will not paste must not undo
             # that: the reply is marked typed either way, and the picture is
             # reported as the one thing still to do by hand.
+            wanted_products = row.get("products") or []
+            if cfg.get("send_products") and isinstance(wanted_products, list):
+                for item in wanted_products[:2]:
+                    query = str((item or {}).get("query") or "").strip() \
+                        if isinstance(item, dict) else str(item or "").strip()
+                    if not query:
+                        continue
+                    fresh = warm_tree(hwnd)
+                    ok_p, why_p = send_product(fresh, window, reader, hwnd, query)
+                    if ok_p:
+                        report["products"] += 1
+                    else:
+                        report["notes"].append(f"{key[:30]} product: {why_p}")
             paths = row.get("photos") or []
             if cfg.get("send_photos") and isinstance(paths, list):
                 for path in [str(p) for p in paths if p][:3]:

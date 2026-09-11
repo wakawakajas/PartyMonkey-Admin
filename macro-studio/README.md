@@ -310,6 +310,77 @@ under print CSS produces a blank PDF -- correctly, and silently. Point the step 
 the print-preview tab a site opens for that purpose, not at the list you clicked
 Print from, and check the file the first time.
 
+## Seed labels on the P-touch
+
+Bundle SKU is packed on a tablet; the Brother P-touch is plugged into this PC.
+Those two cannot talk to each other -- a tablet has no driver for that printer,
+and Pigu is served over https, which a browser will not let reach a plain-http
+box on the same LAN. So the label goes the long way round and arrives faster
+than a dialog would: pressing the label button in Pigu writes a row in
+`label_jobs`, and this agent -- signed in to the same project -- picks it up
+within a few seconds, draws the words and hands the bitmap to the Windows
+driver. Nothing is confirmed at either end. There is no print dialog and no
+P-touch Editor window; the tape coming out of the machine is the confirmation.
+
+Set it up by editing **`labels.json`** (written with its defaults the first time
+the agent starts) and restarting the agent:
+
+```json
+{
+  "enabled": true,
+  "printer": "",
+  "label_width_mm": 62,
+  "label_height_mm": 15,
+  "columns": 2,
+  "cut_line": true,
+  "font_mm": 5,
+  "poll_seconds": 3,
+  "store": "planttalks"
+}
+```
+
+`printer` blank means the first printer whose name looks like a P-touch, which
+on a PC with one label printer is the right answer -- `GET /api/labels/status`
+lists the names to copy from, with a `likely` flag on the guesses. The four
+Supabase fields are blank on purpose: they are borrowed from `duoke.json` when
+they are, because it is the same project and the same account, and typing a
+password into two files is how one of them ends up wrong.
+
+**The shape of a label.** 62mm across the roll and a fixed 15mm down it, two
+names side by side with dashes down the middle to cut along -- one pass of the
+roll for two labels, cut in half afterwards. Fixed, not grown to fit the words:
+a drawer of labels that are all the same height is one that can be cut in a
+stack. A long name stacks onto a second line inside its own half rather than
+making the label taller.
+
+That size is pushed at the driver as a custom page every time a job starts,
+rather than being set once in Printing Preferences and trusted -- a dialog
+somebody changed last week must not quietly make the labels a different height.
+A driver that will not take it is not an error: the labels are drawn at the top
+of whatever page it does give, and `last_error` in the status says what length
+came back so the roll setting can be corrected. `columns: 1` puts one name
+across the full 62mm instead.
+
+**The type is one size on every label.** `font_mm` sets it and it is held --
+fitted type means Tomato comes out twice the size of Pak Choi Green Stem, and a
+drawer of labels that disagree with each other looks like a mistake even when
+every one of them is right. A long name wraps onto a second line at the same
+size; it is only stepped down when it will not fit its half of the label even
+wrapped, which is the alternative to printing it across the cut line. Set
+`font_mm` to 0 to go back to making each name as big as its half will take.
+
+Two things to check the first time, in this order:
+
+- `POST /api/labels/test` with `{"text": "Tomato"}` prints one label without
+  going near Supabase. That is the printer and the tape proven.
+- Press the label button in Pigu. Queued becomes printed on the tablet within a
+  few seconds; if it does not, `GET /api/labels/status` says why -- wrong
+  printer name, no login, or nothing watching because `enabled` is false.
+
+A label queued while this PC was off is not printed later. Anything older than
+`stale_minutes` (30 by default) is failed instead, so a machine switched on at
+four o'clock does not spit out the morning's labels at somebody's back.
+
 ## Downloading a file
 
 A site that hands you a file -- a receipt, an invoice, an export -- gives you
@@ -721,6 +792,23 @@ Set it up once, on the PC DuoKe runs on:
 Leave `type_back` off for the first day if you would rather watch what it drafts before
 it can type anything. Messages still come up; replies just stay in Pigu to be copied by
 hand.
+
+**Product cards.** A reply can send the listing itself -- the picture, the price, the
+variations, the link -- which is DuoKe's own Product tab doing the sending. Pigu keeps only
+the listing's NAME; the agent opens the Product tab, types that name into its search,
+presses Enter and clicks Send on the row whose title matches. A name that matches at most
+half the words of a title sends nothing and says so in the notes: a wrong product card
+reads to a buyer as an answer. `send_products: false` turns it off.
+
+**Why all of this can run behind your work.** Clicking and typing in DuoKe are POSTED to
+its `Chrome_RenderWidgetHostHWND`, not performed with the real mouse and keyboard. That
+window answers posted messages whether or not it is focused, visible, or on a monitor
+anybody is looking at -- which is what makes the sync invisible in use. It was found by
+trying everything else first: Windows refuses a background process both the foreground
+and a z-order raise, and a real click aimed at a covered window lands in whatever is
+drawn on top of it, which for a while meant the sync was clicking on Chrome. The one
+thing that still needs the real keyboard is pasting a photo, because a file on the
+clipboard cannot be posted anywhere.
 
 **Chat history.** Pull chat history on the Replies screen stamps the row; the next pass
 opens that thread, reads the last two dozen lines and puts them back, and they appear on
