@@ -67,16 +67,49 @@ function geminiKey() {
   );
 }
 
-async function ask(body: unknown) {
+// The answer, and only the answer.
+//
+// A thinking model replies in several parts, and the ones it thought with are
+// marked `thought: true`. Reading parts[0] blind put "Analyze Buyer Query &
+// Match to Shop Facts:**" in the draft box — the model's own working, shown to
+// a buyer. So the thought parts are dropped and what is left is joined.
+function answerText(out: unknown): string {
+  const parts = (out as {
+    candidates?: { content?: { parts?: { text?: string; thought?: boolean }[] } }[];
+  })?.candidates?.[0]?.content?.parts ?? [];
+  return parts
+    .filter((p) => p?.thought !== true && typeof p?.text === "string")
+    .map((p) => p.text as string)
+    .join("")
+    .trim();
+}
+
+async function ask(body: Record<string, unknown>) {
   const name = model();
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${name}:generateContent`,
-    {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${name}:generateContent`;
+  const send = (payload: unknown) =>
+    fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": geminiKey() },
-      body: JSON.stringify(body),
-    },
-  );
+      body: JSON.stringify(payload),
+    });
+
+  // Thinking off. A two-sentence chat reply needs none, and left on it spends
+  // the output budget before the reply is written — which is how a draft came
+  // back as a bare asterisk. Not every model takes the setting, so a refusal
+  // of the setting alone is retried without it rather than failing the draft.
+  let res = await send(body);
+  if (res.status === 400) {
+    const detail = await res.text().catch(() => "");
+    if (/thinking/i.test(detail)) {
+      const { generationConfig, ...rest } = body as { generationConfig?: Record<string, unknown> };
+      const config = { ...(generationConfig ?? {}) };
+      delete config.thinkingConfig;
+      res = await send({ ...rest, generationConfig: config });
+    } else {
+      throw new Error(`Gemini said 400: ${detail.slice(0, 240)}`);
+    }
+  }
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     const hint = res.status === 404
@@ -86,9 +119,18 @@ async function ask(body: unknown) {
     throw new Error(`Gemini said ${res.status}${hint}: ${detail.slice(0, 240)}`);
   }
   const out = await res.json();
-  const text = out?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("Gemini returned nothing to read");
-  return String(text);
+  const text = answerText(out);
+  if (!text) {
+    // A model that thought until it ran out of room returns a candidate with
+    // no answer in it at all. Say which of the two happened.
+    const why = (out as { candidates?: { finishReason?: string }[] })?.candidates?.[0]?.finishReason;
+    throw new Error(
+      why === "MAX_TOKENS"
+        ? "Gemini ran out of room before it wrote the reply — try Rewrite, or shorten the message"
+        : "Gemini returned nothing to read",
+    );
+  }
+  return text;
 }
 
 // ---- which approved replies look like this question ----
@@ -189,7 +231,11 @@ function draftPrompt(
   lines.push("- Never promise a refund amount, and never accept blame for a courier's delay.");
   lines.push("- Do not apologise twice, and do not thank them twice.");
   if (tone) lines.push(`- This is a rewrite of a draft that was not right: make it ${tone}.`);
-  lines.push("- Output the reply text and nothing else. No quotes around it, no explanation.");
+  lines.push(
+    "- Output the reply text and nothing else. No quotes around it, no explanation, " +
+    "no headings, no bullet points, no markdown, no working out. The first character " +
+    "you write is the first character the buyer reads.",
+  );
   lines.push("");
   lines.push("BUYER MESSAGE:");
   lines.push(message);
@@ -269,6 +315,8 @@ Deno.serve(async (req) => {
           temperature: 0.2,
           responseMimeType: "application/json",
           responseSchema: DISTIL_SCHEMA,
+          maxOutputTokens: 900,
+          thinkingConfig: { thinkingBudget: 0 },
         },
       });
       let parsed: unknown;
@@ -302,12 +350,19 @@ Deno.serve(async (req) => {
         // Low, but not zero: a rewrite asked for because the first draft was
         // not right has to come back different.
         temperature: body?.tone ? 0.8 : 0.4,
-        maxOutputTokens: 400,
+        // Room for a long reply in a script with no short words, and no more:
+        // a draft that arrives as an essay is the wrong answer anyway.
+        maxOutputTokens: 700,
+        thinkingConfig: { thinkingBudget: 0 },
       },
     })).trim()
       // A model told "no quotes around it" still quotes it sometimes, and a
       // reply that arrives inside quotation marks gets pasted inside them too.
       .replace(/^["'“”]+|["'“”]+$/g, "")
+      // Chat has no markdown. Asterisks and backticks that arrive around a
+      // word are typed to the buyer literally, so they come off here.
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/(^|\s)[*_`]+|[*_`]+(?=\s|$)/g, "$1")
       .trim();
 
     if (!draft) return json({ error: "the draft came back empty — try again" }, 502);
