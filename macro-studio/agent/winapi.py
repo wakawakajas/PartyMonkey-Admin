@@ -337,6 +337,22 @@ def post_char(hwnd: int, char: str) -> None:
     user32.PostMessageW(hwnd, WM_CHAR, ord(char), 0)
 
 
+def post_wheel(hwnd: int, x: int, y: int, notches: int) -> None:
+    """Scroll a window without touching the mouse.
+
+    WM_MOUSEWHEEL carries SCREEN coordinates, unlike every other posted mouse
+    message here, which carry client ones -- a wheel event is delivered to
+    whatever is under the pointer position named in it, not to the window it
+    is sent to. Chromium reads it the same way it reads a real wheel, which is
+    how a list gets scrolled behind somebody's work.
+    """
+    WM_MOUSEWHEEL = 0x020A
+    WHEEL_DELTA = 120
+    w_param = (notches * WHEEL_DELTA) << 16
+    l_param = (y << 16) | (x & 0xFFFF)
+    user32.PostMessageW(hwnd, WM_MOUSEWHEEL, w_param, l_param)
+
+
 def post_key_down(hwnd: int, vk_code: int) -> None:
     user32.PostMessageW(hwnd, WM_KEYDOWN, vk_code, 0)
 
