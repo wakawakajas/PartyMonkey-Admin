@@ -2721,6 +2721,16 @@ body.mc-docked .mc-bubble{display:none !important;}
   border-radius:9px;max-width:86%;overflow-wrap:anywhere;}
 .rp-line.them{background:var(--nest);color:var(--ink);align-self:flex-start;}
 .rp-line.us{background:var(--blueprint-soft);color:var(--ink);align-self:flex-end;}
+/* Listings, as chips rather than pictures: what is being chosen is which
+   product card DuoKe sends, and the name is what identifies it. */
+.rp-prods{display:flex;gap:6px;flex-wrap:wrap;}
+.rp-prod{display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Sans',sans-serif;
+  font-size:12px;padding:6px 10px;border-radius:999px;border:1px solid var(--border);
+  background:transparent;color:var(--muted);cursor:pointer;max-width:100%;}
+.rp-prod.on{border-color:var(--blueprint);color:var(--blueprint);}
+.rp-prod span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px;}
+.rp-prod button{width:auto;min-height:0;height:18px;padding:0 4px;font-size:11px;
+  background:none;border:0;color:var(--faint);}
 .rp-new-fact{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
 .rp-new-fact input[type="text"]{flex:1 1 200px;min-width:140px;width:auto;margin:0;}
 .rp-new-fact button{flex:0 0 auto;width:auto;}
@@ -3541,6 +3551,13 @@ body.mc-docked .mc-bubble{display:none !important;}
   <div class="home-wrap" id="bundleOrderScreen" style="display:none;">
     <h1 id="bundleOrderTitle">Order</h1>
     <p class="sub" id="bundleOrderSub">—</p>
+    <!-- Plant Talks only, because only seeds get a label. One press puts every
+         seed line on this order through the P-touch at the quantity each line
+         needs -- the whole order in one run, rather than a line at a time. -->
+    <div id="bundleLabelBar" style="margin:0 0 12px;" hidden>
+      <button class="btn-outline" id="bundleLabelAllBtn" style="width:100%;">🏷 Print all seed labels</button>
+      <div id="bundleLabelHint"></div>
+    </div>
     <div id="bundleOrderList"></div>
     <!-- An order is finished by the person who packed it, not by the last tick
          landing: the box still has to be closed and put where it goes. So the
@@ -3602,6 +3619,20 @@ body.mc-docked .mc-bubble{display:none !important;}
           text-transform:uppercase;color:var(--faint);margin:0 0 2px;font-weight:600;">Going with it</h3>
         <div id="rpPhotoList"></div>
       </div>
+      <!-- The listing itself, sent as DuoKe's own product card: picture,
+           price, variations, the link that opens the item. -->
+      <div id="rpProdWrap" style="margin-top:10px;">
+        <h3 style="font-family:'IBM Plex Sans',sans-serif;font-size:10.5px;letter-spacing:.09em;
+          text-transform:uppercase;color:var(--faint);margin:0 0 4px;font-weight:600;">Send a product</h3>
+        <div class="rp-new-fact" style="margin-bottom:6px;">
+          <input type="text" id="rpProdInput" placeholder="Listing name, as it reads on Shopee">
+          <button class="btn-outline" id="rpProdAdd">Add</button>
+        </div>
+        <div class="rp-prods" id="rpProds"></div>
+        <p class="hint" style="margin:6px 0 0;">The shop PC searches this name in DuoKe's
+          Product tab and presses Send. A name that matches nothing sends nothing.</p>
+      </div>
+
       <!-- And a photo put in by hand: this parcel, this box, this batch code.
            Tap to send it or not; the + adds a new one to the shelf. -->
       <div id="rpShelfWrap" style="margin-top:10px;">
@@ -6169,6 +6200,23 @@ body.mc-docked .mc-bubble{display:none !important;}
     <button class="btn-primary" id="bundleStartTop">Start from Top</button>
     <button class="btn-outline" id="bundleStartHere">Start from Here</button>
     <button class="btn-outline" id="bundleStartCancel">Cancel</button>
+  </div>
+</div>
+
+<!-- How many of this one label. It opens on the number the line actually
+     needs -- its quantity across every set in the bundle -- so the usual
+     answer is already filled in and the usual gesture is Print. Nothing is
+     confirmed afterwards: the tape coming out of the machine is the
+     confirmation. -->
+<div class="sheet-bg" id="seedLabelSheet">
+  <div class="sheet">
+    <div class="sheet-title">How many labels?</div>
+    <p class="hint" id="seedLabelWhat" style="margin:0 0 4px;"></p>
+    <label class="field"><span>QUANTITY</span>
+      <input type="number" id="seedLabelQty" min="1" max="99" step="1" inputmode="numeric"/>
+    </label>
+    <button class="btn-primary" id="seedLabelGo">🏷 Print</button>
+    <button class="btn-outline" id="seedLabelCancel">Cancel</button>
   </div>
 </div>
 
@@ -10509,6 +10557,8 @@ async function refreshBundleJobs(){
   // a finished job is worth two days and no more; the sweep is asked for
   // whenever the screen is opened rather than being anybody's job to remember
   try{ await sb.rpc('purge_old_bundle_jobs'); }catch(e){}
+  // and the labels that went out with them -- two days, the same two days
+  try{ await sb.rpc('purge_old_label_jobs'); }catch(e){}
   // There is one set of settings for reading work out loud, and it lives on
   // Daily Pick List: the voice, the words said differently, the words not said
   // at all, and which SKUs are somebody else's job. Read afresh here for the
@@ -10715,6 +10765,10 @@ function openBundleOrder(){
     return;
   }
   loadBundleSkuPhotos();
+  // Only Plant Talks packs seeds, so only Plant Talks gets label buttons.
+  const isSeeds=bundleShopOf(o)==='planttalks';
+  const bar=document.getElementById('bundleLabelBar');
+  if(bar) bar.hidden=!isSeeds;
   const hiddenN=o.jobs.reduce((n,j)=>n+bundleHiddenCount(j),0);
   // Every bundle with everything in it, the way a pick list shows every line
   // of the sheet: what is coming is worth knowing before it arrives, and a
@@ -10742,7 +10796,9 @@ function openBundleOrder(){
             bundlePieceNoted(x)?' <span class="bundle-tag">made to order</span>':''}${
             bundlePieceHidden(x,j)?` <span class="bundle-tag" title="Hidden by &quot;${
               escapeHtml(bundlePieceHiddenWord(x))}&quot;">hidden</span>`:''}</span>
-          <span class="hint">&times;${x.qty}${j.sets>1?` · ${x.qty*j.sets} in all`:''}</span>
+          <span class="hint">&times;${x.qty}${j.sets>1?` · ${x.qty*j.sets} in all`:''}</span>${
+            isSeeds?`<button type="button" class="btn-outline btn-sm" data-seed-label="${x.id}"
+              data-seed-job="${j.id}" title="Print this seed's label">🏷</button>`:''}
         </div>`;
       }).join('')||'<p class="hint" style="margin:0;">-- nothing in this bundle --</p>'}</div>
     </div>`;
@@ -10803,6 +10859,8 @@ document.getElementById('bundleOrderDoneBtn').addEventListener('click',bundleOrd
 // asks whether to begin there or at the top, which is the only question two
 // people packing one order between them actually have.
 document.getElementById('bundleOrderList').addEventListener('click',e=>{
+  const label=e.target.closest('[data-seed-label]');
+  if(label){ seedLabelAsk(label.dataset.seedJob,label.dataset.seedLabel); return; }
   if(e.target.closest('[data-show-hidden]')){
     bundleShowHidden=!bundleShowHidden; openBundleOrder(); return;
   }
@@ -11209,6 +11267,151 @@ document.getElementById('bundleStartTop').addEventListener('click',()=>{
   if(first) bundleFocusOpen(first.id);
 });
 document.getElementById('bundleBubble').addEventListener('click',()=>bundleAskStart(null));
+
+// ---- seed labels, printed on the P-touch ----
+// The bundle is packed on a tablet and the P-touch is plugged into the PC in
+// the packing area. Those two cannot talk to each other: a tablet has no
+// driver for that printer, and this page is served over https, which a
+// browser will not let reach a plain-http box on the same LAN. The one thing
+// both of them can reach is the project, so pressing print writes the label
+// down in label_jobs and Macro Studio on the packing PC -- signed in to the
+// same project, already running all day for Replies -- picks it up within a
+// few seconds and sends it to the tape.
+//
+// Nothing is confirmed at either end. There is no print dialog to OK and no
+// P-touch Editor window: the row going from queued to printed is the
+// confirmation, and that is what is watched for below.
+const SEED_LABEL_WAIT_MS=30000;      // how long to wait before saying so
+// The name as it goes on the tape: the seed, without the word Seed or Seeds.
+// Which words those are is the same list Plant Talks' orders are read
+// against, set on Bundle SKU Settings -- one list, so a shop that writes
+// "Seed Pack" does not have to say so twice. The word has to stand on its own
+// here as well, or Seeded Bread would come out as Bread. A name that is
+// nothing but the word survives as itself: a label with no words on it is
+// worse than one that says Seeds.
+function seedLabelText(sku){
+  let s=String(sku||'').trim();
+  bundleWordList(bundleRules.seed_words).forEach(w=>{
+    s=s.replace(new RegExp('(^|[^a-z])'+bundleReEscape(w)+'(?=[^a-z]|$)','ig'),'$1 ');
+  });
+  s=s.replace(/\s+/g,' ')
+     .replace(/^[\s\-\u2013\u2014_,.\u00b7/|]+/,'')
+     .replace(/[\s\-\u2013\u2014_,.\u00b7/|]+$/,'').trim();
+  return s||String(sku||'').trim();
+}
+// How many labels a line needs: its quantity, across every set in the bundle.
+// Three packets in each of two sets is six packets, and six packets want six
+// labels -- so that is the number the sheet opens on.
+const seedLabelWanted=(piece,job)=>Math.max(1,Math.min(99,
+  (piece.qty||1)*((job&&job.sets)||1)));
+
+let seedLabelPending=null;           // the one line waiting on the sheet
+function seedLabelAsk(jobId,pieceId){
+  const j=bundleJobById(jobId); if(!j) return;
+  const x=(j.pieces||[]).find(p=>String(p.id)===String(pieceId)); if(!x) return;
+  const text=seedLabelText(x.sku);
+  seedLabelPending={jobId:j.id,sku:x.sku,text};
+  document.getElementById('seedLabelWhat').textContent='\u201c'+text+'\u201d \u2014 on the tape.';
+  const qty=document.getElementById('seedLabelQty');
+  qty.value=seedLabelWanted(x,j);
+  document.getElementById('seedLabelSheet').classList.add('open');
+  setTimeout(()=>{ qty.focus(); if(qty.select) qty.select(); },60);
+}
+function seedLabelClose(){
+  document.getElementById('seedLabelSheet').classList.remove('open');
+  seedLabelPending=null;
+}
+document.getElementById('seedLabelCancel').addEventListener('click',seedLabelClose);
+document.getElementById('seedLabelGo').addEventListener('click',()=>{
+  const p=seedLabelPending; if(!p) return;
+  const n=Math.max(1,Math.min(99,Math.round(
+    Number(document.getElementById('seedLabelQty').value)||1)));
+  seedLabelClose();
+  seedLabelSend([{jobId:p.jobId,sku:p.sku,text:p.text,copies:n}],
+    n+' \u00d7 \u201c'+p.text+'\u201d');
+});
+
+// Every seed line on the order, at the quantity each needs, in one press.
+// Lines already packed are included: a bundle is labelled and then packed, and
+// somebody who ticks first and prints after still wants their labels.
+document.getElementById('bundleLabelAllBtn').addEventListener('click',()=>{
+  const o=bundleOrderNow(); if(!o) return;
+  const rows=[];
+  o.jobs.forEach(j=>bundleWanted(j).forEach(x=>{
+    const text=seedLabelText(x.sku);
+    if(text) rows.push({jobId:j.id,sku:x.sku,text:text,copies:seedLabelWanted(x,j)});
+  }));
+  const hint=document.getElementById('bundleLabelHint');
+  if(!rows.length){ showMsg(hint,'Nothing on this order to label.',false); return; }
+  const total=rows.reduce((n,r)=>n+r.copies,0);
+  if(!confirm('Print '+total+' seed label'+(total===1?'':'s')+' for "'+o.title
+    +'"?\n\nThey go straight to the P-touch on the packing PC.')) return;
+  seedLabelSend(rows,total+' label'+(total===1?'':'s'));
+});
+
+// Queue them, then watch the rows rather than asking anybody. An insert that
+// never becomes a printed row is the packing PC being off or Macro Studio not
+// running, which is what the message after the wait says.
+async function seedLabelSend(rows,what){
+  const hint=document.getElementById('bundleLabelHint');
+  if(!sb){ showMsg(hint,'Sync unavailable.',false); return; }
+  let session=null;
+  try{ session=(await sb.auth.getSession()).data.session; }catch(e){}
+  if(!session){ showMsg(hint,'Sign in again before printing.',false); return; }
+  const payload=rows.filter(r=>r.text).map(r=>({user_id:session.user.id,
+    store:'planttalks',job_id:r.jobId||null,sku:r.sku||'',text:r.text,
+    copies:Math.max(1,Math.min(99,Math.round(r.copies||1)))}));
+  if(!payload.length){ showMsg(hint,'Nothing to print.',false); return; }
+  const btn=document.getElementById('bundleLabelAllBtn');
+  btn.disabled=true;
+  try{
+    const {data,error}=await sb.from('label_jobs').insert(payload).select('id');
+    if(error) throw error;
+    showMsg(hint,'\u2192 Sent to the P-touch \u2014 '+escapeHtml(what)+'.',true);
+    seedLabelWatch((data||[]).map(r=>r.id),what);
+  }catch(e){
+    showMsg(hint,'Could not send it: '+escapeHtml(e.message||String(e))
+      +' \u2014 run supabase-migration-SEED-LABELS.sql if this is the first time.',false);
+  }finally{ btn.disabled=false; }
+}
+// Watch the rows queued a moment ago until the packing PC has dealt with them.
+// Polled rather than subscribed: it is a handful of rows for half a minute,
+// and it has to keep working on the one screen whose live channel is
+// deliberately quiet while a piece is in somebody's hand.
+let seedLabelTimer=null;
+function seedLabelWatch(ids,what){
+  clearTimeout(seedLabelTimer);
+  if(!ids.length) return;
+  const hint=document.getElementById('bundleLabelHint');
+  const until=Date.now()+SEED_LABEL_WAIT_MS;
+  const look=async()=>{
+    let rows=[];
+    try{
+      const {data,error}=await sb.from('label_jobs')
+        .select('id,status,error').in('id',ids);
+      if(error) throw error;
+      rows=data||[];
+    }catch(e){ return; }
+    const bad=rows.filter(r=>r.status==='failed');
+    const left=rows.filter(r=>r.status==='queued'||r.status==='printing');
+    if(bad.length){
+      showMsg(hint,'The printer refused it: '
+        +escapeHtml(bad[0].error||'no reason given'),false);
+      return;
+    }
+    if(!left.length&&rows.length){
+      showMsg(hint,'\u2713 Printed \u2014 '+escapeHtml(what)+'.',true);
+      return;
+    }
+    if(Date.now()>until){
+      showMsg(hint,'Still waiting. The labels are queued and will print as soon '
+        +'as the packing PC is on with Macro Studio running.',false);
+      return;
+    }
+    seedLabelTimer=setTimeout(look,1500);
+  };
+  seedLabelTimer=setTimeout(look,1200);
+}
 
 // ---- two people, one order ----
 // Bundles are packed by whoever is free, and an order worked by two is two
@@ -37877,6 +38080,8 @@ let rpPhotoOffer=[],rpPhotoSend=new Set();
 // The shelf — photos that belong to no fact — and whether we are waiting on
 // the shop PC to read a thread's history.
 let rpShelf=[],rpHistoryWaiting=false;
+// The listings worth keeping, and which are ticked to go with this reply.
+let rpProducts=[],rpProdSend=new Set();
 // "40 seconds ago" beats a timestamp for the only question the beat answers:
 // is it still reading, right now.
 function rpAgo(iso){
@@ -37897,7 +38102,7 @@ function rpNoTable(error){
 async function refreshReplies(){
   if(!sb) return;
   rpMissing=false;
-  const [msgs,facts,exs,beat,shelf]=await Promise.all([
+  const [msgs,facts,exs,beat,shelf,prods]=await Promise.all([
     sb.from('reply_messages').select('*').eq('status','new')
       .order('received_at',{ascending:true}).limit(200),
     sb.from('reply_facts').select('*').order('created_at'),
@@ -37906,7 +38111,9 @@ async function refreshReplies(){
     sb.from('reply_sync').select('*').eq('id',true).maybeSingle(),
     sb.from('reply_photos').select('*')
       .order('used_at',{ascending:false,nullsFirst:false})
-      .order('created_at',{ascending:false}).limit(40)
+      .order('created_at',{ascending:false}).limit(40),
+    sb.from('reply_products').select('*')
+      .order('uses',{ascending:false}).order('created_at',{ascending:false}).limit(40)
   ]);
   if(msgs.error&&rpNoTable(msgs.error)){ rpMissing=true; rpRender(); return; }
   rpQueue=msgs.data||[];
@@ -37916,6 +38123,7 @@ async function refreshReplies(){
   // a project without the shelf migration is not a broken screen: the strip
   // simply has nothing on it but the + button
   rpShelf=(shelf&&shelf.data)||[];
+  rpProducts=(prods&&prods.data)||[];
   // the one being answered may have been answered by somebody else since
   if(rpNow&&rpNow.id&&!rpQueue.some(r=>r.id===rpNow.id)) rpClose();
   rpRender();
@@ -38178,6 +38386,68 @@ function rpRenderPhotos(){
   });
 }
 
+function rpRenderProducts(){
+  const box=rpEl('rpProds');
+  if(!box) return;
+  if(!rpProducts.length){
+    box.innerHTML='<p class="hint" style="margin:0;">Nothing kept yet. Add the listing name once and it stays here.</p>';
+    return;
+  }
+  box.innerHTML=rpProducts.map(pr=>
+    '<span class="rp-prod'+(rpProdSend.has(pr.query)?' on':'')+'" data-rp-prod="'+escapeHtml(pr.query)+'">'
+    +'<span>'+escapeHtml(pr.label||pr.query)+'</span>'
+    +(pr.uses?'<span style="color:var(--faint);">'+pr.uses+'×</span>':'')
+    +'<button data-rp-prod-del="'+pr.id+'" title="Forget this listing" aria-label="Forget this listing">×</button>'
+    +'</span>').join('');
+  box.querySelectorAll('[data-rp-prod]').forEach(chip=>{
+    chip.addEventListener('click',e=>{
+      if(e.target.closest('[data-rp-prod-del]')) return;
+      const q=chip.dataset.rpProd;
+      if(rpProdSend.has(q)) rpProdSend.delete(q); else rpProdSend.add(q);
+      rpRenderProducts();
+    });
+  });
+  box.querySelectorAll('[data-rp-prod-del]').forEach(btn=>{
+    btn.addEventListener('click',async e=>{
+      e.stopPropagation();
+      const pr=rpProducts.find(x=>x.id===btn.dataset.rpProdDel);
+      const {error}=await sb.from('reply_products').delete().eq('id',btn.dataset.rpProdDel);
+      if(error){ showMsg(rpEl(rpNow?'rpMsg':'rpPasteMsg'),'Could not forget that: '+escapeHtml(error.message),false); return; }
+      if(pr) rpProdSend.delete(pr.query);
+      rpProducts=rpProducts.filter(x=>x.id!==btn.dataset.rpProdDel);
+      rpRenderProducts();
+    });
+  });
+}
+
+async function rpAddProduct(){
+  const input=rpEl('rpProdInput'),text=input.value.trim();
+  const msg=rpEl(rpNow?'rpMsg':'rpPasteMsg');
+  if(!text){ input.focus(); return; }
+  const uid=await currentUserId();
+  if(!uid) return;
+  const {data,error}=await sb.from('reply_products')
+    .insert({user_id:uid,query:text,label:''}).select().maybeSingle();
+  if(error){
+    // already kept is not a failure: tick it instead of complaining
+    if(/duplicate|unique/i.test(error.message||'')){
+      rpProdSend.add(text);
+      input.value='';
+      rpRenderProducts();
+      return;
+    }
+    showMsg(msg,/reply_products/i.test(error.message||'')
+      ?'Run supabase-migration-REPLIES-PRODUCT.sql first — there is nowhere to keep listings yet.'
+      :'Could not add that: '+escapeHtml(error.message),false);
+    return;
+  }
+  if(data) rpProducts.unshift(data);
+  // added while answering means it is meant for this reply
+  rpProdSend.add(text);
+  input.value='';
+  rpRenderProducts();
+}
+
 function rpRenderShelf(){
   const strip=rpEl('rpShelf');
   if(!strip) return;
@@ -38325,12 +38595,13 @@ function rpRenderLearned(){
 
 function rpRender(){
   rpRenderBeat(); rpRenderWaiting(); rpRenderFacts(); rpRenderLearned();
-  rpRenderShelf(); rpSyncBadge();
+  rpRenderShelf(); rpRenderProducts(); rpSyncBadge();
 }
 
 function rpClose(){
   rpNow=null; rpUsed=[]; rpDraftBase='';
   rpPhotoOffer=[]; rpPhotoSend=new Set();
+  rpProdSend=new Set();
   rpHistoryWaiting=false;
   const photos=rpEl('rpPhotos');
   if(photos) photos.style.display='none';
@@ -38408,6 +38679,7 @@ function rpOpen(row){
   rpHistoryWaiting=false;
   rpRenderHistory();
   rpRenderShelf();
+  rpRenderProducts();
   rpRenderWaiting();
   rpEl('rpAnswerCard').scrollIntoView({block:'nearest',behavior:'smooth'});
   // a draft the shop PC already wrote is shown as it is rather than asked for
@@ -38447,6 +38719,10 @@ async function rpSend(){
   const rowId=rpNow.id||null;
   // read before rpClose empties them
   const sent=[...rpPhotoSend];
+  const cards=[...rpProdSend].map(q=>{
+    const pr=rpProducts.find(x=>x.query===q);
+    return {query:q,label:(pr&&pr.label)||''};
+  });
   try{
     if(rowId){
       // The reply is written down and the message is marked answered. That is
@@ -38454,13 +38730,20 @@ async function rpSend(){
       // exactly this, and on a phone there is nothing to type into.
       const answered={status:'answered',reply:text,answered_at:new Date().toISOString(),
         // what actually went, not what the matching would pick again later
-        photos:sent};
+        photos:sent,products:cards};
       let {error}=await sb.from('reply_messages').update(answered).eq('id',rowId);
       // The app can reach a project whose photo migration has not been run —
       // and a reply that will not send because of a column it does not need is
       // a worse failure than a reply that goes without its picture noted.
+      if(error&&/products/i.test(error.message||'')){
+        delete answered.products;
+        ({error}=await sb.from('reply_messages').update(answered).eq('id',rowId));
+        if(!error&&cards.length) showMsg(rpEl('rpFactMsg'),
+          'The reply went. Run supabase-migration-REPLIES-PRODUCT.sql for the product card to go with it.',false);
+      }
       if(error&&/photos/i.test(error.message||'')){
         delete answered.photos;
+        delete answered.products;
         ({error}=await sb.from('reply_messages').update(answered).eq('id',rowId));
         if(!error&&sent.length) showMsg(rpEl('rpFactMsg'),
           'The reply went. Run supabase-migration-REPLIES-PHOTO.sql for photos to go with it.',false);
@@ -38483,6 +38766,14 @@ async function rpSend(){
       sb.from('reply_examples').update({hits:ex.hits,used_at:new Date().toISOString()})
         .eq('id',id).then(()=>{},()=>{});
     }
+    for(const card of cards){
+      const pr=rpProducts.find(x=>x.query===card.query);
+      if(!pr) continue;
+      pr.uses=(pr.uses||0)+1;
+      pr.used_at=new Date().toISOString();
+      sb.from('reply_products').update({uses:pr.uses,used_at:pr.used_at}).eq('id',pr.id)
+        .then(()=>{},()=>{});
+    }
     for(const path of sent){
       const shelved=rpShelf.find(x=>x.photo_path===path);
       if(!shelved) continue;
@@ -38498,11 +38789,15 @@ async function rpSend(){
       ? ' The '+(sent.length===1?'photo goes':'photos go')+' with it from the shop PC —'
         +' away from it, use Copy photo and paste it after the words.'
       : '';
+    const withCards=cards.length
+      ? ' The shop PC sends the '+(cards.length===1?'product card':'product cards')+' too.'
+      : '';
     showMsg(rpEl(rowId?'rpMsg':'rpPasteMsg'),
       rowId
-        ? ((edited?'✓ Sent — and your edit is what it learned.':'✓ Sent.')+escapeHtml(withPhotos))
+        ? ((edited?'✓ Sent — and your edit is what it learned.':'✓ Sent.')
+           +escapeHtml(withPhotos)+escapeHtml(withCards))
         : ((copied?'✓ Copied — paste it into DuoKe.':'✓ Saved. Copy it out of the box above.')
-           +escapeHtml(withPhotos)),true);
+           +escapeHtml(withPhotos)+escapeHtml(withCards)),true);
   }finally{
     rpEl('rpSendBtn').disabled=false;
   }
@@ -38614,6 +38909,10 @@ rpEl('rpLineBtn').addEventListener('click',()=>{
   box.setSelectionRange(at+1,at+1);
 });
 rpEl('rpHistoryBtn').addEventListener('click',rpPullHistory);
+rpEl('rpProdAdd').addEventListener('click',rpAddProduct);
+rpEl('rpProdInput').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){ e.preventDefault(); rpAddProduct(); }
+});
 // Ctrl+V, anywhere on this screen: a screenshot of the order, a photo of the
 // parcel, a picture copied off a supplier's chat — it lands on the shelf and
 // is ticked to go out. Only an image is taken; pasting words into the draft is

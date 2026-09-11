@@ -116,6 +116,10 @@ DEFAULTS: dict[str, Any] = {
     # to a window in the background the way a character can. Off means the
     # words go and the picture waits to be pasted by hand.
     "send_photos": True,
+    # A reply can carry a product card -- the same one DuoKe's own Product tab
+    # sends, with the picture, the price and the link in it. Off means the
+    # words go and the product does not.
+    "send_products": True,
     # Where reply photos live. The same private bucket the rest of the app
     # uses; the path is what the row carries.
     "photo_bucket": "shipment-photos",
@@ -139,6 +143,18 @@ DEFAULTS: dict[str, Any] = {
         # how far left of the conversation the thread list reaches. Beyond it
         # is the shop switcher, whose entries are text too and are not people.
         "list_width": 560,
+        # The Product tab on the right-hand panel: its tab, its search box, the
+        # Send button on a row, and how tall a row is. Names as the app writes
+        # them in English; a build in another language needs these changed and
+        # nothing else.
+        "product_tab": "Product",
+        "product_search": "Search Product Name",
+        "product_send": "Send",
+        "product_row_height": 252,
+        # where the right-hand panel starts, in pixels from the window's left
+        # edge. Only the panel is searched for product rows: the conversation
+        # has titles in it too, in the strip above the messages.
+        "panel_left": 4250,
         # the strip above the conversation: the buyer's name, the product, the
         # order number. Text, in the same column, said by nobody.
         "header_height": 300,
@@ -373,7 +389,7 @@ class Cloud:
 
     def replies_to_type(self) -> list[dict]:
         query = (
-            "/reply_messages?select=id,chat_key,reply,store,photos"
+            "/reply_messages?select=id,chat_key,reply,store,photos,products"
             "&status=eq.answered&typed_at=is.null&reply=neq."
             "&order=answered_at.asc&limit=20"
         )
@@ -1089,6 +1105,80 @@ def type_reply(nodes: list[dict], window: tuple[int, int, int, int], reader: dic
             winapi.set_foreground(was)
 
 
+def _post_target(hwnd: int, x: int, y: int) -> Optional[int]:
+    """The child window that will accept posted input for a screen point.
+
+    Chromium draws everything into one Chrome_RenderWidgetHostHWND, and that
+    window answers posted mouse and character messages whether or not it is
+    visible, focused, or on a monitor anybody is looking at. That is what lets
+    all of this happen behind the work somebody is doing -- no raising, no
+    stealing the foreground, no moving windows between screens. It was found
+    by trying it: a raise is refused to a background process and a click aimed
+    at a covered window lands in whatever is drawn on top of it.
+    """
+    cx, cy = winapi.screen_to_client(hwnd, x, y)
+    child = winapi.child_window_from_point(hwnd, cx, cy)
+    return child or None
+
+
+def _post_click_at(hwnd: int, x: int, y: int) -> bool:
+    child = _post_target(hwnd, x, y)
+    if not child:
+        return False
+    kx, ky = winapi.screen_to_client(child, x, y)
+    winapi.post_click(child, kx, ky)
+    time.sleep(0.35)
+    return True
+
+
+def _post_click_element(hwnd: int, node: dict) -> bool:
+    rect = (node or {}).get("rect")
+    if not rect:
+        return False
+    return _post_click_at(hwnd, (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+
+
+def _post_type(hwnd: int, node: dict, text: str, clear: int = 60) -> bool:
+    """Put text in a field by posting the keystrokes, caret and all.
+
+    End first, then backspaces: a click lands the caret wherever it lands, and
+    a field with yesterday's search still in it returns yesterday's results.
+    """
+    if not _post_click_element(hwnd, node):
+        return False
+    rect = node["rect"]
+    child = _post_target(hwnd, (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+    if not child:
+        return False
+    end = winapi.vk_for("end")
+    bs = winapi.vk_for("backspace")
+    if end:
+        winapi.post_key_down(child, end)
+        winapi.post_key_up(child, end)
+    for _ in range(clear):
+        if bs:
+            winapi.post_key_down(child, bs)
+            winapi.post_key_up(child, bs)
+    time.sleep(0.4)
+    for ch in text:
+        winapi.post_char(child, ch)
+    time.sleep(0.3)
+    return True
+
+
+def _post_key(hwnd: int, node: dict, key: str) -> bool:
+    rect = (node or {}).get("rect")
+    vk = winapi.vk_for(key)
+    if not rect or not vk:
+        return False
+    child = _post_target(hwnd, (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+    if not child:
+        return False
+    winapi.post_key_down(child, vk)
+    winapi.post_key_up(child, vk)
+    return True
+
+
 def _click_box(box: dict, hwnd: int) -> bool:
     """Put the caret in the message box with a real click.
 
@@ -1101,6 +1191,25 @@ def _click_box(box: dict, hwnd: int) -> bool:
     if not rect:
         return False
     x, y = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+    return _click_at(hwnd, x, y)
+
+
+def _click_at(hwnd: int, x: int, y: int) -> bool:
+    """Click a point inside DuoKe, wherever DuoKe happens to be.
+
+    Raised to the top of the pile first, because a click goes to whatever is
+    drawn at that point and the window is usually covered by whatever the
+    person is actually working in -- a click aimed at DuoKe was landing in
+    another app's window entirely. Raising does not move the focus; the first
+    click does, and a window that has just been raised takes the second one
+    properly, which is why there are two.
+    """
+    winapi.raise_without_focus(hwnd)
+    time.sleep(0.25)
+    if winapi.window_from_point(x, y) and             winapi.root_window(winapi.window_from_point(x, y)) != hwnd:
+        return False
+    winapi.physical_move_and_click(x, y)
+    time.sleep(0.3)
     winapi.physical_move_and_click(x, y)
     time.sleep(0.35)
     return True
@@ -1183,6 +1292,119 @@ def paste_photo(nodes: list[dict], window: tuple[int, int, int, int], reader: di
             pass
 
 
+def send_product(nodes: list[dict], window: tuple[int, int, int, int], reader: dict,
+                 hwnd: int, query: str) -> tuple[bool, str]:
+    """Send one product card into the open conversation.
+
+    The same three moves a person makes: open the Product tab, search the
+    listing by name, press Send on the row. All of it posted rather than
+    clicked for real, so the shop PC can be in use while it happens.
+
+    The row is chosen by how much of the query its title actually contains,
+    and a title that matches nothing is not sent: a wrong product card is
+    worse to a buyer than no product card, because it reads as an answer.
+    """
+    want = (query or "").strip()
+    if not want:
+        return False, "no product named"
+
+    tab_name = str(reader.get("product_tab") or "Product")
+    tab = next((n for n in nodes
+                if n["control_type"] == "TabItem" and (n.get("name") or "").strip() == tab_name), None)
+    if not tab:
+        return False, f'no "{tab_name}" tab in the window'
+    if not _post_click_element(hwnd, tab):
+        return False, "the Product tab would not take a click"
+    time.sleep(1.2)
+
+    tree = warm_tree(hwnd)
+    search_name = str(reader.get("product_search") or "Search Product Name")
+    search = next((n for n in tree
+                   if n["control_type"] == "Edit" and search_name in (n.get("name") or "")), None)
+    if not search:
+        return False, "the product search box is not there"
+    if not _post_type(hwnd, search, want):
+        return False, "the product search box would not take the name"
+    _post_key(hwnd, search, "enter")
+    time.sleep(2.0)
+
+    tree = warm_tree(hwnd)
+    rows = _product_rows(tree, window, reader)
+    if not rows:
+        return False, f'no product in the shop matches "{want[:40]}"'
+    best = _best_product(rows, want)
+    if best is None:
+        return False, f'nothing in the list looks like "{want[:40]}", so nothing was sent'
+    if not _post_click_element(hwnd, best["send"]):
+        return False, "the row's Send button would not take a click"
+    time.sleep(1.5)
+    return True, f'sent "{best["title"][:50]}"'
+
+
+def _product_rows(nodes: list[dict], window: tuple[int, int, int, int],
+                  reader: dict) -> list[dict]:
+    """The listings on screen: each one's title and its own Send button.
+
+    A row is a band of the panel, the same way a conversation is a band of the
+    list -- the title, the stock, the price, the SKU and the button are five
+    separate elements that only a shared y range ties together.
+    """
+    band = [float(reader.get("panel_left") or 4250), 99999.0]
+    pitch = float(reader.get("product_row_height") or 252)
+    send_name = str(reader.get("product_send") or "Send")
+
+    sends = [n for n in nodes
+             if n["control_type"] == "Button" and (n.get("name") or "").strip() == send_name
+             and n.get("rect") and _in_band(n, band, window)]
+    titles = [n for n in nodes
+              if n["control_type"] == "Text" and n.get("rect") and _in_band(n, band, window)
+              and len((n.get("name") or "").strip()) > 15
+              and not _is_noise(n.get("name") or "")]
+    out = []
+    for send in sends:
+        top = send["rect"][1] - pitch
+        near = [t for t in titles if top <= t["rect"][1] <= send["rect"][3]]
+        if not near:
+            continue
+        # the title is the first line of the row; the SKU and the price sit
+        # under it and are shorter
+        near.sort(key=lambda t: t["rect"][1])
+        out.append({"title": near[0]["name"].strip(), "send": send})
+    return out
+
+
+def _best_product(rows: list[dict], want: str) -> Optional[dict]:
+    asked = set(words(want))
+    if not asked:
+        return None
+    best, score_best = None, 0.0
+    for row in rows:
+        have = set(words(row["title"]))
+        if not have:
+            continue
+        hit = len(asked & have) / len(asked)
+        if hit > score_best:
+            best, score_best = row, hit
+    # Half the words, or it is a different product. "Kawaii Sticker" must not
+    # match "Personalised Gift Tag" because both say PartyMonkey.
+    return best if score_best >= 0.5 else None
+
+
+def words(text: str) -> list[str]:
+    """The words worth matching on, shop name and packaging noise dropped."""
+    out = []
+    for raw in re.split(r"[^\w]+", (text or "").lower()):
+        if len(raw) > 2 and raw not in _PRODUCT_STOP:
+            out.append(raw)
+    return out
+
+
+_PRODUCT_STOP = {
+    "the", "and", "for", "with", "pcs", "pack", "set", "sgd", "sku", "new",
+    "ready", "stock", "free", "gift", "shipping",
+}
+
+
 # ---------------------------------------------------------------- one pass
 
 
@@ -1219,7 +1441,7 @@ def sync_once() -> dict:
     the loop writes into the heartbeat note."""
     cfg = load()
     report: dict[str, Any] = {"sent": 0, "threads": 0, "typed": 0, "photos": 0,
-                              "history": 0, "skipped": 0, "notes": []}
+                              "products": 0, "history": 0, "skipped": 0, "notes": []}
     cloud = Cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
                   cfg.get("email", ""), cfg.get("password", ""))
     device = (platform.node() or "shop PC")[:60]
@@ -1403,6 +1625,19 @@ def sync_once() -> dict:
             # The words have gone. A photo that will not paste must not undo
             # that: the reply is marked typed either way, and the picture is
             # reported as the one thing still to do by hand.
+            wanted_products = row.get("products") or []
+            if cfg.get("send_products") and isinstance(wanted_products, list):
+                for item in wanted_products[:2]:
+                    query = str((item or {}).get("query") or "").strip() \
+                        if isinstance(item, dict) else str(item or "").strip()
+                    if not query:
+                        continue
+                    fresh = warm_tree(hwnd)
+                    ok_p, why_p = send_product(fresh, window, reader, hwnd, query)
+                    if ok_p:
+                        report["products"] += 1
+                    else:
+                        report["notes"].append(f"{key[:30]} product: {why_p}")
             paths = row.get("photos") or []
             if cfg.get("send_photos") and isinstance(paths, list):
                 for path in [str(p) for p in paths if p][:3]:
