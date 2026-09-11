@@ -181,6 +181,13 @@ def set_foreground(hwnd: int) -> bool:
     return bool(user32.GetForegroundWindow() == hwnd)
 
 
+def minimize(hwnd: int) -> None:
+    """Put a window back where it was found. SW_MINIMIZE rather than
+    SW_FORCEMINIMIZE: the polite one, which lets the app animate and lets the
+    next window in the stack take the foreground normally."""
+    user32.ShowWindow(hwnd, 6)
+
+
 def move_window(hwnd: int, x: int, y: int, width: int, height: int, to_back: bool = True) -> None:
     """Moves and resizes without activating. Also un-maximises first: a
     maximised window ignores position changes, so parking one off-screen

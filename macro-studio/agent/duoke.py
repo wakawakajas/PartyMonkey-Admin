@@ -97,6 +97,15 @@ DEFAULTS: dict[str, Any] = {
     "window_title": "",
     "window_process": "duoke",
     "poll_seconds": 20,
+    # A minimised DuoKe cannot be read at all: minimising it makes Chromium
+    # tear down the accessibility tree, and restoring it from here does not
+    # build it again -- only a real click does, because our process has no
+    # claim on the foreground and Windows refuses to hand it over. So this
+    # restores the window and LEAVES IT UP, which is the state it has to be in
+    # anyway. It may sit behind everything else; it may not sit in the taskbar.
+    # Off means a minimised DuoKe is left alone and the heartbeat says why
+    # nothing was read.
+    "restore_if_minimized": True,
     # Off means read-only: messages come up, nothing is ever typed into DuoKe.
     # Worth leaving off for the first day, to watch what it drafts before it
     # can act.
@@ -138,13 +147,26 @@ DEFAULTS: dict[str, Any] = {
         # a row in the conversation list, and where the list begins under its
         # tabs and its Sort control
         "row_height": 100,
-        "list_top": 230,
+        "list_top": 150,
         # What an unread thread looks like in the list. DuoKe shows a count;
         # a thread whose name matches this is opened and read.
         "unread_pattern": r"\((\d+)\)|\b(\d+)\s*条|·\s*(\d+)$",
+        # Narrower than this at the bottom of the window is not the reply box:
+        # it is a search field, or the Select on an order panel.
+        "min_input_width": 700,
         # A message bubble shorter than this is a sticker, a timestamp or a
         # read receipt, not a question.
         "min_message_chars": 2,
+        # The same again for lines that carry a name or a number in them, so a
+        # whole-line match cannot catch them: "partymonkeysg:main has joined
+        # the conversation" was landing in Pigu as the thing a buyer said.
+        "ignore_patterns": [
+            r"has joined the conversation",
+            r"has left the conversation",
+            r"(?:已|已经)(?:加入|离开)(?:会话|对话)",
+            r"^(?:assigned|transferred) to ",
+            r"^you (?:have been )?assigned",
+        ],
         # DuoKe's own furniture, sitting in the conversation looking like
         # things somebody said: the label on an auto-reply, the heading over a
         # translation, the order panel's field names. Matched as a
@@ -432,6 +454,13 @@ def find_window() -> Optional[int]:
         # not the app either.
         if config.WEB_WINDOW_TITLE_HINT.lower() in title.lower():
             continue
+        # A minimised window reports a placeholder 314x50 strip, which the
+        # size test below would throw out -- and then nothing would ever
+        # restore it, which is how "DuoKe is not open" came to mean "DuoKe is
+        # sitting in the taskbar". Size can only be judged once it is up.
+        if winapi.is_minimized(hwnd):
+            best = hwnd
+            break
         left, top, right, bottom = winapi.window_rect(hwnd)
         if right - left < 400 or bottom - top < 300:
             continue
@@ -447,21 +476,48 @@ def find_window() -> Optional[int]:
 # 22 nodes, the second 1476. So the tree is touched, given a moment, and only
 # then walked. Nothing is a bug about this; it is how Chromium avoids building
 # a tree nobody reads.
-TREE_WARM_SECONDS = 1.6
+TREE_WARM_SECONDS = 0.9
 # Below this many named elements the window is assumed to be still cold rather
 # than genuinely empty, and it is asked again.
 TREE_COLD_NAMES = 12
 
 
 def warm_tree(hwnd: int) -> list[dict]:
-    """The window's elements, after however long it takes them to exist."""
-    root = uia.element_from_handle(hwnd)
-    nodes = _walk(root, max_depth=16, budget=[9000])
-    named = sum(1 for n in nodes if (n.get("name") or "").strip())
-    if named >= TREE_COLD_NAMES:
-        return nodes
-    time.sleep(TREE_WARM_SECONDS)
-    return _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[9000])
+    """The window's elements, after however long it takes them to exist.
+
+    Asking is what makes Chromium build the tree, so this asks repeatedly
+    rather than waiting once: a window just restored from the taskbar has been
+    seen to take three or four seconds to answer with anything at all, and the
+    only way to find out is to keep asking.
+    """
+    nodes: list[dict] = []
+    for attempt in range(6):
+        nodes = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[9000])
+        named = sum(1 for n in nodes if (n.get("name") or "").strip())
+        if named >= TREE_COLD_NAMES:
+            return nodes
+        time.sleep(TREE_WARM_SECONDS)
+    return nodes
+
+
+def _show_for_reading(hwnd: int) -> bool:
+    """Bring a minimised window back up, never to the front.
+
+    Returns True when this call is what restored it -- which is now only worth
+    knowing so the pass can say so. It is deliberately NOT put back
+    afterwards: minimising the window is what kills the tree, and it stays
+    killed until somebody clicks the app, so a sync that tidied up after
+    itself would break every pass after the first.
+    """
+    if not winapi.is_minimized(hwnd):
+        return False
+    if not load().get("restore_if_minimized"):
+        return False
+    winapi.restore_without_focus(hwnd)
+    # Layout first, then the accessibility tree on top of it. Restoring and
+    # walking in the same breath reads a window that has not been laid out.
+    time.sleep(1.2)
+    return True
 
 
 def _rect(element) -> Optional[tuple[int, int, int, int]]:
@@ -539,8 +595,10 @@ def probe() -> dict:
     """
     hwnd = find_window()
     if not hwnd:
-        return {"ok": False, "error": f"no window whose title contains "
-                                     f"\"{load().get('window_title')}\" is open"}
+        cfg = load()
+        looked = cfg.get("window_title") or cfg.get("window_process") or "duoke"
+        return {"ok": False, "error": f"no open window belongs to \"{looked}\""}
+    probe_restored = _show_for_reading(hwnd)
     root = uia.element_from_handle(hwnd)
     if root is None:
         return {"ok": False, "error": "Windows would not hand over that window's elements"}
@@ -681,6 +739,18 @@ _NOISE = re.compile(
 )
 
 
+def _patterns(reader: dict) -> list:
+    """The ignore_patterns, compiled, with a broken one dropped rather than
+    taking the whole pass down with it."""
+    out = []
+    for raw in (reader.get("ignore_patterns") or []):
+        try:
+            out.append(re.compile(str(raw), re.IGNORECASE))
+        except re.error:
+            continue
+    return out
+
+
 def _is_noise(text: str) -> bool:
     t = text.strip()
     return (not t or bool(_TIME_ONLY.match(t)) or bool(_NOISE.match(t))
@@ -697,16 +767,20 @@ def message_band(nodes: list[dict], window: tuple[int, int, int, int],
     somebody drags the window onto a different screen. An explicit x_band in
     duoke.json still wins, for a build where it is not true.
     """
-    named = reader.get("messages") or {}
-    if named.get("x_band"):
-        return list(named["x_band"])
+    told = list((reader.get("messages") or {}).get("x_band") or [])
     box = _input_box(nodes, reader)
-    if not box or not box.get("rect"):
-        return None
-    left = box["rect"][0] - window[0]
-    right = box["rect"][2] - window[0]
-    # a little slack each side: a bubble can be indented past the box's edge
-    return [max(0, left - 40), right + 40]
+    rect = box.get("rect") if box else None
+    # Measured first, told second -- but only when what was measured can
+    # plausibly be a reply box. With no conversation open there is no reply box
+    # at all, and the widest field at the bottom is then a 476px search box,
+    # which would put the conversation in the wrong half of the window.
+    if rect:
+        left = rect[0] - window[0]
+        right = rect[2] - window[0]
+        if (right - left) >= float(reader.get("min_input_width") or 700):
+            # a little slack each side: a bubble can be indented past the edge
+            return [max(0, left - 40), right + 40]
+    return told or None
 
 
 def read_open_who(nodes: list[dict], window: tuple[int, int, int, int],
@@ -747,8 +821,10 @@ def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
               else _find_region(nodes, reader.get("messages") or {}, "x_band", window))
     header = int(reader.get("header_height") or 300)
     skip = {str(x).strip().lower().rstrip(":：") for x in (reader.get("ignore_lines") or [])}
+    junk = _patterns(reader)
     lines = [l for l in _texts(region, int(reader.get("min_message_chars") or 2))
-             if l["text"].strip().lower().rstrip(":：") not in skip]
+             if l["text"].strip().lower().rstrip(":：") not in skip
+             and not any(rx.search(l["text"]) for rx in junk)]
     # The strip above the conversation carries the buyer's name, the product and
     # the order number. All of it is text in the same column and none of it was
     # said by anybody.
@@ -794,6 +870,13 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
         width = float(named.get("list_width") or 560)
         region = ([n for n in nodes if _in_band(n, [max(0, band[0] - width), band[0]], window)]
                   if band else [])
+        if not region:
+            # No conversation open, so nothing measured the columns. The list
+            # is still there to be read, and its own band is the one thing
+            # worth writing down in duoke.json for this build.
+            told = list(named.get("x_band") or [])
+            if told:
+                region = [n for n in nodes if _in_band(n, told, window)]
     pattern = reader.get("unread_pattern") or ""
     rx = None
     if pattern:
@@ -804,9 +887,14 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
     row_height = float(reader.get("row_height") or 100)
     top = float(reader.get("list_top") or 230)
 
-    # everything in the column, below its own tabs and sort header
+    # everything in the column, below its own tabs -- and not the column's own
+    # controls, which sit among the rows and are not people
+    skip = {str(x).strip().lower().rstrip(":：") for x in (reader.get("ignore_lines") or [])}
+    junk = _patterns(reader)
     items = [i for i in _texts(region, 1)
-             if (i["rect"][1] - window[1]) >= top]
+             if (i["rect"][1] - window[1]) >= top
+             and i["text"].strip().lower().rstrip(":：") not in skip
+             and not any(rx.search(i["text"]) for rx in junk)]
     if not items:
         return []
     items.sort(key=lambda i: (i["rect"][1], i["rect"][0]))
@@ -830,7 +918,11 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
         # the top line of the row: the name, the shop, the time. The preview
         # sits below it and is not what the conversation is called.
         top_line = [i for i in words if i["rect"][1] - first_y <= 30]
-        named = max(top_line or words, key=lambda i: i["rect"][2] - i["rect"][0])
+        # Leftmost, not widest. Widest was the obvious rule and it picked the
+        # shop a conversation came through over the person in it: "bnair" is
+        # 69 pixels wide and "PartyMonkey" beside it is 177. The buyer's name
+        # is the first thing on the line, at the same left edge in every row.
+        named = min(top_line or words, key=lambda i: i["rect"][0])
         name = named["text"].strip()
         if not name or name in seen:
             continue
@@ -1097,6 +1189,9 @@ def sync_once() -> dict:
     device = (platform.node() or "shop PC")[:60]
 
     hwnd = find_window()
+    restored = False
+    if hwnd:
+        restored = _show_for_reading(hwnd)
     if not hwnd:
         report["notes"].append("DuoKe is not open")
         try:
@@ -1116,6 +1211,24 @@ def sync_once() -> dict:
     window = winapi.window_rect(hwnd)
     reader = cfg.get("reader") or {}
     nodes = warm_tree(hwnd)
+    named = sum(1 for n in nodes if (n.get("name") or "").strip())
+    if named < TREE_COLD_NAMES:
+        # The window is open and its elements are not there. That is one thing
+        # and one thing only: Chromium has the renderer switched off for this
+        # window, which happens when it has been minimised and not clicked
+        # since. Reported as itself rather than as "no messages".
+        note = ("DuoKe is open but showing nothing to read — click its window once. "
+                "(It was minimised; Chromium does not rebuild a hidden window's "
+                "elements until the app is clicked. Launch it with "
+                "--force-renderer-accessibility to stop this happening.)")
+        report["notes"].append(note)
+        try:
+            cloud.beat(device, True, 0, note)
+        except CloudError:
+            pass
+        _state["last_report"] = report
+        _state["last_pass_at"] = datetime.now(timezone.utc).isoformat()
+        return report
     threads = read_threads(nodes, window, reader)
     report["threads"] = len(threads)
 
