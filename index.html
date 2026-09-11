@@ -2681,6 +2681,28 @@ body.mc-docked .mc-bubble{display:none !important;}
 /* Ticked means "this goes with the reply". It carries the accent because it is
    the one thing on the row that changes what a buyer receives. */
 .rp-send-on{background:var(--blueprint);border-color:var(--blueprint);color:var(--lime-ink);}
+/* The shelf: photos that belong to no fact, picked by hand. A strip rather
+   than a list, because choosing one is done by looking at it. */
+.rp-shelf{display:flex;gap:8px;overflow-x:auto;padding:2px 0 4px;}
+.rp-shelf-pic{position:relative;flex:0 0 auto;border:2px solid transparent;border-radius:10px;
+  padding:0;background:none;line-height:0;cursor:pointer;}
+.rp-shelf-pic img{width:56px;height:56px;border-radius:8px;object-fit:cover;
+  background:var(--nest);}
+.rp-shelf-pic.on{border-color:var(--blueprint);}
+.rp-shelf-pic .rp-shelf-x{position:absolute;top:-6px;right:-6px;width:20px;height:20px;
+  min-height:0;padding:0;border-radius:50%;font-size:11px;line-height:18px;
+  background:var(--card);border:1px solid var(--border-strong);color:var(--muted);}
+.rp-shelf-add{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
+  width:56px;height:56px;border:1px dashed var(--border-strong);border-radius:8px;
+  color:var(--muted);font-size:20px;cursor:pointer;}
+/* The lines before the one being answered. Quoted small and scrollable: it is
+   context, not the thing on the screen. */
+.rp-history{max-height:210px;overflow-y:auto;margin-top:8px;display:flex;
+  flex-direction:column;gap:5px;}
+.rp-line{font-family:'IBM Plex Sans',sans-serif;font-size:12.5px;padding:5px 9px;
+  border-radius:9px;max-width:86%;overflow-wrap:anywhere;}
+.rp-line.them{background:var(--nest);color:var(--ink);align-self:flex-start;}
+.rp-line.us{background:var(--blueprint-soft);color:var(--ink);align-self:flex-end;}
 .rp-new-fact{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
 .rp-new-fact input[type="text"]{flex:1 1 200px;min-width:140px;width:auto;margin:0;}
 .rp-new-fact button{flex:0 0 auto;width:auto;}
@@ -3529,7 +3551,8 @@ body.mc-docked .mc-bubble{display:none !important;}
         — edit it if it is not right, and the edit is what gets remembered</label>
       <textarea id="rpDraft" spellcheck="false" placeholder="Drafting&hellip;"></textarea>
       <p class="hint" style="margin:6px 0 0;"><b>Enter</b> sends it &middot;
-        <b>Shift+Enter</b> starts a new line</p>
+        <b>Shift+Enter</b> starts a new line &mdash; or press
+        <b>&crarr; Line</b> below, which a phone keyboard can reach</p>
       <div class="rp-acts">
         <button class="btn-primary" id="rpSendBtn">Send reply</button>
         <button class="btn-outline" id="rpRedoBtn">Rewrite</button>
@@ -3540,14 +3563,33 @@ body.mc-docked .mc-bubble{display:none !important;}
           <option value="friendly but declining what they asked for">Politely decline</option>
           <option value="one clarifying question back, nothing promised">Ask them back</option>
         </select>
+        <button class="btn-outline" id="rpLineBtn" title="Start a new line in the draft">&crarr; Line</button>
         <button class="btn-outline" id="rpSkipBtn">Skip</button>
       </div>
+      <!-- What was said before this. Pulled on demand rather than always:
+           reading a thread means opening it on the shop PC, which is a click
+           in a window somebody may be using. -->
+      <div style="margin-top:10px;">
+        <button class="btn-outline" id="rpHistoryBtn" style="width:100%;">Pull chat history</button>
+        <h3 id="rpHistoryHead" style="display:none;font-family:'IBM Plex Sans',sans-serif;
+          font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+          margin:10px 0 0;font-weight:600;">What was said before</h3>
+        <div class="rp-history" id="rpHistory" style="display:none;"></div>
+      </div>
+
       <!-- Pictures that answer this question, offered rather than attached:
            each one is ticked on or off before Enter. -->
       <div id="rpPhotos" style="margin-top:10px;display:none;">
         <h3 style="font-family:'IBM Plex Sans',sans-serif;font-size:10.5px;letter-spacing:.09em;
           text-transform:uppercase;color:var(--faint);margin:0 0 2px;font-weight:600;">Going with it</h3>
         <div id="rpPhotoList"></div>
+      </div>
+      <!-- And a photo put in by hand: this parcel, this box, this batch code.
+           Tap to send it or not; the + adds a new one to the shelf. -->
+      <div id="rpShelfWrap" style="margin-top:10px;">
+        <h3 style="font-family:'IBM Plex Sans',sans-serif;font-size:10.5px;letter-spacing:.09em;
+          text-transform:uppercase;color:var(--faint);margin:0 0 4px;font-weight:600;">Put in a photo</h3>
+        <div class="rp-shelf" id="rpShelf"></div>
       </div>
       <div class="rp-basis" id="rpBasis" style="display:none;">
         <h3>Written from</h3>
@@ -37645,6 +37687,9 @@ const RP_PHOTO_QUALITIES=[0.8,0.7,0.6,0.5,0.42];
 const RP_BUDGET_BYTES=180*1024;
 // Which of the offered photos are ticked to go out, by bucket path.
 let rpPhotoOffer=[],rpPhotoSend=new Set();
+// The shelf — photos that belong to no fact — and whether we are waiting on
+// the shop PC to read a thread's history.
+let rpShelf=[],rpHistoryWaiting=false;
 // "40 seconds ago" beats a timestamp for the only question the beat answers:
 // is it still reading, right now.
 function rpAgo(iso){
@@ -37665,19 +37710,25 @@ function rpNoTable(error){
 async function refreshReplies(){
   if(!sb) return;
   rpMissing=false;
-  const [msgs,facts,exs,beat]=await Promise.all([
+  const [msgs,facts,exs,beat,shelf]=await Promise.all([
     sb.from('reply_messages').select('*').eq('status','new')
       .order('received_at',{ascending:true}).limit(200),
     sb.from('reply_facts').select('*').order('created_at'),
     sb.from('reply_examples').select('*')
       .order('hits',{ascending:false}).order('created_at',{ascending:false}).limit(300),
-    sb.from('reply_sync').select('*').eq('id',true).maybeSingle()
+    sb.from('reply_sync').select('*').eq('id',true).maybeSingle(),
+    sb.from('reply_photos').select('*')
+      .order('used_at',{ascending:false,nullsFirst:false})
+      .order('created_at',{ascending:false}).limit(40)
   ]);
   if(msgs.error&&rpNoTable(msgs.error)){ rpMissing=true; rpRender(); return; }
   rpQueue=msgs.data||[];
   rpFacts=facts.data||[];
   rpExamples=exs.data||[];
   rpBeatRow=beat.data||null;
+  // a project without the shelf migration is not a broken screen: the strip
+  // simply has nothing on it but the + button
+  rpShelf=(shelf&&shelf.data)||[];
   // the one being answered may have been answered by somebody else since
   if(rpNow&&rpNow.id&&!rpQueue.some(r=>r.id===rpNow.id)) rpClose();
   rpRender();
@@ -37699,6 +37750,14 @@ function rpWatch(){
         rpRender(); return;
       }
       if(!row||!row.id) return;
+      // the row on screen is the same row: history that has just been read
+      // belongs to it, and so does a reply somebody else sent from a phone
+      if(rpNow&&rpNow.id===row.id&&row.status==='new'){
+        const had=(rpNow.history||[]).length;
+        rpNow=Object.assign(rpNow,row);
+        if((row.history||[]).length!==had) rpHistoryWaiting=false;
+        rpRenderHistory();
+      }
       rpQueue=rpQueue.filter(r=>r.id!==row.id);
       if(row.status==='new') rpQueue.push(row);
       else if(rpNow&&rpNow.id===row.id) rpClose();
@@ -37932,6 +37991,120 @@ function rpRenderPhotos(){
   });
 }
 
+function rpRenderShelf(){
+  const strip=rpEl('rpShelf');
+  if(!strip) return;
+  strip.innerHTML=rpShelf.map(ph=>
+    '<span class="rp-shelf-pic'+(rpPhotoSend.has(ph.photo_path)?' on':'')+'">'
+    +'<img alt="'+escapeHtml(ph.label||'photo')+'" data-rp-thumb="'+escapeHtml(ph.photo_path)+'"'
+    +' data-rp-pick-shelf="'+escapeHtml(ph.photo_path)+'">'
+    +'<button class="icon-btn rp-shelf-x" data-rp-shelf-del="'+ph.id+'"'
+    +' title="Take this off the shelf" aria-label="Take this off the shelf">×</button>'
+    +'</span>').join('')
+    +'<label class="rp-shelf-add" title="Add a photo">+'
+    +'<input type="file" accept="image/*" id="rpShelfPick" style="display:none;"></label>';
+  rpHydrateThumbs(strip);
+  strip.querySelectorAll('[data-rp-pick-shelf]').forEach(img=>{
+    // the thumbnail is the tick: tapping the picture is what sends it, and
+    // hydrateThumbs would otherwise have made it open in a new tab instead
+    img.onclick=()=>{
+      const path=img.dataset.rpPickShelf;
+      if(rpPhotoSend.has(path)) rpPhotoSend.delete(path); else rpPhotoSend.add(path);
+      rpRenderShelf();
+    };
+    img.style.cursor='pointer';
+  });
+  strip.querySelectorAll('[data-rp-shelf-del]').forEach(btn=>{
+    btn.addEventListener('click',e=>{ e.stopPropagation(); rpShelfDrop(btn.dataset.rpShelfDel); });
+  });
+  const pick=rpEl('rpShelfPick');
+  if(pick) pick.addEventListener('change',()=>{
+    const file=pick.files&&pick.files[0];
+    pick.value='';
+    if(file) rpShelfAdd(file);
+  });
+}
+
+async function rpShelfAdd(file){
+  const msg=rpEl('rpMsg');
+  const session=await requireSession(msg); if(!session) return;
+  showMsg(msg,'Uploading the photo…',true);
+  try{
+    const small=await shrinkToBudget(await fileToDataURL(file),RP_PHOTO_MAX_PX,RP_BUDGET_BYTES,
+      {minPx:RP_PHOTO_MIN_PX,qualities:RP_PHOTO_QUALITIES});
+    const blob=await (await fetch(small)).blob();
+    const path=session.user.id+'/replies/'+Date.now()+'.jpg';
+    const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:'image/jpeg'});
+    if(up.error) throw up.error;
+    const {data,error}=await sb.from('reply_photos')
+      .insert({user_id:session.user.id,photo_path:path,label:''}).select().maybeSingle();
+    if(error) throw error;
+    if(data) rpShelf.unshift(data);
+    // ticked straight away: somebody who just picked a photo out of the camera
+    // roll means to send it
+    rpPhotoSend.add(path);
+    msg.innerHTML='';
+    rpRenderShelf();
+  }catch(err){
+    showMsg(msg,'The photo did not upload: '+escapeHtml((err&&err.message)||'unknown error'),false);
+  }
+}
+
+async function rpShelfDrop(id){
+  const ph=rpShelf.find(x=>x.id===id);
+  if(!ph) return;
+  const {error}=await sb.from('reply_photos').delete().eq('id',id);
+  if(error){ showMsg(rpEl('rpMsg'),'Could not take it off: '+escapeHtml(error.message),false); return; }
+  rpPhotoSend.delete(ph.photo_path);
+  rpShelf=rpShelf.filter(x=>x.id!==id);
+  rpRenderShelf();
+  await sb.storage.from(PHOTO_BUCKET).remove([ph.photo_path]);
+}
+
+// The lines before the one being answered, oldest first, the buyer's on the
+// left. Empty until somebody asks for them.
+function rpRenderHistory(){
+  const box=rpEl('rpHistory'),btn=rpEl('rpHistoryBtn');
+  if(!box||!btn) return;
+  const lines=(rpNow&&Array.isArray(rpNow.history))?rpNow.history:[];
+  btn.disabled=rpHistoryWaiting||!rpNow||!rpNow.id;
+  btn.textContent=rpHistoryWaiting
+    ? 'Asking the shop PC…'
+    : (lines.length?'Pull it again':'Pull chat history');
+  const head=rpEl('rpHistoryHead');
+  if(!lines.length){
+    box.style.display='none'; box.innerHTML='';
+    if(head) head.style.display='none';
+    return;
+  }
+  if(head) head.style.display='';
+  box.innerHTML=lines.map(l=>
+    '<span class="rp-line '+(l&&l.inbound?'them':'us')+'">'
+    +escapeHtml(String((l&&l.text)||''))+'</span>').join('');
+  box.style.display='';
+  box.scrollTop=box.scrollHeight;
+}
+
+// Asking is a row being stamped, not a call: the PC that can read DuoKe is the
+// only thing that can answer, and it is on its own clock. The lines arrive on
+// the live feed a pass later, which is why this only says who was asked.
+async function rpPullHistory(){
+  if(!rpNow||!rpNow.id){ showMsg(rpEl('rpMsg'),'A pasted message has no thread to read.',false); return; }
+  rpHistoryWaiting=true;
+  rpRenderHistory();
+  const {error}=await sb.from('reply_messages')
+    .update({history_wanted_at:new Date().toISOString()}).eq('id',rpNow.id);
+  if(error){
+    rpHistoryWaiting=false;
+    rpRenderHistory();
+    showMsg(rpEl('rpMsg'),/history/i.test(error.message||'')
+      ?'Run supabase-migration-REPLIES-SHELF.sql first — there is nowhere to put the history yet.'
+      :'Could not ask for it: '+escapeHtml(error.message),false);
+    return;
+  }
+  showMsg(rpEl('rpMsg'),'Asked the shop PC — the lines appear here on its next pass.',true);
+}
+
 function rpRenderLearned(){
   const box=rpEl('rpLearned');
   if(!box) return;
@@ -37959,13 +38132,22 @@ function rpRenderLearned(){
   });
 }
 
-function rpRender(){ rpRenderBeat(); rpRenderWaiting(); rpRenderFacts(); rpRenderLearned(); rpSyncBadge(); }
+function rpRender(){
+  rpRenderBeat(); rpRenderWaiting(); rpRenderFacts(); rpRenderLearned();
+  rpRenderShelf(); rpSyncBadge();
+}
 
 function rpClose(){
   rpNow=null; rpUsed=[]; rpDraftBase='';
   rpPhotoOffer=[]; rpPhotoSend=new Set();
+  rpHistoryWaiting=false;
   const photos=rpEl('rpPhotos');
   if(photos) photos.style.display='none';
+  const hist=rpEl('rpHistory');
+  if(hist){ hist.style.display='none'; hist.innerHTML=''; }
+  const histHead=rpEl('rpHistoryHead');
+  if(histHead) histHead.style.display='none';
+  rpRenderShelf();
   const card=rpEl('rpAnswerCard');
   if(card) card.style.display='none';
   const box=rpEl('rpDraft');
@@ -37996,6 +38178,9 @@ async function rpDraftFor(message,tone){
   try{
     const {data,error}=await invokeFn('reply-draft',{
       message:message,tone:tone||'',
+      // the lines before it, where they have been pulled: "so tomorrow?" is
+      // answerable only with them, and answerable wrongly without them
+      history:(rpNow&&Array.isArray(rpNow.history))?rpNow.history.slice(-12):[],
       lang:rpEl('rpLang').value||'',
       store:(rpNow&&rpNow.store)||''
     });
@@ -38007,8 +38192,12 @@ async function rpDraftFor(message,tone){
     // Ticked on arrival: the draft has already said the picture is coming, so
     // the default has to match what it says. Untick to send the words alone.
     rpPhotoOffer=(data&&data.photos)||[];
-    rpPhotoSend=new Set(rpPhotoOffer.map(ph=>ph.path));
+    // a shelf photo ticked before the rewrite stays ticked: the picture of
+    // this parcel is still the picture of this parcel
+    const shelfOn=[...rpPhotoSend].filter(p=>rpShelf.some(x=>x.photo_path===p));
+    rpPhotoSend=new Set([...rpPhotoOffer.map(ph=>ph.path),...shelfOn]);
     rpRenderPhotos();
+    rpRenderShelf();
     rpShowBasis();
     box.focus();
     try{ box.setSelectionRange(box.value.length,box.value.length); }catch(e){}
@@ -38025,6 +38214,9 @@ function rpOpen(row){
   rpEl('rpWho').textContent=(row.buyer||row.chat_key||'A buyer')+(row.store?' · '+row.store:'');
   rpEl('rpSaid').textContent=row.message||'';
   rpEl('rpSkipBtn').style.display=row.id?'':'none';
+  rpHistoryWaiting=false;
+  rpRenderHistory();
+  rpRenderShelf();
   rpRenderWaiting();
   rpEl('rpAnswerCard').scrollIntoView({block:'nearest',behavior:'smooth'});
   // a draft the shop PC already wrote is shown as it is rather than asked for
@@ -38069,11 +38261,19 @@ async function rpSend(){
       // The reply is written down and the message is marked answered. That is
       // the whole send from here: the PC that can type into DuoKe watches for
       // exactly this, and on a phone there is nothing to type into.
-      const {error}=await sb.from('reply_messages').update({
-        status:'answered',reply:text,answered_at:new Date().toISOString(),
+      const answered={status:'answered',reply:text,answered_at:new Date().toISOString(),
         // what actually went, not what the matching would pick again later
-        photos:[...rpPhotoSend]
-      }).eq('id',rowId);
+        photos:sent};
+      let {error}=await sb.from('reply_messages').update(answered).eq('id',rowId);
+      // The app can reach a project whose photo migration has not been run —
+      // and a reply that will not send because of a column it does not need is
+      // a worse failure than a reply that goes without its picture noted.
+      if(error&&/photos/i.test(error.message||'')){
+        delete answered.photos;
+        ({error}=await sb.from('reply_messages').update(answered).eq('id',rowId));
+        if(!error&&sent.length) showMsg(rpEl('rpFactMsg'),
+          'The reply went. Run supabase-migration-REPLIES-PHOTO.sql for photos to go with it.',false);
+      }
       if(error){ showMsg(msg,'Could not send that — '+escapeHtml(error.message),false); return; }
     }
     const copied=await rpCopy(text);
@@ -38091,6 +38291,13 @@ async function rpSend(){
       ex.hits=(ex.hits||0)+1;
       sb.from('reply_examples').update({hits:ex.hits,used_at:new Date().toISOString()})
         .eq('id',id).then(()=>{},()=>{});
+    }
+    for(const path of sent){
+      const shelved=rpShelf.find(x=>x.photo_path===path);
+      if(!shelved) continue;
+      shelved.used_at=new Date().toISOString();
+      sb.from('reply_photos').update({used_at:shelved.used_at}).eq('id',shelved.id)
+        .then(()=>{},()=>{});
     }
     if(rowId) rpQueue=rpQueue.filter(r=>r.id!==rowId);
     rpClose();
@@ -38188,14 +38395,34 @@ rpEl('rpPasteBtn').addEventListener('click',()=>{
   rpOpen({message:text,buyer:'Pasted in',store:''});
 });
 rpEl('rpPaste').addEventListener('keydown',e=>{
-  if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); rpEl('rpPasteBtn').click(); }
+  if(e.key!=='Enter'||e.shiftKey) return;
+  if(e.isComposing||e.keyCode===229) return;
+  e.preventDefault();
+  rpEl('rpPasteBtn').click();
 });
 // Enter sends. This is the one textarea in the app where it does, and it is
 // the point of the screen: read the draft, press Enter, move on. Shift+Enter
 // is still a new line, for the reply that needs two.
 rpEl('rpDraft').addEventListener('keydown',e=>{
-  if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); rpSend(); }
+  if(e.key!=='Enter'||e.shiftKey||e.ctrlKey||e.metaKey||e.altKey) return;
+  // Mid-composition Enter is choosing a word, not sending a reply. Without
+  // this, typing Chinese or Thai sends the draft on the first character.
+  if(e.isComposing||e.keyCode===229) return;
+  e.preventDefault();
+  rpSend();
 });
+// The same new line, for a keyboard that has no Shift+Enter — which is every
+// phone. It lands at the caret rather than at the end, because a line is
+// usually being broken in the middle of what was written.
+rpEl('rpLineBtn').addEventListener('click',()=>{
+  const box=rpEl('rpDraft');
+  const at=box.selectionStart??box.value.length;
+  const to=box.selectionEnd??at;
+  box.value=box.value.slice(0,at)+'\n'+box.value.slice(to);
+  box.focus();
+  box.setSelectionRange(at+1,at+1);
+});
+rpEl('rpHistoryBtn').addEventListener('click',rpPullHistory);
 
 </script>
 </body>

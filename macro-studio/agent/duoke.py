@@ -7,6 +7,15 @@ to the Replies screen in Pigu. Nothing is answered here: a draft is written in
 Pigu, somebody reads it and presses Enter, and the approved reply comes back
 down this pipe to be typed into the right conversation.
 
+A reply can carry a picture as well as words. A fact in Pigu may have a photo
+attached — the size chart, the care label — and when the buyer's question
+matches that fact the photo goes out with the reply: fetched from storage, put
+on the clipboard as a file, pasted into the chat and sent. That paste is the
+one thing here that needs DuoKe in front for a second, because Ctrl+V cannot be
+posted to a background window the way a character can; the foreground is handed
+straight back. Turn "send_photos" off and the words still go, leaving the
+picture to be pasted by hand.
+
 Three things live in this module:
 
     probe()       dump the window's UIA tree to a file, once, so the shapes
@@ -38,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
+import tempfile
 import re
 import threading
 import time
@@ -45,9 +55,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
-from agent import config, uia, winapi
+from agent import actions, config, uia, winapi
 
 CONFIG_PATH = config.ROOT_DIR / "duoke.json"
 SEEN_PATH = config.ROOT_DIR / "duoke-seen.json"
@@ -61,6 +72,9 @@ MAX_THREADS_PER_PASS = 10
 # last message is what is being answered; the two before it are context for
 # the draft.
 MESSAGE_TAIL = 6
+# What "pull chat history" fetches. More than the draft needs, because the
+# point of asking is to read the thread yourself.
+HISTORY_TAIL = 24
 MAX_SEEN = 2000
 
 DEFAULTS: dict[str, Any] = {
@@ -84,6 +98,15 @@ DEFAULTS: dict[str, Any] = {
     # Worth leaving off for the first day, to watch what it drafts before it
     # can act.
     "type_back": True,
+    # A fact in Pigu can carry a photo -- a size chart, a care label -- and a
+    # reply can go out with it. Pasting a picture is the one thing here that
+    # needs the window in front for a moment, because Ctrl+V cannot be posted
+    # to a window in the background the way a character can. Off means the
+    # words go and the picture waits to be pasted by hand.
+    "send_photos": True,
+    # Where reply photos live. The same private bucket the rest of the app
+    # uses; the path is what the row carries.
+    "photo_bucket": "shipment-photos",
     # Opening an unread conversation is a click, and a click needs the window.
     # Off means only the conversation already open is read.
     "open_unread": True,
@@ -273,14 +296,62 @@ class Cloud:
                 return False
             raise
 
+    def object_bytes(self, bucket: str, path: str) -> bytes:
+        """One file out of storage, as the signed-in account. Not through
+        /rest/v1 like everything else here -- storage is its own API, and what
+        comes back is the file rather than JSON."""
+        if not self.url or not path:
+            raise CloudError("no photo to fetch")
+        safe = "/".join(urllib.parse.quote(part) for part in path.split("/"))
+        req = urllib.request.Request(f"{self.url}/storage/v1/object/{bucket}/{safe}")
+        req.add_header("apikey", self.anon)
+        for key, value in self._auth().items():
+            req.add_header(key, value)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as res:
+                return res.read()
+        except urllib.error.HTTPError as exc:
+            raise CloudError(f"photo {path} -> {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise CloudError(f"cannot reach storage: {exc.reason}") from exc
+
     def replies_to_type(self) -> list[dict]:
         query = (
-            "/reply_messages?select=id,chat_key,reply,store"
+            "/reply_messages?select=id,chat_key,reply,store,photos"
             "&status=eq.answered&typed_at=is.null&reply=neq."
             "&order=answered_at.asc&limit=20"
         )
         out = self.rest("GET", query)
         return out if isinstance(out, list) else []
+
+    def history_wanted(self) -> list[dict]:
+        """Rows somebody has pressed Pull chat history on since they were last
+        read. Ordered oldest ask first, so a queue of them is served in the
+        order people asked."""
+        query = (
+            "/reply_messages?select=id,chat_key,history_at,history_wanted_at"
+            "&history_wanted_at=not.is.null&status=eq.new"
+            "&order=history_wanted_at.asc&limit=5"
+        )
+        out = self.rest("GET", query)
+        rows = out if isinstance(out, list) else []
+        fresh = []
+        for row in rows:
+            read_at = row.get("history_at")
+            asked_at = row.get("history_wanted_at")
+            # already answered after it was asked -- nothing to do
+            if read_at and asked_at and str(read_at) >= str(asked_at):
+                continue
+            fresh.append(row)
+        return fresh
+
+    def save_history(self, row_id: str, lines: list[dict]) -> None:
+        self.rest(
+            "PATCH",
+            f"/reply_messages?id=eq.{urllib.parse.quote(row_id)}",
+            {"history": lines, "history_at": datetime.now(timezone.utc).isoformat()},
+            prefer="return=minimal",
+        )
 
     def mark_typed(self, row_id: str, note: str = "") -> None:
         body: dict[str, Any] = {"typed_at": datetime.now(timezone.utc).isoformat()}
@@ -538,7 +609,7 @@ def _is_noise(text: str) -> bool:
 
 
 def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
-                           reader: dict) -> list[dict]:
+                           reader: dict, tail: int = MESSAGE_TAIL) -> list[dict]:
     """The tail of the conversation on screen, each line marked inbound or not.
 
     Which side of the pane a bubble sits on is what says who wrote it. Every
@@ -556,7 +627,7 @@ def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
     right = max(l["rect"][2] for l in lines)
     middle = (left + right) / 2
     out = []
-    for line in lines[-MESSAGE_TAIL:]:
+    for line in lines[-tail:]:
         centre = (line["rect"][0] + line["rect"][2]) / 2
         out.append({"text": line["text"], "inbound": centre < middle})
     return out
@@ -658,6 +729,21 @@ def _fingerprint(chat_key: str, text: str) -> str:
 # ---------------------------------------------------------------- writing back
 
 
+def _input_box(nodes: list[dict], reader: dict) -> Optional[dict]:
+    """DuoKe's message box. Named in duoke.json where a probe has named it,
+    otherwise the edit control lowest in the window: the search box sits at the
+    top of the list column, the reply box at the bottom of the conversation."""
+    want = reader.get("input") or {}
+    if want.get("automation_id") or want.get("class_name") or want.get("name"):
+        named = [n for n in nodes if n["control_type"] == "Edit" and _matches(n, want)]
+        if named:
+            return named[0]
+    edits = [n for n in nodes if n["control_type"] == "Edit" and n.get("rect")]
+    if not edits:
+        return None
+    return max(edits, key=lambda n: n["rect"][1])
+
+
 def type_reply(nodes: list[dict], window: tuple[int, int, int, int], reader: dict,
                hwnd: int, text: str) -> tuple[bool, str]:
     """Put `text` in DuoKe's message box and press Enter.
@@ -668,18 +754,9 @@ def type_reply(nodes: list[dict], window: tuple[int, int, int, int], reader: dic
     not) the characters are posted to it one at a time instead, which still
     does not need the window in front.
     """
-    want = reader.get("input") or {}
-    boxes = [n for n in nodes if n["control_type"] == "Edit" and _matches(n, want)] \
-        if (want.get("automation_id") or want.get("class_name") or want.get("name")) else []
-    if not boxes:
-        # The message box is the edit control lowest in the window: the search
-        # box sits at the top of the list column, the reply box at the bottom
-        # of the conversation.
-        edits = [n for n in nodes if n["control_type"] == "Edit" and n.get("rect")]
-        if not edits:
-            return False, "no text box found in the window"
-        boxes = [max(edits, key=lambda n: n["rect"][1])]
-    box = boxes[0]
+    box = _input_box(nodes, reader)
+    if box is None:
+        return False, "no text box found in the window"
     element = box.get("_el")
 
     if element is not None and uia.try_set_value(element, text):
@@ -719,6 +796,70 @@ def type_reply(nodes: list[dict], window: tuple[int, int, int, int], reader: dic
     return False, "the reply is in the box but Enter could not be delivered — send it by hand"
 
 
+def paste_photo(nodes: list[dict], window: tuple[int, int, int, int], reader: dict,
+                hwnd: int, image: bytes) -> tuple[bool, str]:
+    """Put one picture in the chat: on the clipboard, then Ctrl+V, then Enter.
+
+    A chat box takes a pasted image; there is no other way in from outside the
+    app, since DuoKe has no "attach this file" that can be driven blind. The
+    file is written to the temp folder because Set-Clipboard copies a FILE,
+    which is what a chat box understands as an image to send.
+
+    This is the one place that takes the foreground. It is given back to
+    whatever had it as soon as the paste has gone in -- a shop PC is usually
+    being used for something else, and stealing the window for a second is
+    tolerable where stealing it for a minute is not.
+    """
+    if not image:
+        return False, "there was nothing to paste"
+    stamp = datetime.now().strftime("%H%M%S%f")
+    temp = Path(tempfile.gettempdir()) / f"duoke-reply-{stamp}.jpg"
+    try:
+        temp.write_bytes(image)
+    except OSError as exc:
+        return False, f"could not write the photo out: {exc}"
+
+    was = winapi.get_foreground_window()
+    try:
+        proc = actions._powershell(f"Set-Clipboard -LiteralPath '{temp}'")
+        if proc.returncode != 0:
+            return False, "the photo would not go on the clipboard"
+
+        # Click the message box first: a paste lands wherever the caret is, and
+        # after the words went in the caret is where it should be -- but a
+        # window just brought forward may have put it somewhere else.
+        if not winapi.set_foreground(hwnd):
+            return False, "Windows would not bring DuoKe to the front, so the photo was not pasted"
+        time.sleep(0.35)
+        box = _input_box(nodes, reader)
+        if box and box.get("rect"):
+            rect = box["rect"]
+            winapi.physical_move_and_click((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+            time.sleep(0.2)
+
+        ctrl, v, enter = winapi.vk_for("ctrl"), winapi.vk_for("v"), winapi.vk_for("enter")
+        if not (ctrl and v and enter):
+            return False, "this machine reports no Ctrl, V or Enter key"
+        winapi.physical_key(ctrl)
+        winapi.physical_key(v)
+        winapi.physical_key(v, key_up=True)
+        winapi.physical_key(ctrl, key_up=True)
+        # A pasted picture takes a moment to become an attachment; Enter before
+        # that sends an empty message and loses the picture.
+        time.sleep(1.2)
+        winapi.physical_key(enter)
+        winapi.physical_key(enter, key_up=True)
+        time.sleep(0.4)
+        return True, "pasted"
+    finally:
+        if was and was != hwnd:
+            winapi.set_foreground(was)
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------- one pass
 
 
@@ -753,7 +894,8 @@ def sync_once() -> dict:
     report of exactly what it did -- which is what the web UI shows and what
     the loop writes into the heartbeat note."""
     cfg = load()
-    report: dict[str, Any] = {"sent": 0, "threads": 0, "typed": 0, "skipped": 0, "notes": []}
+    report: dict[str, Any] = {"sent": 0, "threads": 0, "typed": 0, "photos": 0,
+                              "history": 0, "skipped": 0, "notes": []}
     cloud = Cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
                   cfg.get("email", ""), cfg.get("password", ""))
     device = (platform.node() or "shop PC")[:60]
@@ -808,6 +950,11 @@ def sync_once() -> dict:
             "message": text[:4000],
             "fingerprint": mark,
             "source": "duoke",
+            # The lines around it, since they were read anyway getting here.
+            # A draft written without them answers "so tomorrow?" confidently
+            # and wrongly.
+            "history": [{"inbound": bool(l["inbound"]), "text": l["text"][:400]}
+                        for l in lines[:-1][-MESSAGE_TAIL:]],
         }
         try:
             if cloud.send_message(row):
@@ -843,6 +990,37 @@ def sync_once() -> dict:
             fresh_root = uia.element_from_handle(hwnd)
             harvest(thread["name"], _walk(fresh_root, max_depth=16, budget=[6000]))
 
+    # ---- somebody on a phone asked to see a thread
+    #
+    # Served before the replies are typed, because the person waiting for it is
+    # looking at the screen right now, while a reply that has been approved has
+    # already been decided and can wait another twenty seconds.
+    try:
+        wanted = cloud.history_wanted()
+    except CloudError as exc:
+        wanted = []
+        report["notes"].append(str(exc))
+    for row in wanted:
+        key = (row.get("chat_key") or "").strip()
+        tree = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
+        here = read_threads(tree, window, reader)
+        target = next((t for t in here if _chat_key(t["name"]) == key), None)
+        if not target:
+            report["notes"].append(f"{key[:30]} is not in the list to read")
+            continue
+        if not _open_thread(target, hwnd, allow_click=True):
+            report["notes"].append(f"could not open {key[:30]} to read it")
+            continue
+        tree = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
+        lines = read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
+        try:
+            cloud.save_history(str(row.get("id")),
+                               [{"inbound": bool(l["inbound"]), "text": l["text"][:400]}
+                                for l in lines])
+            report["history"] += 1
+        except CloudError as exc:
+            report["notes"].append(str(exc))
+
     # ---- and the other direction
     if cfg.get("type_back"):
         try:
@@ -866,17 +1044,35 @@ def sync_once() -> dict:
                 continue
             tree = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
             ok, how = type_reply(tree, window, reader, hwnd, text)
-            if ok:
-                report["typed"] += 1
-                try:
-                    cloud.mark_typed(str(row.get("id")))
-                except CloudError as exc:
-                    report["notes"].append(str(exc))
-            else:
+            if not ok:
                 report["notes"].append(f"{key[:30]}: {how}")
+                continue
+            report["typed"] += 1
+            # The words have gone. A photo that will not paste must not undo
+            # that: the reply is marked typed either way, and the picture is
+            # reported as the one thing still to do by hand.
+            paths = row.get("photos") or []
+            if cfg.get("send_photos") and isinstance(paths, list):
+                for path in [str(p) for p in paths if p][:3]:
+                    try:
+                        image = cloud.object_bytes(str(cfg.get("photo_bucket")), path)
+                    except CloudError as exc:
+                        report["notes"].append(f"{key[:30]}: {exc}")
+                        continue
+                    fresh = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
+                    sent, why = paste_photo(fresh, window, reader, hwnd, image)
+                    if sent:
+                        report["photos"] += 1
+                    else:
+                        report["notes"].append(f"{key[:30]} photo: {why}")
+            try:
+                cloud.mark_typed(str(row.get("id")))
+            except CloudError as exc:
+                report["notes"].append(str(exc))
 
     _remember(fresh)
     note = (f"read {report['threads']} threads, sent {report['sent']}, typed {report['typed']}"
+            + (f", {report['photos']} photos" if report["photos"] else "")
             + ("; " + "; ".join(report["notes"][:3]) if report["notes"] else ""))
     try:
         cloud.beat(device, True, report["threads"], note)

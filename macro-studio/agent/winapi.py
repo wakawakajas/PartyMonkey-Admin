@@ -140,6 +140,23 @@ def restore_without_focus(hwnd: int) -> None:
     user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
 
 
+def set_foreground(hwnd: int) -> bool:
+    """Brings a window to the front and gives it the keyboard.
+
+    Everything else here deliberately avoids this -- a macro that steals the
+    foreground steals whatever somebody was typing. Pasting is the one thing
+    that cannot be done without it: Ctrl+V is a modifier held across two
+    keystrokes, which a posted message cannot express, so the paste has to go
+    through the real keyboard and the real keyboard goes to the active window.
+
+    Windows refuses the call unless the asking process has some claim to the
+    foreground, so the answer is checked rather than assumed."""
+    if is_minimized(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    user32.SetForegroundWindow(hwnd)
+    return bool(user32.GetForegroundWindow() == hwnd)
+
+
 def move_window(hwnd: int, x: int, y: int, width: int, height: int, to_back: bool = True) -> None:
     """Moves and resizes without activating. Also un-maximises first: a
     maximised window ignores position changes, so parking one off-screen
