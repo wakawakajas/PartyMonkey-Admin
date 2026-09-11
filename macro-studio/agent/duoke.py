@@ -72,6 +72,9 @@ MAX_THREADS_PER_PASS = 10
 # last message is what is being answered; the two before it are context for
 # the draft.
 MESSAGE_TAIL = 6
+# What "pull chat history" fetches. More than the draft needs, because the
+# point of asking is to read the thread yourself.
+HISTORY_TAIL = 24
 MAX_SEEN = 2000
 
 DEFAULTS: dict[str, Any] = {
@@ -320,6 +323,35 @@ class Cloud:
         )
         out = self.rest("GET", query)
         return out if isinstance(out, list) else []
+
+    def history_wanted(self) -> list[dict]:
+        """Rows somebody has pressed Pull chat history on since they were last
+        read. Ordered oldest ask first, so a queue of them is served in the
+        order people asked."""
+        query = (
+            "/reply_messages?select=id,chat_key,history_at,history_wanted_at"
+            "&history_wanted_at=not.is.null&status=eq.new"
+            "&order=history_wanted_at.asc&limit=5"
+        )
+        out = self.rest("GET", query)
+        rows = out if isinstance(out, list) else []
+        fresh = []
+        for row in rows:
+            read_at = row.get("history_at")
+            asked_at = row.get("history_wanted_at")
+            # already answered after it was asked -- nothing to do
+            if read_at and asked_at and str(read_at) >= str(asked_at):
+                continue
+            fresh.append(row)
+        return fresh
+
+    def save_history(self, row_id: str, lines: list[dict]) -> None:
+        self.rest(
+            "PATCH",
+            f"/reply_messages?id=eq.{urllib.parse.quote(row_id)}",
+            {"history": lines, "history_at": datetime.now(timezone.utc).isoformat()},
+            prefer="return=minimal",
+        )
 
     def mark_typed(self, row_id: str, note: str = "") -> None:
         body: dict[str, Any] = {"typed_at": datetime.now(timezone.utc).isoformat()}
@@ -577,7 +609,7 @@ def _is_noise(text: str) -> bool:
 
 
 def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
-                           reader: dict) -> list[dict]:
+                           reader: dict, tail: int = MESSAGE_TAIL) -> list[dict]:
     """The tail of the conversation on screen, each line marked inbound or not.
 
     Which side of the pane a bubble sits on is what says who wrote it. Every
@@ -595,7 +627,7 @@ def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
     right = max(l["rect"][2] for l in lines)
     middle = (left + right) / 2
     out = []
-    for line in lines[-MESSAGE_TAIL:]:
+    for line in lines[-tail:]:
         centre = (line["rect"][0] + line["rect"][2]) / 2
         out.append({"text": line["text"], "inbound": centre < middle})
     return out
@@ -863,7 +895,7 @@ def sync_once() -> dict:
     the loop writes into the heartbeat note."""
     cfg = load()
     report: dict[str, Any] = {"sent": 0, "threads": 0, "typed": 0, "photos": 0,
-                              "skipped": 0, "notes": []}
+                              "history": 0, "skipped": 0, "notes": []}
     cloud = Cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
                   cfg.get("email", ""), cfg.get("password", ""))
     device = (platform.node() or "shop PC")[:60]
@@ -918,6 +950,11 @@ def sync_once() -> dict:
             "message": text[:4000],
             "fingerprint": mark,
             "source": "duoke",
+            # The lines around it, since they were read anyway getting here.
+            # A draft written without them answers "so tomorrow?" confidently
+            # and wrongly.
+            "history": [{"inbound": bool(l["inbound"]), "text": l["text"][:400]}
+                        for l in lines[:-1][-MESSAGE_TAIL:]],
         }
         try:
             if cloud.send_message(row):
@@ -952,6 +989,37 @@ def sync_once() -> dict:
                 continue
             fresh_root = uia.element_from_handle(hwnd)
             harvest(thread["name"], _walk(fresh_root, max_depth=16, budget=[6000]))
+
+    # ---- somebody on a phone asked to see a thread
+    #
+    # Served before the replies are typed, because the person waiting for it is
+    # looking at the screen right now, while a reply that has been approved has
+    # already been decided and can wait another twenty seconds.
+    try:
+        wanted = cloud.history_wanted()
+    except CloudError as exc:
+        wanted = []
+        report["notes"].append(str(exc))
+    for row in wanted:
+        key = (row.get("chat_key") or "").strip()
+        tree = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
+        here = read_threads(tree, window, reader)
+        target = next((t for t in here if _chat_key(t["name"]) == key), None)
+        if not target:
+            report["notes"].append(f"{key[:30]} is not in the list to read")
+            continue
+        if not _open_thread(target, hwnd, allow_click=True):
+            report["notes"].append(f"could not open {key[:30]} to read it")
+            continue
+        tree = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
+        lines = read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
+        try:
+            cloud.save_history(str(row.get("id")),
+                               [{"inbound": bool(l["inbound"]), "text": l["text"][:400]}
+                                for l in lines])
+            report["history"] += 1
+        except CloudError as exc:
+            report["notes"].append(str(exc))
 
     # ---- and the other direction
     if cfg.get("type_back"):

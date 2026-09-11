@@ -4,6 +4,8 @@
 //   { message }                   draft a reply to this
 //   { message, lang }             ... in this language rather than the buyer's
 //   { message, tone }             ... rewritten: shorter, warmer, declining
+//   { message, history }          ... with the lines said before it, oldest
+//                                 first, as [{inbound, text}]
 //   { distil: true }              read the approved replies back and say what
 //                                 standing facts they contain
 //
@@ -266,6 +268,8 @@ function pick(message: string, rows: Example[], want = 6): Example[] {
 }
 
 // ---- the prompt ----
+type Line = { inbound?: boolean; text?: string };
+
 function draftPrompt(
   message: string,
   facts: Fact[],
@@ -273,6 +277,7 @@ function draftPrompt(
   lang: string,
   tone: string,
   store: string,
+  history: Line[],
 ) {
   const lines: string[] = [];
   lines.push(
@@ -332,6 +337,22 @@ function draftPrompt(
     "you write is the first character the buyer reads.",
   );
   lines.push("");
+  if (history.length) {
+    // Before the message, not after it: a model reads an instruction better
+    // when the thing it is about has already been described.
+    lines.push("THE CONVERSATION SO FAR — oldest first, for context only:");
+    for (const line of history) {
+      const text = String(line?.text ?? "").trim();
+      if (text) lines.push((line?.inbound ? "Buyer: " : "You: ") + text);
+    }
+    lines.push("");
+    lines.push(
+      "Answer only the last message below. The lines above are what makes it make sense — " +
+      "a buyer asking \"so tomorrow?\" is asking about whatever was being discussed. " +
+      "Do not repeat what you have already told them, and do not greet them again.",
+    );
+    lines.push("");
+  }
   lines.push("BUYER MESSAGE:");
   lines.push(message);
   return lines.join("\n");
@@ -448,6 +469,16 @@ Deno.serve(async (req) => {
             String(body?.lang ?? "").trim().slice(0, 40),
             String(body?.tone ?? "").trim().slice(0, 120),
             String(body?.store ?? "").trim().slice(0, 60),
+            // The last dozen lines at most, and each one short: the history is
+            // context, and a whole morning of it would crowd out the facts and
+            // the voice, which are what the draft is actually built from.
+            (Array.isArray(body?.history) ? body.history : [])
+              .slice(-12)
+              .map((l: Line) => ({
+                inbound: l?.inbound === true,
+                text: String(l?.text ?? "").slice(0, 400),
+              }))
+              .filter((l) => l.text),
           ),
         }],
       }],

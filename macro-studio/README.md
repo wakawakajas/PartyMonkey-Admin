@@ -722,6 +722,12 @@ Leave `type_back` off for the first day if you would rather watch what it drafts
 it can type anything. Messages still come up; replies just stay in Pigu to be copied by
 hand.
 
+**Chat history.** Pull chat history on the Replies screen stamps the row; the next pass
+opens that thread, reads the last two dozen lines and puts them back, and they appear on
+whatever screen asked. Nothing is read on a schedule beyond the message being answered --
+opening a thread is a click in a window somebody may be using, so it happens when
+somebody asks for it.
+
 **Photos.** A fact in Pigu can carry a picture — the size chart, the care label, the four
 colours side by side — and a reply that answers that question goes out with it. The words
 are typed into the background as usual; the picture is put on the clipboard as a file and
