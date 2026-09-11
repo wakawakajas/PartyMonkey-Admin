@@ -120,6 +120,11 @@ DEFAULTS: dict[str, Any] = {
     # sends, with the picture, the price and the link in it. Off means the
     # words go and the product does not.
     "send_products": True,
+    # How often the shop's own listings are read out of the Product tab into
+    # Pigu, so the Replies screen can search them instead of somebody typing
+    # names in by hand. Pressing Sync products on the screen asks for one
+    # straight away; this is the "and anyway, every so often" number.
+    "catalog_hours": 12,
     # Where reply photos live. The same private bucket the rest of the app
     # uses; the path is what the row carries.
     "photo_bucket": "shipment-photos",
@@ -151,6 +156,11 @@ DEFAULTS: dict[str, Any] = {
         "product_search": "Search Product Name",
         "product_send": "Send",
         "product_row_height": 252,
+        # how many screenfuls of listings to scroll through in one read, and
+        # how far a notch of the wheel goes. Four hundred listings is a big
+        # shop and this covers it; a shop with more gets the rest next time.
+        "catalog_pages": 14,
+        "catalog_scroll_notches": 5,
         # where the right-hand panel starts, in pixels from the window's left
         # edge. Only the panel is searched for product rows: the conversation
         # has titles in it too, in the strip above the messages.
@@ -395,6 +405,49 @@ class Cloud:
         )
         out = self.rest("GET", query)
         return out if isinstance(out, list) else []
+
+    def catalog_due(self, every_hours: int) -> bool:
+        """Whether to read the catalogue this pass: asked for since it was last
+        done, or simply older than the interval."""
+        out = self.rest("GET", "/reply_sync?select=catalog_wanted_at,catalog_at&id=eq.true")
+        row = (out or [{}])[0] if isinstance(out, list) else {}
+        asked, done = row.get("catalog_wanted_at"), row.get("catalog_at")
+        if asked and (not done or str(done) < str(asked)):
+            return True
+        if not done:
+            return True
+        try:
+            when = datetime.fromisoformat(str(done).replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return (datetime.now(timezone.utc) - when).total_seconds() > max(1, every_hours) * 3600
+
+    def save_catalog(self, rows: list[dict], shop: str) -> int:
+        """Upsert the listings, in blocks. merge-duplicates against the title
+        key means a listing already known is refreshed rather than doubled,
+        and seen_at moving is what says it is still on the panel."""
+        if not rows:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        body = [{
+            "user_id": self.user_id,
+            "shop": shop or "",
+            "title": r["title"][:300],
+            "price": r.get("price", "")[:60],
+            "sku": r.get("sku", "")[:80],
+            "stock": r.get("stock", "")[:20],
+            "seen_at": now,
+        } for r in rows]
+        wrote = 0
+        for at in range(0, len(body), 50):
+            block = body[at:at + 50]
+            self.rest("POST", "/reply_catalog?on_conflict=shop,title", block,
+                      prefer="return=minimal,resolution=merge-duplicates")
+            wrote += len(block)
+        self.rest("PATCH", "/reply_sync?id=eq.true",
+                  {"catalog_at": now, "catalog_count": len(body)},
+                  prefer="return=minimal")
+        return wrote
 
     def history_wanted(self) -> list[dict]:
         """Rows somebody has pressed Pull chat history on since they were last
@@ -1405,6 +1458,102 @@ _PRODUCT_STOP = {
 }
 
 
+def read_catalog(nodes: list[dict], window: tuple[int, int, int, int], reader: dict,
+                 hwnd: int) -> tuple[list[dict], str]:
+    """Every listing the Product tab will show, scrolled through a page at a
+    time.
+
+    The panel is a virtual list: only what is on screen exists in the tree, so
+    reading it means scrolling it, and scrolling it means posting a wheel event
+    -- which is also why this can run while somebody is using the PC. Stops
+    when a screenful adds nothing new, which is what the bottom of a list
+    looks like from here.
+    """
+    tab_name = str(reader.get("product_tab") or "Product")
+    tab = next((n for n in nodes
+                if n["control_type"] == "TabItem" and (n.get("name") or "").strip() == tab_name), None)
+    if not tab:
+        return [], f'no "{tab_name}" tab in the window'
+    if not _post_click_element(hwnd, tab):
+        return [], "the Product tab would not take a click"
+    time.sleep(1.2)
+
+    # An old search still in the box would return an old shortlist and call it
+    # the catalogue.
+    tree = warm_tree(hwnd)
+    search_name = str(reader.get("product_search") or "Search Product Name")
+    search = next((n for n in tree
+                   if n["control_type"] == "Edit" and search_name in (n.get("name") or "")), None)
+    if search:
+        _post_type(hwnd, search, "")
+        _post_key(hwnd, search, "enter")
+        time.sleep(1.8)
+
+    found: dict[str, dict] = {}
+    pages = int(reader.get("catalog_pages") or 14)
+    notches = int(reader.get("catalog_scroll_notches") or 5)
+    panel_left = float(reader.get("panel_left") or 4250)
+    mid_x = int(window[0] + panel_left + 300)
+    mid_y = int((window[1] + window[3]) / 2)
+    child = _post_target(hwnd, mid_x, mid_y)
+
+    for _ in range(pages):
+        tree = warm_tree(hwnd)
+        before = len(found)
+        for row in _catalog_rows(tree, window, reader):
+            key = row["title"].strip().lower()
+            if key and key not in found:
+                found[key] = row
+        if len(found) == before:
+            break                      # a screenful that added nothing is the end
+        if not child:
+            break
+        winapi.post_wheel(child, mid_x, mid_y, -notches)
+        time.sleep(0.9)
+
+    return list(found.values()), ""
+
+
+def _catalog_rows(nodes: list[dict], window: tuple[int, int, int, int],
+                  reader: dict) -> list[dict]:
+    """One listing per Send button, and the lines that belong to it.
+
+    The button is the anchor because it is the only thing in a row that is
+    unambiguously one per row. Everything else -- title, price, SKU, stock --
+    is read out of the band above it, in the order the panel draws them.
+    """
+    band = [float(reader.get("panel_left") or 4250), 99999.0]
+    pitch = float(reader.get("product_row_height") or 252)
+    send_name = str(reader.get("product_send") or "Send")
+    sends = [n for n in nodes
+             if n["control_type"] == "Button" and (n.get("name") or "").strip() == send_name
+             and n.get("rect") and _in_band(n, band, window)]
+    texts = [n for n in nodes
+             if n["control_type"] == "Text" and n.get("rect") and _in_band(n, band, window)
+             and (n.get("name") or "").strip()]
+    out = []
+    for send in sends:
+        top = send["rect"][1] - pitch
+        near = sorted((t for t in texts if top <= t["rect"][1] <= send["rect"][3]),
+                      key=lambda t: (t["rect"][1], t["rect"][0]))
+        lines = [t["name"].strip() for t in near if not _is_noise(t["name"])]
+        title = next((l for l in lines if len(l) > 15), "")
+        if not title:
+            continue
+        sku = next((l for l in lines if l.upper().startswith("SKU")), "")
+        stock = next((l for l in lines if re.fullmatch(r"x\s*[\d,]+", l, re.IGNORECASE)), "")
+        price_bits = [l for l in lines
+                      if re.search(r"\d", l) and l is not title and l != sku and l != stock
+                      and len(l) < 24]
+        out.append({
+            "title": title,
+            "price": " ".join(price_bits[:3])[:60],
+            "sku": sku.split("：", 1)[-1].split(":", 1)[-1].strip()[:80],
+            "stock": stock[:20],
+        })
+    return out
+
+
 # ---------------------------------------------------------------- one pass
 
 
@@ -1441,7 +1590,8 @@ def sync_once() -> dict:
     the loop writes into the heartbeat note."""
     cfg = load()
     report: dict[str, Any] = {"sent": 0, "threads": 0, "typed": 0, "photos": 0,
-                              "products": 0, "history": 0, "skipped": 0, "notes": []}
+                              "products": 0, "history": 0, "catalog": 0,
+                              "skipped": 0, "notes": []}
     cloud = Cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
                   cfg.get("email", ""), cfg.get("password", ""))
     device = (platform.node() or "shop PC")[:60]
@@ -1540,50 +1690,13 @@ def sync_once() -> dict:
         _state["last_report"] = report
         return report
 
-    # The conversation that happens to be open is NOT read. It would cost no
-    # clicks, and there is no way to be sure whose it is: the title says only
-    # the app's own name, and the list draws its selection without telling
-    # anybody. A message filed under the wrong buyer gets answered to the wrong
-    # buyer, so only threads this opens by name are read.
-
-    if cfg.get("open_unread"):
-        for thread in [t for t in threads if t["unread"]][:MAX_THREADS_PER_PASS]:
-            if not _open_thread(thread, hwnd, allow_click=True):
-                report["notes"].append(f"could not open {thread['name'][:30]}")
-                continue
-            harvest(thread["name"], warm_tree(hwnd))
-
-    # ---- somebody on a phone asked to see a thread
+    # ---- what has been approved goes out FIRST
     #
-    # Served before the replies are typed, because the person waiting for it is
-    # looking at the screen right now, while a reply that has been approved has
-    # already been decided and can wait another twenty seconds.
-    try:
-        wanted = cloud.history_wanted()
-    except CloudError as exc:
-        wanted = []
-        report["notes"].append(str(exc))
-    for row in wanted:
-        key = (row.get("chat_key") or "").strip()
-        tree = warm_tree(hwnd)
-        here = read_threads(tree, window, reader)
-        target = next((t for t in here if _chat_key(t["name"]) == key), None)
-        if not target:
-            report["notes"].append(f"{key[:30]} is not in the list to read")
-            continue
-        if not _open_thread(target, hwnd, allow_click=True):
-            report["notes"].append(f"could not open {key[:30]} to read it")
-            continue
-        tree = warm_tree(hwnd)
-        lines = read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
-        try:
-            cloud.save_history(str(row.get("id")),
-                               [{"inbound": bool(l["inbound"]), "text": l["text"][:400]}
-                                for l in lines])
-            report["history"] += 1
-        except CloudError as exc:
-            report["notes"].append(str(exc))
-
+    # Order is latency. Reading nineteen threads, then the catalogue, then
+    # somebody's history request, and only then typing the reply somebody
+    # approved a moment ago, is most of a minute of a person watching a
+    # screen and wondering whether it worked. Nothing in the reading half
+    # is more urgent than a reply that is already written.
     # ---- and the other direction
     if cfg.get("type_back"):
         try:
@@ -1656,6 +1769,70 @@ def sync_once() -> dict:
                 cloud.mark_typed(str(row.get("id")))
             except CloudError as exc:
                 report["notes"].append(str(exc))
+
+
+    # The conversation that happens to be open is NOT read. It would cost no
+    # clicks, and there is no way to be sure whose it is: the title says only
+    # the app's own name, and the list draws its selection without telling
+    # anybody. A message filed under the wrong buyer gets answered to the wrong
+    # buyer, so only threads this opens by name are read.
+
+    # Reading the unread comes after sending, and this is the expensive half:
+    # a click and a tree walk per thread. A buyer whose message arrives in Pigu
+    # four seconds later has lost nothing; a seller watching a reply they have
+    # already approved has.
+    if cfg.get("open_unread"):
+        for thread in [t for t in threads if t["unread"]][:MAX_THREADS_PER_PASS]:
+            if not _open_thread(thread, hwnd, allow_click=True):
+                report["notes"].append(f"could not open {thread['name'][:30]}")
+                continue
+            harvest(thread["name"], warm_tree(hwnd))
+
+    # ---- the shop's own listings, so the screen can search them
+    #
+    # After the messages, because a buyer waiting is worth more than a
+    # catalogue being a few minutes stale, and before the replies, because a
+    # reply may be sending one of these.
+    try:
+        if cloud.catalog_due(int(cfg.get("catalog_hours") or 12)):
+            listings, why = read_catalog(warm_tree(hwnd), window, reader, hwnd)
+            if listings:
+                report["catalog"] = cloud.save_catalog(listings, str(cfg.get("store") or ""))
+            elif why:
+                report["notes"].append(f"catalogue: {why}")
+    except CloudError as exc:
+        report["notes"].append(f"catalogue: {exc}")
+
+    # ---- somebody on a phone asked to see a thread
+    #
+    # Served before the replies are typed, because the person waiting for it is
+    # looking at the screen right now, while a reply that has been approved has
+    # already been decided and can wait another twenty seconds.
+    try:
+        wanted = cloud.history_wanted()
+    except CloudError as exc:
+        wanted = []
+        report["notes"].append(str(exc))
+    for row in wanted:
+        key = (row.get("chat_key") or "").strip()
+        tree = warm_tree(hwnd)
+        here = read_threads(tree, window, reader)
+        target = next((t for t in here if _chat_key(t["name"]) == key), None)
+        if not target:
+            report["notes"].append(f"{key[:30]} is not in the list to read")
+            continue
+        if not _open_thread(target, hwnd, allow_click=True):
+            report["notes"].append(f"could not open {key[:30]} to read it")
+            continue
+        tree = warm_tree(hwnd)
+        lines = read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
+        try:
+            cloud.save_history(str(row.get("id")),
+                               [{"inbound": bool(l["inbound"]), "text": l["text"][:400]}
+                                for l in lines])
+            report["history"] += 1
+        except CloudError as exc:
+            report["notes"].append(str(exc))
 
     _remember(fresh)
     note = (f"read {report['threads']} threads, sent {report['sent']}, typed {report['typed']}"
