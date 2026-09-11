@@ -722,6 +722,15 @@ Leave `type_back` off for the first day if you would rather watch what it drafts
 it can type anything. Messages still come up; replies just stay in Pigu to be copied by
 hand.
 
+**Photos.** A fact in Pigu can carry a picture — the size chart, the care label, the four
+colours side by side — and a reply that answers that question goes out with it. The words
+are typed into the background as usual; the picture is put on the clipboard as a file and
+pasted, which needs DuoKe in front for about a second, after which whatever was in front
+before gets the foreground back. `send_photos: false` keeps the words and leaves the
+picture to be pasted by hand. Either way the words are never lost to a photo that would
+not paste: the reply is marked as typed and the picture is named in the run's notes as
+the thing still to do.
+
 **duoke.json holds a password in plain text.** It is a local file on a single-user shop
 PC — the same trade the rest of Macro Studio makes — and it is gitignored. Use an
 account that has the Replies section and nothing else, not the account that can reach

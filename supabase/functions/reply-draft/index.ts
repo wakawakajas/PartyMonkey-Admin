@@ -7,9 +7,11 @@
 //   { distil: true }              read the approved replies back and say what
 //                                 standing facts they contain
 //
-// Answers with { draft, used }, where used is the ids of the approved replies
+// Answers with { draft, used, photos }: used is the ids of the approved replies
 // the draft was written from — the screen shows them, so it is never a mystery
-// why a draft said what it said. Or { facts } for a distil. Or { error }.
+// why a draft said what it said — and photos are the pictures attached to the
+// facts this question matched, offered for the screen to tick. Or { facts } for
+// a distil. Or { error }.
 //
 // WHY THE PROMPT IS BUILT HERE AND NOT IN THE APP: the two things that keep a
 // draft honest are the shop's facts and the replies already approved, and both
@@ -216,6 +218,29 @@ function words(s: string) {
 }
 
 type Example = { id: string; buyer_text: string; reply_text: string; hits: number; edited: boolean };
+type Fact = { fact: string; photo_path: string };
+
+// Which attached photo, if any, this question is asking to be shown.
+//
+// The same word overlap as the examples, and for the same reason: a buyer
+// asking about sizing uses the words that are written on the size chart. Two
+// at most, because a reply that arrives with four pictures is worse than one
+// that arrives with the right one — and none at all on a thin overlap, since
+// an unasked-for photo is something a buyer has to scroll past.
+function photosFor(message: string, facts: Fact[]): Fact[] {
+  const asked = new Set(words(message));
+  if (!asked.size) return [];
+  const scored = facts
+    .filter((f) => f.photo_path)
+    .map((f) => {
+      let score = 0;
+      for (const w of words(f.fact)) if (asked.has(w)) score += 1;
+      return { f, score };
+    })
+    .filter((x) => x.score >= 1);
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, 2).map((x) => x.f);
+}
 
 function pick(message: string, rows: Example[], want = 6): Example[] {
   const asked = [...new Set(words(message))];
@@ -243,7 +268,7 @@ function pick(message: string, rows: Example[], want = 6): Example[] {
 // ---- the prompt ----
 function draftPrompt(
   message: string,
-  facts: string[],
+  facts: Fact[],
   examples: Example[],
   lang: string,
   tone: string,
@@ -256,7 +281,13 @@ function draftPrompt(
   );
   lines.push("");
   lines.push("SHOP FACTS — the only facts you may state:");
-  lines.push(facts.length ? facts.map((f) => "- " + f).join("\n") : "- (none recorded yet)");
+  lines.push(
+    facts.length
+      ? facts.map((f) =>
+        "- " + f.fact + (f.photo_path ? "   [a photo of this goes out with your reply]" : ""))
+        .join("\n")
+      : "- (none recorded yet)",
+  );
   lines.push("");
   if (examples.length) {
     lines.push("REPLIES THIS SELLER HAS ALREADY APPROVED — copy this voice, wording and length:");
@@ -285,6 +316,14 @@ function draftPrompt(
     "order number.",
   );
   lines.push("- Never promise a refund amount, and never accept blame for a courier's delay.");
+  if (facts.some((f) => f.photo_path)) {
+    lines.push(
+      "- Where a fact above is marked as having a photo going out and that fact answers the " +
+      "question, say the picture is there — \"ni size chart dia\", \"here is the photo\" — in the " +
+      "buyer's own language. It is attached to the same reply, so do not describe what is in it " +
+      "and do not offer to send it later.",
+    );
+  }
   lines.push("- Do not apologise twice, and do not thank them twice.");
   if (tone) lines.push(`- This is a rewrite of a draft that was not right: make it ${tone}.`);
   lines.push(
@@ -331,9 +370,16 @@ Deno.serve(async (req) => {
     const { data: me } = await asUser.auth.getUser();
     if (!me?.user) return json({ error: "sign in first" }, 401);
 
+    // select * rather than naming the columns, so a fact still loads on a
+    // project where the photo migration has not been run yet
     const { data: factRows } = await asUser.from("reply_facts")
-      .select("fact").order("created_at");
-    const facts = (factRows ?? []).map((r) => String(r.fact ?? "").trim()).filter(Boolean);
+      .select("*").order("created_at");
+    const facts: Fact[] = (factRows ?? [])
+      .map((r) => ({
+        fact: String((r as { fact?: unknown }).fact ?? "").trim(),
+        photo_path: String((r as { photo_path?: unknown }).photo_path ?? "").trim(),
+      }))
+      .filter((f) => f.fact);
 
     // The whole table, ranked here. It is a few hundred rows of chat at the
     // very most — a shop that has approved a thousand replies has a thousand
@@ -387,13 +433,17 @@ Deno.serve(async (req) => {
     }
 
     const used = pick(message, examples);
+    // Worked out before the draft rather than after: a reply that says "here
+    // is the chart" with no chart attached is worse than one that never
+    // mentioned a chart at all.
+    const offered = photosFor(message, facts);
     const draft = (await ask({
       contents: [{
         role: "user",
         parts: [{
           text: draftPrompt(
             message,
-            facts,
+            [...offered, ...facts.filter((f) => !offered.includes(f))],
             used,
             String(body?.lang ?? "").trim().slice(0, 40),
             String(body?.tone ?? "").trim().slice(0, 120),
@@ -421,7 +471,13 @@ Deno.serve(async (req) => {
 
     if (!draft) return json({ error: "the draft came back empty — try again" }, 502);
 
-    return json({ draft, used: used.map((u) => u.id) });
+    return json({
+      draft,
+      used: used.map((u) => u.id),
+      // Offered, not decided: the screen shows these beside the draft with a
+      // tick each, so nothing goes to a buyer that nobody looked at.
+      photos: offered.map((f) => ({ path: f.photo_path, fact: f.fact })),
+    });
   } catch (err) {
     return json({ error: (err as Error)?.message ?? "unknown error" }, 500);
   }
