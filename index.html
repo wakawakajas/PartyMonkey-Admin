@@ -325,6 +325,24 @@ input:checked + .slider:before{transform:translateX(18px);}
   background:var(--card);border:1px solid var(--border);border-radius:9px;
   color:var(--ink);font-size:13px;cursor:pointer;}
 .design-line .turn button.on{border-color:var(--blueprint);color:var(--blueprint);}
+/* The set, in a window that comes to the click rather than a panel a scroll
+   away: one set of placeholders, one window. Dragged by its head, closed by its
+   ×, and never taller than the screen it floats over. */
+.ph-pop{position:fixed;z-index:66;width:310px;max-width:calc(100vw - 20px);
+  max-height:min(78vh,640px);overflow-y:auto;background:var(--card);
+  border:1px solid var(--border-strong);border-radius:16px;padding:12px;
+  box-shadow:0 18px 44px rgba(0,0,0,.42);display:none;}
+.ph-pop.open{display:block;}
+.ph-pop-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;
+  margin:-12px -12px 10px;padding:11px 12px;border-bottom:1px solid var(--border);
+  cursor:grab;touch-action:none;}
+.ph-pop-head.dragging{cursor:grabbing;}
+.ph-pop-title{font-size:12.5px;font-weight:600;}
+.ph-pop-sub{font-size:11px;color:var(--faint);margin-top:2px;}
+.ph-pop .chips{margin-bottom:0;}
+/* a set in the panel below: one line for the lot, not one line per box */
+.ph-setrow{cursor:pointer;}
+.ph-setrow .ph-card-head{margin-bottom:4px;}
 .sheet-nav{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:9px;}
 /* in the preview's own top row, beside the turn buttons: no gap above it, and
    tighter, since it is sharing the line rather than holding one of its own */
@@ -3588,7 +3606,8 @@ body.mc-docked .mc-bubble{display:none !important;}
            Tap to send it or not; the + adds a new one to the shelf. -->
       <div id="rpShelfWrap" style="margin-top:10px;">
         <h3 style="font-family:'IBM Plex Sans',sans-serif;font-size:10.5px;letter-spacing:.09em;
-          text-transform:uppercase;color:var(--faint);margin:0 0 4px;font-weight:600;">Put in a photo</h3>
+          text-transform:uppercase;color:var(--faint);margin:0 0 4px;font-weight:600;">Put in a
+          photo &mdash; or paste one with Ctrl+V</h3>
         <div class="rp-shelf" id="rpShelf"></div>
       </div>
       <div class="rp-basis" id="rpBasis" style="display:none;">
@@ -5614,6 +5633,9 @@ body.mc-docked .mc-bubble{display:none !important;}
       <div id="pcCatList"></div>
     </div>
   </div>
+  <!-- one set of placeholders, in a window of its own — written here, moved
+       to wherever the card was clicked -->
+  <div class="ph-pop" id="phSetPop"></div>
   </div><!-- /#appScreen -->
 </div><!-- /#postAuthChrome -->
 
@@ -7263,8 +7285,13 @@ function phSelSync(){
   // re-laying a set, or changing only what is picked, needs a pick first
   const rs=document.getElementById('resizeSetBtn'); if(rs) rs.disabled=n<1;
   const bs=document.getElementById('bulkApplySelBtn'); if(bs) bs.disabled=n<1;
-  document.querySelectorAll('#phListWrap .ph-card').forEach(c=>
-    c.classList.toggle('sel',phSel.has(c.dataset.id)));
+  // a set row reads as picked when the whole set is
+  document.querySelectorAll('#phListWrap .ph-card').forEach(c=>{
+    if(c.dataset.set!=null){
+      const boxes=phSetBoxes(Number(c.dataset.set));
+      c.classList.toggle('sel',boxes.length>0&&boxes.every(q=>phSel.has(q.id)));
+    }else c.classList.toggle('sel',phSel.has(c.dataset.id));
+  });
 }
 function phSelSet(ids){
   phSel.clear();
@@ -7570,12 +7597,15 @@ document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
     return null;
   };
   let drag=null, band=null;
+  // a click that never became a drag: the card was pointed at, so its set opens
+  // in its own window where everything about it can be reached at once
+  let tap=null;
   c.addEventListener('pointerdown',e=>{
     const q=at(e); if(!q) return;
     const h=hit(q);
     if(!h){
       // empty paper: start a marquee, and a plain click clears the selection
-      band={x0:q.x,y0:q.y,add:e.shiftKey};
+      band={x0:q.x,y0:q.y,add:e.shiftKey}; tap=null;
       if(!e.shiftKey&&phSel.size) phSelSet([]);
       try{ c.setPointerCapture(e.pointerId); }catch(err){}
       e.preventDefault();
@@ -7583,10 +7613,11 @@ document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
     }
     if(e.shiftKey){
       if(phSel.has(h.ph.id)) phSel.delete(h.ph.id); else phSel.add(h.ph.id);
-      phSelSync(); drawAll();
+      tap=null; phSelSync(); drawAll();
       return;
     }
     if(!phSel.has(h.ph.id)) phSelSet([h.ph.id]);
+    tap={ph:h.ph,x:e.clientX,y:e.clientY};
     // Moving takes the whole selection with it, the way dragging one of
     // several selected objects does; resizing is one box at a time.
     drag={mode:h.corner?'resize':'move',ph:h.ph,x:q.x,y:q.y,
@@ -7605,6 +7636,8 @@ document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
     }
     if(!drag) return;
     e.preventDefault();
+    // a few pixels of wobble is still a click; past that it is a drag
+    if(tap&&(Math.abs(e.clientX-tap.x)>4||Math.abs(e.clientY-tap.y)>4)) tap=null;
     const dx=q.x-drag.x, dy=q.y-drag.y;
     if(drag.mode==='move') drag.from.forEach(f=>{ f.p.xMm=f.x+dx; f.p.yMm=f.y+dy; });
     else{
@@ -7632,6 +7665,7 @@ document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
     if(!drag) return;
     drag=null;
     renderPlaceholderList(); phSelSync(); drawAll();
+    if(tap){ phPopOpen(tap.ph,{clientX:tap.x,clientY:tap.y}); tap=null; }
   };
   c.addEventListener('pointerup',stop);
   c.addEventListener('pointercancel',stop);
@@ -7661,71 +7695,224 @@ document.addEventListener('keydown',e=>{
   renderPlaceholderList(); phSelSync(); drawAll();
 });
 
+// ---------- the sets, and the window one opens in ----------
+// A sheet of twenty identical boxes made a panel of twenty identical rows, and
+// finding in it the box just pointed at was the whole trouble. The panel lists
+// sets instead — one line each — and the set opens in a window that comes to
+// the click, carrying what the whole set shares and what the one card does not.
+const phSetNo=p=>Math.max(0,Math.floor(Number(p&&p.setNo)||0));
+const phSetBoxes=no=>state.placeholders.filter(p=>phSetNo(p)===no);
+function phSetNumbers(){
+  return [...new Set(state.placeholders.map(phSetNo))].sort((a,b)=>a-b);
+}
+// the set's card size, where every box in it agrees — otherwise the boxes differ
+function phSetSize(list){
+  if(!list.length) return null;
+  const w=list[0].wMm,h=list[0].hMm;
+  return list.every(q=>Math.abs(q.wMm-w)<0.01&&Math.abs(q.hMm-h)<0.01)?{w,h}:null;
+}
+function phSetLabel(no){ return 'Set '+(no+1); }
+function phSetSummary(no){
+  const list=phSetBoxes(no), u=state.paper.unit, sz=phSetSize(list);
+  const size=sz?`${round(fromMm(sz.w,u))} × ${round(fromMm(sz.h,u))} ${u}`:'mixed sizes';
+  let cat='';
+  if(pcMode==='placecard'){
+    const names=[...new Set(list.map(q=>{
+      const c=(state.cats||[]).find(z=>z.id===q.cat); return c?(c.name||'—'):''; }))].filter(Boolean);
+    cat=names.length===1?' · '+names[0]:names.length?' · several groups':' · no group';
+  }
+  return `${list.length} card${list.length===1?'':'s'} · ${size}${cat}`;
+}
 function renderPlaceholderList(){
   const u=state.paper.unit;
   document.querySelectorAll('.unitHint').forEach(e=>e.textContent=u);
   const wrap=document.getElementById('phListWrap');
-  if(!state.placeholders.length){wrap.innerHTML='<p class="hint" style="margin:0;">No placeholders yet.</p>';return;}
-  // which group each box belongs to — Place Card only, since Custom Template
-  // has no categories to put it in
-  const catPick=p=>pcMode!=='placecard'?'':`
-      <label class="field" style="margin-top:6px;"><span>CATEGORY</span>
-        <select data-field="cat">
-          <option value=""${p.cat?'':' selected'}>— none —</option>
-          ${(state.cats||[]).map(c=>
-            `<option value="${escapeHtml(c.id)}"${p.cat===c.id?' selected':''}>${escapeHtml(c.name||'')}</option>`).join('')}
-        </select></label>`;
-  wrap.innerHTML='<div class="ph-list">'+state.placeholders.map(p=>`
-    <div class="ph-card" data-id="${p.id}">
-      <div class="ph-card-head"><input class="ph-label-inp" type="text" data-field="label" value="${escapeHtml(p.label||'')}" aria-label="Placeholder name"/><button class="del-btn" data-del="${p.id}">×</button></div>
-      <div class="grid4">
-        <label class="field"><span>X</span><input type="number" step="0.1" value="${round(fromMm(p.xMm,u))}" data-field="x"/></label>
-        <label class="field"><span>Y</span><input type="number" step="0.1" value="${round(fromMm(p.yMm,u))}" data-field="y"/></label>
-        <label class="field"><span>W</span><input type="number" step="0.1" value="${round(fromMm(p.wMm,u))}" data-field="w"/></label>
-        <label class="field"><span>H</span><input type="number" step="0.1" value="${round(fromMm(p.hMm,u))}" data-field="h"/></label>
-      </div>${catPick(p)}
-    </div>`).join('')+'</div>';
-  wrap.querySelectorAll('select[data-field="cat"]').forEach(sel=>{
-    sel.addEventListener('change',e=>{
-      const ph=state.placeholders.find(x=>x.id===e.target.closest('.ph-card').dataset.id);
-      if(!ph) return;
-      ph.cat=e.target.value;
-      if(typeof pcRenderCats==='function') pcRenderCats();
-      drawAll();
-    });
-  });
-  wrap.querySelectorAll('input').forEach(inp=>{
-    inp.addEventListener('input',e=>{
-      const ph=state.placeholders.find(x=>x.id===e.target.closest('.ph-card').dataset.id);
-      const f=e.target.dataset.field;
-      if(f==='label'){ ph.label=e.target.value; drawAll(); return; }
-      const v=toMm(parseFloat(e.target.value)||0,state.paper.unit);
-      if(f==='x')ph.xMm=v; if(f==='y')ph.yMm=v; if(f==='w')ph.wMm=v; if(f==='h')ph.hMm=v;
-      drawAll();
-    });
-  });
-  wrap.querySelectorAll('[data-del]').forEach(b=>{
+  if(!state.placeholders.length){
+    wrap.innerHTML='<p class="hint" style="margin:0;">No placeholders yet.</p>';
+    phPopSync(); return;
+  }
+  wrap.innerHTML='<div class="ph-list">'+phSetNumbers().map(no=>`
+    <div class="ph-card ph-setrow" data-set="${no}">
+      <div class="ph-card-head"><span>${escapeHtml(phSetLabel(no))}</span>
+        <button type="button" class="btn-outline btn-sm" data-openset="${no}">Open</button></div>
+      <p class="hint" style="margin:0;">${escapeHtml(phSetSummary(no))}</p>
+    </div>`).join('')+'</div>'
+    +'<p class="hint" style="margin:7px 0 0;">Click a card on the sheet, or Open, for the set in its own window.</p>';
+  wrap.querySelectorAll('[data-openset]').forEach(b=>{
     b.addEventListener('click',e=>{
       e.stopPropagation();
-      state.placeholders=state.placeholders.filter(x=>x.id!==b.dataset.del);
-      phSel.delete(b.dataset.del);
-      renderPlaceholderList();phSelSync();drawAll();
+      const first=phSetBoxes(Number(b.dataset.openset))[0];
+      if(first) phPopOpen(first);
     });
   });
-  // a card is the same object as the box on the sheet, so picking either picks
-  // both — and shift adds, exactly as it does on the canvas
-  wrap.querySelectorAll('.ph-card').forEach(card=>{
-    card.addEventListener('click',e=>{
-      if(e.target.closest('input,select,[data-del]')) return;
-      const id=card.dataset.id;
-      if(e.shiftKey){
-        if(phSel.has(id)) phSel.delete(id); else phSel.add(id);
-        phSelSync(); drawAll();
-      }else phSelSet([id]);
+  // the row picks the set out on the sheet, shift adds it to what is held
+  wrap.querySelectorAll('.ph-setrow').forEach(row=>{
+    row.addEventListener('click',e=>{
+      if(e.target.closest('button')) return;
+      const ids=phSetBoxes(Number(row.dataset.set)).map(q=>q.id);
+      phSelSet(e.shiftKey?[...phSel,...ids]:ids);
     });
   });
-  phSelSync();
+  phSelSync(); phPopSync();
 }
+
+// ---------- one set, one window ----------
+// What the window is showing: the set, and which of its cards the fields at the
+// bottom belong to. Kept by id, so a redraw finds it again or closes.
+const phPop={no:null,id:null,x:null,y:null};
+function phPopEl(){ return document.getElementById('phSetPop'); }
+function phPopClose(){
+  const el=phPopEl();
+  if(el){ el.classList.remove('open'); el.innerHTML=''; }
+  phPop.no=null; phPop.id=null;
+}
+function phPopOpen(ph,ev){
+  if(!ph) return;
+  phPop.no=phSetNo(ph); phPop.id=ph.id;
+  const el=phPopEl(); if(!el) return;
+  el.classList.add('open');
+  phPopRender();
+  // it comes to the click the first time; after that it stays where it was put
+  if(ev||phPop.x==null){
+    const w=el.offsetWidth||310, h=el.offsetHeight||360;
+    const cx=ev?ev.clientX+16:Math.max(10,(window.innerWidth-w)/2);
+    const cy=ev?ev.clientY-24:Math.max(10,(window.innerHeight-h)/2);
+    phPop.x=Math.max(8,Math.min(window.innerWidth-w-8,cx));
+    phPop.y=Math.max(8,Math.min(window.innerHeight-h-8,cy));
+  }
+  el.style.left=phPop.x+'px'; el.style.top=phPop.y+'px';
+}
+// the window follows the sheet: a set that is gone takes it with it
+function phPopSync(){
+  if(phPop.no==null) return;
+  if(!phSetBoxes(phPop.no).length){ phPopClose(); return; }
+  if(!state.placeholders.some(q=>q.id===phPop.id)) phPop.id=phSetBoxes(phPop.no)[0].id;
+  phPopRender();
+}
+function phPopRender(){
+  const el=phPopEl(); if(!el||phPop.no==null) return;
+  const u=state.paper.unit;
+  const list=phSetBoxes(phPop.no);
+  if(!list.length){ phPopClose(); return; }
+  const ph=list.find(q=>q.id===phPop.id)||list[0];
+  phPop.id=ph.id;
+  const sz=phSetSize(list);
+  const catRow=pcMode!=='placecard'?'':`
+    <label class="field"><span>GROUP — THE WHOLE SET</span>
+      <select data-pop="cat">
+        <option value="">— none —</option>
+        ${(state.cats||[]).map(c=>`<option value="${escapeHtml(c.id)}"${
+          list.every(q=>q.cat===c.id)?' selected':''}>${escapeHtml(c.name||'')}</option>`).join('')}
+      </select></label>`;
+  el.innerHTML=`
+    <div class="ph-pop-head" data-pop="drag">
+      <div><div class="ph-pop-title">${escapeHtml(phSetLabel(phPop.no))}</div>
+        <div class="ph-pop-sub">${escapeHtml(phSetSummary(phPop.no))}</div></div>
+      <button class="del-btn" type="button" data-pop="close" aria-label="Close">×</button>
+    </div>
+    <div class="sect-label" style="margin-top:0;">The whole set</div>
+    ${catRow}
+    <div class="grid2" style="margin-top:9px;">
+      <label class="field"><span>WIDTH</span>
+        <input type="number" step="0.1" data-pop="setw" value="${sz?round(fromMm(sz.w,u)):''}" placeholder="mixed"/></label>
+      <label class="field"><span>HEIGHT</span>
+        <input type="number" step="0.1" data-pop="seth" value="${sz?round(fromMm(sz.h,u)):''}" placeholder="mixed"/></label>
+    </div>
+    <div class="grid2" style="margin-top:9px;">
+      <button type="button" class="btn-outline btn-sm" data-pop="selset">Pick out the set</button>
+      <button type="button" class="btn-danger btn-sm" data-pop="delset">Delete the set</button>
+    </div>
+    <div class="sect-label">The card in hand</div>
+    <div class="chips">${list.map(q=>
+      `<button type="button" class="btn-outline btn-sm${q.id===ph.id?' on':''}" data-pop="pick" data-pid="${q.id}">${escapeHtml(q.label||'—')}</button>`).join('')}</div>
+    <label class="field" style="margin-top:9px;"><span>NAME</span>
+      <input type="text" data-pop="label" value="${escapeHtml(ph.label||'')}"/></label>
+    <div class="grid4" style="margin-top:9px;">
+      <label class="field"><span>X</span><input type="number" step="0.1" data-pop="x" value="${round(fromMm(ph.xMm,u))}"/></label>
+      <label class="field"><span>Y</span><input type="number" step="0.1" data-pop="y" value="${round(fromMm(ph.yMm,u))}"/></label>
+      <label class="field"><span>W</span><input type="number" step="0.1" data-pop="w" value="${round(fromMm(ph.wMm,u))}"/></label>
+      <label class="field"><span>H</span><input type="number" step="0.1" data-pop="h" value="${round(fromMm(ph.hMm,u))}"/></label>
+    </div>
+    <button type="button" class="btn-outline btn-sm" data-pop="delone" style="width:100%;margin-top:9px;">Delete this card</button>`;
+}
+// The whole set resized about each box's own centre, so a set snapped into the
+// cards of the first stays centred in them.
+function phPopSetSize(wMm,hMm){
+  const p=paperMm();
+  phSetBoxes(phPop.no).forEach(q=>{
+    const cx=q.xMm+q.wMm/2, cy=q.yMm+q.hMm/2;
+    if(wMm){ q.wMm=Math.max(2,wMm); q.xMm=Math.max(0,Math.min(p.w-q.wMm,cx-q.wMm/2)); }
+    if(hMm){ q.hMm=Math.max(2,hMm); q.yMm=Math.max(0,Math.min(p.h-q.hMm,cy-q.hMm/2)); }
+  });
+}
+(function phPopWiring(){
+  const el=phPopEl(); if(!el) return;
+  const cur=()=>state.placeholders.find(q=>q.id===phPop.id);
+  el.addEventListener('input',e=>{
+    const t=e.target.closest('[data-pop]'); if(!t) return;
+    const k=t.dataset.pop, u=state.paper.unit, ph=cur();
+    if(k==='setw'||k==='seth'){
+      const v=parseFloat(t.value); if(!isFinite(v)||v<=0) return;
+      phPopSetSize(k==='setw'?toMm(v,u):0,k==='seth'?toMm(v,u):0);
+      renderPlaceholderList(); refreshArtInputs(); drawAll(); return;
+    }
+    if(!ph) return;
+    if(k==='label'){ ph.label=t.value; drawAll(); return; }
+    const v=toMm(parseFloat(t.value)||0,u);
+    if(k==='x')ph.xMm=v; else if(k==='y')ph.yMm=v;
+    else if(k==='w')ph.wMm=v; else if(k==='h')ph.hMm=v; else return;
+    drawAll();
+  });
+  el.addEventListener('change',e=>{
+    const t=e.target.closest('[data-pop="cat"]'); if(!t) return;
+    phSetBoxes(phPop.no).forEach(q=>{ q.cat=t.value; });
+    if(typeof pcRenderCats==='function') pcRenderCats();
+    renderPlaceholderList(); drawAll();
+  });
+  el.addEventListener('click',e=>{
+    const t=e.target.closest('[data-pop]'); if(!t) return;
+    const k=t.dataset.pop;
+    if(k==='close'){ phPopClose(); return; }
+    if(k==='pick'){ phPop.id=t.dataset.pid; phSelSet([phPop.id]); phPopRender(); return; }
+    if(k==='selset'){ phSelSet(phSetBoxes(phPop.no).map(q=>q.id)); return; }
+    if(k==='delset'){
+      const ids=new Set(phSetBoxes(phPop.no).map(q=>q.id));
+      state.placeholders=state.placeholders.filter(q=>!ids.has(q.id));
+      ids.forEach(id=>phSel.delete(id));
+      phPopClose(); renderPlaceholderList(); refreshArtInputs(); updateCalc();
+      renderDesignLines(); phSelSync(); drawAll();
+      return;
+    }
+    if(k==='delone'){
+      state.placeholders=state.placeholders.filter(q=>q.id!==phPop.id);
+      phSel.delete(phPop.id); phPop.id=null;
+      renderPlaceholderList(); refreshArtInputs(); updateCalc();
+      renderDesignLines(); phSelSync(); drawAll();
+      return;
+    }
+  });
+  // dragged by its head, the way a window is
+  let drag=null;
+  el.addEventListener('pointerdown',e=>{
+    const head=e.target.closest('[data-pop="drag"]');
+    if(!head||e.target.closest('button')) return;
+    drag={x:e.clientX-el.offsetLeft,y:e.clientY-el.offsetTop};
+    head.classList.add('dragging');
+    try{ head.setPointerCapture(e.pointerId); }catch(err){}
+    e.preventDefault();
+  });
+  el.addEventListener('pointermove',e=>{
+    if(!drag) return;
+    phPop.x=Math.max(8,Math.min(window.innerWidth-el.offsetWidth-8,e.clientX-drag.x));
+    phPop.y=Math.max(8,Math.min(window.innerHeight-40,e.clientY-drag.y));
+    el.style.left=phPop.x+'px'; el.style.top=phPop.y+'px';
+  });
+  const stop=()=>{ drag=null;
+    el.querySelectorAll('.dragging').forEach(h=>h.classList.remove('dragging')); };
+  el.addEventListener('pointerup',stop);
+  el.addEventListener('pointercancel',stop);
+})();
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&phPop.no!=null) phPopClose(); });
 // The bulk row, applied to every box or only to the ones picked out. Blank
 // fields are left alone, and on Place Card the category comes with them — a
 // whole group moved to another in one go, which one select at a time is not.
@@ -38026,7 +38213,7 @@ function rpRenderShelf(){
 }
 
 async function rpShelfAdd(file){
-  const msg=rpEl('rpMsg');
+  const msg=rpEl(rpNow?'rpMsg':'rpPasteMsg');
   const session=await requireSession(msg); if(!session) return;
   showMsg(msg,'Uploading the photo…',true);
   try{
@@ -38054,7 +38241,11 @@ async function rpShelfDrop(id){
   const ph=rpShelf.find(x=>x.id===id);
   if(!ph) return;
   const {error}=await sb.from('reply_photos').delete().eq('id',id);
-  if(error){ showMsg(rpEl('rpMsg'),'Could not take it off: '+escapeHtml(error.message),false); return; }
+  if(error){
+    showMsg(rpEl(rpNow?'rpMsg':'rpPasteMsg'),
+      'Could not take it off: '+escapeHtml(error.message),false);
+    return;
+  }
   rpPhotoSend.delete(ph.photo_path);
   rpShelf=rpShelf.filter(x=>x.id!==id);
   rpRenderShelf();
@@ -38423,6 +38614,20 @@ rpEl('rpLineBtn').addEventListener('click',()=>{
   box.setSelectionRange(at+1,at+1);
 });
 rpEl('rpHistoryBtn').addEventListener('click',rpPullHistory);
+// Ctrl+V, anywhere on this screen: a screenshot of the order, a photo of the
+// parcel, a picture copied off a supplier's chat — it lands on the shelf and
+// is ticked to go out. Only an image is taken; pasting words into the draft is
+// still pasting words into the draft, which is the more common thing by far.
+document.addEventListener('paste',e=>{
+  if(currentScreen!=='replies') return;
+  const items=[...((e.clipboardData&&e.clipboardData.items)||[])];
+  const shot=items.find(i=>i.kind==='file'&&/^image\//.test(i.type||''));
+  if(!shot) return;
+  const file=shot.getAsFile();
+  if(!file) return;
+  e.preventDefault();
+  rpShelfAdd(file);
+});
 
 </script>
 </body>

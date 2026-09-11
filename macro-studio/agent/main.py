@@ -591,6 +591,7 @@ class MacroVideoSettings(BaseModel):
     mode: str = "fullscreen"  # fullscreen | window | region
     fps: int = 10
     window_title: Optional[str] = None
+    window_process: Optional[str] = None
     region: Optional[dict] = None
 
 

@@ -89,10 +89,13 @@ DEFAULTS: dict[str, Any] = {
     # Which shop these messages belong to, if you run more than one. Shown on
     # the message in Pigu; nothing keys off it.
     "store": "",
-    # The window to read. Matched as a case-insensitive substring of the
-    # title, so "duoke" finds "DuoKe - 多客" and whatever it renames itself to
-    # when a chat is open.
-    "window_title": "duoke",
+    # Which window to read, either way round: a case-insensitive substring of
+    # the title, OR of the program's own file name. The file name is the one
+    # that holds still -- DuoKe titles itself 多客 in Chinese and renames
+    # itself again whenever a conversation is open, while the exe stays
+    # Duoke.exe. Leave the title empty to match on the program alone.
+    "window_title": "",
+    "window_process": "duoke",
     "poll_seconds": 20,
     # Off means read-only: messages come up, nothing is ever typed into DuoKe.
     # Worth leaving off for the first day, to watch what it drafts before it
@@ -379,13 +382,19 @@ class Cloud:
 
 
 def find_window() -> Optional[int]:
-    want = (load().get("window_title") or "duoke").strip().lower()
-    if not want:
+    cfg = load()
+    want = (cfg.get("window_title") or "").strip().lower()
+    want_exe = (cfg.get("window_process") or "").strip().lower()
+    if not want and not want_exe:
         return None
     best: Optional[int] = None
     for hwnd in winapi.enum_top_level_windows():
         title = winapi.window_title(hwnd) or ""
-        if want not in title.lower():
+        by_title = bool(want) and want in title.lower()
+        by_exe = False
+        if want_exe and not by_title:
+            by_exe = want_exe in (winapi.process_name(winapi.window_pid(hwnd)) or "")
+        if not (by_title or by_exe):
             continue
         # Our own browser tab showing the Replies screen has "DuoKe" in its
         # title the moment somebody types the word. A window with no size is
@@ -881,6 +890,7 @@ def status() -> dict:
         "poll_seconds": int(cfg.get("poll_seconds") or 20),
         "type_back": bool(cfg.get("type_back")),
         "window_title": cfg.get("window_title"),
+        "window_process": cfg.get("window_process"),
         "window_found": find_window() is not None,
         "last_pass_at": _state["last_pass_at"],
         "last_error": _state["last_error"],

@@ -66,6 +66,30 @@ def window_pid(hwnd: int) -> int:
     return pid.value
 
 
+def process_name(pid: int) -> str:
+    """The exe behind a window, lowercase and without its path.
+
+    Matching an app by its window title is fine in English and useless in
+    Chinese: DuoKe calls itself 多客, a title nobody is going to type into a
+    config file by hand, and it renames itself again whenever a chat is open.
+    The executable does not change.
+    """
+    if not pid:
+        return ""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return ""
+        return buf.value.rsplit("\\", 1)[-1].lower()
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def window_title(hwnd: int) -> str:
     length = user32.GetWindowTextLengthW(hwnd)
     if length <= 0:
