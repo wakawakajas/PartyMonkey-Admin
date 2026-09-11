@@ -113,19 +113,50 @@ DEFAULTS: dict[str, Any] = {
     # Opening an unread conversation is a click, and a click needs the window.
     # Off means only the conversation already open is read.
     "open_unread": True,
-    # Filled in from a probe. Each is matched by automation_id first, then
-    # class_name, then name-contains; x_band is the fallback -- the left/right
-    # split of a two-column chat window, in pixels from the window's left edge.
+    # Where the three things are. Everything here is empty on purpose: the
+    # window is measured rather than described, from the one element that can
+    # be found without being told anything -- the reply box, which is the
+    # widest text field at the bottom and is exactly as wide as the
+    # conversation above it. Everything else is relative to that.
+    #
+    # Fill a selector or an x_band in from a probe only where the measuring
+    # gets it wrong on a particular build: a number written down here is true
+    # until somebody drags the window to another screen, and measuring is true
+    # afterwards as well.
     "reader": {
-        "chat_list": {"automation_id": "", "class_name": "", "name": "", "x_band": [0, 340]},
-        "messages": {"automation_id": "", "class_name": "", "name": "", "x_band": [340, 99999]},
+        "chat_list": {"automation_id": "", "class_name": "", "name": "", "x_band": []},
+        "messages": {"automation_id": "", "class_name": "", "name": "", "x_band": []},
         "input": {"automation_id": "", "class_name": "", "name": ""},
+        # how far left of the conversation the thread list reaches. Beyond it
+        # is the shop switcher, whose entries are text too and are not people.
+        "list_width": 560,
+        # the strip above the conversation: the buyer's name, the product, the
+        # order number. Text, in the same column, said by nobody.
+        "header_height": 300,
+        # and where that strip starts, below the window's own toolbar
+        "header_top": 150,
+        # a row in the conversation list, and where the list begins under its
+        # tabs and its Sort control
+        "row_height": 100,
+        "list_top": 230,
         # What an unread thread looks like in the list. DuoKe shows a count;
         # a thread whose name matches this is opened and read.
         "unread_pattern": r"\((\d+)\)|\b(\d+)\s*条|·\s*(\d+)$",
         # A message bubble shorter than this is a sticker, a timestamp or a
         # read receipt, not a question.
         "min_message_chars": 2,
+        # DuoKe's own furniture, sitting in the conversation looking like
+        # things somebody said: the label on an auto-reply, the heading over a
+        # translation, the order panel's field names. Matched as a
+        # case-insensitive whole line, so a buyer who writes "more" is still
+        # heard.
+        "ignore_lines": [
+            "more", "seller note", "translate", "original text", "translation preview",
+            "default translation", "duoke order note", "auto invite to follow",
+            "incoming buyer reception", "logistic information", "shipping provider",
+            "tracking number", "order id", "total amount", "logistics status",
+            "abnormal reason", "completed time", "no result found", "sort",
+        ],
     },
 }
 
@@ -409,6 +440,30 @@ def find_window() -> Optional[int]:
     return best
 
 
+# How long to wait for a Chromium app to build its accessibility tree.
+#
+# DuoKe is Electron, and an Electron window hands out nothing but empty panes
+# until an accessibility client asks -- the FIRST probe of this window returned
+# 22 nodes, the second 1476. So the tree is touched, given a moment, and only
+# then walked. Nothing is a bug about this; it is how Chromium avoids building
+# a tree nobody reads.
+TREE_WARM_SECONDS = 1.6
+# Below this many named elements the window is assumed to be still cold rather
+# than genuinely empty, and it is asked again.
+TREE_COLD_NAMES = 12
+
+
+def warm_tree(hwnd: int) -> list[dict]:
+    """The window's elements, after however long it takes them to exist."""
+    root = uia.element_from_handle(hwnd)
+    nodes = _walk(root, max_depth=16, budget=[9000])
+    named = sum(1 for n in nodes if (n.get("name") or "").strip())
+    if named >= TREE_COLD_NAMES:
+        return nodes
+    time.sleep(TREE_WARM_SECONDS)
+    return _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[9000])
+
+
 def _rect(element) -> Optional[tuple[int, int, int, int]]:
     try:
         r = element.CurrentBoundingRectangle
@@ -490,12 +545,15 @@ def probe() -> dict:
     if root is None:
         return {"ok": False, "error": "Windows would not hand over that window's elements"}
     window = winapi.window_rect(hwnd)
-    nodes = _walk(root, max_depth=16, budget=[6000])
+    nodes = warm_tree(hwnd)
 
     # Panes ranked by how much text they contain, which is what tells the
     # conversation from the chrome around it.
     panes: list[dict] = []
     for node in nodes:
+        rect0 = node.get("rect")
+        if rect0 and (rect0[2] - rect0[0] <= 1 or rect0[3] - rect0[1] <= 1):
+            continue                      # built but not shown; see _texts
         if node["control_type"] not in ("Pane", "List", "Group", "Document", "Custom", "Table"):
             continue
         rect = node.get("rect")
@@ -599,6 +657,12 @@ def _texts(nodes: list[dict], min_chars: int) -> list[dict]:
         rect = node.get("rect")
         if not rect:
             continue
+        # A panel that is built but not shown -- an order sidebar, a terms
+        # dialog, the tab nobody is looking at -- reports a rect with no width
+        # or height at all. Its text is real text and belongs to no column, so
+        # without this the conversation fills up with a migration letter.
+        if rect[2] - rect[0] <= 1 or rect[3] - rect[1] <= 1:
+            continue
         out.append({"text": name, "rect": rect, "_el": node["_el"],
                     "control_type": node["control_type"]})
     out.sort(key=lambda n: (n["rect"][1], n["rect"][0]))
@@ -606,6 +670,11 @@ def _texts(nodes: list[dict], min_chars: int) -> list[dict]:
 
 
 _TIME_ONLY = re.compile(r"^[\d\s:./\-]+$")
+# An icon font puts its glyphs in Unicode's private use area, so a chat list
+# full of \ue22c is full of buttons, not people.
+_GLYPHS = re.compile(r"^[\ue000-\uf8ff\s]+$")
+# The unread badge: a small number on its own, at the left of a row.
+_BADGE = re.compile(r"^\d{1,3}$")
 _NOISE = re.compile(
     r"^(yesterday|today|kemarin|hari ini|昨天|今天|已读|未读|read|unread|sent|delivered)$",
     re.IGNORECASE,
@@ -614,7 +683,53 @@ _NOISE = re.compile(
 
 def _is_noise(text: str) -> bool:
     t = text.strip()
-    return not t or bool(_TIME_ONLY.match(t)) or bool(_NOISE.match(t))
+    return (not t or bool(_TIME_ONLY.match(t)) or bool(_NOISE.match(t))
+            or bool(_GLYPHS.match(t)))
+
+
+def message_band(nodes: list[dict], window: tuple[int, int, int, int],
+                 reader: dict) -> Optional[list[float]]:
+    """Where the conversation is, in pixels from the window's left edge.
+
+    Taken from the reply box, because the reply box is exactly as wide as the
+    conversation above it -- which is true of this app at any window size and
+    on any monitor, where a number typed into a config file is true only until
+    somebody drags the window onto a different screen. An explicit x_band in
+    duoke.json still wins, for a build where it is not true.
+    """
+    named = reader.get("messages") or {}
+    if named.get("x_band"):
+        return list(named["x_band"])
+    box = _input_box(nodes, reader)
+    if not box or not box.get("rect"):
+        return None
+    left = box["rect"][0] - window[0]
+    right = box["rect"][2] - window[0]
+    # a little slack each side: a bubble can be indented past the box's edge
+    return [max(0, left - 40), right + 40]
+
+
+def read_open_who(nodes: list[dict], window: tuple[int, int, int, int],
+                  reader: dict, band: list[float]) -> Optional[str]:
+    """Who the open conversation is with.
+
+    The window title cannot say: DuoKe titles itself after itself. The name is
+    written above the conversation instead -- the leftmost piece of text in the
+    conversation column's own header strip -- which is where a chat app has put
+    it since chat apps existed.
+    """
+    header = int(reader.get("header_height") or 300)
+    # Below the window's own toolbar, whose stats ("Online Duration") sit in
+    # the same column and read as a name to anything looking only at x.
+    above = int(reader.get("header_top") or 150)
+    lines = [
+        l for l in _texts([n for n in nodes if _in_band(n, band, window)], 2)
+        if above <= (l["rect"][1] - window[1]) < header and not _is_noise(l["text"])
+    ]
+    if not lines:
+        return None
+    lines.sort(key=lambda l: (l["rect"][0], l["rect"][1]))
+    return lines[0]["text"].strip() or None
 
 
 def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
@@ -627,9 +742,18 @@ def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
     update -- so the split is measured from the pane the bubbles are actually
     in, not assumed.
     """
-    region = _find_region(nodes, reader.get("messages") or {}, "x_band", window)
-    lines = _texts(region, int(reader.get("min_message_chars") or 2))
-    lines = [l for l in lines if not _is_noise(l["text"])]
+    band = message_band(nodes, window, reader)
+    region = ([n for n in nodes if _in_band(n, band, window)] if band
+              else _find_region(nodes, reader.get("messages") or {}, "x_band", window))
+    header = int(reader.get("header_height") or 300)
+    skip = {str(x).strip().lower().rstrip(":：") for x in (reader.get("ignore_lines") or [])}
+    lines = [l for l in _texts(region, int(reader.get("min_message_chars") or 2))
+             if l["text"].strip().lower().rstrip(":：") not in skip]
+    # The strip above the conversation carries the buyer's name, the product and
+    # the order number. All of it is text in the same column and none of it was
+    # said by anybody.
+    lines = [l for l in lines
+             if not _is_noise(l["text"]) and (l["rect"][1] - window[1]) >= header]
     if not lines:
         return []
     left = min(l["rect"][0] for l in lines)
@@ -644,11 +768,32 @@ def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
 
 def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
                  reader: dict) -> list[dict]:
-    """The conversation list: what each thread is called, and whether it is
-    unread. The list's own items only -- a thread is a ListItem or a Text
-    block in the left column, and its name is what has to be matched again
-    later to type a reply into it."""
-    region = _find_region(nodes, reader.get("chat_list") or {}, "x_band", window)
+    """The conversation list, a row at a time.
+
+    A row in this list is not one element and not one line of text: it is a
+    badge, a name, the shop it came through, a time and a preview of the last
+    message, all laid out side by side. Read line by line it produces five
+    "threads" per conversation, one of them called "12:29". So the texts in the
+    column are grouped by how far down the window they sit -- anything within a
+    row's height of each other is one conversation -- and inside a row the name
+    is the widest thing on the top line, which is what a chat list always makes
+    it.
+
+    Unread is the small number to the left of the name. Nothing else in a row
+    is a bare one-to-three-digit number: a time has a colon in it.
+    """
+    named = reader.get("chat_list") or {}
+    if named.get("automation_id") or named.get("class_name") or named.get("name") \
+            or named.get("x_band"):
+        region = _find_region(nodes, named, "x_band", window)
+    else:
+        # Immediately left of the conversation, and no wider than a list of
+        # names needs to be: further left than that is the shop switcher, whose
+        # entries are also plain text and are not conversations.
+        band = message_band(nodes, window, reader)
+        width = float(named.get("list_width") or 560)
+        region = ([n for n in nodes if _in_band(n, [max(0, band[0] - width), band[0]], window)]
+                  if band else [])
     pattern = reader.get("unread_pattern") or ""
     rx = None
     if pattern:
@@ -656,19 +801,49 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
             rx = re.compile(pattern)
         except re.error:
             rx = None
+    row_height = float(reader.get("row_height") or 100)
+    top = float(reader.get("list_top") or 230)
+
+    # everything in the column, below its own tabs and sort header
+    items = [i for i in _texts(region, 1)
+             if (i["rect"][1] - window[1]) >= top]
+    if not items:
+        return []
+    items.sort(key=lambda i: (i["rect"][1], i["rect"][0]))
+
+    rows: list[list[dict]] = []
+    for item in items:
+        y = item["rect"][1]
+        if rows and (y - rows[-1][0]["rect"][1]) < row_height:
+            rows[-1].append(item)
+        else:
+            rows.append([item])
+
     out = []
-    seen_names: set[str] = set()
-    for item in _texts(region, 1):
-        name = item["text"]
-        if _is_noise(name) or name in seen_names:
+    seen: set[str] = set()
+    for row in rows:
+        badges = [i for i in row if _BADGE.match(i["text"].strip())]
+        words = [i for i in row if not _is_noise(i["text"]) and i not in badges]
+        if not words:
             continue
-        seen_names.add(name)
-        unread = bool(rx and rx.search(name))
+        first_y = min(i["rect"][1] for i in words)
+        # the top line of the row: the name, the shop, the time. The preview
+        # sits below it and is not what the conversation is called.
+        top_line = [i for i in words if i["rect"][1] - first_y <= 30]
+        named = max(top_line or words, key=lambda i: i["rect"][2] - i["rect"][0])
+        name = named["text"].strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        left = min(i["rect"][0] for i in row)
+        right = max(i["rect"][2] for i in row)
         out.append({
             "name": name,
-            "unread": unread,
-            "rect": item["rect"],
-            "_el": item["_el"],
+            "unread": bool(badges) or bool(rx and rx.search(name)),
+            # the whole row is the click target, but the name is the element
+            # most likely to answer an invoke
+            "rect": (left, first_y, right, max(i["rect"][3] for i in row)),
+            "_el": named["_el"],
         })
     return out
 
@@ -739,18 +914,29 @@ def _fingerprint(chat_key: str, text: str) -> str:
 
 
 def _input_box(nodes: list[dict], reader: dict) -> Optional[dict]:
-    """DuoKe's message box. Named in duoke.json where a probe has named it,
-    otherwise the edit control lowest in the window: the search box sits at the
-    top of the list column, the reply box at the bottom of the conversation."""
+    """DuoKe's message box: the WIDEST edit control in the bottom half.
+
+    "Lowest in the window" was the obvious rule and it was wrong on the real
+    thing -- an order panel on the far right has a little Select box below the
+    reply box, so lowest picked a 185px dropdown over a 3356px message field.
+    Widest-at-the-bottom is what actually describes a chat's reply box, and it
+    has the useful side effect of measuring the conversation column: the reply
+    box spans it exactly, which is what `message_band` uses.
+    """
     want = reader.get("input") or {}
     if want.get("automation_id") or want.get("class_name") or want.get("name"):
         named = [n for n in nodes if n["control_type"] == "Edit" and _matches(n, want)]
         if named:
             return named[0]
-    edits = [n for n in nodes if n["control_type"] == "Edit" and n.get("rect")]
+    edits = [n for n in nodes if n["control_type"] == "Edit" and n.get("rect")
+             and n["rect"][2] - n["rect"][0] > 1]
     if not edits:
         return None
-    return max(edits, key=lambda n: n["rect"][1])
+    bottom = max(n["rect"][3] for n in edits)
+    top = min(n["rect"][1] for n in edits)
+    half = top + (bottom - top) / 2
+    low = [n for n in edits if n["rect"][1] >= half] or edits
+    return max(low, key=lambda n: n["rect"][2] - n["rect"][0])
 
 
 def type_reply(nodes: list[dict], window: tuple[int, int, int, int], reader: dict,
@@ -929,7 +1115,7 @@ def sync_once() -> dict:
 
     window = winapi.window_rect(hwnd)
     reader = cfg.get("reader") or {}
-    nodes = _walk(root, max_depth=16, budget=[6000])
+    nodes = warm_tree(hwnd)
     threads = read_threads(nodes, window, reader)
     report["threads"] = len(threads)
 
@@ -983,22 +1169,18 @@ def sync_once() -> dict:
         _state["last_report"] = report
         return report
 
-    # The conversation already open is read first, because reading it costs no
-    # clicks -- but only when the window title says which one it is. An
-    # unnamed conversation is skipped rather than filed under a guess.
-    open_name = open_thread_name(threads, hwnd)
-    if open_name:
-        harvest(open_name, nodes)
-    else:
-        report["notes"].append("could not tell which conversation is open — read the unread ones only")
+    # The conversation that happens to be open is NOT read. It would cost no
+    # clicks, and there is no way to be sure whose it is: the title says only
+    # the app's own name, and the list draws its selection without telling
+    # anybody. A message filed under the wrong buyer gets answered to the wrong
+    # buyer, so only threads this opens by name are read.
 
     if cfg.get("open_unread"):
         for thread in [t for t in threads if t["unread"]][:MAX_THREADS_PER_PASS]:
             if not _open_thread(thread, hwnd, allow_click=True):
                 report["notes"].append(f"could not open {thread['name'][:30]}")
                 continue
-            fresh_root = uia.element_from_handle(hwnd)
-            harvest(thread["name"], _walk(fresh_root, max_depth=16, budget=[6000]))
+            harvest(thread["name"], warm_tree(hwnd))
 
     # ---- somebody on a phone asked to see a thread
     #
@@ -1012,7 +1194,7 @@ def sync_once() -> dict:
         report["notes"].append(str(exc))
     for row in wanted:
         key = (row.get("chat_key") or "").strip()
-        tree = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
+        tree = warm_tree(hwnd)
         here = read_threads(tree, window, reader)
         target = next((t for t in here if _chat_key(t["name"]) == key), None)
         if not target:
@@ -1021,7 +1203,7 @@ def sync_once() -> dict:
         if not _open_thread(target, hwnd, allow_click=True):
             report["notes"].append(f"could not open {key[:30]} to read it")
             continue
-        tree = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
+        tree = warm_tree(hwnd)
         lines = read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
         try:
             cloud.save_history(str(row.get("id")),
@@ -1043,7 +1225,7 @@ def sync_once() -> dict:
             text = (row.get("reply") or "").strip()
             if not text:
                 continue
-            tree = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
+            tree = warm_tree(hwnd)
             here = read_threads(tree, window, reader)
             target = next((t for t in here if _chat_key(t["name"]) == key), None)
             if target and not _open_thread(target, hwnd, allow_click=True):
@@ -1052,7 +1234,18 @@ def sync_once() -> dict:
             if not target:
                 report["notes"].append(f"{key[:30]} is not in the list any more")
                 continue
-            tree = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
+            tree = warm_tree(hwnd)
+            # The thread was clicked; this is whether the click landed. Typing
+            # into the wrong conversation is the one mistake here that reaches
+            # a stranger, so it is checked rather than assumed -- and only when
+            # the app actually offers a name to check against.
+            band = message_band(tree, window, reader)
+            who = read_open_who(tree, window, reader, band) if band else None
+            if who and _chat_key(who).lower() not in key.lower() \
+                    and key.lower() not in _chat_key(who).lower():
+                report["notes"].append(
+                    f"{key[:30]}: the open conversation looks like {who[:30]}, so nothing was typed")
+                continue
             ok, how = type_reply(tree, window, reader, hwnd, text)
             if not ok:
                 report["notes"].append(f"{key[:30]}: {how}")
@@ -1069,7 +1262,7 @@ def sync_once() -> dict:
                     except CloudError as exc:
                         report["notes"].append(f"{key[:30]}: {exc}")
                         continue
-                    fresh = _walk(uia.element_from_handle(hwnd), max_depth=16, budget=[6000])
+                    fresh = warm_tree(hwnd)
                     sent, why = paste_photo(fresh, window, reader, hwnd, image)
                     if sent:
                         report["photos"] += 1
