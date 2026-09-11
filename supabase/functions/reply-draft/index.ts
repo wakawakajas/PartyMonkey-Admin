@@ -1,0 +1,319 @@
+// The draft answer to a buyer's chat message, written in the shop's own voice.
+//
+// Called by the app with a signed-in user's token:
+//   { message }                   draft a reply to this
+//   { message, lang }             ... in this language rather than the buyer's
+//   { message, tone }             ... rewritten: shorter, warmer, declining
+//   { distil: true }              read the approved replies back and say what
+//                                 standing facts they contain
+//
+// Answers with { draft, used }, where used is the ids of the approved replies
+// the draft was written from — the screen shows them, so it is never a mystery
+// why a draft said what it said. Or { facts } for a distil. Or { error }.
+//
+// WHY THE PROMPT IS BUILT HERE AND NOT IN THE APP: the two things that keep a
+// draft honest are the shop's facts and the replies already approved, and both
+// are rows this function can read for itself. An app that assembled the prompt
+// would be an app that could be out of date with the table, and a phone on a
+// slow connection would be uploading the whole voice of the shop on every
+// message. The app sends the buyer's message and nothing else.
+//
+// NOTHING IS SENT ANYWHERE. This writes a draft and returns it. The reply
+// leaves for the buyer only when somebody reads it and presses Enter, and even
+// then it is Macro Studio on the shop PC that types it into DuoKe.
+//
+// Secrets it needs (Edge Functions -> Secrets):
+//   GEMINI_API_KEY   required
+//   GEMINI_MODEL     optional, defaults to gemini-3.6-flash
+import { createClient } from "jsr:@supabase/supabase-js@2";
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { ...CORS, "Content-Type": "application/json" },
+  });
+
+// Read per call rather than once at boot, for the same reason as the energy
+// question: changing the GEMINI_MODEL secret should take effect on the next
+// draft, not whenever a worker happens to be recycled.
+const model = () => Deno.env.get("GEMINI_MODEL") || "gemini-3.6-flash";
+
+// Names only, never values — "not set" cannot tell a missing secret from a
+// misspelled one, and those want opposite fixes.
+function secretNames() {
+  try {
+    return Object.keys(Deno.env.toObject())
+      .filter((k) => !/^(SUPABASE_|SB_|DENO_|_)/.test(k))
+      .sort();
+  } catch { return []; }
+}
+
+function geminiKey() {
+  const key = Deno.env.get("GEMINI_API_KEY");
+  if (key) return key;
+  const seen = secretNames();
+  throw new Error(
+    "GEMINI_API_KEY is not set on this function. " +
+      (seen.length
+        ? `Secrets it can see: ${seen.join(", ")}. ` +
+          "If yours is in that list, the name differs — check for a stray space or lowercase."
+        : "It can see no secrets at all, so either none were saved on this project " +
+          "or the function is running an older deploy — deploy it again."),
+  );
+}
+
+async function ask(body: unknown) {
+  const name = model();
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${name}:generateContent`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": geminiKey() },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    const hint = res.status === 404
+      ? ` — "${name}" is not available to this key. Set the GEMINI_MODEL secret to one that is;` +
+        ` the list is at https://generativelanguage.googleapis.com/v1beta/models`
+      : "";
+    throw new Error(`Gemini said ${res.status}${hint}: ${detail.slice(0, 240)}`);
+  }
+  const out = await res.json();
+  const text = out?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("Gemini returned nothing to read");
+  return String(text);
+}
+
+// ---- which approved replies look like this question ----
+//
+// Word overlap, not meaning. It is crude on purpose: a shop's chat is the same
+// two dozen questions in the same two dozen words, and "post" matching "post"
+// finds the right example far more reliably than anything clever would on
+// mixed Malay-English typed at speed. The hits bonus is what lets a reply that
+// keeps proving useful beat a closer-worded one that never does.
+//
+// The stop list is deliberately bilingual: without the Malay function words a
+// question like "kak bila nak post ya" scores every example in the table.
+const STOP = new Set((
+  "a an the and or but is are was were be been am i you he she it we they me my your our " +
+  "this that these those to of in on at for with from by as so if then than do does did " +
+  "not no yes can could will would shall should may might must have has had ok okay pls " +
+  "please thanks thank kak bang bro sis boleh nak tak ya la lah ke kah saya awak aku dia " +
+  "kami kita ini itu dan atau dengan untuk dari pada yang ada dah sudah belum bila macam " +
+  "mana kalau sama juga lagi bagi dapat mau mahu gak sih dong kok ada nya"
+).split(" "));
+
+function words(s: string) {
+  return String(s ?? "").toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOP.has(w));
+}
+
+type Example = { id: string; buyer_text: string; reply_text: string; hits: number; edited: boolean };
+
+function pick(message: string, rows: Example[], want = 6): Example[] {
+  const asked = [...new Set(words(message))];
+  if (!asked.length) {
+    // Nothing to match on — a sticker, an order number on its own. The most
+    // used replies are still a better guide to the shop's voice than nothing.
+    return rows.slice().sort((a, b) => (b.hits ?? 0) - (a.hits ?? 0)).slice(0, 3);
+  }
+  const scored = rows.map((row) => {
+    const has = new Set(words(row.buyer_text + " " + row.reply_text));
+    let score = 0;
+    for (const w of asked) {
+      if (has.has(w)) score += 1;
+      else if ([...has].some((h) => h.startsWith(w) || w.startsWith(h))) score += 0.5;
+    }
+    // an edited reply is a correction somebody bothered to make; it is worth
+    // more as an example than a draft that happened to be accepted as written
+    if (row.edited) score += 0.25;
+    return { row, score: score + Math.min(1.2, (row.hits ?? 0) * 0.15) };
+  }).filter((s) => s.score > 0.5);
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, want).map((s) => s.row);
+}
+
+// ---- the prompt ----
+function draftPrompt(
+  message: string,
+  facts: string[],
+  examples: Example[],
+  lang: string,
+  tone: string,
+  store: string,
+) {
+  const lines: string[] = [];
+  lines.push(
+    "You write chat replies for a small Shopee seller answering a buyer in Shopee Chat. " +
+    "Write the reply the seller will send" + (store ? ` from the shop "${store}"` : "") + ".",
+  );
+  lines.push("");
+  lines.push("SHOP FACTS — the only facts you may state:");
+  lines.push(facts.length ? facts.map((f) => "- " + f).join("\n") : "- (none recorded yet)");
+  lines.push("");
+  if (examples.length) {
+    lines.push("REPLIES THIS SELLER HAS ALREADY APPROVED — copy this voice, wording and length:");
+    for (const ex of examples) {
+      lines.push(`Buyer: ${ex.buyer_text}\nSeller: ${ex.reply_text}\n`);
+    }
+  } else {
+    lines.push(
+      "No approved replies yet, so there is no voice to copy — write plainly and warmly, " +
+      "the way a small seller types in chat.",
+    );
+    lines.push("");
+  }
+  lines.push("RULES");
+  lines.push(
+    lang
+      ? `- Write in ${lang}.`
+      : "- Write in the same language and register the buyer used, mixed Malay-English included. " +
+        "Keep Shopee's own words as they are: tracking no, COD, variation, Return/Refund, Shopee Xpress.",
+  );
+  lines.push("- One to three short sentences. This is chat, not email: no greeting block, no sign-off.");
+  lines.push("- No emoji unless the approved replies above use them.");
+  lines.push(
+    "- Never invent a posting date, tracking number, price, discount, stock level or courier " +
+    "that is not in SHOP FACTS. Where the fact is missing, say you will check, or ask for the " +
+    "order number.",
+  );
+  lines.push("- Never promise a refund amount, and never accept blame for a courier's delay.");
+  lines.push("- Do not apologise twice, and do not thank them twice.");
+  if (tone) lines.push(`- This is a rewrite of a draft that was not right: make it ${tone}.`);
+  lines.push("- Output the reply text and nothing else. No quotes around it, no explanation.");
+  lines.push("");
+  lines.push("BUYER MESSAGE:");
+  lines.push(message);
+  return lines.join("\n");
+}
+
+const DISTIL_SCHEMA = {
+  type: "object",
+  properties: {
+    facts: {
+      type: "array",
+      maxItems: 10,
+      items: { type: "string" },
+    },
+  },
+  required: ["facts"],
+};
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  try {
+    const body = await req.json().catch(() => ({}));
+    const message = String(body?.message ?? "").trim();
+    const distil = body?.distil === true;
+    if (!distil && !message) return json({ error: "nothing to reply to" }, 400);
+    if (message.length > 4000) return json({ error: "that message is too long to draft from" }, 400);
+
+    const url = Deno.env.get("SUPABASE_URL")!;
+    const anon = Deno.env.get("SUPABASE_ANON_KEY")!;
+    const auth = req.headers.get("Authorization") ?? "";
+
+    // The caller's own token reads the tables, so row level security decides
+    // what this can see exactly as it does in the app. There is no service
+    // role key in here at all: a draft needs nothing the person asking for it
+    // could not read themselves.
+    const asUser = createClient(url, anon, { global: { headers: { Authorization: auth } } });
+    const { data: me } = await asUser.auth.getUser();
+    if (!me?.user) return json({ error: "sign in first" }, 401);
+
+    const { data: factRows } = await asUser.from("reply_facts")
+      .select("fact").order("created_at");
+    const facts = (factRows ?? []).map((r) => String(r.fact ?? "").trim()).filter(Boolean);
+
+    // The whole table, ranked here. It is a few hundred rows of chat at the
+    // very most — a shop that has approved a thousand replies has a thousand
+    // short lines, not a corpus — and ranking needs to see all of them.
+    const { data: exRows } = await asUser.from("reply_examples")
+      .select("id,buyer_text,reply_text,hits,edited,created_at")
+      .order("created_at", { ascending: false })
+      .limit(1000);
+    const examples = (exRows ?? []) as Example[];
+
+    if (distil) {
+      if (examples.length < 3) {
+        return json({ facts: [], note: "approve a few replies first — there is nothing to read yet" });
+      }
+      const recent = examples.slice(0, 40);
+      const text = await ask({
+        systemInstruction: {
+          parts: [{
+            text:
+              "You read replies a Shopee seller actually sent to buyers and pull out the standing " +
+              "facts about the shop: posting times, couriers, stock and restock habits, price and " +
+              "discount policy, exchange and refund rules — anything the seller repeats.\n\n" +
+              "Each fact is one short line in the seller's own terms, under 110 characters.\n" +
+              "Skip anything true of only one order. Skip anything the replies do not actually " +
+              "support. Better to return three facts than ten guesses.",
+          }],
+        },
+        contents: [{
+          role: "user",
+          parts: [{
+            text: recent.map((r) => `Buyer: ${r.buyer_text}\nSeller: ${r.reply_text}`).join("\n\n"),
+          }],
+        }],
+        generationConfig: {
+          temperature: 0.2,
+          responseMimeType: "application/json",
+          responseSchema: DISTIL_SCHEMA,
+        },
+      });
+      let parsed: unknown;
+      try { parsed = JSON.parse(text); } catch { throw new Error("Gemini returned something that is not JSON"); }
+      const got = (parsed as { facts?: unknown })?.facts;
+      const out = Array.isArray(got)
+        ? got.map((f) => String(f ?? "").trim().slice(0, 160)).filter(Boolean).slice(0, 10)
+        : [];
+      // Not written to the table here. A distilled fact is a suggestion about
+      // the shop, and the person on the screen is the one who knows whether it
+      // is true — they keep the ones that are.
+      return json({ facts: out });
+    }
+
+    const used = pick(message, examples);
+    const draft = (await ask({
+      contents: [{
+        role: "user",
+        parts: [{
+          text: draftPrompt(
+            message,
+            facts,
+            used,
+            String(body?.lang ?? "").trim().slice(0, 40),
+            String(body?.tone ?? "").trim().slice(0, 120),
+            String(body?.store ?? "").trim().slice(0, 60),
+          ),
+        }],
+      }],
+      generationConfig: {
+        // Low, but not zero: a rewrite asked for because the first draft was
+        // not right has to come back different.
+        temperature: body?.tone ? 0.8 : 0.4,
+        maxOutputTokens: 400,
+      },
+    })).trim()
+      // A model told "no quotes around it" still quotes it sometimes, and a
+      // reply that arrives inside quotation marks gets pasted inside them too.
+      .replace(/^["'“”]+|["'“”]+$/g, "")
+      .trim();
+
+    if (!draft) return json({ error: "the draft came back empty — try again" }, 502);
+
+    return json({ draft, used: used.map((u) => u.id) });
+  } catch (err) {
+    return json({ error: (err as Error)?.message ?? "unknown error" }, 500);
+  }
+});

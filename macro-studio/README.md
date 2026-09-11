@@ -658,6 +658,82 @@ Two pieces, per the design brief — a browser tab can't touch the OS directly:
 - **Storage**: macros as individual JSON files under `macros/`, last 10 versions each
   kept under `macros/versions/`. Implemented in Phase 5.
 
+## Answering Shopee chat
+
+DuoKe is where the shop answers Shopee chat, and it is the same twenty questions every
+day typed out again by hand. This reads the DuoKe window and hands what it finds to the
+**Replies** screen in Pigu, which drafts the answer in the shop's own voice. Somebody
+reads the draft and presses Enter. That press is what sends it, and the approved reply
+comes back down here to be typed into the right conversation.
+
+Nothing is ever answered automatically. There is no path through this that sends a
+buyer anything nobody read.
+
+Set it up once, on the PC DuoKe runs on:
+
+1. Run the `supabase-migration-REPLIES.sql` migration on the Supabase project, deploy
+   the `reply-draft` function, and grant yourself the Replies section in Users & access.
+2. With DuoKe open and a conversation showing, **probe the window**:
+
+   ```
+   curl -X POST http://127.0.0.1:8756/api/duoke/probe
+   ```
+
+   It writes `runs/duoke-probe-<when>.json` — every element in the window, its
+   automation id, its class and where it sits — and returns the panes that look most
+   like a chat list and a conversation. Nothing is clicked or typed: it only looks.
+3. Write `duoke.json` next to `start.bat` with the login the sync should use and,
+   from the probe, which pane is which:
+
+   ```json
+   {
+     "enabled": true,
+     "supabase_url": "https://<project>.supabase.co",
+     "supabase_anon_key": "<the anon key, same one the app uses>",
+     "email": "sync@yourshop.com",
+     "password": "...",
+     "store": "Party Monkey",
+     "window_title": "duoke",
+     "poll_seconds": 20,
+     "type_back": true,
+     "reader": {
+       "chat_list": {"automation_id": "", "class_name": "", "x_band": [0, 340]},
+       "messages": {"automation_id": "", "class_name": "", "x_band": [340, 99999]},
+       "input": {"automation_id": ""}
+     }
+   }
+   ```
+
+   The `x_band` defaults are the left column and the right column of a two-column chat
+   window, in pixels from the window's left edge, and they are usually enough on their
+   own. Fill in an automation id where the probe offers one: it survives the window
+   being resized, which a band does not.
+4. Watch one pass go past before leaving it alone:
+
+   ```
+   curl -X POST http://127.0.0.1:8756/api/duoke/sync-now
+   ```
+
+   The report says how many threads it read, how many messages it sent up and how many
+   replies it typed back, and names anything it could not do. `GET /api/duoke/status`
+   is the same picture plus whether the loop is running.
+
+Leave `type_back` off for the first day if you would rather watch what it drafts before
+it can type anything. Messages still come up; replies just stay in Pigu to be copied by
+hand.
+
+**duoke.json holds a password in plain text.** It is a local file on a single-user shop
+PC — the same trade the rest of Macro Studio makes — and it is gitignored. Use an
+account that has the Replies section and nothing else, not the account that can reach
+orders and shipping.
+
+**Which side of the bubble says who wrote it.** A conversation is read by position: the
+other person's messages sit on the left of the pane, yours on the right. That is true of
+every chat app ever built and stays true after DuoKe updates itself, which an automation
+id or a colour does not. It is also why a probe is worth re-running if a DuoKe update
+ever rearranges the window — a pass that suddenly reads nothing says so in the
+heartbeat the Replies screen shows, rather than looking like a quiet morning.
+
 ## Data layout
 
 ```
@@ -668,6 +744,8 @@ macro-studio/
   macros/         Saved macros as JSON (gitignored — this is your data)
   macros/versions/  Last 10 versions per macro (gitignored)
   schedules.json  Saved schedules (your data -- the queue itself is memory-only)
+  duoke.json      Replies sync: the Supabase login and which pane is which (gitignored)
+  duoke-seen.json Messages already sent up, so a restart doesn't re-send them (gitignored)
   runs/           Run logs, failure screenshots, videos (gitignored)
   requirements.txt
   start.bat       Start Macro Studio

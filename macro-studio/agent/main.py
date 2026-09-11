@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import cdp, config, library, macro_store, run_reports, scheduler as scheduler_mod, settings, video
+from agent import cdp, config, duoke, library, macro_store, run_reports, scheduler as scheduler_mod, settings, video
 from agent.macro_store import MacroNotFoundError
 from agent.panic import PanicWatcher
 from agent.recorder import Recorder
@@ -158,6 +158,11 @@ async def _on_startup() -> None:
     panic_watcher.start()
     scheduler.start()
     threading.Thread(target=_video_cleanup_loop, daemon=True).start()
+    # The Replies sync only starts itself when it has been switched on and
+    # given a login -- an agent on a PC that has never set it up does nothing
+    # and says nothing about it.
+    if duoke.load().get("enabled"):
+        duoke.watcher.start()
 
 
 @app.get("/api/status")
@@ -845,6 +850,68 @@ def clear_queue() -> dict:
 @app.post("/api/queue/clear-history")
 def clear_queue_history() -> dict:
     return {"cleared": scheduler.clear_history()}
+
+
+# -- Replies: reading DuoKe and typing the approved answer back -----------
+# The messages themselves never come through here. They go up to the shop's
+# own Supabase project and the Replies screen in Pigu reads them there, which
+# is what lets somebody answer from a phone in the kitchen while the PC that
+# can actually type into DuoKe sits in the office. These routes are only for
+# setting the sync up and seeing whether it is working.
+
+
+class DuokeConfig(BaseModel):
+    enabled: Optional[bool] = None
+    supabase_url: Optional[str] = None
+    supabase_anon_key: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+    store: Optional[str] = None
+    window_title: Optional[str] = None
+    poll_seconds: Optional[int] = None
+    type_back: Optional[bool] = None
+    open_unread: Optional[bool] = None
+    reader: Optional[dict] = None
+
+
+@app.get("/api/duoke/status")
+def duoke_status() -> dict:
+    return duoke.status()
+
+
+@app.put("/api/duoke/config")
+def duoke_config(body: DuokeConfig) -> JSONResponse:
+    """Only the fields actually sent are changed -- so saving the window
+    title from one panel cannot blank the password saved from another."""
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "poll_seconds" in patch:
+        patch["poll_seconds"] = max(5, min(600, int(patch["poll_seconds"])))
+    saved = duoke.save(patch)
+    if saved.get("enabled"):
+        duoke.watcher.start()
+    else:
+        duoke.watcher.stop()
+    return JSONResponse(content={"saved": duoke.redacted(), "status": duoke.status()})
+
+
+@app.post("/api/duoke/probe")
+def duoke_probe() -> JSONResponse:
+    """Dump DuoKe's window to a file in runs/, once, so the selectors in
+    duoke.json can be filled in for the build installed on this PC. Reads
+    only -- it clicks nothing and types nothing."""
+    out = duoke.probe()
+    return JSONResponse(status_code=200 if out.get("ok") else 400, content=out)
+
+
+@app.post("/api/duoke/sync-now")
+def duoke_sync_now() -> JSONResponse:
+    """One pass, right now, whether or not the loop is enabled. This is the
+    button to press while watching DuoKe, to see what it actually does."""
+    try:
+        return JSONResponse(content={"report": duoke.sync_once(), "status": duoke.status()})
+    except Exception as exc:  # a failed pass is an answer, not a 500
+        return JSONResponse(status_code=200, content={
+            "report": {"error": f"{type(exc).__name__}: {exc}"}, "status": duoke.status()})
 
 
 @app.websocket("/ws")
