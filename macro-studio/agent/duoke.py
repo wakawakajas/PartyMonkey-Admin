@@ -835,10 +835,16 @@ def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
     left = min(l["rect"][0] for l in lines)
     right = max(l["rect"][2] for l in lines)
     middle = (left + right) / 2
-    out = []
+    out: list[dict] = []
     for line in lines[-tail:]:
         centre = (line["rect"][0] + line["rect"][2]) / 2
-        out.append({"text": line["text"], "inbound": centre < middle})
+        text = line["text"]
+        # DuoKe draws its own translation under each message, so every line
+        # arrives twice in a row when the languages match -- which is what made
+        # one sent reply look like two sent replies.
+        if out and out[-1]["text"] == text:
+            continue
+        out.append({"text": text, "inbound": centre < middle})
     return out
 
 
@@ -1046,41 +1052,90 @@ def type_reply(nodes: list[dict], window: tuple[int, int, int, int], reader: dic
         return False, "no text box found in the window"
     element = box.get("_el")
 
+    # The quiet route first, because it needs neither the foreground nor the
+    # mouse: set the value, and believe it only if the box kept it. This box
+    # does not -- it is a React editor, which accepts SetValue, reports success
+    # and then re-renders itself empty -- but a different build or a different
+    # app might, and a reply typed without taking the screen is worth trying
+    # for.
     if element is not None and uia.try_set_value(element, text):
         value = uia.get_current_value(element) or ""
-        if text[:40] not in value:
-            return False, "the text box took the reply but did not keep it"
-    else:
-        handle = None
-        rect = box.get("rect")
-        if rect:
-            cx, cy = winapi.screen_to_client(hwnd, (rect[0] + rect[2]) // 2,
-                                             (rect[1] + rect[3]) // 2)
-            handle = winapi.child_window_from_point(hwnd, cx, cy)
-        if not handle:
-            return False, "the text box would not take the reply"
-        for ch in text:
-            winapi.post_char(handle, ch)
-        time.sleep(0.2)
-        vk = winapi.vk_for("enter")
-        if vk:
-            winapi.post_key_down(handle, vk)
-            winapi.post_key_up(handle, vk)
-        return True, "typed character by character"
+        if text[:40] in value:
+            handle = None
+            rect = box.get("rect")
+            if rect:
+                cx, cy = winapi.screen_to_client(hwnd, (rect[0] + rect[2]) // 2,
+                                                 (rect[1] + rect[3]) // 2)
+                handle = winapi.child_window_from_point(hwnd, cx, cy)
+            vk = winapi.vk_for("enter")
+            if handle and vk:
+                winapi.post_key_down(handle, vk)
+                winapi.post_key_up(handle, vk)
+                return True, "set and sent without taking the screen"
 
-    # Enter, to the control that holds the text.
-    handle = None
-    rect = box.get("rect")
-    if rect:
-        cx, cy = winapi.screen_to_client(hwnd, (rect[0] + rect[2]) // 2,
-                                         (rect[1] + rect[3]) // 2)
-        handle = winapi.child_window_from_point(hwnd, cx, cy)
-    vk = winapi.vk_for("enter")
-    if handle and vk:
-        winapi.post_key_down(handle, vk)
-        winapi.post_key_up(handle, vk)
-        return True, "sent"
-    return False, "the reply is in the box but Enter could not be delivered — send it by hand"
+    # And the route that works on a Chromium chat box.
+    was = winapi.get_foreground_window()
+    try:
+        actions.clipboard_write(text)
+    except RuntimeError as exc:
+        return False, f"the reply would not go on the clipboard: {exc}"
+    try:
+        return _paste_and_send(box, hwnd, verify=True)
+    finally:
+        # Whatever had the screen gets it back. The click that sent the reply
+        # took it legitimately; keeping it would mean the next thing somebody
+        # types goes into DuoKe.
+        if was and was != hwnd:
+            winapi.set_foreground(was)
+
+
+def _click_box(box: dict, hwnd: int) -> bool:
+    """Put the caret in the message box with a real click.
+
+    A real click is also how the window legitimately comes to the front:
+    SetForegroundWindow from here is refused outright, because Windows only
+    grants the foreground to a process that has some claim to it, and a
+    background agent has none. A synthesised click has one.
+    """
+    rect = box.get("rect") if box else None
+    if not rect:
+        return False
+    x, y = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+    winapi.physical_move_and_click(x, y)
+    time.sleep(0.35)
+    return True
+
+
+def _paste_and_send(box: dict, hwnd: int, verify: bool) -> tuple[bool, str]:
+    """Ctrl+V into the message box, then Enter.
+
+    Chromium is why. The box is a React-controlled editor: UIA's SetValue
+    reports success and the value does not stick, and characters posted to a
+    background window never reach the renderer. Pasting is the one route in
+    that a chat box built out of HTML cannot tell from a person, which is also
+    why it needs the window in front for the second it takes.
+    """
+    ctrl, v, enter = winapi.vk_for("ctrl"), winapi.vk_for("v"), winapi.vk_for("enter")
+    if not (ctrl and v and enter):
+        return False, "this machine reports no Ctrl, V or Enter key"
+    if not _click_box(box, hwnd):
+        return False, "the message box has no place to click"
+    winapi.physical_key(ctrl)
+    winapi.physical_key(v)
+    winapi.physical_key(v, key_up=True)
+    winapi.physical_key(ctrl, key_up=True)
+    # An attachment takes a moment to become an attachment, and a long reply
+    # takes a moment to land; Enter before either is an empty message sent to
+    # a customer.
+    time.sleep(1.2)
+    if verify:
+        got = uia.get_current_value(box.get("_el")) if box.get("_el") else None
+        if got is not None and not got.strip():
+            return False, "the paste did not land in the box, so nothing was sent"
+    winapi.physical_key(enter)
+    winapi.physical_key(enter, key_up=True)
+    time.sleep(0.4)
+    return True, "pasted and sent"
 
 
 def paste_photo(nodes: list[dict], window: tuple[int, int, int, int], reader: dict,
@@ -1112,32 +1167,13 @@ def paste_photo(nodes: list[dict], window: tuple[int, int, int, int], reader: di
         if proc.returncode != 0:
             return False, "the photo would not go on the clipboard"
 
-        # Click the message box first: a paste lands wherever the caret is, and
-        # after the words went in the caret is where it should be -- but a
-        # window just brought forward may have put it somewhere else.
-        if not winapi.set_foreground(hwnd):
-            return False, "Windows would not bring DuoKe to the front, so the photo was not pasted"
-        time.sleep(0.35)
         box = _input_box(nodes, reader)
-        if box and box.get("rect"):
-            rect = box["rect"]
-            winapi.physical_move_and_click((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
-            time.sleep(0.2)
-
-        ctrl, v, enter = winapi.vk_for("ctrl"), winapi.vk_for("v"), winapi.vk_for("enter")
-        if not (ctrl and v and enter):
-            return False, "this machine reports no Ctrl, V or Enter key"
-        winapi.physical_key(ctrl)
-        winapi.physical_key(v)
-        winapi.physical_key(v, key_up=True)
-        winapi.physical_key(ctrl, key_up=True)
-        # A pasted picture takes a moment to become an attachment; Enter before
-        # that sends an empty message and loses the picture.
-        time.sleep(1.2)
-        winapi.physical_key(enter)
-        winapi.physical_key(enter, key_up=True)
-        time.sleep(0.4)
-        return True, "pasted"
+        if not box:
+            return False, "no message box to paste the photo into"
+        # A pasted file cannot be read back out of the box, so there is nothing
+        # to verify -- the click and the paste either worked or the picture is
+        # still on the clipboard.
+        return _paste_and_send(box, hwnd, verify=False)
     finally:
         if was and was != hwnd:
             winapi.set_foreground(was)
