@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import cdp, config, duoke, library, macro_store, run_reports, scheduler as scheduler_mod, settings, video
+from agent import cdp, config, duoke, labels, library, macro_store, run_reports, scheduler as scheduler_mod, settings, video
 from agent.macro_store import MacroNotFoundError
 from agent.panic import PanicWatcher
 from agent.recorder import Recorder
@@ -163,6 +163,14 @@ async def _on_startup() -> None:
     # and says nothing about it.
     if duoke.load().get("enabled"):
         duoke.watcher.start()
+    # Same arrangement for seed labels: the tablet queues them, this prints
+    # them, and a PC that has never been set up for it does nothing. The file
+    # is written out with its defaults on the first run so there is something
+    # to open and edit rather than a filename to get right from the README.
+    if not labels.CONFIG_PATH.exists():
+        labels.save({})
+    if labels.load().get("enabled"):
+        labels.watcher.start()
 
 
 @app.get("/api/status")
@@ -913,6 +921,72 @@ def duoke_sync_now() -> JSONResponse:
     except Exception as exc:  # a failed pass is an answer, not a 500
         return JSONResponse(status_code=200, content={
             "report": {"error": f"{type(exc).__name__}: {exc}"}, "status": duoke.status()})
+
+
+# ---------------------------------------------------------------- seed labels
+# The bundle is packed on a tablet and the P-touch is plugged into this PC.
+# A tablet cannot reach that printer, so Pigu writes the label down in
+# Supabase and the loop below prints whatever is queued. These routes are for
+# setting that up and for seeing whether it is working.
+
+
+class LabelConfig(BaseModel):
+    enabled: Optional[bool] = None
+    supabase_url: Optional[str] = None
+    supabase_anon_key: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+    printer: Optional[str] = None
+    poll_seconds: Optional[int] = None
+    store: Optional[str] = None
+    stale_minutes: Optional[int] = None
+
+
+class LabelTest(BaseModel):
+    text: str = "Test Label"
+    copies: int = 1
+
+
+@app.get("/api/labels/status")
+def labels_status() -> dict:
+    return labels.status()
+
+
+@app.put("/api/labels/config")
+def labels_config(body: LabelConfig) -> JSONResponse:
+    """Only the fields actually sent are changed, so saving the printer from
+    one panel cannot blank the password saved from another."""
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "poll_seconds" in patch:
+        patch["poll_seconds"] = max(2, min(120, int(patch["poll_seconds"])))
+    saved = labels.save(patch)
+    if saved.get("enabled"):
+        labels.watcher.start()
+    else:
+        labels.watcher.stop()
+    return JSONResponse(content={"saved": labels.redacted(), "status": labels.status()})
+
+
+@app.post("/api/labels/test")
+def labels_test(body: LabelTest) -> JSONResponse:
+    """One label, straight out of the machine, without going near Supabase --
+    the button to press while standing at the printer with a fresh tape in."""
+    try:
+        return JSONResponse(content={"report": labels.print_labels(
+            [{"text": body.text, "copies": body.copies}])})
+    except labels.LabelError as exc:
+        return JSONResponse(status_code=400, content={"error": "label", "detail": str(exc)})
+
+
+@app.post("/api/labels/print-now")
+def labels_print_now() -> JSONResponse:
+    """One pass over whatever is queued, right now, whether or not the loop is
+    enabled."""
+    try:
+        return JSONResponse(content={"report": labels.sync_once(), "status": labels.status()})
+    except Exception as exc:  # a failed pass is an answer, not a 500
+        return JSONResponse(status_code=200, content={
+            "report": {"error": f"{type(exc).__name__}: {exc}"}, "status": labels.status()})
 
 
 @app.websocket("/ws")
