@@ -1479,15 +1479,36 @@ def read_catalog(nodes: list[dict], window: tuple[int, int, int, int], reader: d
     time.sleep(1.2)
 
     # An old search still in the box would return an old shortlist and call it
-    # the catalogue.
+    # the catalogue -- but an EMPTY search submitted deliberately is worse: the
+    # panel answers it with nothing at all and the whole read comes back zero.
+    # So the box is only touched when it has something in it, and the reset is
+    # re-opening the tab rather than submitting emptiness.
     tree = warm_tree(hwnd)
     search_name = str(reader.get("product_search") or "Search Product Name")
     search = next((n for n in tree
                    if n["control_type"] == "Edit" and search_name in (n.get("name") or "")), None)
-    if search:
+    if search and (uia.get_current_value(search.get("_el")) or "").strip():
         _post_type(hwnd, search, "")
         _post_key(hwnd, search, "enter")
-        time.sleep(1.8)
+        time.sleep(1.5)
+
+    # A panel showing nothing is usually a panel still holding somebody's
+    # search -- including an empty one, which it answers with an empty list and
+    # keeps answering that way after the box is cleared. Leaving the tab and
+    # coming back is what resets it; nothing typed into the box will.
+    if not _catalog_rows(warm_tree(hwnd), window, reader):
+        other = next((n for n in warm_tree(hwnd)
+                      if n["control_type"] == "TabItem"
+                      and (n.get("name") or "").strip() not in ("", tab_name)), None)
+        if other:
+            _post_click_element(hwnd, other)
+            time.sleep(1.0)
+        again = next((n for n in warm_tree(hwnd)
+                      if n["control_type"] == "TabItem"
+                      and (n.get("name") or "").strip() == tab_name), None)
+        if again:
+            _post_click_element(hwnd, again)
+            time.sleep(1.5)
 
     found: dict[str, dict] = {}
     pages = int(reader.get("catalog_pages") or 14)
