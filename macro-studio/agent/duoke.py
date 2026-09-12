@@ -932,6 +932,10 @@ _TIME_ONLY = re.compile(r"^[\d\s:./\-]+$")
 _GLYPHS = re.compile(r"^[\ue000-\uf8ff\s]+$")
 # The unread badge: a small number on its own, at the left of a row.
 _BADGE = re.compile(r"^\d{1,3}$")
+# When a row says something happened: a clock, a date, or an age. Sits on the
+# top line beside the name and the shop, and is neither of those.
+_WHEN = re.compile(r"^\d{1,2}[:/.]\d{2}(?::\d{2})?$|^\d+\s*(?:m|min|mins|h|hr|d|day|days)$"
+                   r"|^(?:just now|now)$", re.IGNORECASE)
 _NOISE = re.compile(
     r"^(yesterday|today|kemarin|hari ini|昨天|今天|已读|未读|read|unread|sent|delivered)$",
     re.IGNORECASE,
@@ -1136,6 +1140,18 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
         # is the first thing on the line, at the same left edge in every row.
         named = min(top_line or words, key=lambda i: i["rect"][0])
         name = named["text"].strip()
+        # Everything else on the top line is the shop and the time. One PC
+        # answers for three shops here, and which one a buyer wrote to changes
+        # what is true about postage and what the reply should sound like --
+        # so it travels with the message rather than being guessed later.
+        shop = ""
+        for other in sorted((i for i in top_line if i is not named),
+                            key=lambda i: i["rect"][0]):
+            text = other["text"].strip()
+            if not text or _WHEN.match(text) or _BADGE.match(text):
+                continue
+            shop = text
+            break
         if not name or name in seen:
             continue
         seen.add(name)
@@ -1143,6 +1159,7 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
         right = max(i["rect"][2] for i in row)
         out.append({
             "name": name,
+            "shop": shop,
             "unread": bool(badges) or bool(rx and rx.search(name)),
             # the whole row is the click target, but the name is the element
             # most likely to answer an invoke
@@ -2025,10 +2042,31 @@ def sync_once() -> dict:
     threads = read_threads(nodes, window, reader)
     report["threads"] = len(threads)
 
+    # A filter or a search left on in DuoKe empties the conversation list, and
+    # an empty list is indistinguishable from a quiet morning from here -- the
+    # app says "No Result Found" where the conversations would be, so that is
+    # what gets looked for. Reported rather than cleared: which filter somebody
+    # is working in is their business.
+    if not threads:
+        band = message_band(nodes, window, reader)
+        left = band[0] if band else 967
+        blank = any((n.get("name") or "").strip().lower() in
+                    ("no result found", "no results", "no data", "暂无数据")
+                    for n in nodes
+                    if n.get("rect") and (n["rect"][0] - window[0]) < left)
+        if blank:
+            note = ("DuoKe's conversation list is showing No Result Found — a filter or a "
+                    "search is on in DuoKe, so nothing can be read until it is cleared.")
+            report["notes"].append(note)
+            try:
+                cloud.beat(device, True, 0, note)
+            except CloudError:
+                pass
+
     seen = _seen()
     fresh: set[str] = set()
 
-    def harvest(chat_name: str, tree: list[dict]) -> None:
+    def harvest(chat_name: str, tree: list[dict], shop: str = "") -> None:
         key = _chat_key(chat_name)
         lines = read_open_conversation(tree, window, reader)
         inbound = [l["text"] for l in lines if l["inbound"]]
@@ -2046,7 +2084,10 @@ def sync_once() -> dict:
             return
         row = {
             "user_id": cloud.user_id,
-            "store": cfg.get("store") or "",
+            # The shop the buyer wrote to, read off their row in the list.
+            # The configured store is only a fallback, for a PC that answers
+            # for one shop and whose list therefore does not say.
+            "store": shop or cfg.get("store") or "",
             "chat_key": key,
             "buyer": key,
             "message": text[:4000],
@@ -2180,7 +2221,7 @@ def sync_once() -> dict:
             if not _open_thread(thread, hwnd, allow_click=True):
                 report["notes"].append(f"could not open {thread['name'][:30]}")
                 continue
-            harvest(thread["name"], warm_tree(hwnd))
+            harvest(thread["name"], warm_tree(hwnd), thread.get("shop", ""))
 
     # ---- the shop's own listings, so the screen can search them
     #
