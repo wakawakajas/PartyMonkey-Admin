@@ -2298,7 +2298,10 @@ def sync_once() -> dict:
                     f"{key[:30]}: the words went; the photo needs the screen for a second "
                     "and that is switched off, so paste it by hand")
             elif cfg.get("send_photos") and isinstance(paths, list):
-                for path in [str(p) for p in paths if p][:3]:
+                # Six, because a size chart, a measuring guide and the four
+                # colourways is a real answer; twenty is somebody's holiday
+                # album arriving in a chat.
+                for path in [str(p) for p in paths if p][:6]:
                     try:
                         image = cloud.object_bytes(str(cfg.get("photo_bucket")), path)
                     except CloudError as exc:
