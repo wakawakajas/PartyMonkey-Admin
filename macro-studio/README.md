@@ -323,7 +323,10 @@ driver. Nothing is confirmed at either end. There is no print dialog and no
 P-touch Editor window; the tape coming out of the machine is the confirmation.
 
 Set it up by editing **`labels.json`** (written with its defaults the first time
-the agent starts) and restarting the agent:
+the agent starts). Save it and the next label picks the new settings up -- the
+file is read when it changes, not once at boot, because an agent that goes on
+using the printer it read at breakfast reports an error naming a printer that
+is no longer in the settings:
 
 ```json
 {

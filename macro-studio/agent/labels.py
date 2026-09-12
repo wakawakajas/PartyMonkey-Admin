@@ -90,6 +90,7 @@ DEFAULTS: dict[str, Any] = {
 
 _lock = threading.RLock()
 _cache: Optional[dict] = None
+_cache_stamp: float = -1.0       # the file's mtime when the cache was filled
 
 # One label at a time. Two print jobs racing into the same DC is a jam, and
 # nobody is pressing two buttons at once anyway.
@@ -127,9 +128,22 @@ class LabelError(RuntimeError):
 
 
 def load() -> dict:
-    global _cache
+    """The settings as the file has them now, not as it had them at boot.
+
+    This file is meant to be opened and edited by hand -- that is what the
+    README tells whoever sets the printer up. A cache that is filled once and
+    never looked at again turns that instruction into a lie: the file says one
+    printer, the agent goes on using the one it read at breakfast, and the
+    error that comes back names a printer nobody can find in the settings. So
+    the file's own timestamp decides whether the cache still stands.
+    """
+    global _cache, _cache_stamp
     with _lock:
-        if _cache is not None:
+        try:
+            stamp = CONFIG_PATH.stat().st_mtime
+        except OSError:
+            stamp = 0.0
+        if _cache is not None and stamp == _cache_stamp:
             return _cache
         saved: dict = {}
         if CONFIG_PATH.exists():
@@ -139,18 +153,22 @@ def load() -> dict:
                 saved = {}
         merged = dict(DEFAULTS)
         merged.update({k: v for k, v in saved.items() if k in DEFAULTS})
-        _cache = merged
+        _cache, _cache_stamp = merged, stamp
         return _cache
 
 
 def save(patch: dict) -> dict:
-    global _cache
+    global _cache, _cache_stamp
     with _lock:
         data = dict(load())
         data.update({k: v for k, v in (patch or {}).items()
                      if k in DEFAULTS and v is not None})
         CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
         _cache = data
+        try:
+            _cache_stamp = CONFIG_PATH.stat().st_mtime
+        except OSError:
+            _cache_stamp = 0.0
         return data
 
 
@@ -638,8 +656,15 @@ def sync_once() -> dict:
         return report
 
     try:
-        out = print_labels([{"text": r.get("text"), "copies": r.get("copies")} for r in mine],
-                           cfg.get("printer") or None)
+        # No printer named here on purpose. The name in the file is a
+        # preference, not an instruction: chosen_printer() checks it against
+        # what Windows actually has and falls back to the P-touch sitting
+        # right there when it does not match. Handing the raw string down
+        # skipped that check on the one path that matters -- somebody at a
+        # tablet got "the printer name is invalid" about a printer they had
+        # already corrected, while the test button, which does go through
+        # chosen_printer(), printed perfectly.
+        out = print_labels([{"text": r.get("text"), "copies": r.get("copies")} for r in mine])
     except LabelError as exc:
         for row in mine:
             _finish(cloud, row["id"], False, str(exc))
@@ -667,13 +692,24 @@ def status() -> dict:
         printer_error = ""
     except LabelError as exc:
         printers, printer_error = [], str(exc)
+    # A name in the file that Windows does not have is not fatal -- the P-touch
+    # is found anyway -- but it is worth saying out loud, or the settings and
+    # the machine go on disagreeing and nobody knows which one is printing.
+    saved_name = (cfg.get("printer") or "").strip()
+    printer = chosen_printer()
+    printer_note = ""
+    if saved_name and printer and saved_name != printer:
+        printer_note = (f'labels.json asks for "{saved_name}", which Windows does '
+                        f'not have. Printing on "{printer}" instead.')
     return {
         "configured": bool(url and anon and email and password),
         "enabled": bool(cfg.get("enabled")),
         "watching": bool(_state["running"]),
         "poll_seconds": int(cfg.get("poll_seconds") or 3),
         "store": cfg.get("store") or "",
-        "printer": chosen_printer(),
+        "printer": printer,
+        "printer_saved": saved_name,
+        "printer_note": printer_note,
         "printer_error": printer_error,
         "printers": printers,
         "printed_total": _state["printed_total"],
