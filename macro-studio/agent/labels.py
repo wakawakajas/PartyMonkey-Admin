@@ -500,13 +500,13 @@ def print_labels(labels: list[dict], printer: Optional[str] = None, shop: str = 
     cut_line = bool(cfg.get("cut_line", True))
     font_mm = float(cfg.get("font_mm") or 0)
 
-    # PartyMonkey (PM) uses different label dimensions: 20mm height, 1 column
+    # PartyMonkey uses different label dimensions: 20mm height, 1 column
     shop_lower = (shop or "").lower()
-    if shop_lower in ("partymonkey", "pm"):
+    if shop_lower == "partymonkey":
         height_mm = 20
         cols = 1
         cut_line = False
-        print(f"[LABELS] PartyMonkey (PM) detected: {height_mm}mm height, {cols} column")
+        print(f"[LABELS] PartyMonkey detected: {height_mm}mm height, {cols} column")
 
     flat: list[str] = []
     for entry in labels or []:
