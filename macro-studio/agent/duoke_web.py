@@ -257,13 +257,21 @@ _READ_LIST = r"""
     const parts = (row.innerText || '').split('\n').map(t => t.trim()).filter(Boolean);
     if (!parts.length) return;
     const isWhen = t => /^(\d{1,2}[:\/.]\d{2}|\d{1,2}\/\d{1,2}|yesterday|今天|昨天)$/i.test(t);
-    const badge = parts.find(t => /^\d{1,3}$/.test(t) && !isWhen(t)) || '';
-    // name first, then the shop it came through, then a time, then whatever
-    // they last said -- and any of the middle two may be missing
-    const name = parts[0];
-    const rest = parts.slice(1).filter(t => t !== badge);
-    const shop = rest.find(t => !isWhen(t) && t.length <= 28 && /^[A-Za-z]/.test(t)
+    const isBadge = t => /^\d{1,3}$/.test(t) && !isWhen(t);
+    const badge = parts.find(isBadge) || '';
+    // THE NAME IS THE FIRST LINE THAT IS NOT A NUMBER OR A CLOCK.
+    //
+    // parts[0] was the obvious choice and it was wrong in the one case that
+    // matters: an unread row puts its badge first, so every conversation with
+    // something waiting was read as a buyer called "1", "2" or "5" -- filed
+    // under that, unfindable afterwards, and impossible to clear. The badge
+    // and the time are the two things a row says that are not a name.
+    const named = parts.filter(t => !isBadge(t) && !isWhen(t));
+    const name = named[0] || '';
+    const rest = named.slice(1);
+    const shop = rest.find(t => t.length <= 28 && /^[A-Za-z]/.test(t)
       && t !== parts[parts.length - 1]) || '';
+    if (!name) return;
     out.push({
       name: name.slice(0, 80),
       shop: shop.slice(0, 40),
