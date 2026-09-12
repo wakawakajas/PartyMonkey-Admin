@@ -117,6 +117,12 @@ DEFAULTS: dict[str, Any] = {
     # to a window in the background the way a character can. Off means the
     # words go and the picture waits to be pasted by hand.
     "send_photos": True,
+    # A photo can only go in through the clipboard, and a clipboard paste needs
+    # the real keyboard, which needs the window in front for a second -- so
+    # sending a photo takes the screen and the mouse briefly. Words do not:
+    # they are posted. Off means photos wait to be pasted by hand and nothing
+    # ever jumps in front of what somebody is doing.
+    "photos_may_take_screen": True,
     # A reply can carry a product card -- the same one DuoKe's own Product tab
     # sends, with the picture, the price and the link in it. Off means the
     # words go and the product does not.
@@ -1269,30 +1275,30 @@ def type_reply(nodes: list[dict], window: tuple[int, int, int, int], reader: dic
     box = _input_box(nodes, reader)
     if box is None:
         return False, "no text box found in the window"
-    element = box.get("_el")
 
-    # The quiet route first, because it needs neither the foreground nor the
-    # mouse: set the value, and believe it only if the box kept it. This box
-    # does not -- it is a React editor, which accepts SetValue, reports success
-    # and then re-renders itself empty -- but a different build or a different
-    # app might, and a reply typed without taking the screen is worth trying
-    # for.
-    if element is not None and uia.try_set_value(element, text):
-        value = uia.get_current_value(element) or ""
-        if text[:40] in value:
-            handle = None
-            rect = box.get("rect")
-            if rect:
-                cx, cy = winapi.screen_to_client(hwnd, (rect[0] + rect[2]) // 2,
-                                                 (rect[1] + rect[3]) // 2)
-                handle = winapi.child_window_from_point(hwnd, cx, cy)
-            vk = winapi.vk_for("enter")
-            if handle and vk:
-                winapi.post_key_down(handle, vk)
-                winapi.post_key_up(handle, vk)
-                return True, "set and sent without taking the screen"
+    # TYPED, NOT PASTED. The characters are posted to the window, which needs
+    # neither the foreground nor the mouse -- so a reply goes out without
+    # anything jumping in front of whoever is using the PC. This was the last
+    # thing here still taking the screen, and it did not need to: the box
+    # accepts posted characters perfectly well, which was worth ten seconds of
+    # trying before assuming a chat box could only be pasted into.
+    if _post_type(hwnd, box, text):
+        fresh = _input_box(warm_tree(hwnd), reader) or box
+        value = uia.get_current_value(fresh.get("_el"))
+        landed = value is None or text[:40] in value
+        if landed and _post_key(hwnd, fresh, "enter"):
+            time.sleep(0.5)
+            return True, "typed and sent in the background"
+        if value is not None and text[:40] not in value:
+            # something is in the box and it is not the reply: do not press
+            # Enter on it
+            _post_type(hwnd, fresh, "")
 
-    # And the route that works on a Chromium chat box.
+    # A build where posting does not reach the editor: the clipboard still
+    # does, at the cost of the screen for a second.
+    if not load().get("photos_may_take_screen"):
+        return False, ("the reply would not type into the box, and pasting is switched off "
+                       "(photos_may_take_screen)")
     was = winapi.get_foreground_window()
     try:
         actions.clipboard_write(text)
@@ -2014,7 +2020,11 @@ def sync_once() -> dict:
                     else:
                         report["notes"].append(f"{key[:30]} product: {why_p}")
             paths = row.get("photos") or []
-            if cfg.get("send_photos") and isinstance(paths, list):
+            if cfg.get("send_photos") and not cfg.get("photos_may_take_screen") and paths:
+                report["notes"].append(
+                    f"{key[:30]}: the words went; the photo needs the screen for a second "
+                    "and that is switched off, so paste it by hand")
+            elif cfg.get("send_photos") and isinstance(paths, list):
                 for path in [str(p) for p in paths if p][:3]:
                     try:
                         image = cloud.object_bytes(str(cfg.get("photo_bucket")), path)
