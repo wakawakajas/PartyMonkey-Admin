@@ -45,7 +45,11 @@ const json = (body: unknown, status = 200) =>
 // Read per call rather than once at boot, for the same reason as the energy
 // question: changing the GEMINI_MODEL secret should take effect on the next
 // draft, not whenever a worker happens to be recycled.
-const model = () => Deno.env.get("GEMINI_MODEL") || "gemini-3.6-flash";
+// "gemini-3.6-flash" was the default and this key cannot call it: the name
+// was wrong, so every draft fell through to the fallbacks. An alias is the
+// right kind of default -- it survives the retirements that break a pinned
+// version, which is the failure this whole ladder exists to absorb.
+const model = () => Deno.env.get("GEMINI_MODEL") || "gemini-flash-latest";
 
 // Names only, never values — "not set" cannot tell a missing secret from a
 // misspelled one, and those want opposite fixes.
@@ -113,7 +117,11 @@ async function ask(body: Record<string, unknown>) {
   // several retirements. A model name that is wrong is answered 404 by some
   // endpoints and 400 by others, so a refusal is never taken as proof the
   // request was the problem — the next name is tried before giving up.
-  const names = [...new Set([model(), "gemini-flash-latest", "gemini-2.5-flash"])];
+  // Lite last on purpose: it is the one with room left when the free tier's
+  // per-minute allowance on the bigger models has gone, which is what a 429
+  // here actually means.
+  const names = [...new Set([model(), "gemini-flash-latest", "gemini-2.5-flash",
+                             "gemini-2.5-flash-lite"])];
   const send = (name: string, payload: unknown) =>
     fetch(`https://generativelanguage.googleapis.com/v1beta/models/${name}:generateContent`, {
       method: "POST",
@@ -148,13 +156,27 @@ async function ask(body: Record<string, unknown>) {
   let res: Response | null = null;
   let refused = "";
   let refusedBy = "";
+  let busy = "";
   let settled = false;
   for (const name of names) {
     for (const rung of rungs) {
       const attempt = await send(name, rung);
-      // Answered, or refused for a reason another name or rung cannot fix —
-      // a rate limit, a dead key, an outage. Either way the asking is over.
-      if (attempt.ok || (attempt.status !== 400 && attempt.status !== 404)) {
+      // Answered: done. Out of quota or overloaded: this MODEL is spent, but
+      // another one has its own allowance, so break out of the rungs and try
+      // the next name rather than giving up — the free tier runs out per
+      // model, not per key. Anything else (a dead key, a refusal) no other
+      // name will fix either.
+      if (attempt.ok) {
+        res = attempt;
+        settled = true;
+        break;
+      }
+      if (attempt.status === 429 || attempt.status === 503) {
+        busy = await attempt.text().catch(() => "") || busy;
+        res = attempt;
+        break;
+      }
+      if (attempt.status !== 400 && attempt.status !== 404) {
         res = attempt;
         settled = true;
         break;
@@ -167,6 +189,20 @@ async function ask(body: Record<string, unknown>) {
   }
   if (!res || !res.ok) {
     const status = res?.status ?? 0;
+
+    // Out of quota is not a misconfiguration, and listing the models a key may
+    // call is unhelpful noise when the key may call all of them and has simply
+    // run out for now. Say what it is and what to do about it.
+    if (status === 429 || status === 503) {
+      throw new Error(
+        "Gemini is out of allowance for this key right now — every model it can reach " +
+        `answered ${status}. The free tier resets by the minute and by the day, so this ` +
+        "usually clears within a minute; if it keeps happening, set the GEMINI_MODEL " +
+        "secret to gemini-2.5-flash-lite, which has the largest free allowance." +
+        ` (${busy.slice(0, 120)})`,
+      );
+    }
+
     const detail = res && !refused ? await res.text().catch(() => "") : refused;
     // Which models the key may call is the answer nine times in ten, and the
     // refusal never says. So it is asked and put in the message.

@@ -38,7 +38,10 @@ const json = (body: unknown, status = 200) =>
 // recycled. Models are retired on a schedule — 2.5 Flash closed to new keys
 // well before its shutdown — so this will need changing again, and changing it
 // should not mean a redeploy.
-const model = () => Deno.env.get("GEMINI_MODEL") || "gemini-3.6-flash";
+// An alias, not a version: "gemini-3.6-flash" was the default here too and
+// the project's key cannot call it, which would have broken the day's question
+// the same way it broke the drafts.
+const model = () => Deno.env.get("GEMINI_MODEL") || "gemini-flash-latest";
 
 // Not a check-in any more: a daft question at the start of the shift. The four
 // slots no longer run most-to-least anything — there is no scale in "which
