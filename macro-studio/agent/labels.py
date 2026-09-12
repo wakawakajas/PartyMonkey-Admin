@@ -477,7 +477,7 @@ def _printer_dc(name: str, width_mm: float, height_mm: float):
     return dc, False
 
 
-def print_labels(labels: list[dict], printer: Optional[str] = None) -> dict:
+def print_labels(labels: list[dict], printer: Optional[str] = None, shop: str = "") -> dict:
     """Print everything asked for, two names to a pass of the roll.
 
     The labels are flattened first -- six of one name is six labels, not one
@@ -499,6 +499,12 @@ def print_labels(labels: list[dict], printer: Optional[str] = None) -> dict:
     cols = max(1, min(4, int(cfg.get("columns") or 2)))
     cut_line = bool(cfg.get("cut_line", True))
     font_mm = float(cfg.get("font_mm") or 0)
+
+    # PartyMonkey uses different label dimensions: 20mm height, 1 column
+    if shop == "partymonkey":
+        height_mm = 20
+        cols = 1
+        cut_line = False
 
     flat: list[str] = []
     for entry in labels or []:
@@ -664,7 +670,8 @@ def sync_once() -> dict:
         # tablet got "the printer name is invalid" about a printer they had
         # already corrected, while the test button, which does go through
         # chosen_printer(), printed perfectly.
-        out = print_labels([{"text": r.get("text"), "copies": r.get("copies")} for r in mine])
+        shop = mine[0].get("store", "").strip() if mine else ""
+        out = print_labels([{"text": r.get("text"), "copies": r.get("copies")} for r in mine], shop=shop)
     except LabelError as exc:
         for row in mine:
             _finish(cloud, row["id"], False, str(exc))
