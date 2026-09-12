@@ -47,8 +47,9 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
-import tempfile
 import re
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1366,18 +1367,114 @@ def type_reply(nodes: list[dict], window: tuple[int, int, int, int], reader: dic
         return False, ("the reply would not type into the box, and pasting is switched off "
                        "(photos_may_take_screen)")
     was = winapi.get_foreground_window()
+    borrowed = clip_save()
     try:
         actions.clipboard_write(text)
     except RuntimeError as exc:
+        clip_restore(borrowed)
         return False, f"the reply would not go on the clipboard: {exc}"
     try:
         return _paste_and_send(box, hwnd, verify=True)
     finally:
+        if not clip_restore(borrowed):
+            _state["clipboard_kept"] = borrowed.get("kind", "unknown")
         # Whatever had the screen gets it back. The click that sent the reply
         # took it legitimately; keeping it would mean the next thing somebody
         # types goes into DuoKe.
         if was and was != hwnd:
             winapi.set_foreground(was)
+
+
+# ---------------------------------------------------------------- clipboard
+
+# Sending a photo has to go through the clipboard -- a file on the clipboard is
+# the only thing a chat box built out of HTML will accept as an attachment --
+# and the clipboard belongs to whoever is using the PC. Taking it and not
+# giving it back means somebody's copied paragraph, spreadsheet row or
+# screenshot is gone the next time they press Ctrl+V, which is a far worse
+# thing to do to a person's morning than a slow reply.
+#
+# So it is borrowed: what is on it is saved first and put back afterwards, in
+# the format it was in. Text, files and an image are the three that matter;
+# anything more exotic (an Excel range, HTML with formatting) cannot be
+# round-tripped through here, and the note says so rather than pretending.
+_CLIP_READ = r"""
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing | Out-Null
+$out = @{ kind = 'empty' }
+try {
+  if ([Windows.Forms.Clipboard]::ContainsFileDropList()) {
+    $out = @{ kind = 'files'; files = @([Windows.Forms.Clipboard]::GetFileDropList()) }
+  } elseif ([Windows.Forms.Clipboard]::ContainsImage()) {
+    $p = Join-Path $env:TEMP ('duoke-clip-' + [guid]::NewGuid().ToString('N') + '.png')
+    [Windows.Forms.Clipboard]::GetImage().Save($p, [System.Drawing.Imaging.ImageFormat]::Png)
+    $out = @{ kind = 'image'; path = $p }
+  } elseif ([Windows.Forms.Clipboard]::ContainsText()) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes([Windows.Forms.Clipboard]::GetText())
+    $out = @{ kind = 'text'; b64 = [Convert]::ToBase64String($bytes) }
+  }
+} catch { $out = @{ kind = 'unknown' } }
+$out | ConvertTo-Json -Compress
+"""
+
+
+def _powershell_sta(script: str) -> subprocess.CompletedProcess:
+    """PowerShell in a single-threaded apartment, which the clipboard APIs
+    require. actions._powershell cannot be used for this: its cmdlets are fine
+    but Windows.Forms.Clipboard refuses to run MTA."""
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-STA", "-Command", script],
+        capture_output=True, text=True, encoding="ascii", errors="replace", timeout=20,
+    )
+
+
+def clip_save() -> dict:
+    """What is on the clipboard now, in a shape clip_restore understands."""
+    try:
+        proc = _powershell_sta(_CLIP_READ)
+        if proc.returncode != 0:
+            return {"kind": "unknown"}
+        return json.loads((proc.stdout or "").strip() or '{"kind":"empty"}')
+    except (json.JSONDecodeError, OSError, subprocess.SubprocessError):
+        return {"kind": "unknown"}
+
+
+def clip_restore(snap: dict) -> bool:
+    """Put it back. False means it could not be, which the caller reports --
+    never silently."""
+    kind = (snap or {}).get("kind", "unknown")
+    if kind == "empty":
+        return True
+    if kind == "text":
+        b64 = str(snap.get("b64") or "")
+        if not b64:
+            return False
+        script = ("Add-Type -AssemblyName System.Windows.Forms | Out-Null; "
+                  "[Windows.Forms.Clipboard]::SetText("
+                  f"[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64}')))")
+    elif kind == "files":
+        files = [str(f) for f in (snap.get("files") or []) if str(f).strip()]
+        if not files:
+            return False
+        listed = ",".join("'" + f.replace("'", "''") + "'" for f in files)
+        script = ("Add-Type -AssemblyName System.Windows.Forms | Out-Null; "
+                  "$c = New-Object System.Collections.Specialized.StringCollection; "
+                  f"@({listed}) | ForEach-Object {{ $c.Add($_) | Out-Null }}; "
+                  "[Windows.Forms.Clipboard]::SetFileDropList($c)")
+    elif kind == "image":
+        path = str(snap.get("path") or "")
+        if not path:
+            return False
+        safe = path.replace("'", "''")
+        script = ("Add-Type -AssemblyName System.Windows.Forms,System.Drawing | Out-Null; "
+                  f"$i = [System.Drawing.Image]::FromFile('{safe}'); "
+                  "[Windows.Forms.Clipboard]::SetImage($i); $i.Dispose(); "
+                  f"Remove-Item -LiteralPath '{safe}' -ErrorAction SilentlyContinue")
+    else:
+        return False
+    try:
+        return _powershell_sta(script).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _post_target(hwnd: int, x: int, y: int) -> Optional[int]:
@@ -1546,6 +1643,7 @@ def paste_photo(nodes: list[dict], window: tuple[int, int, int, int], reader: di
         return False, f"could not write the photo out: {exc}"
 
     was = winapi.get_foreground_window()
+    borrowed = clip_save()
     try:
         proc = actions._powershell(f"Set-Clipboard -LiteralPath '{temp}'")
         if proc.returncode != 0:
@@ -1561,6 +1659,8 @@ def paste_photo(nodes: list[dict], window: tuple[int, int, int, int], reader: di
     finally:
         if was and was != hwnd:
             winapi.set_foreground(was)
+        if not clip_restore(borrowed):
+            _state["clipboard_kept"] = borrowed.get("kind", "unknown")
         try:
             temp.unlink()
         except OSError:
@@ -2206,11 +2306,29 @@ def sync_once() -> dict:
                 report["notes"].append(str(exc))
 
 
-    # The conversation that happens to be open is NOT read. It would cost no
-    # clicks, and there is no way to be sure whose it is: the title says only
-    # the app's own name, and the list draws its selection without telling
-    # anybody. A message filed under the wrong buyer gets answered to the wrong
-    # buyer, so only threads this opens by name are read.
+    # THE CONVERSATION THAT IS OPEN IS READ FIRST, every pass.
+    #
+    # This was left out at first because nothing could say whose it was. Then
+    # read_open_who was built -- the name above the messages -- and leaving it
+    # out became the reason the screen did not feel live: a buyer replying into
+    # the conversation DuoKe currently has open never raises an unread badge,
+    # because DuoKe considers a conversation on screen to be read. The agent
+    # leaves a conversation open every time it types a reply, so exactly the
+    # thread somebody is working is the one whose next message nothing would
+    # notice. It cost no clicks to read and it is the whole difference between
+    # a screen that updates in seconds and one that waits for the buyer to
+    # write twice.
+    #
+    # The name is checked rather than assumed: an email address is this shop's
+    # own account rather than a buyer, and a name that is not a conversation
+    # gets nothing filed under it.
+    band_now = message_band(nodes, window, reader)
+    open_who = read_open_who(nodes, window, reader, band_now) if band_now else None
+    if open_who and "@" not in open_who:
+        key_open = _chat_key(open_who)
+        shop_open = next((t.get("shop", "") for t in threads
+                          if _chat_key(t["name"]).lower() == key_open.lower()), "")
+        harvest(key_open, nodes, shop_open)
 
     # Reading the unread comes after sending, and this is the expensive half:
     # a click and a tree walk per thread. A buyer whose message arrives in Pigu
@@ -2285,6 +2403,11 @@ def sync_once() -> dict:
             report["notes"].append(str(exc))
 
     _remember(fresh)
+    kept = _state.pop("clipboard_kept", "")
+    if kept:
+        report["notes"].append(
+            "a photo was sent and what was on the clipboard before could not be put back"
+            + (f" (it was {kept})" if kept != "unknown" else ""))
     note = (f"read {report['threads']} threads, sent {report['sent']}, typed {report['typed']}"
             + (f", {report['photos']} photos" if report["photos"] else "")
             + ("; " + "; ".join(report["notes"][:3]) if report["notes"] else ""))
