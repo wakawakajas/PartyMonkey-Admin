@@ -1161,6 +1161,30 @@ def read_open_conversation(nodes: list[dict], window: tuple[int, int, int, int],
 
 def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
                  reader: dict) -> list[dict]:
+    """The conversation list. The DOM first -- it is the same list, it has the
+    shop names without guessing which text is which, and it answers with the
+    window minimised, which the accessibility tree does not.
+
+    Everything below this is the accessibility reader, kept as the fallback
+    for a DuoKe started without the debugging port."""
+    web = duoke_web.list_chats()
+    if web:
+        return [{
+            "name": str(row.get("name") or "").strip(),
+            "shop": str(row.get("shop") or "").strip(),
+            "unread": bool(row.get("unread")),
+            "preview": str(row.get("preview") or ""),
+            # no rectangle and no element: this row is opened by clicking it in
+            # the page, which needs neither
+            "rect": None,
+            "_el": None,
+            "web": True,
+        } for row in web if str(row.get("name") or "").strip()]
+    return _read_threads_uia(nodes, window, reader)
+
+
+def _read_threads_uia(nodes: list[dict], window: tuple[int, int, int, int],
+                      reader: dict) -> list[dict]:
     """The conversation list, a row at a time.
 
     A row in this list is not one element and not one line of text: it is a
@@ -1353,6 +1377,22 @@ def _chat_key(name: str) -> str:
 
 
 def _open_thread(thread: dict, hwnd: int, allow_click: bool) -> bool:
+    """Open a conversation, without ever touching the screen.
+
+    In the page first: element.click() on the row needs no window, no focus
+    and no pointer. Then the accessibility patterns, which are also quiet.
+    Then a POSTED click, which Chromium accepts on a background window.
+
+    What is deliberately not here any more is a real mouse click. It worked,
+    and it meant raising DuoKe and moving somebody's pointer every time a
+    thread was opened -- which is DuoKe "popping up randomly" while somebody
+    was trying to work. Nothing in the reading half of this sync is worth
+    that.
+    """
+    name = str(thread.get("name") or "").strip()
+    if name and duoke_web.open_chat(_chat_key(name)):
+        time.sleep(0.8)
+        return True
     element = thread.get("_el")
     if element is not None:
         if uia.try_select(element) or uia.try_invoke(element):
@@ -1363,12 +1403,7 @@ def _open_thread(thread: dict, hwnd: int, allow_click: bool) -> bool:
     rect = thread.get("rect")
     if not rect:
         return False
-    x, y = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
-    left, top, _r, _b = winapi.window_rect(hwnd)
-    cx, cy = winapi.screen_to_client(hwnd, x, y)
-    child = winapi.child_window_from_point(hwnd, cx, cy)
-    if child:
-        winapi.post_click(child, cx, cy)
+    if _post_click_at(hwnd, (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2):
         time.sleep(0.6)
         return True
     return False
@@ -1674,7 +1709,16 @@ def _click_box(box: dict, hwnd: int) -> bool:
 
 
 def _click_at(hwnd: int, x: int, y: int) -> bool:
-    """Click a point inside DuoKe, wherever DuoKe happens to be.
+    """A REAL click: the window raised and the pointer moved.
+
+    The only caller left is pasting a photo, which cannot be done any other
+    way -- a file on the clipboard needs a real Ctrl+V, and a real keystroke
+    goes to whichever window holds the keyboard. Everything else clicks in the
+    page or posts a message, because a click that takes the screen is a click
+    that interrupts somebody.
+
+    Kept as it was otherwise: raised first, because a click goes to whatever is
+    drawn at that point.
 
     Raised to the top of the pile first, because a click goes to whatever is
     drawn at that point and the window is usually covered by whatever the
@@ -2212,6 +2256,12 @@ def sync_once() -> dict:
     named = sum(1 for n in nodes if (n.get("name") or "").strip())
     if named >= TREE_COLD_NAMES:
         _cold_since[0] = 0.0
+    # A cold accessibility tree used to end the pass. It no longer has to: the
+    # DOM reader does not care whether anybody is looking at the window, so a
+    # cold tree is only a problem when the debugging port is shut as well.
+    if named < TREE_COLD_NAMES and duoke_web.available():
+        named = TREE_COLD_NAMES
+        _cold_since[0] = 0.0
     if named < TREE_COLD_NAMES:
         if not _cold_since[0]:
             _cold_since[0] = time.time()
@@ -2256,6 +2306,12 @@ def sync_once() -> dict:
     reply_rect = reply_box.get("rect") if reply_box else None
     wide_enough = float(reader.get("min_input_width") or 700)
     on_chat_page = bool(reply_rect) and (reply_rect[2] - reply_rect[0]) >= wide_enough
+    # Or the DOM says so. A conversation list in the page is the same proof as
+    # a reply box in the accessibility tree, and it is proof that survives the
+    # window being minimised -- without this the pass still gave up on a cold
+    # tree even though everything it needed was readable.
+    if not on_chat_page and duoke_web.list_chats():
+        on_chat_page = True
     if not on_chat_page:
         note = ("DuoKe is not showing its chat list — click Chat in DuoKe once. "
                 "(A window that has just started opens on the dashboard, where there "
