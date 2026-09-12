@@ -59,7 +59,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from agent import actions, config, uia, winapi
+from agent import actions, config, duoke_web, uia, winapi
 
 CONFIG_PATH = config.ROOT_DIR / "duoke.json"
 SEEN_PATH = config.ROOT_DIR / "duoke-seen.json"
@@ -130,6 +130,9 @@ DEFAULTS: dict[str, Any] = {
         "--force-renderer-accessibility",
         "--disable-backgrounding-occluded-windows",
         "--disable-features=CalculateNativeWinOcclusion",
+        # The DOM, which has the picture URLs the accessibility tree does not
+        # and which answers whether or not the window is on screen.
+        "--remote-debugging-port=9223",
     ],
     # Off means read-only: messages come up, nothing is ever typed into DuoKe.
     # Worth leaving off for the first day, to watch what it drafts before it
@@ -1013,6 +1016,38 @@ _NOISE = re.compile(
     r"^(yesterday|today|kemarin|hari ini|昨天|今天|已读|未读|read|unread|sent|delivered)$",
     re.IGNORECASE,
 )
+
+
+def clean_lines(lines: list[dict], reader: dict) -> list[dict]:
+    """Drop DuoKe's own furniture from a conversation, whichever reader found
+    it.
+
+    The accessibility reader filtered this as it went; the DOM reader arrives
+    with the same "Auto Invite to Follow" and date dividers in it, and they
+    read as things somebody said. One filter for both, so a line that is noise
+    is noise in either.
+    """
+    skip = {str(x).strip().lower().rstrip(":：") for x in (reader.get("ignore_lines") or [])}
+    junk = _patterns(reader)
+    out = []
+    for line in lines:
+        text = str(line.get("text") or "").strip()
+        imgs = [u for u in (line.get("imgs") or []) if u]
+        if text:
+            folded = text.lower().rstrip(":：")
+            if folded in skip or any(rx.search(text) for rx in junk):
+                continue
+            # a date or a date and time on its own is a divider
+            if _DATE_ONLY.match(text) and not imgs:
+                continue
+        if not text and not imgs:
+            continue
+        out.append({"inbound": bool(line.get("inbound")), "text": text, "imgs": imgs})
+    return out
+
+
+# "2026/09/03 14:26", "09/12", "14:26" -- a divider, not a message
+_DATE_ONLY = re.compile(r"^\d{1,4}[/.\-]\d{1,2}([/.\-]\d{1,4})?(\s+\d{1,2}:\d{2}(:\d{2})?)?$")
 
 
 def _patterns(reader: dict) -> list:
@@ -2089,13 +2124,16 @@ def clear_answered_by_hand(cloud: "Cloud", hwnd: int, window: tuple[int, int, in
         who = read_open_who(tree, window, reader, message_band(tree, window, reader) or [])
         if not who or _chat_key(who).lower() != key.lower():
             continue                      # opened something else; do not judge it
-        lines = read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
+        lines = clean_lines(duoke_web.read_open_conversation(), reader) or \
+            read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
         _last_hand_check[0] = time.time()
         if not lines or lines[-1]["inbound"]:
             return                        # still theirs; still waiting
         try:
             cloud.save_history(chat["ids"][-1],
-                               [{"inbound": bool(l["inbound"]), "text": l["text"][:400]}
+                               [{"inbound": bool(l["inbound"]),
+                                 "text": str(l.get("text") or "")[:400],
+                                 "imgs": [u for u in (l.get("imgs") or []) if u][:4]}
                                 for l in lines])
             cloud.answered_by_hand(chat["ids"])
             report["by_hand"] = report.get("by_hand", 0) + len(chat["ids"])
@@ -2260,14 +2298,26 @@ def sync_once() -> dict:
 
     def harvest(chat_name: str, tree: list[dict], shop: str = "") -> None:
         key = _chat_key(chat_name)
-        lines = read_open_conversation(tree, window, reader)
-        inbound = [l["text"] for l in lines if l["inbound"]]
+        # The DOM first, where DuoKe's debugging port is open: it carries the
+        # same lines and, unlike the accessibility tree, the URL of every
+        # picture in them. A customer's photo is hosted by Shopee already, so
+        # what travels to Pigu is the link -- a hundred bytes rather than a
+        # megabyte of the shop's storage for a second copy of their file.
+        lines = clean_lines(duoke_web.read_open_conversation(), reader) or \
+            read_open_conversation(tree, window, reader)
+        inbound = [l for l in lines if l["inbound"]]
         if not inbound:
             return
         # Only the last thing they said is answered. The lines before it went
         # up on an earlier pass, or were answered by hand; sending them again
         # would put three rows on the screen for one conversation.
-        text = inbound[-1].strip()
+        last = inbound[-1]
+        text = str(last.get("text") or "").strip()
+        pics = [u for u in (last.get("imgs") or []) if u]
+        # A photo with no caption is still a message, and the commonest one
+        # there is: "is this the right plant", with a picture and nothing else.
+        if not text and pics:
+            text = "[photo]"
         if not text:
             return
         mark = _fingerprint(key, text)
@@ -2287,9 +2337,13 @@ def sync_once() -> dict:
             "source": "duoke",
             # The lines around it, since they were read anyway getting here.
             # A draft written without them answers "so tomorrow?" confidently
-            # and wrongly.
-            "history": [{"inbound": bool(l["inbound"]), "text": l["text"][:400]}
-                        for l in lines[:-1][-MESSAGE_TAIL:]],
+            # and wrongly. The message itself is kept in here as well, because
+            # a picture cannot live in the message column and this is where
+            # the screen looks for it.
+            "history": [{"inbound": bool(l["inbound"]),
+                         "text": str(l.get("text") or "")[:400],
+                         "imgs": [u for u in (l.get("imgs") or []) if u][:4]}
+                        for l in lines[-MESSAGE_TAIL:]],
         }
         try:
             if cloud.send_message(row):
@@ -2444,11 +2498,11 @@ def sync_once() -> dict:
     quiet = not any(t["unread"] for t in threads) and not report["typed"]
 
     # A buyer answered in DuoKe by hand is still on Pigu's list until somebody
-    # notices. This is the noticing, and it only happens on a quiet pass for
-    # the same reason the catalogue read does: it costs a click in a window
-    # somebody may be using.
-    if quiet:
-        clear_answered_by_hand(cloud, hwnd, window, reader, cfg, report)
+    # notices, and this is the noticing. It used to wait for a quiet pass,
+    # which meant a shop with anything unread never cleared a manual reply at
+    # all -- exactly when somebody is most likely to be answering by hand. It
+    # is throttled by its own clock instead: one conversation a minute.
+    clear_answered_by_hand(cloud, hwnd, window, reader, cfg, report)
     try:
         if not cfg.get("catalog_when_quiet") or quiet:
             if cloud.catalog_due(int(cfg.get("catalog_hours") or 12)):
@@ -2488,10 +2542,13 @@ def sync_once() -> dict:
             report["notes"].append(f"{key[:30]} is not in the list and the search missed them")
             continue
         tree = warm_tree(hwnd)
-        lines = read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
+        lines = clean_lines(duoke_web.read_open_conversation(), reader) or \
+            read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
         try:
             cloud.save_history(str(row.get("id")),
-                               [{"inbound": bool(l["inbound"]), "text": l["text"][:400]}
+                               [{"inbound": bool(l["inbound"]),
+                                 "text": str(l.get("text") or "")[:400],
+                                 "imgs": [u for u in (l.get("imgs") or []) if u][:4]}
                                 for l in lines])
             report["history"] += 1
         except CloudError as exc:
