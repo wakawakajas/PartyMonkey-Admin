@@ -108,6 +108,29 @@ DEFAULTS: dict[str, Any] = {
     # Off means a minimised DuoKe is left alone and the heartbeat says why
     # nothing was read.
     "restore_if_minimized": True,
+    # WHEN THE WINDOW IS OPEN AND ITS ELEMENTS ARE GONE.
+    #
+    # Minimising a Chromium window makes it tear down the accessibility tree,
+    # and nothing this agent can do brings it back: not restoring it, not a
+    # posted click, not SwitchToThisWindow -- all three were tried. Only a
+    # person clicking the app, or the app starting again, rebuilds it. So a
+    # sync that has been blind this long starts DuoKe again with the flags it
+    # needs, which is the only automatic way out.
+    #
+    # It is safe in the way that matters: a tree is only cold because nobody
+    # has touched DuoKe since it was minimised, so there is nothing of theirs
+    # to interrupt. Set to 0 to never do it -- then a blind sync stays blind
+    # until somebody clicks the window, and says so in the heartbeat.
+    "relaunch_if_cold_seconds": 180,
+    # The flags DuoKe has to start with to be readable at all. Discovered the
+    # hard way: without the first, Chromium builds no tree for a window nobody
+    # is using; without the third, it drops the tree whenever the window is
+    # covered.
+    "duoke_flags": [
+        "--force-renderer-accessibility",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-features=CalculateNativeWinOcclusion",
+    ],
     # Off means read-only: messages come up, nothing is ever typed into DuoKe.
     # Worth leaving off for the first day, to watch what it drafts before it
     # can act.
@@ -331,6 +354,45 @@ def _remember(fingerprints: set[str]) -> None:
 
 
 _last_hand_check = [0.0]
+# when the window's elements were first found missing, and when it was last
+# started again because of it
+_cold_since = [0.0]
+_last_relaunch = [0.0]
+
+
+def revive(hwnd: int) -> tuple[bool, str]:
+    """Start DuoKe again, with the flags that make it readable.
+
+    The exe is taken from the window itself rather than a configured path, so
+    this works on whichever machine it is and after an update moves things.
+    Its session survives -- DuoKe stays signed in -- so the cost is the
+    fifteen seconds it takes to come back.
+    """
+    cfg = load()
+    wait = float(cfg.get("relaunch_if_cold_seconds") or 0)
+    if wait <= 0:
+        return False, "left alone: relaunch_if_cold_seconds is 0"
+    # never twice in a row over the same minute: a DuoKe that comes back cold
+    # is a different problem and restarting it in a loop would be worse than
+    # the silence
+    if time.time() - _last_relaunch[0] < max(wait, 120):
+        return False, "already restarted it recently"
+    path = winapi.process_path(winapi.window_pid(hwnd)) if hwnd else ""
+    if not path:
+        return False, "could not tell which program to start"
+    flags = [str(f) for f in (cfg.get("duoke_flags") or []) if str(f).strip()]
+    try:
+        subprocess.run(["taskkill", "/PID", str(winapi.window_pid(hwnd)), "/F", "/T"],
+                       capture_output=True, timeout=20)
+        time.sleep(3.0)
+        subprocess.Popen([path, *flags], close_fds=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not start it again: {exc}"
+    _last_relaunch[0] = time.time()
+    _cold_since[0] = 0.0
+    # it needs a moment to come up; the next pass reads it
+    time.sleep(12.0)
+    return True, "started DuoKe again so it can be read"
 
 
 def _sweep_at() -> int:
@@ -2110,15 +2172,35 @@ def sync_once() -> dict:
     reader = cfg.get("reader") or {}
     nodes = warm_tree(hwnd)
     named = sum(1 for n in nodes if (n.get("name") or "").strip())
+    if named >= TREE_COLD_NAMES:
+        _cold_since[0] = 0.0
     if named < TREE_COLD_NAMES:
+        if not _cold_since[0]:
+            _cold_since[0] = time.time()
+        cold_for = time.time() - _cold_since[0]
+        wait = float(cfg.get("relaunch_if_cold_seconds") or 0)
+        if wait > 0 and cold_for >= wait:
+            done, why = revive(hwnd)
+            report["notes"].append(why)
+            if done:
+                try:
+                    cloud.beat(device, True, 0,
+                               "DuoKe had stopped showing its contents, so the shop PC "
+                               "restarted it — reading again in a few seconds.")
+                except CloudError:
+                    pass
+                _state["last_report"] = report
+                _state["last_pass_at"] = datetime.now(timezone.utc).isoformat()
+                return report
         # The window is open and its elements are not there. That is one thing
         # and one thing only: Chromium has the renderer switched off for this
         # window, which happens when it has been minimised and not clicked
         # since. Reported as itself rather than as "no messages".
         note = ("DuoKe is open but showing nothing to read — click its window once. "
                 "(It was minimised; Chromium does not rebuild a hidden window's "
-                "elements until the app is clicked. Launch it with "
-                "--force-renderer-accessibility to stop this happening.)")
+                "elements until the app is clicked, and restoring it from here does "
+                "not count. The shop PC will restart DuoKe itself if this lasts "
+                f"{int(float(cfg.get('relaunch_if_cold_seconds') or 0))} seconds.)")
         report["notes"].append(note)
         try:
             cloud.beat(device, True, 0, note)

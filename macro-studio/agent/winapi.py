@@ -90,6 +90,26 @@ def process_name(pid: int) -> str:
         kernel32.CloseHandle(handle)
 
 
+def process_path(pid: int) -> str:
+    """The full path of the exe behind a window, so an app can be started
+    again exactly as it was found rather than from a path written down
+    somewhere that will be wrong on the next machine."""
+    if not pid:
+        return ""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(2048)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return ""
+        return buf.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def window_title(hwnd: int) -> str:
     length = user32.GetWindowTextLengthW(hwnd)
     if length <= 0:
