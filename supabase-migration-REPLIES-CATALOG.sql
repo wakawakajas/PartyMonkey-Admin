@@ -43,6 +43,13 @@ create table if not exists public.reply_catalog (
 -- The title is the handle, so it is the key. Two shops selling a listing of
 -- the same name are two rows, because the send has to happen in the right
 -- shop's panel.
+--
+-- Case-folded, and that is deliberate: DuoKe writes a title one way and this
+-- is not the place to decide two spellings are two products. Note that an
+-- index on an EXPRESSION is not something PostgREST's on_conflict can resolve
+-- -- it matches constraints on columns -- so the sync reads what is there and
+-- splits its write into inserts and updates rather than upserting. Nothing
+-- about this table has to change for that.
 create unique index if not exists reply_catalog_title_key
   on public.reply_catalog (shop, lower(btrim(title)));
 

@@ -159,8 +159,18 @@ DEFAULTS: dict[str, Any] = {
         # how many screenfuls of listings to scroll through in one read, and
         # how far a notch of the wheel goes. Four hundred listings is a big
         # shop and this covers it; a shop with more gets the rest next time.
-        "catalog_pages": 14,
+        "catalog_pages": 3,
         "catalog_scroll_notches": 5,
+        # What to search the shop for when reading the catalogue.
+        #
+        # The Product tab's own list is not the catalogue: it is that buyer's
+        # recent inquiries, half a dozen rows that do not scroll. The search
+        # box is what reaches the whole shop, so the read sweeps it -- and the
+        # terms are mostly single vowels, because every title has an "a" or an
+        # "e" in it somewhere and the point is coverage rather than relevance.
+        # The words after them are here for titles that a vowel search buries.
+        "catalog_terms": ["a", "e", "i", "o", "u", "card", "sticker", "balloon",
+                          "tag", "box", "gift", "party"],
         # where the right-hand panel starts, in pixels from the window's left
         # edge. Only the panel is searched for product rows: the conversation
         # has titles in it too, in the strip above the messages.
@@ -423,31 +433,61 @@ class Cloud:
         return (datetime.now(timezone.utc) - when).total_seconds() > max(1, every_hours) * 3600
 
     def save_catalog(self, rows: list[dict], shop: str) -> int:
-        """Upsert the listings, in blocks. merge-duplicates against the title
-        key means a listing already known is refreshed rather than doubled,
-        and seen_at moving is what says it is still on the panel."""
+        """Write the listings: insert what is new, refresh what is known.
+
+        NOT an on_conflict upsert. PostgREST resolves on_conflict against a
+        unique constraint on the named COLUMNS, and the catalogue's key is an
+        expression -- lower(btrim(title)) -- so the whole write came back
+        42P10, "no unique or exclusion constraint matching". Reading what is
+        already there and splitting the write in two needs no change to the
+        table, which matters because the table is already live.
+
+        The refresh is one request for the many and one for the few: every
+        known row's seen_at moves together (that is what says a listing is
+        still on the panel), and only a row whose price, SKU or stock has
+        actually changed is written on its own.
+        """
         if not rows:
             return 0
         now = datetime.now(timezone.utc).isoformat()
-        body = [{
-            "user_id": self.user_id,
-            "shop": shop or "",
-            "title": r["title"][:300],
-            "price": r.get("price", "")[:60],
-            "sku": r.get("sku", "")[:80],
-            "stock": r.get("stock", "")[:20],
-            "seen_at": now,
-        } for r in rows]
-        wrote = 0
-        for at in range(0, len(body), 50):
-            block = body[at:at + 50]
-            self.rest("POST", "/reply_catalog?on_conflict=shop,title", block,
-                      prefer="return=minimal,resolution=merge-duplicates")
-            wrote += len(block)
+        where_shop = f"&shop=eq.{urllib.parse.quote(shop or '')}"
+        known = self.rest(
+            "GET", "/reply_catalog?select=id,title,price,sku,stock&limit=2000" + where_shop)
+        by_title = {}
+        for row in (known if isinstance(known, list) else []):
+            by_title[str(row.get("title", "")).strip().lower()] = row
+
+        fresh, again, changed = [], [], []
+        for r in rows:
+            title = r["title"][:300]
+            shaped = {
+                "price": r.get("price", "")[:60],
+                "sku": r.get("sku", "")[:80],
+                "stock": r.get("stock", "")[:20],
+            }
+            have = by_title.get(title.strip().lower())
+            if not have:
+                fresh.append({"user_id": self.user_id, "shop": shop or "",
+                              "title": title, "seen_at": now, **shaped})
+                continue
+            again.append(str(have.get("id")))
+            if any(str(have.get(k) or "") != v for k, v in shaped.items()):
+                changed.append((str(have.get("id")), shaped))
+
+        for at in range(0, len(fresh), 50):
+            self.rest("POST", "/reply_catalog", fresh[at:at + 50], prefer="return=minimal")
+        for at in range(0, len(again), 100):
+            ids = ",".join(again[at:at + 100])
+            self.rest("PATCH", f"/reply_catalog?id=in.({ids})", {"seen_at": now},
+                      prefer="return=minimal")
+        for row_id, shaped in changed[:80]:
+            self.rest("PATCH", f"/reply_catalog?id=eq.{urllib.parse.quote(row_id)}",
+                      {**shaped, "seen_at": now}, prefer="return=minimal")
+
         self.rest("PATCH", "/reply_sync?id=eq.true",
-                  {"catalog_at": now, "catalog_count": len(body)},
+                  {"catalog_at": now, "catalog_count": len(rows)},
                   prefer="return=minimal")
-        return wrote
+        return len(fresh) + len(again)
 
     def history_wanted(self) -> list[dict]:
         """Rows somebody has pressed Pull chat history on since they were last
@@ -993,6 +1033,13 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
         # the top line of the row: the name, the shop, the time. The preview
         # sits below it and is not what the conversation is called.
         top_line = [i for i in words if i["rect"][1] - first_y <= 30]
+        # A conversation row is a name with something said underneath it.
+        # Without this, a DuoKe that has come up on its dashboard hands over
+        # "Number of consultations" and "Guide Buyers" as though they were
+        # people waiting for an answer -- which is how a statistics panel
+        # nearly got messages posted about it.
+        if len(top_line) >= len(words):
+            continue
         # Leftmost, not widest. Widest was the obvious rule and it picked the
         # shop a conversation came through over the person in it: "bnair" is
         # 69 pixels wide and "PartyMonkey" beside it is 177. The buyer's name
@@ -1473,7 +1520,20 @@ def read_catalog(nodes: list[dict], window: tuple[int, int, int, int], reader: d
     tab = next((n for n in nodes
                 if n["control_type"] == "TabItem" and (n.get("name") or "").strip() == tab_name), None)
     if not tab:
-        return [], f'no "{tab_name}" tab in the window'
+        # The right-hand panel, tabs and all, only exists while a conversation
+        # is open -- on a freshly started DuoKe there is nothing to read the
+        # catalogue out of. Opening the first thread in the list is enough, and
+        # it is a thread that is about to be read anyway.
+        first = next(iter(read_threads(nodes, window, reader)), None)
+        if not first or not _open_thread(first, hwnd, allow_click=True):
+            return [], "no conversation is open, so the Product tab is not there to read"
+        time.sleep(1.2)
+        nodes = warm_tree(hwnd)
+        tab = next((n for n in nodes
+                    if n["control_type"] == "TabItem"
+                    and (n.get("name") or "").strip() == tab_name), None)
+        if not tab:
+            return [], f'no "{tab_name}" tab in the window'
     if not _post_click_element(hwnd, tab):
         return [], "the Product tab would not take a click"
     time.sleep(1.2)
@@ -1511,26 +1571,54 @@ def read_catalog(nodes: list[dict], window: tuple[int, int, int, int], reader: d
             time.sleep(1.5)
 
     found: dict[str, dict] = {}
-    pages = int(reader.get("catalog_pages") or 14)
+    pages = max(1, int(reader.get("catalog_pages") or 3))
     notches = int(reader.get("catalog_scroll_notches") or 5)
     panel_left = float(reader.get("panel_left") or 4250)
     mid_x = int(window[0] + panel_left + 300)
     mid_y = int((window[1] + window[3]) / 2)
     child = _post_target(hwnd, mid_x, mid_y)
 
-    for _ in range(pages):
-        tree = warm_tree(hwnd)
-        before = len(found)
-        for row in _catalog_rows(tree, window, reader):
-            key = row["title"].strip().lower()
-            if key and key not in found:
-                found[key] = row
-        if len(found) == before:
-            break                      # a screenful that added nothing is the end
-        if not child:
-            break
-        winapi.post_wheel(child, mid_x, mid_y, -notches)
-        time.sleep(0.9)
+    def harvest_screenfuls() -> None:
+        """Whatever is on the panel now, and the next few screenfuls of it.
+
+        Two empty screenfuls end it rather than one: a list scrolled faster
+        than it renders shows nothing for a beat, and treating that as the
+        bottom of the list once read seven listings out of a shop with
+        hundreds."""
+        quiet = 0
+        for _ in range(pages):
+            before = len(found)
+            for row in _catalog_rows(warm_tree(hwnd), window, reader):
+                key = row["title"].strip().lower()
+                if key and key not in found:
+                    found[key] = row
+            quiet = 0 if len(found) > before else quiet + 1
+            if quiet >= 2 or not child:
+                break
+            winapi.post_wheel(child, mid_x, mid_y, -notches)
+            time.sleep(1.1)
+
+    # what the panel offers on its own: this buyer's recent inquiries, which
+    # are the listings most likely to be asked about again
+    harvest_screenfuls()
+
+    # and then the shop itself, through the one thing that reaches past the
+    # shortlist
+    if search:
+        for term in (reader.get("catalog_terms") or []):
+            word = str(term).strip()
+            if not word:
+                continue
+            if not _post_type(hwnd, search, word):
+                break
+            _post_key(hwnd, search, "enter")
+            time.sleep(1.6)
+            harvest_screenfuls()
+        # left as it was found, so the next person to look at the panel is not
+        # looking at a search nobody typed
+        _post_type(hwnd, search, "")
+        _post_key(hwnd, search, "enter")
+        time.sleep(0.8)
 
     return list(found.values()), ""
 
@@ -1658,6 +1746,28 @@ def sync_once() -> dict:
         _state["last_report"] = report
         _state["last_pass_at"] = datetime.now(timezone.utc).isoformat()
         return report
+    # Is this the chat page at all? A freshly started DuoKe comes up on its
+    # dashboard, where there is no conversation, no reply box and no Product
+    # tab -- and the left column is full of rows that read like a list of
+    # people until you look at them. The reply box is the thing that only
+    # exists on the chat page, so it is what decides.
+    reply_box = _input_box(nodes, reader)
+    reply_rect = reply_box.get("rect") if reply_box else None
+    wide_enough = float(reader.get("min_input_width") or 700)
+    on_chat_page = bool(reply_rect) and (reply_rect[2] - reply_rect[0]) >= wide_enough
+    if not on_chat_page:
+        note = ("DuoKe is not showing its chat list — click Chat in DuoKe once. "
+                "(A window that has just started opens on the dashboard, where there "
+                "is nothing to read.)")
+        report["notes"].append(note)
+        try:
+            cloud.beat(device, True, 0, note)
+        except CloudError:
+            pass
+        _state["last_report"] = report
+        _state["last_pass_at"] = datetime.now(timezone.utc).isoformat()
+        return report
+
     threads = read_threads(nodes, window, reader)
     report["threads"] = len(threads)
 
