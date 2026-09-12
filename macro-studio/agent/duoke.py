@@ -62,6 +62,7 @@ from agent import actions, config, uia, winapi
 
 CONFIG_PATH = config.ROOT_DIR / "duoke.json"
 SEEN_PATH = config.ROOT_DIR / "duoke-seen.json"
+CATALOG_PATH = config.ROOT_DIR / "duoke-catalog.json"
 PROBE_DIR = config.RUNS_DIR
 
 # A conversation is opened, read, and left. Ten in a pass is plenty for a
@@ -125,6 +126,11 @@ DEFAULTS: dict[str, Any] = {
     # names in by hand. Pressing Sync products on the screen asks for one
     # straight away; this is the "and anyway, every so often" number.
     "catalog_hours": 12,
+    # The catalogue read moves the Product tab about, so it waits for a quiet
+    # moment: nothing unread, nothing approved and still to type. A shop mid
+    # morning never has one -- which is right, because a buyer waiting matters
+    # more than a listing being a few hours stale.
+    "catalog_when_quiet": True,
     # Where reply photos live. The same private bucket the rest of the app
     # uses; the path is what the row carries.
     "photo_bucket": "shipment-photos",
@@ -152,6 +158,10 @@ DEFAULTS: dict[str, Any] = {
         # Send button on a row, and how tall a row is. Names as the app writes
         # them in English; a build in another language needs these changed and
         # nothing else.
+        # DuoKe's own search, top middle: what finds a buyer whose
+        # conversation has scrolled out of the list. Its results appear as a
+        # panel under it, headed "Buyer".
+        "chat_search": "Search",
         "product_tab": "Product",
         "product_search": "Search Product Name",
         "product_send": "Send",
@@ -171,6 +181,12 @@ DEFAULTS: dict[str, Any] = {
         # The words after them are here for titles that a vowel search buries.
         "catalog_terms": ["a", "e", "i", "o", "u", "card", "sticker", "balloon",
                           "tag", "box", "gift", "party"],
+        # How many of those terms to search in ONE pass. One. Twelve of them
+        # back to back is a minute and a half of the Product tab scrolling
+        # itself in front of whoever is using the PC; one is a flicker, and the
+        # sweep finishes over the next few passes instead. Where it got to is
+        # remembered in duoke-catalog.json.
+        "catalog_terms_per_pass": 1,
         # where the right-hand panel starts, in pixels from the window's left
         # edge. Only the panel is searched for product rows: the conversation
         # has titles in it too, in the strip above the messages.
@@ -284,6 +300,21 @@ def _remember(fingerprints: set[str]) -> None:
     keep = list(_seen() | fingerprints)[-MAX_SEEN:]
     try:
         SEEN_PATH.write_text(json.dumps(keep), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _sweep_at() -> int:
+    """Which search term the catalogue sweep is up to."""
+    try:
+        return int(json.loads(CATALOG_PATH.read_text(encoding="utf-8")).get("term", 0))
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return 0
+
+
+def _sweep_to(term: int) -> None:
+    try:
+        CATALOG_PATH.write_text(json.dumps({"term": term}), encoding="utf-8")
     except OSError:
         pass
 
@@ -432,7 +463,7 @@ class Cloud:
             return True
         return (datetime.now(timezone.utc) - when).total_seconds() > max(1, every_hours) * 3600
 
-    def save_catalog(self, rows: list[dict], shop: str) -> int:
+    def save_catalog(self, rows: list[dict], shop: str, finished: bool = True) -> int:
         """Write the listings: insert what is new, refresh what is known.
 
         NOT an on_conflict upsert. PostgREST resolves on_conflict against a
@@ -484,9 +515,13 @@ class Cloud:
             self.rest("PATCH", f"/reply_catalog?id=eq.{urllib.parse.quote(row_id)}",
                       {**shaped, "seen_at": now}, prefer="return=minimal")
 
-        self.rest("PATCH", "/reply_sync?id=eq.true",
-                  {"catalog_at": now, "catalog_count": len(rows)},
-                  prefer="return=minimal")
+        # catalog_at is "when the catalogue was last read THROUGH", so a slice
+        # of the sweep moves the count and the seen_at stamps but not the clock
+        # that decides when to read again.
+        beat: dict[str, Any] = {"catalog_count": len(by_title) + len(fresh)}
+        if finished:
+            beat["catalog_at"] = now
+        self.rest("PATCH", "/reply_sync?id=eq.true", beat, prefer="return=minimal")
         return len(fresh) + len(again)
 
     def history_wanted(self) -> list[dict]:
@@ -1062,6 +1097,74 @@ def read_threads(nodes: list[dict], window: tuple[int, int, int, int],
     return out
 
 
+def open_by_search(hwnd: int, window: tuple[int, int, int, int], reader: dict,
+                   key: str) -> bool:
+    """Open a conversation that is no longer in the list, by searching for it.
+
+    The list holds the recent and the unread; a buyer answered an hour ago has
+    dropped off the bottom of it, and a reply approved for them then had
+    nowhere to go -- "not in the list any more" was three real replies sitting
+    unsent. DuoKe's own search finds them, and its results are rows under a
+    "Buyer" heading in the middle of the window, which is neither the list
+    column nor the conversation.
+
+    The search box is emptied afterwards: leaving somebody else's name in it
+    would leave the app showing a list nobody asked for.
+    """
+    want = (key or "").strip()
+    if not want:
+        return False
+    nodes = warm_tree(hwnd)
+    name = str(reader.get("chat_search") or "Search")
+    box = next((n for n in nodes
+                if n["control_type"] == "Edit" and (n.get("name") or "").strip() == name), None)
+    if not box:
+        return False
+    if not _post_type(hwnd, box, want):
+        return False
+    _post_key(hwnd, box, "enter")
+    time.sleep(2.0)
+
+    band = message_band(warm_tree(hwnd), window, reader)
+    list_right = (band[0] if band else 967)
+    hits = []
+    for node in warm_tree(hwnd):
+        rect = node.get("rect")
+        if not rect or rect[2] - rect[0] <= 1:
+            continue
+        text = (node.get("name") or "").strip()
+        if not text or node["control_type"] not in ("Text", "ListItem"):
+            continue
+        # a result, not the list row it may also still be in, and not the
+        # conversation header of whoever is open
+        if (rect[0] - window[0]) < list_right:
+            continue
+        if _chat_key(text).lower() != want.lower():
+            continue
+        hits.append((rect[1], node))
+    hits.sort(key=lambda h: h[0])
+
+    opened = False
+    for _y, node in hits[:3]:
+        if not _post_click_element(hwnd, node):
+            continue
+        time.sleep(1.4)
+        tree = warm_tree(hwnd)
+        who = read_open_who(tree, window, reader, message_band(tree, window, reader) or [])
+        if who and _chat_key(who).lower() == want.lower():
+            opened = True
+            break
+
+    # tidy up whether or not it worked
+    box2 = next((n for n in warm_tree(hwnd)
+                 if n["control_type"] == "Edit" and (n.get("name") or "").strip() == name), None)
+    if box2:
+        _post_type(hwnd, box2, "")
+        _post_key(hwnd, box2, "enter")
+        time.sleep(0.6)
+    return opened
+
+
 def _chat_key(name: str) -> str:
     """A thread's name with the unread count taken off it, so the same
     conversation is the same key whether or not it had two waiting when it was
@@ -1534,6 +1637,14 @@ def read_catalog(nodes: list[dict], window: tuple[int, int, int, int], reader: d
                     and (n.get("name") or "").strip() == tab_name), None)
         if not tab:
             return [], f'no "{tab_name}" tab in the window'
+    # whichever tab the panel was showing, so it can be put back afterwards.
+    # There is no "selected" flag to read, so it is the one whose pane is
+    # drawn: the Custom element named after a tab.
+    panes = {(n.get("name") or "").strip() for n in nodes
+             if n["control_type"] == "Custom" and (n.get("name") or "").strip()}
+    tabs = {(n.get("name") or "").strip() for n in nodes if n["control_type"] == "TabItem"}
+    was_on = next(iter(panes & tabs), "")
+
     if not _post_click_element(hwnd, tab):
         return [], "the Product tab would not take a click"
     time.sleep(1.2)
@@ -1603,24 +1714,39 @@ def read_catalog(nodes: list[dict], window: tuple[int, int, int, int], reader: d
     harvest_screenfuls()
 
     # and then the shop itself, through the one thing that reaches past the
-    # shortlist
-    if search:
-        for term in (reader.get("catalog_terms") or []):
-            word = str(term).strip()
-            if not word:
-                continue
+    # shortlist -- a term or two per pass, carrying on from where the last pass
+    # stopped, so this is never a minute of somebody's window scrolling itself
+    terms = [str(t).strip() for t in (reader.get("catalog_terms") or []) if str(t).strip()]
+    per = max(1, int(reader.get("catalog_terms_per_pass") or 1))
+    done_all = True
+    if search and terms:
+        at = _sweep_at() % len(terms)
+        for step in range(per):
+            word = terms[(at + step) % len(terms)]
             if not _post_type(hwnd, search, word):
                 break
             _post_key(hwnd, search, "enter")
             time.sleep(1.6)
             harvest_screenfuls()
+        nxt = (at + per) % len(terms)
+        _sweep_to(nxt)
+        done_all = nxt == 0          # a full circuit of the terms is a full read
         # left as it was found, so the next person to look at the panel is not
         # looking at a search nobody typed
         _post_type(hwnd, search, "")
         _post_key(hwnd, search, "enter")
         time.sleep(0.8)
 
-    return list(found.values()), ""
+    # and the panel goes back to the tab it was on: somebody watching an order
+    # should not find themselves looking at a product list
+    if was_on and was_on != tab_name:
+        back = next((n for n in warm_tree(hwnd)
+                     if n["control_type"] == "TabItem"
+                     and (n.get("name") or "").strip() == was_on), None)
+        if back:
+            _post_click_element(hwnd, back)
+
+    return list(found.values()), ("" if done_all else "part")
 
 
 def _catalog_rows(nodes: list[dict], window: tuple[int, int, int, int],
@@ -1843,11 +1969,16 @@ def sync_once() -> dict:
             tree = warm_tree(hwnd)
             here = read_threads(tree, window, reader)
             target = next((t for t in here if _chat_key(t["name"]) == key), None)
-            if target and not _open_thread(target, hwnd, allow_click=True):
-                report["notes"].append(f"could not open {key[:30]} to reply")
-                continue
-            if not target:
-                report["notes"].append(f"{key[:30]} is not in the list any more")
+            if target:
+                if not _open_thread(target, hwnd, allow_click=True):
+                    report["notes"].append(f"could not open {key[:30]} to reply")
+                    continue
+            elif not open_by_search(hwnd, window, reader, key):
+                # searched and still nothing: the buyer has been renamed, or
+                # the conversation is gone. Said plainly, because the reply is
+                # still sitting there waiting.
+                report["notes"].append(
+                    f"{key[:30]} is not in the list and the search did not find them")
                 continue
             tree = warm_tree(hwnd)
             # The thread was clicked; this is whether the click landed. Typing
@@ -1924,13 +2055,20 @@ def sync_once() -> dict:
     # After the messages, because a buyer waiting is worth more than a
     # catalogue being a few minutes stale, and before the replies, because a
     # reply may be sending one of these.
+    quiet = not any(t["unread"] for t in threads) and not report["typed"]
     try:
-        if cloud.catalog_due(int(cfg.get("catalog_hours") or 12)):
-            listings, why = read_catalog(warm_tree(hwnd), window, reader, hwnd)
-            if listings:
-                report["catalog"] = cloud.save_catalog(listings, str(cfg.get("store") or ""))
-            elif why:
-                report["notes"].append(f"catalogue: {why}")
+        if not cfg.get("catalog_when_quiet") or quiet:
+            if cloud.catalog_due(int(cfg.get("catalog_hours") or 12)):
+                listings, part = read_catalog(warm_tree(hwnd), window, reader, hwnd)
+                if listings:
+                    report["catalog"] = cloud.save_catalog(
+                        listings, str(cfg.get("store") or ""),
+                        # A partial sweep must not stamp the read as done, or
+                        # the next twelve hours pass without the other terms
+                        # ever being searched.
+                        finished=part != "part")
+                elif part and part != "part":
+                    report["notes"].append(f"catalogue: {part}")
     except CloudError as exc:
         report["notes"].append(f"catalogue: {exc}")
 
@@ -1949,11 +2087,12 @@ def sync_once() -> dict:
         tree = warm_tree(hwnd)
         here = read_threads(tree, window, reader)
         target = next((t for t in here if _chat_key(t["name"]) == key), None)
-        if not target:
-            report["notes"].append(f"{key[:30]} is not in the list to read")
-            continue
-        if not _open_thread(target, hwnd, allow_click=True):
-            report["notes"].append(f"could not open {key[:30]} to read it")
+        if target:
+            if not _open_thread(target, hwnd, allow_click=True):
+                report["notes"].append(f"could not open {key[:30]} to read it")
+                continue
+        elif not open_by_search(hwnd, window, reader, key):
+            report["notes"].append(f"{key[:30]} is not in the list and the search missed them")
             continue
         tree = warm_tree(hwnd)
         lines = read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
