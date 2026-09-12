@@ -3899,7 +3899,18 @@ body.mc-docked .mc-bubble{display:none !important;}
         <div id="rpProdResults"></div>
         <div class="rp-prods" id="rpProds" style="margin-top:6px;"></div>
         <p class="hint" id="rpCatalogNote" style="margin:6px 0 0;"></p>
-        <button class="btn-outline" id="rpProdSyncBtn" style="width:100%;margin-top:8px;">Sync my listings from DuoKe</button>
+        <div class="rp-acts" style="margin-top:8px;">
+          <label class="btn-primary" style="flex:1;text-align:center;cursor:pointer;">
+            Import listings from Shopee
+            <input type="file" id="rpProdFile" accept=".csv,.xlsx,.xls,text/csv"
+                   style="display:none;">
+          </label>
+          <button class="btn-outline" id="rpProdSyncBtn">Read from DuoKe instead</button>
+        </div>
+        <p class="hint" id="rpImportHint" style="margin:6px 0 0;">Seller Centre &rarr; Products
+          &rarr; Export, then drop the file here: the whole catalogue in one go, which is
+          faster and more complete than reading DuoKe's panel a search at a time.</p>
+        <div id="rpImportMsg"></div>
       </div>
 
       <!-- And a photo put in by hand: this parcel, this box, this batch code.
@@ -38955,6 +38966,137 @@ async function rpSearchCatalog(){
     +'Use as typed sends it anyway, if that is how it reads on Shopee.</p>';
 }
 
+// ---- listings from the shop's own export ----
+//
+// Reading DuoKe's Product tab was always the wrong way round: it is a panel
+// built for a person, it shows one buyer's recent inquiries by default, and
+// the only way past that is to search it a term at a time and scroll -- slow
+// to run and visible in somebody's window while it does. Shopee will hand over
+// the whole catalogue as a file, and this app already reads spreadsheets.
+//
+// Columns are found by what their headers say rather than by position, because
+// Shopee's export has changed shape twice and a column index would be a bug
+// waiting for the next change.
+const RP_COL={
+  title:[/product name/i,/item name/i,/^name$/i,/商品名称/],
+  sku:[/variation sku/i,/parent sku/i,/^sku/i,/货号/],
+  price:[/price/i,/价格/],
+  stock:[/stock/i,/quantity/i,/库存/],
+  variation:[/variation name/i,/variation$/i,/规格/]
+};
+function rpPickCols(header){
+  const at={};
+  header.forEach((cell,i)=>{
+    const text=String(cell||'').trim();
+    if(!text) return;
+    for(const key in RP_COL){
+      if(at[key]!==undefined) continue;
+      if(RP_COL[key].some(rx=>rx.test(text))) at[key]=i;
+    }
+  });
+  return at;
+}
+
+// One row per listing, not per variation: a product with nine sizes is one
+// thing to send, and its price is the range across them.
+function rpFoldRows(rows,at){
+  const by={};
+  rows.forEach(r=>{
+    const title=String(r[at.title]||'').trim();
+    if(!title) return;
+    const key=title.toLowerCase();
+    const seat=by[key]||(by[key]={title:title,prices:[],stock:0,sku:''});
+    const price=parseFloat(String(r[at.price]??'').replace(/[^\d.]/g,''));
+    if(!isNaN(price)) seat.prices.push(price);
+    const stock=parseInt(String(r[at.stock]??'').replace(/[^\d]/g,''),10);
+    if(!isNaN(stock)) seat.stock+=stock;
+    if(!seat.sku){
+      const sku=String(r[at.sku]||'').trim();
+      if(sku) seat.sku=sku;
+    }
+  });
+  return Object.values(by).map(x=>{
+    const lo=Math.min(...x.prices), hi=Math.max(...x.prices);
+    return {
+      title:x.title.slice(0,300),
+      price:x.prices.length?(lo===hi?lo.toFixed(2):lo.toFixed(2)+' ~ '+hi.toFixed(2)):'',
+      sku:x.sku.slice(0,80),
+      stock:x.stock?('x '+x.stock):''
+    };
+  });
+}
+
+async function rpImportListings(file){
+  const msg=rpEl('rpImportMsg');
+  const session=await requireSession(msg); if(!session) return;
+  if(typeof XLSX==='undefined'){
+    showMsg(msg,'The spreadsheet reader did not load — check the connection and reload.',false);
+    return;
+  }
+  showMsg(msg,'Reading '+escapeHtml(file.name)+'…',true);
+  let listings=[];
+  try{
+    const book=XLSX.read(await file.arrayBuffer(),{type:'array'});
+    const sheet=book.Sheets[book.SheetNames[0]];
+    const grid=XLSX.utils.sheet_to_json(sheet,{header:1,blankrows:false});
+    // Shopee's export carries a row or two of instructions above the headers,
+    // so the header is the first row that actually names a product column.
+    let head=-1,at={};
+    for(let i=0;i<Math.min(grid.length,12);i++){
+      const found=rpPickCols(grid[i]||[]);
+      if(found.title!==undefined){ head=i; at=found; break; }
+    }
+    if(head<0){
+      showMsg(msg,'No product name column in that file. Export again from Seller Centre '
+        +'&rarr; Products &rarr; Export, or send me the file and I will read its headers.',false);
+      return;
+    }
+    listings=rpFoldRows(grid.slice(head+1),at);
+  }catch(err){
+    showMsg(msg,'Could not read that file: '+escapeHtml((err&&err.message)||'unknown error'),false);
+    return;
+  }
+  if(!listings.length){ showMsg(msg,'That file has headers but no listings in it.',false); return; }
+
+  // Insert what is new, refresh what is known — the same split the agent
+  // makes, and for the same reason: the table's key is a folded title, which
+  // an upsert cannot resolve.
+  showMsg(msg,'Saving '+listings.length+' listings…',true);
+  const {data:known}=await sb.from('reply_catalog').select('id,title').limit(3000);
+  const byTitle={};
+  (known||[]).forEach(r=>{ byTitle[String(r.title||'').trim().toLowerCase()]=r.id; });
+  const now=new Date().toISOString();
+  const fresh=[],again=[];
+  listings.forEach(l=>{
+    const id=byTitle[l.title.trim().toLowerCase()];
+    if(id) again.push({id:id,...l});
+    else fresh.push({user_id:session.user.id,shop:'',...l,seen_at:now});
+  });
+  let added=0;
+  for(let i=0;i<fresh.length;i+=200){
+    const {error}=await sb.from('reply_catalog').insert(fresh.slice(i,i+200));
+    if(error){
+      showMsg(msg,/reply_catalog/i.test(error.message||'')
+        ?'Run supabase-migration-REPLIES-CATALOG.sql first.'
+        :'Could not save them: '+escapeHtml(error.message),false);
+      return;
+    }
+    added+=Math.min(200,fresh.length-i);
+  }
+  for(let i=0;i<again.length;i+=200){
+    // seen_at and the numbers, in one request per block
+    await Promise.all(again.slice(i,i+200).map(r=>
+      sb.from('reply_catalog').update({price:r.price,sku:r.sku,stock:r.stock,seen_at:now})
+        .eq('id',r.id)));
+  }
+  await sb.from('reply_sync')
+    .update({catalog_at:now,catalog_count:listings.length}).eq('id',true);
+  rpCatalogRow=Object.assign({},rpCatalogRow||{},{catalog_at:now,catalog_count:listings.length});
+  rpRenderCatalogNote();
+  showMsg(msg,'✓ '+listings.length+' listings in — '+added+' new, '
+    +(listings.length-added)+' refreshed. Search them above.',true);
+}
+
 // Asking is a stamp on a row, like the chat history: the only thing that can
 // read the Product tab is the PC with DuoKe on it.
 async function rpSyncCatalog(){
@@ -39653,6 +39795,11 @@ rpEl('rpQueueBtn').addEventListener('click',async()=>{
 });
 rpEl('rpProdAdd').addEventListener('click',rpAddProduct);
 rpEl('rpProdSyncBtn').addEventListener('click',rpSyncCatalog);
+rpEl('rpProdFile').addEventListener('change',e=>{
+  const file=e.target.files&&e.target.files[0];
+  e.target.value='';
+  if(file) rpImportListings(file);
+});
 rpEl('rpProdSearch').addEventListener('input',()=>{
   clearTimeout(rpHitTimer);
   rpHitTimer=setTimeout(rpSearchCatalog,260);

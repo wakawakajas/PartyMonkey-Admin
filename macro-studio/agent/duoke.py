@@ -132,7 +132,12 @@ DEFAULTS: dict[str, Any] = {
     # Pigu, so the Replies screen can search them instead of somebody typing
     # names in by hand. Pressing Sync products on the screen asks for one
     # straight away; this is the "and anyway, every so often" number.
-    "catalog_hours": 12,
+    # Zero means never on a timer. The listings come in from Shopee's own
+    # export now -- the whole catalogue in one file, in seconds -- and reading
+    # DuoKe's panel a search at a time was slow, incomplete and visible in
+    # somebody's window while it happened. Pressing "Read from DuoKe instead"
+    # in Pigu still asks for one, which is what this is for.
+    "catalog_hours": 0,
     # The catalogue read moves the Product tab about, so it waits for a quiet
     # moment: nothing unread, nothing approved and still to type. A shop mid
     # morning never has one -- which is right, because a buyer waiting matters
@@ -479,6 +484,11 @@ class Cloud:
         asked, done = row.get("catalog_wanted_at"), row.get("catalog_at")
         if asked and (not done or str(done) < str(asked)):
             return True
+        # Zero hours means only when asked. The listings arrive from Shopee's
+        # export now; reading the panel is the fallback somebody presses, not
+        # something that should start itself in the middle of a morning.
+        if every_hours <= 0:
+            return False
         if not done:
             return True
         try:
