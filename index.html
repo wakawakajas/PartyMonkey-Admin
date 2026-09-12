@@ -3062,6 +3062,7 @@ body.mc-docked .mc-bubble{display:none !important;}
       <div class="chips chips-left" style="margin:12px 0 0;">
         <button class="btn-outline" id="bundleFocusAddLater">Add In Later</button>
         <button class="btn-outline" id="bundleFocusNextSet">Next Set</button>
+        <button class="btn-outline" id="bundleFocusPrintLabel">🏷 Print label</button>
         <button class="btn-primary" id="bundleFocusOk" style="flex:1;">OK</button>
       </div>
       <div id="bundleFocusMsg"></div>
@@ -3765,6 +3766,7 @@ body.mc-docked .mc-bubble{display:none !important;}
          needs -- the whole order in one run, rather than a line at a time. -->
     <div id="bundleLabelBar" style="margin:0 0 12px;" hidden>
       <button class="btn-outline" id="bundleLabelAllBtn" style="width:100%;">🏷 Print all seed labels</button>
+      <button class="btn-outline" id="bundlePrintAllBtn" style="width:100%;" hidden>🏷 Print bundle</button>
       <div id="bundleLabelHint"></div>
     </div>
     <div id="bundleOrderList"></div>
@@ -6468,12 +6470,26 @@ body.mc-docked .mc-bubble{display:none !important;}
 <div class="sheet-bg" id="seedLabelSheet">
   <div class="sheet">
     <div class="sheet-title">How many labels?</div>
-    <p class="hint" id="seedLabelWhat" style="margin:0 0 4px;"></p>
+    <label class="field"><span>LABEL TEXT</span>
+      <input type="text" id="seedLabelText" style="font-size:13px;"/>
+    </label>
     <label class="field"><span>QUANTITY</span>
       <input type="number" id="seedLabelQty" min="1" max="99" step="1" inputmode="numeric"/>
     </label>
     <button class="btn-primary" id="seedLabelGo">🏷 Print</button>
     <button class="btn-outline" id="seedLabelCancel">Cancel</button>
+  </div>
+</div>
+
+<div class="sheet-bg" id="bundlePrintSelectSheet">
+  <div class="sheet">
+    <div class="sheet-title">Print items from bundle</div>
+    <div id="bundlePrintSelectList" style="max-height:200px;overflow-y:auto;margin:0 0 12px;"></div>
+    <div class="chips chips-left">
+      <button class="btn-outline" id="bundlePrintSelectAll">Select All</button>
+      <button class="btn-primary" id="bundlePrintGo" style="flex:1;">🏷 Print Bundle</button>
+    </div>
+    <button class="btn-outline" id="bundlePrintSelectCancel" style="width:100%;margin-top:8px;">Cancel</button>
   </div>
 </div>
 
@@ -11147,9 +11163,14 @@ function openBundleOrder(){
   }
   loadBundleSkuPhotos();
   // Only Plant Talks packs seeds, so only Plant Talks gets label buttons.
-  const isSeeds=bundleShopOf(o)==='planttalks';
+  const shop=bundleShopOf(o);
+  const isSeeds=shop==='planttalks';
   const bar=document.getElementById('bundleLabelBar');
-  if(bar) bar.hidden=!isSeeds;
+  if(bar){
+    bar.hidden=false;
+    document.getElementById('bundleLabelAllBtn').hidden=!isSeeds;
+    document.getElementById('bundlePrintAllBtn').hidden=isSeeds;
+  }
   const hiddenN=o.jobs.reduce((n,j)=>n+bundleHiddenCount(j),0);
   // Every bundle with everything in it, the way a pick list shows every line
   // of the sheet: what is coming is worth knowing before it arrives, and a
@@ -11579,6 +11600,12 @@ document.getElementById('bundleFocusNextSet').addEventListener('click',()=>{
   }
   bundleFocusOpen(next.id);
 });
+document.getElementById('bundleFocusPrintLabel').addEventListener('click',()=>{
+  const j=bundleJobById(bundleFocusJob); if(!j) return;
+  const p=bundleFocusAt>=0&&bundleFocusAt<j.pieces.length?j.pieces[bundleFocusAt]:null;
+  if(!p) return;
+  seedLabelAsk(j.id,p.id);
+});
 document.getElementById('bundleFocusClose').addEventListener('click',bundleFocusClose);
 // A piece already in your hand is worth ticking now rather than when the list
 // gets round to it, so the grid is not only a view of what is coming.
@@ -11692,11 +11719,12 @@ function seedLabelAsk(jobId,pieceId){
   const x=(j.pieces||[]).find(p=>String(p.id)===String(pieceId)); if(!x) return;
   const text=seedLabelText(x.sku);
   seedLabelPending={jobId:j.id,sku:x.sku,text};
-  document.getElementById('seedLabelWhat').textContent='\u201c'+text+'\u201d \u2014 on the tape.';
+  const txtField=document.getElementById('seedLabelText');
   const qty=document.getElementById('seedLabelQty');
+  txtField.value=text;
   qty.value=seedLabelWanted(x,j);
   document.getElementById('seedLabelSheet').classList.add('open');
-  setTimeout(()=>{ qty.focus(); if(qty.select) qty.select(); },60);
+  setTimeout(()=>{ txtField.focus(); if(txtField.select) txtField.select(); },60);
 }
 function seedLabelClose(){
   document.getElementById('seedLabelSheet').classList.remove('open');
@@ -11705,11 +11733,12 @@ function seedLabelClose(){
 document.getElementById('seedLabelCancel').addEventListener('click',seedLabelClose);
 document.getElementById('seedLabelGo').addEventListener('click',()=>{
   const p=seedLabelPending; if(!p) return;
+  const text=(document.getElementById('seedLabelText').value||'').trim();
   const n=Math.max(1,Math.min(99,Math.round(
     Number(document.getElementById('seedLabelQty').value)||1)));
   seedLabelClose();
-  seedLabelSend([{jobId:p.jobId,sku:p.sku,text:p.text,copies:n}],
-    n+' \u00d7 \u201c'+p.text+'\u201d');
+  seedLabelSend([{jobId:p.jobId,sku:p.sku,text:text,copies:n}],
+    n+' \u00d7 \u201c'+text+'\u201d');
 });
 
 // Every seed line on the order, at the quantity each needs, in one press.
@@ -11727,6 +11756,66 @@ document.getElementById('bundleLabelAllBtn').addEventListener('click',()=>{
   const total=rows.reduce((n,r)=>n+r.copies,0);
   if(!confirm('Print '+total+' seed label'+(total===1?'':'s')+' for "'+o.title
     +'"?\n\nThey go straight to the P-touch on the packing PC.')) return;
+  seedLabelSend(rows,total+' label'+(total===1?'':'s'));
+});
+
+// Print items from a bundle: let user select which ones.
+let bundlePrintPending=null;
+document.getElementById('bundlePrintAllBtn').addEventListener('click',()=>{
+  const o=bundleOrderNow(); if(!o) return;
+  const items=[];
+  o.jobs.forEach(j=>bundleWanted(j).forEach(x=>{
+    items.push({jobId:j.id,sku:x.sku,piece:x,job:j});
+  }));
+  if(!items.length){ showMsg(document.getElementById('bundleLabelHint'),'Nothing on this order to label.',false); return; }
+  bundlePrintPending={order:o,items:items,selected:new Set(items.map((_,i)=>i))};
+  bundlePrintShowSelect();
+});
+
+function bundlePrintShowSelect(){
+  const p=bundlePrintPending; if(!p) return;
+  const html=p.items.map((item,i)=>`
+    <label style="display:flex;align-items:center;padding:8px;cursor:pointer;border-bottom:1px solid var(--color-border);">
+      <input type="checkbox" id="bundlePrintItem${i}" ${p.selected.has(i)?'checked':''} style="margin-right:8px;"/>
+      <span>${item.piece.sku}</span>
+    </label>
+  `).join('');
+  document.getElementById('bundlePrintSelectList').innerHTML=html;
+  p.items.forEach((_,i)=>{
+    const cb=document.getElementById('bundlePrintItem'+i);
+    cb.addEventListener('change',()=>{
+      if(cb.checked) p.selected.add(i);
+      else p.selected.delete(i);
+    });
+  });
+  document.getElementById('bundlePrintSelectSheet').classList.add('open');
+}
+
+document.getElementById('bundlePrintSelectAll').addEventListener('click',()=>{
+  const p=bundlePrintPending; if(!p) return;
+  p.selected=new Set(p.items.map((_,i)=>i));
+  p.items.forEach((_,i)=>{ const cb=document.getElementById('bundlePrintItem'+i); if(cb) cb.checked=true; });
+});
+
+document.getElementById('bundlePrintSelectCancel').addEventListener('click',()=>{
+  document.getElementById('bundlePrintSelectSheet').classList.remove('open');
+  bundlePrintPending=null;
+});
+
+document.getElementById('bundlePrintGo').addEventListener('click',()=>{
+  const p=bundlePrintPending; if(!p) return;
+  const rows=[];
+  p.selected.forEach(i=>{
+    const item=p.items[i];
+    if(item && item.piece){
+      const text=seedLabelText(item.piece.sku);
+      rows.push({jobId:item.jobId,sku:item.sku,text:text,copies:seedLabelWanted(item.piece,item.job)});
+    }
+  });
+  document.getElementById('bundlePrintSelectSheet').classList.remove('open');
+  if(!rows.length){ showMsg(document.getElementById('bundleLabelHint'),'No items selected.',false); bundlePrintPending=null; return; }
+  const total=rows.reduce((n,r)=>n+r.copies,0);
+  bundlePrintPending=null;
   seedLabelSend(rows,total+' label'+(total===1?'':'s'));
 });
 
