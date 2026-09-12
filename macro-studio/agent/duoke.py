@@ -137,6 +137,20 @@ DEFAULTS: dict[str, Any] = {
     # morning never has one -- which is right, because a buyer waiting matters
     # more than a listing being a few hours stale.
     "catalog_when_quiet": True,
+    # Answering a buyer in DuoKe by hand should take them off the list in
+    # Pigu, and the only way to know it happened is to look: a conversation
+    # whose last line is now OURS has been dealt with. That costs a click, so
+    # it happens to one conversation at a time, no more often than this, and
+    # only when nothing is waiting to go out.
+    "hand_check_seconds": 60,
+    # And not straight away: a buyer who sends two lines ten seconds apart
+    # would otherwise have the first one checked while they are still typing
+    # the second.
+    "hand_check_after": 45,
+    # How many conversations one look may try before giving up for this minute.
+    # A row that can never be found -- a renamed buyer, a deleted chat -- would
+    # otherwise block the check for good.
+    "hand_check_tries": 3,
     # Where reply photos live. The same private bucket the rest of the app
     # uses; the path is what the row carries.
     "photo_bucket": "shipment-photos",
@@ -308,6 +322,9 @@ def _remember(fingerprints: set[str]) -> None:
         SEEN_PATH.write_text(json.dumps(keep), encoding="utf-8")
     except OSError:
         pass
+
+
+_last_hand_check = [0.0]
 
 
 def _sweep_at() -> int:
@@ -529,6 +546,38 @@ class Cloud:
             beat["catalog_at"] = now
         self.rest("PATCH", "/reply_sync?id=eq.true", beat, prefer="return=minimal")
         return len(fresh) + len(again)
+
+    def pending_chats(self) -> list[dict]:
+        """The conversations Pigu is still showing as unanswered, oldest first,
+        as [{chat_key, buyer, ids, newest}]."""
+        out = self.rest(
+            "GET",
+            "/reply_messages?select=id,chat_key,buyer,received_at&status=eq.new"
+            "&order=received_at.asc&limit=200",
+        )
+        rows = out if isinstance(out, list) else []
+        chats: dict[str, dict] = {}
+        for row in rows:
+            key = (row.get("chat_key") or row.get("buyer") or "").strip()
+            if not key:
+                continue
+            seat = chats.setdefault(key, {"chat_key": key, "buyer": row.get("buyer") or key,
+                                          "ids": [], "newest": ""})
+            seat["ids"].append(str(row.get("id")))
+            stamp = str(row.get("received_at") or "")
+            if stamp > seat["newest"]:
+                seat["newest"] = stamp
+        return sorted(chats.values(), key=lambda c: c["newest"])
+
+    def answered_by_hand(self, ids: list[str]) -> None:
+        """Off the list, without a reply of its own: somebody typed one in
+        DuoKe. Skipped is exactly what that means here -- dealt with, and
+        nothing for the shop PC to send."""
+        if not ids:
+            return
+        joined = ",".join(urllib.parse.quote(i) for i in ids)
+        self.rest("PATCH", f"/reply_messages?id=in.({joined})",
+                  {"status": "skipped"}, prefer="return=minimal")
 
     def history_wanted(self) -> list[dict]:
         """Rows somebody has pressed Pull chat history on since they were last
@@ -1795,6 +1844,79 @@ def _catalog_rows(nodes: list[dict], window: tuple[int, int, int, int],
     return out
 
 
+def clear_answered_by_hand(cloud: "Cloud", hwnd: int, window: tuple[int, int, int, int],
+                           reader: dict, cfg: dict, report: dict) -> None:
+    """Take conversations off Pigu's list that were answered in DuoKe by hand.
+
+    One conversation per look, the one waiting longest, because each one costs
+    opening a thread. What decides is the last line in it: if it came from this
+    side, the buyer has their answer and the row in Pigu is stale. The reply
+    itself is not copied anywhere -- it was typed by a person into DuoKe, which
+    is where it belongs; what matters is that the list stops asking for it.
+
+    The lines are written back as history first, so somebody looking at that
+    conversation in Pigu sees the reply that was typed rather than watching the
+    row vanish with no explanation.
+    """
+    every = float(cfg.get("hand_check_seconds") or 60)
+    if time.time() - _last_hand_check[0] < every:
+        return
+    try:
+        chats = cloud.pending_chats()
+    except CloudError as exc:
+        report["notes"].append(f"by hand: {exc}")
+        return
+    if not chats:
+        _last_hand_check[0] = time.time()
+        return
+
+    wait = float(cfg.get("hand_check_after") or 45)
+    most = max(1, int(cfg.get("hand_check_tries") or 3))
+    tried = 0
+    now = datetime.now(timezone.utc)
+    for chat in chats:
+        try:
+            when = datetime.fromisoformat(str(chat["newest"]).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if (now - when).total_seconds() < wait:
+            continue                      # they may still be typing
+        key = chat["chat_key"]
+        tried += 1
+        # A candidate that cannot be opened must not use up the look: the next
+        # one along may well be answerable, and a row that can never be found
+        # would otherwise block the check forever.
+        if tried > most:
+            break
+        tree = warm_tree(hwnd)
+        here = read_threads(tree, window, reader)
+        target = next((t for t in here if _chat_key(t["name"]) == key), None)
+        if target:
+            if not _open_thread(target, hwnd, allow_click=True):
+                continue
+        elif not open_by_search(hwnd, window, reader, key):
+            continue
+        tree = warm_tree(hwnd)
+        who = read_open_who(tree, window, reader, message_band(tree, window, reader) or [])
+        if not who or _chat_key(who).lower() != key.lower():
+            continue                      # opened something else; do not judge it
+        lines = read_open_conversation(tree, window, reader, tail=HISTORY_TAIL)
+        _last_hand_check[0] = time.time()
+        if not lines or lines[-1]["inbound"]:
+            return                        # still theirs; still waiting
+        try:
+            cloud.save_history(chat["ids"][-1],
+                               [{"inbound": bool(l["inbound"]), "text": l["text"][:400]}
+                                for l in lines])
+            cloud.answered_by_hand(chat["ids"])
+            report["by_hand"] = report.get("by_hand", 0) + len(chat["ids"])
+        except CloudError as exc:
+            report["notes"].append(f"by hand: {exc}")
+        return
+
+    _last_hand_check[0] = time.time()
+
+
 # ---------------------------------------------------------------- one pass
 
 
@@ -1832,7 +1954,7 @@ def sync_once() -> dict:
     cfg = load()
     report: dict[str, Any] = {"sent": 0, "threads": 0, "typed": 0, "photos": 0,
                               "products": 0, "history": 0, "catalog": 0,
-                              "skipped": 0, "notes": []}
+                              "by_hand": 0, "skipped": 0, "notes": []}
     cloud = Cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
                   cfg.get("email", ""), cfg.get("password", ""))
     device = (platform.node() or "shop PC")[:60]
@@ -2066,6 +2188,13 @@ def sync_once() -> dict:
     # catalogue being a few minutes stale, and before the replies, because a
     # reply may be sending one of these.
     quiet = not any(t["unread"] for t in threads) and not report["typed"]
+
+    # A buyer answered in DuoKe by hand is still on Pigu's list until somebody
+    # notices. This is the noticing, and it only happens on a quiet pass for
+    # the same reason the catalogue read does: it costs a click in a window
+    # somebody may be using.
+    if quiet:
+        clear_answered_by_hand(cloud, hwnd, window, reader, cfg, report)
     try:
         if not cfg.get("catalog_when_quiet") or quiet:
             if cloud.catalog_due(int(cfg.get("catalog_hours") or 12)):
