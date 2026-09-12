@@ -45,11 +45,44 @@ const json = (body: unknown, status = 200) =>
 // Read per call rather than once at boot, for the same reason as the energy
 // question: changing the GEMINI_MODEL secret should take effect on the next
 // draft, not whenever a worker happens to be recycled.
-// "gemini-3.6-flash" was the default and this key cannot call it: the name
-// was wrong, so every draft fell through to the fallbacks. An alias is the
-// right kind of default -- it survives the retirements that break a pinned
-// version, which is the failure this whole ladder exists to absorb.
-const model = () => Deno.env.get("GEMINI_MODEL") || "gemini-flash-latest";
+// WHY THERE IS NO MODEL TO KEEP CHANGING.
+//
+// Every model name in here has been wrong at some point: 3.6-flash was
+// refused, 2.5-flash came back "no longer available to new users, use
+// 3.6-flash", and a pinned version is a thing that expires. Asking somebody to
+// edit a secret each time Google rotates its line-up is not a fix, it is a
+// subscription to being interrupted.
+//
+// So the model is DISCOVERED. A name in the GEMINI_MODEL secret is honoured
+// first, for a shop that wants a particular one; aliases come next, because an
+// alias is Google's own promise to keep pointing at something that works; and
+// if all of those are refused the key is asked what it can actually call and
+// those are tried newest-looking first. Whatever answers is remembered for the
+// life of the worker, so the cost of a rotation is one slow draft rather than
+// a message to the person who owns the shop.
+const model = () => Deno.env.get("GEMINI_MODEL") || "";
+
+// The one that answered last, per worker. Not stored anywhere: a worker lives
+// minutes to hours, and re-finding a model is one cheap call.
+let workingModel = "";
+
+// Aliases first: they are the names that do not retire. gemma is dropped --
+// it is a different family and answers differently -- and so is anything that
+// is plainly not a text model.
+function preferredNames(listed: string[]): string[] {
+  const usable = listed.filter((n) => !/gemma|embedding|image|tts|aqa|veo|imagen/i.test(n));
+  const aliases = usable.filter((n) => /-latest$/.test(n));
+  const flash = usable.filter((n) => /flash/i.test(n) && !/-latest$/.test(n));
+  const rest = usable.filter((n) => !aliases.includes(n) && !flash.includes(n));
+  // newest first within each group, which for Gemini names is the highest
+  // version number and "preview" last
+  const order = (a: string, b: string) => {
+    const pre = (x: string) => (/preview|exp/i.test(x) ? 1 : 0);
+    if (pre(a) !== pre(b)) return pre(a) - pre(b);
+    return b.localeCompare(a, undefined, { numeric: true });
+  };
+  return [...aliases.sort(order), ...flash.sort(order), ...rest.sort(order)];
+}
 
 // Names only, never values — "not set" cannot tell a missing secret from a
 // misspelled one, and those want opposite fixes.
@@ -117,11 +150,19 @@ async function ask(body: Record<string, unknown>) {
   // several retirements. A model name that is wrong is answered 404 by some
   // endpoints and 400 by others, so a refusal is never taken as proof the
   // request was the problem — the next name is tried before giving up.
-  // Lite last on purpose: it is the one with room left when the free tier's
-  // per-minute allowance on the bigger models has gone, which is what a 429
-  // here actually means.
-  const names = [...new Set([model(), "gemini-flash-latest", "gemini-2.5-flash",
-                             "gemini-2.5-flash-lite"])];
+  // What to try, in order: the one that worked a moment ago, then the secret
+  // if somebody set one, then the aliases. The list from the key itself is
+  // only fetched if all of those are refused -- it costs a call, and nine
+  // times in ten an alias answers.
+  const names = [...new Set([
+    workingModel,
+    model(),
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-pro-latest",
+  ].filter(Boolean))];
+  // whether the key has already been asked what it can call
+  let listedAlready = false;
   const send = (name: string, payload: unknown) =>
     fetch(`https://generativelanguage.googleapis.com/v1beta/models/${name}:generateContent`, {
       method: "POST",
@@ -158,17 +199,22 @@ async function ask(body: Record<string, unknown>) {
   let refusedBy = "";
   let busy = "";
   let settled = false;
-  for (const name of names) {
+  const tried: string[] = [];
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
     for (const rung of rungs) {
       const attempt = await send(name, rung);
-      // Answered: done. Out of quota or overloaded: this MODEL is spent, but
-      // another one has its own allowance, so break out of the rungs and try
-      // the next name rather than giving up — the free tier runs out per
+      tried.push(`${name} → ${attempt.status}`);
+      // Answered: done, and remembered, so the next draft in this worker goes
+      // straight to it.
+      // Out of quota or overloaded: this MODEL is spent, but another one has
+      // its own allowance, so try the next name — the free tier runs out per
       // model, not per key. Anything else (a dead key, a refusal) no other
       // name will fix either.
       if (attempt.ok) {
         res = attempt;
         settled = true;
+        workingModel = name;
         break;
       }
       if (attempt.status === 429 || attempt.status === 503) {
@@ -186,6 +232,17 @@ async function ask(body: Record<string, unknown>) {
       res = attempt;
     }
     if (settled) break;
+    // Every name we knew about has been refused. Now it is worth asking the
+    // key what it can actually call, and carrying on down that list -- this is
+    // the bit that means a model being retired overnight costs one slow draft
+    // instead of somebody editing a secret.
+    if (i === names.length - 1 && !listedAlready) {
+      listedAlready = true;
+      const listed = preferredNames(await usableModels());
+      for (const extra of listed) {
+        if (!names.includes(extra)) names.push(extra);
+      }
+    }
   }
   if (!res || !res.ok) {
     const status = res?.status ?? 0;
@@ -204,13 +261,15 @@ async function ask(body: Record<string, unknown>) {
     }
 
     const detail = res && !refused ? await res.text().catch(() => "") : refused;
-    // Which models the key may call is the answer nine times in ten, and the
-    // refusal never says. So it is asked and put in the message.
-    const can = await usableModels();
-    const hint = can.length
-      ? ` — "${refusedBy || names[0]}" was refused. This key can call: ${can.slice(0, 10).join(", ")}` +
-        `${can.length > 10 ? ", …" : ""}. Set the GEMINI_MODEL secret to one of those.`
-      : " — and this key could not list any models at all, so check GEMINI_API_KEY itself" +
+    // Everything this key offers has now been tried, so the useful thing to
+    // report is what was tried and what each one said -- not a list of models
+    // to go and paste into a secret, which is the loop this was written to
+    // break.
+    const hint = tried.length
+      ? ` — tried ${tried.slice(0, 8).join(", ")}${tried.length > 8 ? ", …" : ""}.` +
+        " Every model this key can reach refused the request, so this is the key or the" +
+        " project rather than the model name."
+      : " — and this key could not reach Gemini at all, so check GEMINI_API_KEY itself" +
         " (a restricted key, or one from a project without the Generative Language API enabled).";
     throw new Error(`Gemini said ${status}${hint}: ${detail.slice(0, 200)}`);
   }
