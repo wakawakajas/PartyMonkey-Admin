@@ -501,7 +501,7 @@ def print_labels(labels: list[dict], printer: Optional[str] = None, shop: str = 
     font_mm = float(cfg.get("font_mm") or 0)
 
     # PartyMonkey uses different label dimensions: 20mm height, 1 column
-    if shop == "partymonkey":
+    if (shop or "").lower() == "partymonkey":
         height_mm = 20
         cols = 1
         cut_line = False
