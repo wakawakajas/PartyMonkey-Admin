@@ -501,10 +501,12 @@ def print_labels(labels: list[dict], printer: Optional[str] = None, shop: str = 
     font_mm = float(cfg.get("font_mm") or 0)
 
     # PartyMonkey uses different label dimensions: 20mm height, 1 column
-    if (shop or "").lower() == "partymonkey":
+    shop_lower = (shop or "").lower()
+    if shop_lower == "partymonkey":
         height_mm = 20
         cols = 1
         cut_line = False
+        print(f"[LABELS] PartyMonkey detected: {height_mm}mm height, {cols} column")
 
     flat: list[str] = []
     for entry in labels or []:
@@ -671,6 +673,7 @@ def sync_once() -> dict:
         # already corrected, while the test button, which does go through
         # chosen_printer(), printed perfectly.
         shop = mine[0].get("store", "").strip() if mine else ""
+        print(f"[LABELS] Detected shop: '{shop}'")
         out = print_labels([{"text": r.get("text"), "copies": r.get("copies")} for r in mine], shop=shop)
     except LabelError as exc:
         for row in mine:
