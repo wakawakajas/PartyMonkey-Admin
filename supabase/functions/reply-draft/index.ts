@@ -256,7 +256,7 @@ function words(s: string) {
 }
 
 type Example = { id: string; buyer_text: string; reply_text: string; hits: number; edited: boolean };
-type Fact = { fact: string; photo_path: string };
+type Fact = { fact: string; photos: string[] };
 
 // Which attached photo, if any, this question is asking to be shown.
 //
@@ -269,7 +269,7 @@ function photosFor(message: string, facts: Fact[]): Fact[] {
   const asked = new Set(words(message));
   if (!asked.size) return [];
   const scored = facts
-    .filter((f) => f.photo_path)
+    .filter((f) => f.photos.length)
     .map((f) => {
       let score = 0;
       for (const w of words(f.fact)) if (asked.has(w)) score += 1;
@@ -325,7 +325,11 @@ function draftPrompt(
   lines.push(
     facts.length
       ? facts.map((f) =>
-        "- " + f.fact + (f.photo_path ? "   [a photo of this goes out with your reply]" : ""))
+        "- " + f.fact + (f.photos.length
+          ? (f.photos.length > 1
+            ? `   [${f.photos.length} photos of this go out with your reply]`
+            : "   [a photo of this goes out with your reply]")
+          : ""))
         .join("\n")
       : "- (none recorded yet)",
   );
@@ -357,7 +361,7 @@ function draftPrompt(
     "order number.",
   );
   lines.push("- Never promise a refund amount, and never accept blame for a courier's delay.");
-  if (facts.some((f) => f.photo_path)) {
+  if (facts.some((f) => f.photos.length)) {
     lines.push(
       "- Where a fact above is marked as having a photo going out and that fact answers the " +
       "question, say the picture is there — \"ni size chart dia\", \"here is the photo\" — in the " +
@@ -432,10 +436,17 @@ Deno.serve(async (req) => {
     const { data: factRows } = await asUser.from("reply_facts")
       .select("*").order("created_at");
     const facts: Fact[] = (factRows ?? [])
-      .map((r) => ({
-        fact: String((r as { fact?: unknown }).fact ?? "").trim(),
-        photo_path: String((r as { photo_path?: unknown }).photo_path ?? "").trim(),
-      }))
+      .map((r) => {
+        const row = r as { fact?: unknown; photo_path?: unknown; photos?: unknown };
+        // A fact may carry several pictures now. photo_path is the first of
+        // them, and on a project without that migration it is the only one.
+        const many = Array.isArray(row.photos) ? row.photos.map((x) => String(x ?? "").trim()) : [];
+        const one = String(row.photo_path ?? "").trim();
+        return {
+          fact: String(row.fact ?? "").trim(),
+          photos: [...new Set([one, ...many].filter(Boolean))],
+        };
+      })
       .filter((f) => f.fact);
 
     // The whole table, ranked here. It is a few hundred rows of chat at the
@@ -543,7 +554,10 @@ Deno.serve(async (req) => {
       used: used.map((u) => u.id),
       // Offered, not decided: the screen shows these beside the draft with a
       // tick each, so nothing goes to a buyer that nobody looked at.
-      photos: offered.map((f) => ({ path: f.photo_path, fact: f.fact })),
+      // every picture the matched facts carry, capped so a reply cannot
+      // arrive as an album
+      photos: offered.flatMap((f) => f.photos.map((path) => ({ path, fact: f.fact })))
+        .slice(0, 4),
     });
   } catch (err) {
     return json({ error: (err as Error)?.message ?? "unknown error" }, 500);

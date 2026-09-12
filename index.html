@@ -2837,6 +2837,23 @@ body.mc-docked .mc-bubble{display:none !important;}
   text-transform:uppercase;color:var(--faint);margin:0 0 5px;font-weight:600;}
 .rp-basis li{font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:var(--muted);
   margin-bottom:3px;overflow-wrap:anywhere;}
+/* a fact's pictures, however many it has */
+.rp-fact-pics{display:flex;gap:5px;flex-wrap:wrap;flex:0 0 auto;}
+.rp-fact-pic{position:relative;line-height:0;}
+.rp-fact-pic .rp-x{position:absolute;top:-5px;right:-5px;width:17px;height:17px;min-height:0;
+  padding:0;border-radius:50%;font-size:10px;line-height:15px;background:var(--card);
+  border:1px solid var(--border-strong);color:var(--muted);}
+/* the / menu: the shop's own facts, dropped into a draft as you type */
+.rp-slash{position:absolute;z-index:60;left:0;right:0;bottom:calc(100% + 4px);
+  background:var(--card);border:1px solid var(--border-strong);border-radius:12px;
+  box-shadow:0 -6px 24px rgba(0,0,0,.45);max-height:230px;overflow-y:auto;padding:4px;}
+.rp-slash-opt{display:block;width:100%;text-align:left;background:none;border:0;
+  color:var(--ink);font-family:'IBM Plex Sans',sans-serif;font-size:13px;padding:8px 10px;
+  border-radius:8px;cursor:pointer;min-height:0;overflow-wrap:anywhere;}
+.rp-slash-opt.on,.rp-slash-opt:hover{background:var(--nest);}
+.rp-slash-kind{font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--faint);margin-left:6px;}
+.rp-composer{position:relative;}
 .rp-fact{display:flex;align-items:flex-start;gap:9px;padding:8px 0;
   border-bottom:1px solid var(--paper-line);}
 .rp-fact:last-child{border-bottom:0;}
@@ -3863,13 +3880,16 @@ body.mc-docked .mc-bubble{display:none !important;}
           <div class="rp-composer-top">
             <span class="rp-draft-chip" id="rpDraftChip">Drafted for you</span>
             <span class="hint" style="flex:1;"><b>Enter</b> sends &middot;
-              <b>Shift+Enter</b> or <b>&crarr; Line</b> for a new line</span>
+              <b>Shift+Enter</b> for a new line &middot; <b>/</b> drops in a shop fact</span>
           </div>
+          <div class="rp-slash" id="rpSlash" style="display:none;"></div>
           <textarea id="rpDraft" spellcheck="false" placeholder="Drafting&hellip;"></textarea>
           <div class="rp-acts">
             <button class="btn-primary rp-send" id="rpSendBtn">Send reply</button>
             <button class="btn-outline" id="rpLineBtn" title="Start a new line in the draft">&crarr; Line</button>
             <button class="btn-outline" id="rpRedoBtn">Rewrite</button>
+            <button class="btn-outline" id="rpFactFromDraft"
+              title="Keep the selected words as something true about the shop">+ Fact</button>
             <select id="rpTone" aria-label="Rewrite it differently">
           <option value="">Same again, different words</option>
           <option value="shorter and firmer">Shorter, firmer</option>
@@ -38759,29 +38779,35 @@ function rpRenderFacts(){
   }
   box.innerHTML=rpFacts.map(f=>
     '<div class="rp-fact">'
-    +(f.photo_path
-      ?'<img class="rp-thumb" alt="" data-rp-thumb="'+escapeHtml(f.photo_path)+'">'
+    +(rpFactPics(f).length
+      ?'<span class="rp-fact-pics">'+rpFactPics(f).map(path=>
+          '<span class="rp-fact-pic">'
+          +'<img class="rp-thumb" alt="" data-rp-thumb="'+escapeHtml(path)+'">'
+          +'<button class="icon-btn rp-x" data-rp-unpic="'+f.id+'" data-rp-path="'
+          +escapeHtml(path)+'" title="Take this photo off" aria-label="Take this photo off">×</button>'
+          +'</span>').join('')+'</span>'
       :'')
     +'<span class="rp-fact-text">'+escapeHtml(f.fact)+'</span>'
     +(f.source==='distilled'?'<span class="rp-tag check">Check me</span>':'')
     +'<span class="rp-photo-acts">'
     // a label rather than a button: the file input is what opens the camera on
     // a phone, and a label is the only thing that can front for one
-    +'<label class="btn-outline">'+(f.photo_path?'Change':'Photo')
-    +'<input type="file" accept="image/*" data-rp-pick="'+f.id+'" style="display:none;"></label>'
-    +(f.photo_path?'<button class="btn-outline" data-rp-unpic="'+f.id+'">No photo</button>':'')
+    +'<label class="btn-outline">'+(rpFactPics(f).length?'Add photo':'Photo')
+    +'<input type="file" accept="image/*" multiple data-rp-pick="'+f.id
+    +'" style="display:none;"></label>'
     +'<button class="btn-outline" data-fact="'+f.id+'">Delete</button>'
     +'</span></div>').join('');
   rpHydrateThumbs(box);
   box.querySelectorAll('[data-rp-pick]').forEach(inp=>{
-    inp.addEventListener('change',()=>{
-      const file=inp.files&&inp.files[0];
+    inp.addEventListener('change',async()=>{
+      const files=[...(inp.files||[])];
       inp.value='';
-      if(file) rpAttachPhoto(inp.dataset.rpPick,file);
+      // one at a time, so a slow upload of the third does not lose the first
+      for(const file of files) await rpAttachPhoto(inp.dataset.rpPick,file);
     });
   });
   box.querySelectorAll('[data-rp-unpic]').forEach(btn=>{
-    btn.addEventListener('click',()=>rpDropPhoto(btn.dataset.rpUnpic));
+    btn.addEventListener('click',()=>rpDropPhoto(btn.dataset.rpUnpic,btn.dataset.rpPath));
   });
   box.querySelectorAll('[data-fact]').forEach(btn=>{
     btn.addEventListener('click',async()=>{
@@ -38810,6 +38836,14 @@ async function rpHydrateThumbs(root){
     }
   }
 }
+// A fact's pictures: the list, with the single old column folded in, so a
+// project that has not run the many-photos migration still shows its one.
+function rpFactPics(fact){
+  const many=Array.isArray(fact&&fact.photos)?fact.photos.filter(Boolean):[];
+  const one=(fact&&fact.photo_path)?[fact.photo_path]:[];
+  return [...new Set([...one,...many])];
+}
+
 async function rpAttachPhoto(factId,file){
   const msg=rpEl('rpFactMsg');
   const session=await requireSession(msg); if(!session) return;
@@ -38824,28 +38858,59 @@ async function rpAttachPhoto(factId,file){
     const path=session.user.id+'/replies/'+Date.now()+'.jpg';
     const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:'image/jpeg'});
     if(up.error) throw up.error;
-    const old=fact.photo_path||'';
-    const {error}=await sb.from('reply_facts').update({photo_path:path}).eq('id',factId);
+    // Added, not replaced. photo_path keeps the first one -- the orphan sweep
+    // only protects files named in a *_path column, so the first photo of
+    // every fact is safe by that route and the rest are kept safe by also
+    // living on the shelf, whose photo_path the sweep does see.
+    const pics=rpFactPics(fact);
+    const next=[...pics,path];
+    const patch={photos:next};
+    if(!fact.photo_path) patch.photo_path=path;
+    let {error}=await sb.from('reply_facts').update(patch).eq('id',factId);
+    if(error&&/photos/i.test(error.message||'')){
+      // the many-photos migration has not been run: keep the one it can hold
+      ({error}=await sb.from('reply_facts').update({photo_path:path}).eq('id',factId));
+      if(!error){
+        fact.photo_path=path;
+        showMsg(rpEl('rpFactMsg'),'Saved. Run supabase-migration-REPLIES-MANY-PHOTOS.sql '
+          +'to keep more than one photo on a fact.',false);
+      }
+    }else if(!error){
+      fact.photos=next;
+      if(!fact.photo_path) fact.photo_path=path;
+      rpEl('rpFactMsg').innerHTML='';
+    }
     if(error) throw error;
-    if(old) await sb.storage.from(PHOTO_BUCKET).remove([old]);
-    fact.photo_path=path;
-    rpEl('rpFactMsg').innerHTML='';
+    // on the shelf as well, so it can be sent with any reply and so the
+    // orphan sweep can see it
+    await sb.from('reply_photos')
+      .insert({user_id:session.user.id,photo_path:path,label:(fact.fact||'').slice(0,60)})
+      .then(({data})=>{ if(data&&data[0]) rpShelf.unshift(data[0]); },()=>{});
     rpRenderFacts();
   }catch(err){
     showMsg(msg,'The photo did not upload: '+escapeHtml((err&&err.message)||'unknown error'),false);
   }
 }
-async function rpDropPhoto(factId){
+async function rpDropPhoto(factId,path){
   const fact=rpFacts.find(f=>f.id===factId);
-  if(!fact||!fact.photo_path) return;
-  const old=fact.photo_path;
-  const {error}=await sb.from('reply_facts').update({photo_path:''}).eq('id',factId);
+  if(!fact) return;
+  const pics=rpFactPics(fact);
+  const gone=path||pics[0];
+  if(!gone) return;
+  const left=pics.filter(x=>x!==gone);
+  const patch={photos:left,photo_path:left[0]||''};
+  let {error}=await sb.from('reply_facts').update(patch).eq('id',factId);
+  if(error&&/photos/i.test(error.message||''))
+    ({error}=await sb.from('reply_facts').update({photo_path:left[0]||''}).eq('id',factId));
   if(error){ showMsg(rpEl('rpFactMsg'),'Could not take it off: '+escapeHtml(error.message),false); return; }
-  fact.photo_path='';
+  fact.photos=left; fact.photo_path=left[0]||'';
   rpRenderFacts();
-  // the file goes after the row, not before: a delete that half-happened
-  // should leave a fact with a picture, not a picture nothing points at
-  await sb.storage.from(PHOTO_BUCKET).remove([old]);
+  // The row first, the file second: a half-done delete should leave a fact
+  // with a picture rather than a picture nothing points at. The file itself
+  // stays while the shelf still names it -- the shelf is where photos are
+  // deleted for good.
+  if(!rpShelf.some(x=>x.photo_path===gone))
+    await sb.storage.from(PHOTO_BUCKET).remove([gone]);
 }
 
 // Chat has one clipboard, and the words are already on it, so a photo cannot
@@ -39185,8 +39250,8 @@ function rpRenderShelf(){
     +'<button class="icon-btn rp-shelf-x" data-rp-shelf-del="'+ph.id+'"'
     +' title="Take this off the shelf" aria-label="Take this off the shelf">×</button>'
     +'</span>').join('')
-    +'<label class="rp-shelf-add" title="Add a photo">+'
-    +'<input type="file" accept="image/*" id="rpShelfPick" style="display:none;"></label>';
+    +'<label class="rp-shelf-add" title="Add photos">+'
+    +'<input type="file" accept="image/*" multiple id="rpShelfPick" style="display:none;"></label>';
   rpHydrateThumbs(strip);
   strip.querySelectorAll('[data-rp-pick-shelf]').forEach(img=>{
     // the thumbnail is the tick: tapping the picture is what sends it, and
@@ -39202,10 +39267,10 @@ function rpRenderShelf(){
     btn.addEventListener('click',e=>{ e.stopPropagation(); rpShelfDrop(btn.dataset.rpShelfDel); });
   });
   const pick=rpEl('rpShelfPick');
-  if(pick) pick.addEventListener('change',()=>{
-    const file=pick.files&&pick.files[0];
+  if(pick) pick.addEventListener('change',async()=>{
+    const files=[...(pick.files||[])];
     pick.value='';
-    if(file) rpShelfAdd(file);
+    for(const file of files) await rpShelfAdd(file);
   });
 }
 
@@ -39739,6 +39804,39 @@ rpEl('rpRedoBtn').addEventListener('click',()=>{
   rpDraftFor(asked,rpEl('rpTone').value||'worded differently, and no longer');
 });
 rpEl('rpFactBtn').addEventListener('click',rpAddFact);
+// The moment you notice a fact is missing is the moment you are writing round
+// it, so it can be kept from here: select the words in the draft and press
+// + Fact. Nothing selected takes the line the caret is on, which is usually
+// the sentence that just got typed.
+rpEl('rpFactFromDraft').addEventListener('click',async()=>{
+  const box=rpEl('rpDraft'),msg=rpEl('rpMsg');
+  const from=box.selectionStart??0,to=box.selectionEnd??0;
+  let text=box.value.slice(from,to).trim();
+  if(!text){
+    const lines=box.value.split('\n');
+    let count=0;
+    for(const line of lines){
+      count+=line.length+1;
+      if(count>from){ text=line.trim(); break; }
+    }
+  }
+  text=text.replace(/^[-•\s]+/,'').trim();
+  if(!text){ showMsg(msg,'Select the words you want kept as a fact.',false); return; }
+  if(text.length>200) text=text.slice(0,200).trim();
+  const uid=await currentUserId();
+  if(!uid) return;
+  const {data,error}=await sb.from('reply_facts')
+    .insert({user_id:uid,fact:text,source:'typed'}).select().maybeSingle();
+  if(error){
+    showMsg(msg,/duplicate|unique/i.test(error.message||'')
+      ?'That is already in the shop facts.'
+      :'Could not keep that: '+escapeHtml(error.message),false);
+    return;
+  }
+  if(data) rpFacts.push(data);
+  rpRenderFacts();
+  showMsg(msg,'✓ Kept as a shop fact — every draft can say it now.',true);
+});
 rpEl('rpDistilBtn').addEventListener('click',rpDistil);
 rpEl('rpFactInput').addEventListener('keydown',e=>{
   if(e.key==='Enter'){ e.preventDefault(); rpAddFact(); }
@@ -39759,16 +39857,111 @@ rpEl('rpPaste').addEventListener('keydown',e=>{
 // Enter sends. This is the one textarea in the app where it does, and it is
 // the point of the screen: read the draft, press Enter, move on. Shift+Enter
 // is still a new line, for the reply that needs two.
+// ---- "/" : the shop's own facts, dropped into a draft ----
+//
+// DuoKe's own box says "press / to trigger quick reply", so / is what somebody
+// answering chat all day already reaches for. Here it offers what is true
+// about the shop, and the replies that have been sent most -- the two things
+// worth having at the end of a sentence without going to find them.
+//
+// It reads what has been typed since the slash and narrows as you go, and it
+// only opens at the start of a word: a URL with a slash in it is not a menu.
+let rpSlashAt=-1,rpSlashPick=0;
+
+function rpSlashOptions(term){
+  const want=term.trim().toLowerCase();
+  const hit=text=>!want||String(text).toLowerCase().includes(want);
+  const out=[];
+  rpFacts.forEach(f=>{ if(hit(f.fact)) out.push({text:f.fact,kind:'fact'}); });
+  rpExamples.slice(0,40).forEach(e=>{
+    if(hit(e.reply_text)) out.push({text:e.reply_text,kind:'reply'});
+  });
+  return out.slice(0,8);
+}
+
+function rpSlashClose(){
+  rpSlashAt=-1; rpSlashPick=0;
+  const menu=rpEl('rpSlash');
+  if(menu){ menu.style.display='none'; menu.innerHTML=''; }
+}
+
+function rpSlashShow(){
+  const box=rpEl('rpDraft'),menu=rpEl('rpSlash');
+  if(!box||!menu||rpSlashAt<0) return;
+  const term=box.value.slice(rpSlashAt+1,box.selectionStart??box.value.length);
+  // a space right after the slash means it was punctuation, not a command
+  if(/\s/.test(term)){ rpSlashClose(); return; }
+  const opts=rpSlashOptions(term);
+  if(!opts.length){ rpSlashClose(); return; }
+  rpSlashPick=Math.min(rpSlashPick,opts.length-1);
+  menu.innerHTML=opts.map((o,i)=>
+    '<button class="rp-slash-opt'+(i===rpSlashPick?' on':'')+'" data-rp-slash="'+i+'">'
+    +escapeHtml(o.text.slice(0,150))
+    +'<span class="rp-slash-kind">'+(o.kind==='fact'?'fact':'sent before')+'</span>'
+    +'</button>').join('');
+  menu.style.display='';
+  menu.querySelectorAll('[data-rp-slash]').forEach(b=>{
+    b.addEventListener('mousedown',e=>{ e.preventDefault(); rpSlashTake(opts[+b.dataset.rpSlash]); });
+  });
+}
+
+function rpSlashTake(opt){
+  const box=rpEl('rpDraft');
+  if(!opt||!box||rpSlashAt<0) return;
+  const at=box.selectionStart??box.value.length;
+  const before=box.value.slice(0,rpSlashAt);
+  const after=box.value.slice(at);
+  // the fact as it reads, with a space after it, so the sentence carries on
+  box.value=before+opt.text+(after.startsWith(' ')?'':' ')+after;
+  const caret=(before+opt.text+' ').length;
+  rpSlashClose();
+  box.focus();
+  box.setSelectionRange(caret,caret);
+  box.dispatchEvent(new Event('input'));
+}
+
 // Once it has been touched it is no longer a draft, and the chip says so:
 // the risk with a suggested reply is sending one nobody read.
 rpEl('rpDraft').addEventListener('input',()=>{
+  const box=rpEl('rpDraft');
+  const at=box.selectionStart??0;
+  if(rpSlashAt<0){
+    // only at the start of a word: a slash inside a URL or a size ("S/M") is
+    // not somebody asking for a menu
+    const ch=box.value[at-1];
+    const before=at>=2?box.value[at-2]:'';
+    if(ch==='/'&&(at===1||/\s/.test(before))){ rpSlashAt=at-1; rpSlashPick=0; }
+  }else if(at<=rpSlashAt||box.value[rpSlashAt]!=='/'){
+    rpSlashClose();
+  }
+  if(rpSlashAt>=0) rpSlashShow();
   const chip=rpEl('rpDraftChip');
   if(!chip) return;
   const edited=rpEl('rpDraft').value.trim()!==(rpDraftBase||'').trim();
   chip.textContent=edited?'Your words':'Drafted for you';
   chip.className='rp-draft-chip'+(edited?' mine':'');
 });
+rpEl('rpDraft').addEventListener('blur',()=>setTimeout(rpSlashClose,120));
 rpEl('rpDraft').addEventListener('keydown',e=>{
+  // the menu owns these keys while it is open, or Enter would send a draft
+  // with half a command still in it
+  if(rpSlashAt>=0){
+    const opts=rpSlashOptions(rpEl('rpDraft').value.slice(
+      rpSlashAt+1,rpEl('rpDraft').selectionStart??undefined));
+    if(e.key==='Escape'){ e.preventDefault(); rpSlashClose(); return; }
+    if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+      e.preventDefault();
+      if(opts.length){
+        rpSlashPick=(rpSlashPick+(e.key==='ArrowDown'?1:opts.length-1))%opts.length;
+        rpSlashShow();
+      }
+      return;
+    }
+    if(e.key==='Enter'||e.key==='Tab'){
+      if(opts.length){ e.preventDefault(); rpSlashTake(opts[rpSlashPick]); return; }
+      rpSlashClose();
+    }
+  }
   if(e.key!=='Enter'||e.shiftKey||e.ctrlKey||e.metaKey||e.altKey) return;
   // Mid-composition Enter is choosing a word, not sending a reply. Without
   // this, typing Chinese or Thai sends the draft on the first character.
