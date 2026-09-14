@@ -5825,10 +5825,11 @@ body.mc-docked .mc-bubble{display:none !important;}
       <!-- outside the block above, so it is still there to reach once the
            design list has taken that block's place -->
       <div class="sect-label" style="margin-top:0;">Artwork size</div>
-      <p class="hint">Artwork arrives filling its placeholder — that is the shape being trimmed. Switch to Original to keep the file's own proportions inside the card instead.</p>
+      <p class="hint">Artwork arrives filling its placeholder — that is the shape being trimmed. Switch to Original to keep the file's own proportions inside the card instead, or Actual size to print it at the size the file itself says.</p>
       <div class="seg" id="artFitSeg" style="margin-bottom:14px;">
         <button data-artfit="card" class="on">Placeholder size</button>
         <button data-artfit="original">Original</button>
+        <button data-artfit="actual">Actual size</button>
       </div>
       <div class="art-reset-row">
         <label class="field" style="flex:1;"><span>ORDER ID</span>
@@ -7020,7 +7021,110 @@ async function pdfFileToDataURL(file,maxPx,clear){
   // that a shape cut out of nothing stays cut out of nothing
   if(!clear){ ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,c.height); }
   await page.render({canvasContext:ctx,viewport:vp}).promise;
-  return c.toDataURL('image/png');
+  // the page's own size goes with the picture of it, so Actual size can read
+  // it back off the PNG like any other file's
+  return pngWithDpi(c.toDataURL('image/png'),
+    c.width/(b.width/72), c.height/(b.height/72));
+}
+// A pHYs chunk slipped in straight after IHDR. The signature and IHDR are 33
+// bytes and the chunk 21, 54 in all — a whole number of base64 groups — so the
+// rest of the file's base64 is carried over untouched rather than re-encoded.
+let crcTable=null;
+function crc32(bytes){
+  if(!crcTable){
+    crcTable=new Uint32Array(256);
+    for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=c&1?0xEDB88320^(c>>>1):c>>>1; crcTable[n]=c>>>0; }
+  }
+  let c=0xFFFFFFFF;
+  for(const b of bytes) c=crcTable[(c^b)&0xFF]^(c>>>8);
+  return (c^0xFFFFFFFF)>>>0;
+}
+function pngWithDpi(dataURL,dpiX,dpiY){
+  const comma=dataURL.indexOf(',');
+  const b64=dataURL.slice(comma+1);
+  const head=atob(b64.slice(0,44));
+  if(head.length!==33||head.charCodeAt(1)!==0x50||head.slice(12,16)!=='IHDR') return dataURL;
+  const out=new Uint8Array(54);
+  for(let i=0;i<33;i++) out[i]=head.charCodeAt(i);
+  const dv=new DataView(out.buffer);
+  dv.setUint32(33,9);
+  out.set([0x70,0x48,0x59,0x73],37);                    // pHYs
+  dv.setUint32(41,Math.round(dpiX/0.0254));
+  dv.setUint32(45,Math.round(dpiY/0.0254));
+  out[49]=1;                                            // per metre
+  dv.setUint32(50,crc32(out.subarray(37,50)));
+  let bin=''; for(const b of out) bin+=String.fromCharCode(b);
+  return dataURL.slice(0,comma+1)+btoa(bin)+b64.slice(44);
+}
+// The resolution a file says it prints at: a PNG's pHYs, a JPEG's JFIF header
+// or its EXIF. Only the head of the file is read — those all sit before the
+// picture itself. null when the file says nothing.
+function imageDpi(src){
+  if(typeof src!=='string'||!src.startsWith('data:')) return null;
+  const b64=src.slice(src.indexOf(',')+1,src.indexOf(',')+1+87380);
+  const bin=atob(b64.slice(0,b64.length-b64.length%4));
+  const u8=i=>bin.charCodeAt(i), u16=i=>u8(i)<<8|u8(i+1);
+  const u32=i=>(u16(i)*65536+u16(i+2));
+  const len=bin.length;
+  if(u8(0)===0x89&&bin.slice(1,4)==='PNG'){
+    for(let i=8;i+12<=len;){
+      const n=u32(i), type=bin.slice(i+4,i+8);
+      if(type==='pHYs'&&i+17<=len){
+        if(u8(i+16)!==1) return null;
+        return {x:u32(i+8)*0.0254, y:u32(i+12)*0.0254};
+      }
+      if(type==='IDAT'||type==='IEND') return null;
+      i+=12+n;
+    }
+    return null;
+  }
+  if(u8(0)===0xFF&&u8(1)===0xD8){
+    let exif=null;
+    for(let i=2;i+4<=len;){
+      if(u8(i)!==0xFF){ i++; continue; }
+      const m=u8(i+1);
+      if(m===0xFF){ i++; continue; }
+      if(m===0xDA||m===0xD9) break;
+      const n=u16(i+2), d=i+4;
+      if(m===0xE0&&bin.slice(d,d+5)==='JFIF '){
+        const unit=u8(d+7), x=u16(d+8), y=u16(d+10);
+        if(unit===1&&x>1) return {x,y};
+        if(unit===2&&x>1) return {x:x*2.54,y:y*2.54};
+      }
+      if(m===0xE1&&bin.slice(d,d+6)==='Exif  ') exif=d+6;
+      i+=2+n;
+    }
+    if(exif!==null) return exifDpi(bin,exif);
+  }
+  return null;
+}
+function exifDpi(bin,t){
+  const le=bin.slice(t,t+2)==='II';
+  const b=i=>bin.charCodeAt(t+i);
+  const u16=i=>le?b(i)|b(i+1)<<8:b(i)<<8|b(i+1);
+  const u32=i=>le?(u16(i)+u16(i+2)*65536):(u16(i)*65536+u16(i+2));
+  const ifd=u32(4), count=u16(ifd);
+  let x=0,y=0,unit=2;
+  for(let k=0;k<count;k++){
+    const e=ifd+2+k*12, tag=u16(e);
+    if(tag===0x011A||tag===0x011B){
+      const at=u32(e+8), den=u32(at+4), v=den?u32(at)/den:0;
+      if(tag===0x011A) x=v; else y=v;
+    }else if(tag===0x0128) unit=u16(e+8);
+  }
+  if(!(x>1)) return null;
+  if(!(y>1)) y=x;
+  return unit===3?{x:x*2.54,y:y*2.54}:unit===1?null:{x,y};
+}
+// The artwork's own printed size in mm. A file that says nothing of its
+// resolution is taken at 72 per inch, as Photoshop and Illustrator open it.
+function artRealMm(img){
+  if(!img||!img.naturalWidth) return null;
+  if(img._realMm) return img._realMm;
+  let dpi=null;
+  try{ dpi=imageDpi(img.src); }catch(e){}
+  const dx=(dpi&&dpi.x)||72, dy=(dpi&&dpi.y)||dx;
+  return img._realMm={w:img.naturalWidth/dx*25.4, h:img.naturalHeight/dy*25.4};
 }
 async function fileToImageData(file){
   const isPdf=file.type==='application/pdf'||/\.(pdf|ai)$/i.test(file.name);
@@ -7155,7 +7259,9 @@ function fitArtToCard(side){
     ? state.designs[0].img : state.final[side].img;
   if(!img) return;
   const L=layoutMm();
-  if(state.artFit==='original'){
+  if(state.artFit==='actual'){
+    state.art[side]=Object.assign({},artRealMm(img));
+  }else if(state.artFit==='original'){
     const f=Math.min(L.cardW/img.naturalWidth,L.cardH/img.naturalHeight);
     state.art[side]={wMm:img.naturalWidth*f,hMm:img.naturalHeight*f};
   }else{
@@ -7340,7 +7446,11 @@ function renderSide(side,canvas,maxDim,opts){
   // shapes each keep its own without any of them being stretched.
   const one=(img,ph,line,key)=>{
     let wMm=a.wMm, hMm=a.hMm;
-    if(state.artFit==='original'&&img.naturalWidth&&img.naturalHeight){
+    // Actual size: each design in the list at the size its own file gives;
+    // the single artwork at the WIDTH/HEIGHT box, which starts at that size
+    if(state.artFit==='actual'&&line&&artRealMm(img)){
+      ({w:wMm,h:hMm}=artRealMm(img));
+    }else if(state.artFit==='original'&&img.naturalWidth&&img.naturalHeight){
       const f=Math.min(a.wMm/img.naturalWidth,a.hMm/img.naturalHeight);
       wMm=img.naturalWidth*f; hMm=img.naturalHeight*f;
     }
@@ -9097,7 +9207,7 @@ document.getElementById('sheetNextBtn').addEventListener('click',()=>{
 });
 // filling the placeholder or keeping the file's own proportions
 function setArtFit(mode,skipDraw){
-  state.artFit=mode==='original'?'original':'card';
+  state.artFit=mode==='original'||mode==='actual'?mode:'card';
   document.querySelectorAll('#artFitSeg button').forEach(b=>
     b.classList.toggle('on',b.dataset.artfit===state.artFit));
   if(skipDraw) return;
