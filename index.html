@@ -2706,6 +2706,12 @@ body.mc-docked .mc-bubble{display:none !important;}
 .rp-q-tag.out{background:var(--blueprint-soft);color:var(--blueprint);}
 .rp-q-tag.in{background:var(--nest);color:var(--muted);}
 .rp-q-tag.stuck{background:var(--rust);color:#2a1109;}
+.rp-q-undo{background:none;border:none;color:var(--faint);cursor:pointer;padding:4px;
+  font-size:16px;opacity:0.6;transition:opacity 0.2s;flex:0 0 auto;}
+.rp-q-undo:hover{opacity:1;color:var(--rust);}
+.rp-stop-all{background:var(--rust);color:white;border:none;padding:4px 12px;
+  border-radius:3px;cursor:pointer;font-size:12px;transition:opacity 0.2s;}
+.rp-stop-all:hover{opacity:0.8;}
 .rp-cols{display:grid;grid-template-columns:1fr;gap:12px;align-items:start;}
 .rp-col{display:flex;flex-direction:column;min-width:0;}
 @media (min-width:1040px){
@@ -10334,6 +10340,9 @@ function bundleRowToCombo(row,col){
 // one naming convention for the morning's files is easier to keep than two,
 // and the floor already knows this one.
 const bundleShopOf=x=>{
+  // Check shop field first (legacy data), then fall back to title pattern
+  const shop=String((x&&x.shop)||'').trim().toLowerCase();
+  if(shop) return shop;
   const title=String(x&&x.title||'').toUpperCase();
   return title.includes('PT')?'planttalks':'partymonkey';
 };
@@ -38825,7 +38834,8 @@ function rpRenderQueue(){
       +'<span class="rp-q-who"><b>'+escapeHtml(r.buyer||r.chat_key||'a buyer')+'</b> '
       +'<span class="rp-q-what">'+escapeHtml((r.reply||'').slice(0,70))+'</span></span>'
       +rpShopChip(r.store)
-      +'<span class="rp-q-age">'+rpAgo(r.answered_at)+'</span></div>');
+      +'<span class="rp-q-age">'+rpAgo(r.answered_at)+'</span>'
+      +'<button class="rp-q-undo" data-id="'+escapeHtml(r.id)+'" title="Undo: go back to draft">↶</button></div>');
   });
 
   rpChats().forEach(c=>{
@@ -38838,13 +38848,40 @@ function rpRenderQueue(){
       +rpAgo((c.last||{}).received_at)+'</span></div>');
   });
 
-  body.innerHTML=(lines.length?lines.join(''):
+  const header=rpOutbox.length?
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border-color);">'
+    +'<span style="font-size:12px;color:var(--text-secondary);">'+rpOutbox.length+' waiting to send</span>'
+    +'<button class="rp-stop-all" style="padding:4px 8px;font-size:12px;" title="Undo all: go back to drafts">Stop All</button>'
+    +'</div>':'';
+
+  body.innerHTML=header+(lines.length?lines.join(''):
     '<p class="hint" style="margin:0;">Nothing waiting and nothing to send.</p>')
     +'<p class="hint" style="margin:10px 0 0;">'
     +(reading
       ?'The shop PC is reading DuoKe, so anything above goes out within seconds.'
       :'The shop PC is not reading DuoKe at the moment — approved replies wait here until it is.')
     +'</p>';
+
+  // Attach event handlers for undo buttons
+  Array.from(body.querySelectorAll('.rp-q-undo')).forEach(btn=>{
+    btn.onclick=async(e)=>{
+      e.preventDefault();
+      const id=btn.dataset.id;
+      if(!id) return;
+      await rpUndoReply(id);
+    };
+  });
+
+  // Attach event handler for stop all button
+  const stopAllBtn=body.querySelector('.rp-stop-all');
+  if(stopAllBtn){
+    stopAllBtn.onclick=async(e)=>{
+      e.preventDefault();
+      if(confirm('Undo all '+rpOutbox.length+' messages? They will go back to drafts.')) {
+        await rpStopAll();
+      }
+    };
+  }
 }
 
 async function refreshReplies(){
@@ -39756,7 +39793,9 @@ async function rpDraftFor(message,tone){
       // answerable only with them, and answerable wrongly without them
       history:(rpNow&&Array.isArray(rpNow.history))?rpNow.history.slice(-12):[],
       lang:rpEl('rpLang').value||'',
-      store:(rpNow&&rpNow.store)||''
+      store:(rpNow&&rpNow.store)||'',
+      // Chat key ensures examples are picked from the same conversation, not a different customer
+      chat_key:(rpNow&&rpNow.chat_key)||''
     });
     if(error){ showMsg(msg,escapeHtml(await functionError(error)),false); return; }
     if(data&&data.error){ showMsg(msg,escapeHtml(data.error),false); return; }
@@ -39993,6 +40032,50 @@ async function rpSkip(){
   if(error){ showMsg(rpEl('rpMsg'),'Could not skip that — '+escapeHtml(error.message),false); return; }
   rpQueue=rpQueue.filter(r=>!ids.includes(r.id));
   rpClose(); rpRender();
+}
+
+// Undo a single message: change from 'answered' back to 'new' so you can re-draft
+async function rpUndoReply(id){
+  if(!sb||!id) return;
+  const msg=rpOutbox.find(r=>r.id===id);
+  if(!msg) return;
+  const {error}=await sb.from('reply_messages').update({
+    status:'new',
+    draft:msg.reply,
+    reply:'',
+    answered_at:null
+  }).eq('id',id);
+  if(error){
+    showMsg(rpEl('rpMsg'),'Could not undo — '+escapeHtml(error.message),false);
+    return;
+  }
+  rpOutbox=rpOutbox.filter(r=>r.id!==id);
+  rpRenderQueue();
+}
+
+// Undo all messages in queue: go back to draft stage for all
+async function rpStopAll(){
+  if(!sb||!rpOutbox.length) return;
+  const ids=rpOutbox.map(r=>r.id).filter(Boolean);
+  if(!ids.length) return;
+
+  // Update each message: restore draft from reply, clear reply
+  let count=0;
+  for(const msg of rpOutbox){
+    const {error}=await sb.from('reply_messages').update({
+      status:'new',
+      draft:msg.reply,
+      reply:'',
+      answered_at:null
+    }).eq('id',msg.id);
+    if(!error) count++;
+  }
+
+  if(count<rpOutbox.length){
+    showMsg(rpEl('rpMsg'),`Undid ${count} of ${rpOutbox.length} messages`,false);
+  }
+  rpOutbox=[];
+  rpRenderQueue();
 }
 
 // ---- the facts ----
