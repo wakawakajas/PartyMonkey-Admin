@@ -13,10 +13,9 @@
 -- and update them to 'planttalks'
 update public.bundle_skus
 set shop = 'planttalks'
-where id in (
-  select distinct bji.bundle_id
-  from public.bundle_job_items bji
-  join public.bundle_jobs bj on bji.job_id = bj.id
+where name in (
+  select distinct bj.combo_name
+  from public.bundle_jobs bj
   join public.bundle_orders bo on bj.order_id = bo.id
   where bo.title ilike '%PT%'
     or bo.title ilike '%plant talks%'
@@ -25,10 +24,9 @@ where id in (
 -- Step 2: Also accept orders set explicitly with shop field if available
 update public.bundle_skus
 set shop = 'planttalks'
-where id in (
-  select distinct bji.bundle_id
-  from public.bundle_job_items bji
-  join public.bundle_jobs bj on bji.job_id = bj.id
+where name in (
+  select distinct bj.combo_name
+  from public.bundle_jobs bj
   join public.bundle_orders bo on bj.order_id = bo.id
   where bo.shop = 'planttalks'
 );
