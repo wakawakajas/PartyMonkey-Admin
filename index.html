@@ -3749,6 +3749,32 @@ body.mc-docked .mc-bubble{display:none !important;}
       <div id="bundleRuleMsg"></div>
     </div></div>
 
+    <!-- What comes off a bundle's name before it goes on a sticker. Its own
+         list, not the seed words above: DIY decides what Plant Talks packs,
+         and it also belongs on the tape. -->
+    <div class="card" style="margin-top:12px;"><div class="card-body" style="padding:14px;">
+      <div class="sect-label lg">Sticker words</div>
+      <p class="hint" style="margin:0 0 10px;">Taken off a Bundle SKU's name before its sticker
+        prints. Dashes become spaces, and brackets left empty go too — so with <b>seeds</b> and
+        <b>popular</b> here, <i>Seeds-Mimosa (10pc)</i> prints <i>Mimosa (10pc)</i> and
+        <i>DIY-Mimosa (Popular)</i> prints <i>DIY Mimosa</i>. Case does not matter.</p>
+      <form class="pk-add" id="stickerWordAdd" autocomplete="off" style="margin-bottom:8px;">
+        <label class="field" style="margin-bottom:6px;"><span>ADD A WORD</span>
+          <input type="text" id="stickerWordNew" placeholder="e.g. Popular" maxlength="60" required/></label>
+        <button class="btn-outline btn-sm" type="submit" style="width:100%;">Add</button>
+      </form>
+      <div class="chips chips-left" id="stickerWordBar" style="margin:0 0 8px;">
+        <button class="btn-outline btn-sm" type="button" id="stickerWordAll">Select all</button>
+        <button class="btn-outline btn-sm" type="button" id="stickerWordDel" hidden>Remove selected</button>
+        <button class="btn-outline btn-sm" type="button" id="stickerWordCancel" hidden>Cancel</button>
+      </div>
+      <div id="stickerWordList"></div>
+      <label class="field" style="margin:12px 0 6px;"><span>TRY A NAME</span>
+        <input type="text" id="stickerWordTest" placeholder="Paste a Bundle SKU name" autocomplete="off"/></label>
+      <div id="stickerWordTestOut" class="hint"></div>
+      <div id="stickerWordMsg"></div>
+    </div></div>
+
     <!-- A word each, rather than one field of them: several hundred is
          normal, and a word typed wrong in the middle of a long list is easier
          to fix by finding it than by re-reading the whole line. Matched fuzzy
@@ -5884,12 +5910,15 @@ body.mc-docked .mc-bubble{display:none !important;}
       <!-- How the bleed is made. Stretch is what it always did; the other two
            keep the artwork at its trim size and make the bleed up around it,
            which is what a client file drawn with no bleed at all needs. -->
-      <div class="seg" id="bleedModeSeg" style="margin-top:10px;">
-        <button type="button" data-bleedmode="stretch">Stretch</button>
-        <button type="button" data-bleedmode="mirror">Mirror</button>
-        <button type="button" data-bleedmode="extend">Extend edges</button>
+      <div class="chips" id="bleedModeSeg" style="margin:10px 0 0;">
+        <button type="button" class="chip chip-state" data-bleedmode="stretch">Stretch</button>
+        <button type="button" class="chip chip-state" data-bleedmode="mirror">Mirror</button>
+        <button type="button" class="chip chip-state" data-bleedmode="extend">Extend edges</button>
+        <button type="button" class="chip chip-state" data-bleedmode="content">Content-aware</button>
+        <button type="button" class="chip chip-state" data-bleedmode="ai">AI fill</button>
       </div>
-      <p class="hint" style="margin-top:7px;margin-bottom:0;"><b>Stretch</b> enlarges the artwork into the bleed, so its edges are trimmed off. <b>Mirror</b> and <b>Extend edges</b> keep the artwork at its size and build the bleed from its own edges — nothing near the edge is cut. Mirror suits photos and patterns, Extend suits flat colours and gradients.</p>
+      <p class="hint" style="margin-top:7px;margin-bottom:0;"><b>Stretch</b> enlarges the artwork into the bleed, so its edges are trimmed off. Every other style keeps the artwork at its size and makes up only what lies past the cut. <b>Mirror</b> suits photos and patterns, <b>Extend edges</b> flat colours and gradients. <b>Content-aware</b> fills the bleed with texture matched from the artwork, like Photoshop's Content-Aware Fill — a few seconds, works offline. <b>AI fill</b> paints it in with the free LaMa model on this computer — it can continue shapes and scenery a patch cannot, but it is softer, takes about 15 seconds per part of the edge, and the first use downloads about 200 MB once.</p>
+      <div id="bleedFillMsg"></div>
 
       <div class="sect-label">Client file fix</div>
       <p class="hint">For a file that came in at the wrong size, too low a resolution or with no bleed: fits it to the card, adds 5 mm bleed made from its own edges, and AI-upscales any side under 300 DPI.</p>
@@ -8782,14 +8811,17 @@ document.querySelectorAll('#bleedPresets [data-bleed]').forEach(b=>{
 // picture at its size and invent only what lies beyond the cut.
 function bleedModeNow(){
   const m=state.bleed&&state.bleed.mode;
-  return m==='mirror'||m==='extend'?m:'stretch';
+  return m==='mirror'||m==='extend'||m==='content'||m==='ai'?m:'stretch';
 }
 function syncBleedModeSeg(){
   document.querySelectorAll('#bleedModeSeg [data-bleedmode]').forEach(b=>
     b.classList.toggle('on',b.dataset.bleedmode===bleedModeNow()));
 }
-document.getElementById('bleedModeSeg').addEventListener('click',e=>{
+document.getElementById('bleedModeSeg').addEventListener('click',async e=>{
   const b=e.target.closest('[data-bleedmode]'); if(!b) return;
+  // 200 MB is not something to start on a tap by accident, on a phone's data
+  if(b.dataset.bleedmode==='ai'&&bleedModeNow()!=='ai'&&!await lamaCached()
+    &&!confirm('AI fill downloads its model (about 200 MB) the first time, then keeps it on this computer. Download now?')) return;
   state.bleed.mode=b.dataset.bleedmode;
   syncBleedModeSeg(); drawAll();
 });
@@ -8804,6 +8836,15 @@ function bleedArt(img,trimW,trimH,mm,mode){
   // one mirrored copy is as far as a mirror can honestly reach
   const bx=Math.max(1,Math.min(nW,Math.round(mm*nW/trimW)));
   const by=Math.max(1,Math.min(nH,Math.round(mm*nH/trimH)));
+  if(mode==='content'||mode==='ai'){
+    const job=bleedJob(img,bx,by,mode);
+    return job.canvas||bleedArtPx(img,bx,by,'extend');
+  }
+  return bleedArtPx(img,bx,by,mode);
+}
+// the same, with the bleed already in the picture's own pixels
+function bleedArtPx(img,bx,by,mode){
+  const nW=img.naturalWidth||img.width, nH=img.naturalHeight||img.height;
   let memo=bleedArtMemo.get(img);
   if(!memo){ memo=new Map(); bleedArtMemo.set(img,memo); }
   const k=mode+'|'+bx+'|'+by;
@@ -8856,6 +8897,386 @@ function bleedArt(img,trimW,trimH,mm,mode){
   }
   memo.set(k,c);
   return c;
+}
+
+// ---------- filled bleeds: content-aware and AI ----------
+// Both are too slow to run inside a redraw, so each is a job: the sheet shows
+// the Extend edge meanwhile and redraws when the fill lands. Jobs run one at a
+// time, and a job nobody is looking at any more — a bleed typed through on the
+// way to another figure — is dropped rather than worked.
+var bleedJobMemo=new WeakMap(), bleedJobWanted=new WeakMap(), bleedJobPending=new Set();
+var bleedJobChain=Promise.resolve();
+// the longest side a fill is worked at; the result is enlarged back onto the
+// full picture, whose own pixels are then laid over it untouched
+const BLEED_FILL_PX=1200;
+// Progress stays up for as long as the work goes on — a square of AI fill
+// outlasts the few seconds an ordinary message is shown for. The outcome is an
+// ordinary message.
+function bleedFillMsg(text,ok,final){
+  const el=document.getElementById('bleedFillMsg'); if(!el) return;
+  const prev=msgTimers.get(el);
+  if(prev){ clearTimeout(prev.hide); clearTimeout(prev.wipe); msgTimers.delete(el); }
+  if(!text){ el.innerHTML=''; return; }
+  if(ok!==false&&!final){ el.innerHTML=`<div class="banner ok">${text}</div>`; return; }
+  showMsg(el,text,ok!==false);
+}
+function bleedJob(img,bx,by,mode){
+  let memo=bleedJobMemo.get(img);
+  if(!memo){ memo=new Map(); bleedJobMemo.set(img,memo); }
+  const k=mode+'|'+bx+'|'+by;
+  bleedJobWanted.set(img,k);
+  let job=memo.get(k);
+  if(job&&!job.dropped) return job;
+  if(memo.size>=4) for(const [key,j] of memo) if(j.canvas||j.dropped) memo.delete(key);
+  job={canvas:null,error:null,dropped:false};
+  memo.set(k,job);
+  job.promise=bleedJobChain=bleedJobChain.then(async()=>{
+    if(bleedJobWanted.get(img)!==k){ job.dropped=true; memo.delete(k); return; }
+    try{
+      job.canvas=await bleedFill(img,bx,by,mode,bleedFillMsg);
+      bleedFillMsg('✓ Bleed filled'+(mode==='ai'?' by AI.':' from the artwork.'),true,true);
+    }catch(err){
+      job.error=err;
+      bleedFillMsg((mode==='ai'?'AI fill':'Content-aware fill')+' failed: '
+        +escapeHtml((err&&err.message)||'unknown error')+' — showing Extend edges instead.',false);
+    }
+    // the chain must never reject, or every job after this one is skipped
+    try{ drawAll(); }catch(e){}
+  });
+  bleedJobPending.add(job.promise);
+  job.promise.finally(()=>bleedJobPending.delete(job.promise));
+  return job;
+}
+// every fill asked for so far, finished — and a failed one stops the export
+async function bleedJobsSettled(){
+  while(bleedJobPending.size) await Promise.all([...bleedJobPending]);
+  let failed=null;
+  for(const o of [state.final.front,state.final.back,...state.designs]){
+    const memo=o&&o.img&&bleedJobMemo.get(o.img);
+    const j=memo&&memo.get(bleedJobWanted.get(o.img));
+    if(j&&j.error) failed=j.error;
+  }
+  if(failed) throw new Error('the bleed could not be filled ('+((failed&&failed.message)||failed)+')');
+}
+// The picture with a filled bleed, at full size. The picture is padded with
+// the Extend edge first, which is also what the fill starts from.
+async function bleedFill(img,bx,by,mode,say){
+  const nW=img.naturalWidth, nH=img.naturalHeight;
+  const W=nW+bx*2, H=nH+by*2;
+  const base=document.createElement('canvas');
+  base.width=W; base.height=H;
+  // the Extend canvas for exactly these bleed pixels
+  base.getContext('2d').drawImage(bleedArtPx(img,bx,by,'extend'),0,0);
+  let f=Math.min(1,BLEED_FILL_PX/Math.max(W,H));
+  // the AI works in 512 px squares, so the picture must be at least that big
+  if(mode==='ai') f=Math.max(f,512/Math.min(W,H));
+  const least=mode==='ai'?512:1;
+  const w=Math.max(least,Math.round(W*f)), h=Math.max(least,Math.round(H*f));
+  const small=document.createElement('canvas');
+  small.width=w; small.height=h;
+  const sctx=small.getContext('2d',{willReadFrequently:true});
+  sctx.imageSmoothingQuality='high';
+  sctx.drawImage(base,0,0,w,h);
+  // the part of the small picture that is the artwork, whole pixels only
+  const x0=Math.ceil(bx*f), y0=Math.ceil(by*f);
+  const x1=Math.floor((bx+nW)*f), y1=Math.floor((by+nH)*f);
+  const data=sctx.getImageData(0,0,w,h);
+  const filled=mode==='ai'
+    ? await lamaFill(data,x0,y0,x1,y1,say)
+    : await patchFill(data,x0,y0,x1,y1,say);
+  sctx.putImageData(filled,0,0);
+  const out=document.createElement('canvas');
+  out.width=W; out.height=H;
+  const octx=out.getContext('2d');
+  octx.imageSmoothingQuality='high';
+  octx.drawImage(small,0,0,W,H);
+  octx.drawImage(img,bx,by,nW,nH);
+  return out;
+}
+
+// ---- content-aware: PatchMatch, the method behind Photoshop's classic fill ----
+// Every pixel of the bleed is given the patch of the artwork that best matches
+// what surrounds it, coarse to fine, and the overlapping patches vote on its
+// colour. Run in a worker so the page keeps moving while it thinks.
+let patchWorkerUrl=null;
+function patchFill(imageData,x0,y0,x1,y1,say){
+  if(!patchWorkerUrl) patchWorkerUrl=URL.createObjectURL(new Blob(
+    ['('+patchWorkerMain.toString()+')()'],{type:'text/javascript'}));
+  return new Promise((res,rej)=>{
+    const wk=new Worker(patchWorkerUrl);
+    wk.onmessage=e=>{
+      const m=e.data;
+      if(m.progress!==undefined){ say(`Filling the bleed from the artwork… ${Math.round(m.progress*100)}%`,true); return; }
+      wk.terminate();
+      if(m.error) rej(new Error(m.error));
+      else res(new ImageData(new Uint8ClampedArray(m.data),imageData.width,imageData.height));
+    };
+    wk.onerror=e=>{ wk.terminate(); rej(new Error(e.message||'worker error')); };
+    const buf=imageData.data.slice().buffer;
+    wk.postMessage({w:imageData.width,h:imageData.height,data:buf,x0,y0,x1,y1},[buf]);
+  });
+}
+function patchWorkerMain(){
+  self.onmessage=e=>{
+    try{
+      const {w,h,data,x0,y0,x1,y1}=e.data;
+      const out=run(w,h,new Uint8ClampedArray(data),x0,y0,x1,y1,p=>self.postMessage({progress:p}));
+      self.postMessage({data:out.buffer},[out.buffer]);
+    }catch(err){ self.postMessage({error:String((err&&err.message)||err)}); }
+  };
+  const R=3;   // 7 x 7 patches
+  function run(W,H,rgba,X0,Y0,X1,Y1,progress){
+    if(X1-X0<R*2+2||Y1-Y0<R*2+2) throw new Error('the artwork is too small to match patches from');
+    // the pyramid: halved until the bleed is a few pixels deep
+    const levels=[];
+    let img=new Float32Array(rgba.length);
+    for(let i=0;i<rgba.length;i++) img[i]=rgba[i];
+    let lv={w:W,h:H,img,x0:X0,y0:Y0,x1:X1,y1:Y1};
+    levels.push(lv);
+    while(levels.length<7){
+      const ring=Math.min(lv.x0,lv.y0,lv.w-lv.x1,lv.h-lv.y1);
+      const nx0=Math.ceil(lv.x0/2), ny0=Math.ceil(lv.y0/2), nx1=Math.floor(lv.x1/2), ny1=Math.floor(lv.y1/2);
+      if(ring<8||nx1-nx0<R*4+2||ny1-ny0<R*4+2) break;
+      const w2=Math.ceil(lv.w/2), h2=Math.ceil(lv.h/2), im2=new Float32Array(w2*h2*4);
+      for(let y=0;y<h2;y++) for(let x=0;x<w2;x++){
+        const o=(y*w2+x)*4;
+        for(let dy=0;dy<2;dy++) for(let dx=0;dx<2;dx++){
+          const sx=Math.min(lv.w-1,x*2+dx), sy=Math.min(lv.h-1,y*2+dy), i=(sy*lv.w+sx)*4;
+          im2[o]+=lv.img[i]/4; im2[o+1]+=lv.img[i+1]/4; im2[o+2]+=lv.img[i+2]/4; im2[o+3]+=lv.img[i+3]/4;
+        }
+      }
+      lv={w:w2,h:h2,img:im2,x0:nx0,y0:ny0,x1:nx1,y1:ny1};
+      levels.push(lv);
+    }
+    let prev=null;
+    let work=0, done=0;
+    const emOf=L=>L===0?2:(L===levels.length-1?6:3);
+    levels.forEach((l,L)=>{ work+=emOf(L)*(l.w*l.h-(l.x1-l.x0)*(l.y1-l.y0)); });
+    for(let L=levels.length-1;L>=0;L--){
+      const {w,h,img,x0,y0,x1,y1}=levels[L];
+      // centres whose whole patch is artwork: a rectangle, which keeps this simple
+      const sx0=x0+R, sy0=y0+R, sx1=x1-R-1, sy1=y1-R-1;
+      const isSrc=(x,y)=>x>=sx0&&x<=sx1&&y>=sy0&&y<=sy1;
+      const known=(x,y)=>x>=x0&&x<x1&&y>=y0&&y<y1;
+      const nnX=new Int32Array(w*h), nnY=new Int32Array(w*h), dist=new Float32Array(w*h);
+      const rnd=(a,b)=>a+Math.floor(Math.random()*(b-a+1));
+      for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+        const i=y*w+x;
+        if(isSrc(x,y)){ nnX[i]=x; nnY[i]=y; continue; }
+        if(prev){
+          const cx=Math.min(prev.w-1,x>>1), cy=Math.min(prev.h-1,y>>1), j=cy*prev.w+cx;
+          nnX[i]=Math.min(sx1,Math.max(sx0,prev.nnX[j]*2+(x-cx*2)));
+          nnY[i]=Math.min(sy1,Math.max(sy0,prev.nnY[j]*2+(y-cy*2)));
+        }else{ nnX[i]=rnd(sx0,sx1); nnY[i]=rnd(sy0,sy1); }
+      }
+      // squared colour distance between the patch at p and the one at q, per
+      // pixel of p's patch that is on the canvas; gives up once past `best`
+      const D=(px,py,qx,qy,best)=>{
+        let s=0,n=0;
+        const ya=Math.max(-R,-py), yb=Math.min(R,h-1-py), xa=Math.max(-R,-px), xb=Math.min(R,w-1-px);
+        const cap=best*(yb-ya+1)*(xb-xa+1);
+        for(let dy=ya;dy<=yb;dy++){
+          let ti=((py+dy)*w+px+xa)*4, si=((qy+dy)*w+qx+xa)*4;
+          for(let dx=xa;dx<=xb;dx++,ti+=4,si+=4){
+            const a=img[ti]-img[si], b=img[ti+1]-img[si+1], c=img[ti+2]-img[si+2], d=img[ti+3]-img[si+3];
+            s+=a*a+b*b+c*c+d*d;
+          }
+          n+=xb-xa+1;
+          if(s>=cap) return Infinity;
+        }
+        return s/n;
+      };
+      // the pixels to match: everything that is not itself a source centre
+      const eachTarget=(rev,fn)=>{
+        if(!rev){
+          for(let y=0;y<h;y++){
+            const inner=y>=sy0&&y<=sy1;
+            for(let x=0;x<w;x++){ if(inner&&x===sx0){ x=sx1; continue; } fn(x,y); }
+          }
+        }else{
+          for(let y=h-1;y>=0;y--){
+            const inner=y>=sy0&&y<=sy1;
+            for(let x=w-1;x>=0;x--){ if(inner&&x===sx1){ x=sx0; continue; } fn(x,y); }
+          }
+        }
+      };
+      const measure=()=>eachTarget(false,(x,y)=>{ const i=y*w+x; dist[i]=D(x,y,nnX[i],nnY[i],Infinity); });
+      const vote=()=>{
+        const acc=new Float32Array(w*h*4), ws=new Float32Array(w*h);
+        eachTarget(false,(x,y)=>{
+          const i=y*w+x, qx=nnX[i], qy=nnY[i];
+          const wt=1/(1+dist[i]/64);
+          for(let dy=-R;dy<=R;dy++){
+            const ty=y+dy; if(ty<0||ty>=h) continue;
+            for(let dx=-R;dx<=R;dx++){
+              const tx=x+dx; if(tx<0||tx>=w||known(tx,ty)) continue;
+              const t=ty*w+tx, si=((qy+dy)*w+qx+dx)*4;
+              acc[t*4]+=img[si]*wt; acc[t*4+1]+=img[si+1]*wt; acc[t*4+2]+=img[si+2]*wt; acc[t*4+3]+=img[si+3]*wt;
+              ws[t]+=wt;
+            }
+          }
+        });
+        for(let t=0;t<w*h;t++) if(ws[t]>0){
+          img[t*4]=acc[t*4]/ws[t]; img[t*4+1]=acc[t*4+1]/ws[t]; img[t*4+2]=acc[t*4+2]/ws[t]; img[t*4+3]=acc[t*4+3]/ws[t];
+        }
+      };
+      const pass=rev=>{
+        const dir=rev?-1:1;
+        eachTarget(rev,(x,y)=>{
+          const i=y*w+x;
+          let bxq=nnX[i], byq=nnY[i], bd=dist[i];
+          const tryQ=(qx,qy)=>{
+            if(qx<sx0||qx>sx1||qy<sy0||qy>sy1||(qx===bxq&&qy===byq)) return;
+            const d=D(x,y,qx,qy,bd);
+            if(d<bd){ bd=d; bxq=qx; byq=qy; }
+          };
+          const nx=x-dir; if(nx>=0&&nx<w){ const j=i-dir; tryQ(nnX[j]+dir,nnY[j]); }
+          const ny=y-dir; if(ny>=0&&ny<h){ const j=i-dir*w; tryQ(nnX[j],nnY[j]+dir); }
+          for(let rad=Math.max(sx1-sx0,sy1-sy0);rad>=1;rad>>=1)
+            tryQ(Math.min(sx1,Math.max(sx0,bxq+rnd(-rad,rad))),Math.min(sy1,Math.max(sy0,byq+rnd(-rad,rad))));
+          nnX[i]=bxq; nnY[i]=byq; dist[i]=bd;
+        });
+      };
+      if(prev){ measure(); vote(); }
+      const em=emOf(L), area=w*h-(x1-x0)*(y1-y0);
+      for(let it=0;it<em;it++){
+        measure(); pass(it%2===1); pass(it%2===0); vote();
+        done+=area; progress(Math.min(0.99,done/work));
+      }
+      prev={w,h,nnX,nnY};
+    }
+    const top=levels[0].img, out=new Uint8ClampedArray(top.length);
+    for(let i=0;i<top.length;i++) out[i]=top[i];
+    return out;
+  }
+}
+
+// ---- AI fill: LaMa, an open inpainting model, run on this computer ----
+// Free and private: the model is fetched once from Hugging Face and kept in
+// the browser's own storage, and the picture never leaves the machine.
+const ORT_BASE='https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+const LAMA_URL='https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx';
+const LAMA_SIZE=208044816;
+const MODEL_CACHE='pigu-ai-models';
+let lamaSessionP=null;
+async function lamaCached(){
+  try{ return !!(await (await caches.open(MODEL_CACHE)).match(LAMA_URL)); }catch(e){ return false; }
+}
+async function lamaModelBytes(say){
+  let cache=null;
+  try{
+    cache=await caches.open(MODEL_CACHE);
+    const hit=await cache.match(LAMA_URL);
+    if(hit) return new Uint8Array(await hit.arrayBuffer());
+  }catch(e){ cache=null; }
+  const res=await fetch(LAMA_URL);
+  if(!res.ok||!res.body) throw new Error('could not download the AI model ('+res.status+')');
+  const total=Number(res.headers.get('content-length'))||LAMA_SIZE;
+  const reader=res.body.getReader(), parts=[];
+  let got=0, shown=-1;
+  for(;;){
+    const {done,value}=await reader.read();
+    if(done) break;
+    parts.push(value); got+=value.length;
+    const mb=Math.round(got/1048576);
+    if(mb!==shown){ shown=mb; say(`Downloading the AI model, once… ${mb} of ${Math.round(total/1048576)} MB`,true); }
+  }
+  const bytes=new Uint8Array(got);
+  let at=0; for(const p of parts){ bytes.set(p,at); at+=p.length; }
+  if(cache) try{ await cache.put(LAMA_URL,new Response(bytes,{headers:{'content-type':'application/octet-stream'}})); }catch(e){}
+  return bytes;
+}
+// The model runs in a worker of its own, on the processor: the graphics card
+// route cannot run LaMa's Fourier layers, and on the page's own thread a
+// quarter of a minute per square would freeze everything while it thought.
+function lamaSession(say){
+  if(!lamaSessionP) lamaSessionP=(async()=>{
+    const bytes=await lamaModelBytes(say);
+    say('Starting the AI model…',true);
+    const url=URL.createObjectURL(new Blob(['('+lamaWorkerMain.toString()+')()'],{type:'text/javascript'}));
+    const wk=new Worker(url);
+    let seq=0;
+    const waiting=new Map();
+    wk.onmessage=e=>{
+      const m=e.data, p=waiting.get(m.id); if(!p) return;
+      waiting.delete(m.id);
+      if(m.error) p.rej(new Error(m.error)); else p.res(m);
+    };
+    wk.onerror=e=>{
+      for(const p of waiting.values()) p.rej(new Error(e.message||'the AI worker stopped'));
+      waiting.clear(); lamaSessionP=null;
+    };
+    const call=(msg,transfer)=>new Promise((res,rej)=>{
+      const id=++seq; waiting.set(id,{res,rej}); wk.postMessage({...msg,id},transfer||[]);
+    });
+    await call({type:'init',ortBase:ORT_BASE,bytes:bytes.buffer},[bytes.buffer]);
+    return {run:async(image,mask)=>{
+      const im=image.slice(), mk=mask.slice();
+      const m=await call({type:'run',image:im.buffer,mask:mk.buffer},[im.buffer,mk.buffer]);
+      return new Float32Array(m.data);
+    }};
+  })().catch(err=>{ lamaSessionP=null; throw err; });
+  return lamaSessionP;
+}
+function lamaWorkerMain(){
+  let session=null;
+  self.onmessage=async e=>{
+    const m=e.data;
+    try{
+      if(m.type==='init'){
+        importScripts(m.ortBase+'ort.wasm.min.js');
+        self.ort.env.wasm.wasmPaths=m.ortBase;
+        self.ort.env.wasm.numThreads=1;
+        session=await self.ort.InferenceSession.create(new Uint8Array(m.bytes),{executionProviders:['wasm']});
+        self.postMessage({id:m.id});
+      }else if(m.type==='run'){
+        const T=512, ort=self.ort;
+        const out=await session.run({
+          image:new ort.Tensor('float32',new Float32Array(m.image),[1,3,T,T]),
+          mask:new ort.Tensor('float32',new Float32Array(m.mask),[1,1,T,T])});
+        const d=new Float32Array(out[session.outputNames[0]].data);
+        self.postMessage({id:m.id,data:d.buffer},[d.buffer]);
+      }
+    }catch(err){ self.postMessage({id:m.id,error:String((err&&err.message)||err)}); }
+  };
+}
+async function lamaFill(imageData,x0,y0,x1,y1,say){
+  const sess=await lamaSession(say);
+  const {width:w,height:h,data}=imageData;
+  const T=512;
+  // 512 px squares overlapping along every edge; the middle of the picture is
+  // artwork already and never needs one
+  const spots=L=>{ if(L<=T) return [0]; const n=Math.ceil((L-T)/384)+1; return [...Array(n).keys()].map(i=>Math.round(i*(L-T)/(n-1))); };
+  const tiles=[];
+  for(const ty of spots(h)) for(const tx of spots(w))
+    if(tx<x0||ty<y0||tx+T>x1||ty+T>y1) tiles.push([tx,ty]);
+  const acc=new Float32Array(w*h*3), ws=new Float32Array(w*h);
+  const image=new Float32Array(3*T*T), mask=new Float32Array(T*T);
+  for(let k=0;k<tiles.length;k++){
+    say(`AI is filling the bleed… part ${k+1} of ${tiles.length} (about 15 seconds each)`,true);
+    const [tx,ty]=tiles[k];
+    for(let y=0;y<T;y++) for(let x=0;x<T;x++){
+      const X=tx+x, Y=ty+y, i=(Y*w+X)*4, o=y*T+x;
+      const known=X>=x0&&X<x1&&Y>=y0&&Y<y1;
+      image[o]=data[i]/255; image[T*T+o]=data[i+1]/255; image[2*T*T+o]=data[i+2]/255;
+      mask[o]=known?0:1;
+    }
+    const out=await sess.run(image,mask);
+    // squares are feathered into each other so no seam shows where they meet
+    for(let y=0;y<T;y++) for(let x=0;x<T;x++){
+      const X=tx+x, Y=ty+y;
+      if(X>=x0&&X<x1&&Y>=y0&&Y<y1) continue;
+      const t=Y*w+X, o=y*T+x;
+      const wt=1+Math.min(x,y,T-1-x,T-1-y);
+      acc[t*3]+=out[o]*wt; acc[t*3+1]+=out[T*T+o]*wt; acc[t*3+2]+=out[2*T*T+o]*wt;
+      ws[t]+=wt;
+    }
+  }
+  const px=new Uint8ClampedArray(data);
+  for(let t=0;t<w*h;t++) if(ws[t]>0){
+    px[t*4]=acc[t*3]/ws[t]; px[t*4+1]=acc[t*3+1]/ws[t]; px[t*4+2]=acc[t*3+2]/ws[t];
+  }
+  return new ImageData(px,w,h);
 }
 
 // ---------- what a single artwork prints at ----------
@@ -9044,7 +9465,7 @@ document.getElementById('printReadyBtn').addEventListener('click',async()=>{
       if(await enhanceArt(s)) done.push(s);
     }
     const failed=soft.filter(s=>!done.includes(s));
-    const parts=['fitted to the card','5 mm '+(bleedModeNow()==='mirror'?'mirrored':'extended')+' bleed'];
+    const parts=['fitted to the card','5 mm '+({mirror:'mirrored',extend:'extended',content:'content-aware',ai:'AI-filled'}[bleedModeNow()])+' bleed'];
     if(done.length) parts.push(done.join(' and ')+' upscaled to print resolution');
     showMsg(out,(failed.length?'⚠ ':'✓ ')+parts.join(', ')
       +(failed.length?` — ${failed.join(' and ')} could not be upscaled, see above.`:'.'),!failed.length);
@@ -10799,7 +11220,7 @@ const bundleShopName=v=>v==='planttalks'?'Plant Talks':'PartyMonkey';
 // for the team, read when the screen opens and again whenever the day's jobs
 // are.
 const BUNDLE_RULES_DEFAULT={pt_word:'PT',seed_words:'seed, seeds',
-  made_to_order:'Custom',pm_combos_only:true};
+  made_to_order:'Custom',pm_combos_only:true,label_strip_words:'seed, seeds, popular'};
 let bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT);
 const bundleWordList=v=>String(v==null?'':v).split(/[,\n]/).map(x=>x.trim()).filter(Boolean);
 // A word has to stand on its own -- beside a space, a dash, a dot or a digit,
@@ -10851,6 +11272,8 @@ async function loadBundleRules(){
     if(error) throw error;
     const r=(data||[])[0];
     if(r) bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT,r);
+    if(bundleRules.label_strip_words==null)            // column not added yet
+      bundleRules.label_strip_words=BUNDLE_RULES_DEFAULT.label_strip_words;
   }catch(e){ /* not set up yet -- what the app was born with stands */ }
   bundleRulesReady();
 }
@@ -11316,7 +11739,112 @@ async function openBundleSettings(){
   await Promise.all([loadBundleRules(),loadBundleHiddenWords()]);
   renderBundleRules();
   renderBundleHideList();
+  stickerPicked.clear();
+  renderStickerWords();
 }
+
+// ---- sticker words: taken off a Bundle SKU's name before it prints ----
+// Kept in one field on bundle_settings and written back whole on every change,
+// so an add, an edit and a removal are each one save.
+const stickerPicked=new Set();              // words ticked, lower-cased
+const stickerWords=()=>bundleWordList(bundleRules.label_strip_words);
+function renderStickerWords(){
+  const el=document.getElementById('stickerWordList'); if(!el) return;
+  const words=stickerWords();
+  for(const k of [...stickerPicked]) if(!words.some(w=>w.toLowerCase()===k)) stickerPicked.delete(k);
+  el.innerHTML=words.length?words.map((w,i)=>`<div class="ph-card pl-hidden-row" data-sticker-i="${i}">
+      <input type="checkbox" data-sticker-pick ${stickerPicked.has(w.toLowerCase())?'checked':''}
+        aria-label="Select" style="width:22px;height:22px;flex:0 0 auto;"/>
+      <input type="text" data-sticker-box value="${escapeHtml(w)}" maxlength="60" aria-label="Word"/>
+      <button class="del-btn" data-sticker-del title="Remove" aria-label="Remove">×</button>
+    </div>`).join('')
+    :'<p class="hint" style="margin:4px 0 0;">-- nothing taken off, so stickers print the name as it is --</p>';
+  const n=stickerPicked.size;
+  document.getElementById('stickerWordAll').hidden=!words.length||n===words.length;
+  const del=document.getElementById('stickerWordDel');
+  del.hidden=!n; del.textContent='Remove selected ('+n+')';
+  document.getElementById('stickerWordCancel').hidden=!n;
+  stickerTest();
+}
+function stickerTest(){
+  const v=document.getElementById('stickerWordTest').value.trim();
+  document.getElementById('stickerWordTestOut').innerHTML=v
+    ?'Prints: <b>'+escapeHtml(bundleComboNameClean(v))+'</b>':'';
+}
+async function stickerSave(words,done){
+  const msg=document.getElementById('stickerWordMsg');
+  const session=await requireSession(msg); if(!session) return false;
+  const label_strip_words=words.join(', ');
+  try{
+    const {error}=await sb.from('bundle_settings')
+      .upsert({id:true,label_strip_words,updated_at:new Date().toISOString()},{onConflict:'id'});
+    if(error) throw error;
+    bundleRules.label_strip_words=label_strip_words;
+    renderStickerWords();
+    if(done) showMsg(msg,'✓ '+done,true); else msg.innerHTML='';
+    return true;
+  }catch(err){
+    renderStickerWords();
+    showMsg(msg,/column|relation|does not exist|schema cache/i.test(err.message||'')
+      ? 'Run supabase-migration-STICKER-WORDS.sql in Supabase first.'
+      : 'Could not save: '+escapeHtml(err.message||String(err)),false);
+    return false;
+  }
+}
+const stickerHas=(words,w,skip)=>words.some((x,i)=>i!==skip&&x.toLowerCase()===w.toLowerCase());
+document.getElementById('stickerWordAdd').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const box=document.getElementById('stickerWordNew');
+  const w=box.value.replace(/,/g,' ').trim(); if(!w) return;
+  const words=stickerWords();
+  if(stickerHas(words,w)){ showMsg(document.getElementById('stickerWordMsg'),'That one is already on the list.',false); return; }
+  if(await stickerSave([...words,w])) box.value='';
+});
+document.getElementById('stickerWordList').addEventListener('change',e=>{
+  const pick=e.target.closest('[data-sticker-pick]'); if(!pick) return;
+  const w=stickerWords()[+pick.closest('[data-sticker-i]').dataset.stickerI]; if(w==null) return;
+  if(pick.checked) stickerPicked.add(w.toLowerCase()); else stickerPicked.delete(w.toLowerCase());
+  renderStickerWords();
+});
+document.getElementById('stickerWordList').addEventListener('click',e=>{
+  const del=e.target.closest('[data-sticker-del]'); if(!del) return;
+  const i=+del.closest('[data-sticker-i]').dataset.stickerI;
+  const words=stickerWords(); if(words[i]==null) return;
+  if(!confirm(`Are you sure?\n\nStop taking "${words[i]}" off stickers?`)) return;
+  words.splice(i,1);
+  stickerSave(words,'Removed.');
+});
+// edited on leaving the box, like the hidden words below
+document.getElementById('stickerWordList').addEventListener('focusout',e=>{
+  const box=e.target.closest('[data-sticker-box]'); if(!box) return;
+  const i=+box.closest('[data-sticker-i]').dataset.stickerI;
+  const words=stickerWords(); const was=words[i]; if(was==null) return;
+  const w=box.value.replace(/,/g,' ').trim();
+  if(!w||w===was){ box.value=was; return; }
+  if(stickerHas(words,w,i)){
+    showMsg(document.getElementById('stickerWordMsg'),'That one is already on the list.',false);
+    box.value=was; return;
+  }
+  stickerPicked.delete(was.toLowerCase());
+  words[i]=w;
+  stickerSave(words);
+});
+document.getElementById('stickerWordAll').addEventListener('click',()=>{
+  stickerWords().forEach(w=>stickerPicked.add(w.toLowerCase()));
+  renderStickerWords();
+});
+document.getElementById('stickerWordCancel').addEventListener('click',()=>{
+  stickerPicked.clear();
+  renderStickerWords();
+});
+document.getElementById('stickerWordDel').addEventListener('click',()=>{
+  const words=stickerWords();
+  const gone=words.filter(w=>stickerPicked.has(w.toLowerCase())); if(!gone.length) return;
+  if(!confirm(`Are you sure?\n\nStop taking these off stickers?\n\n${gone.join(', ')}`)) return;
+  stickerPicked.clear();
+  stickerSave(words.filter(w=>!gone.includes(w)),'Removed '+gone.length+'.');
+});
+document.getElementById('stickerWordTest').addEventListener('input',stickerTest);
 function renderBundleRules(){
   const set=(id,v)=>{ const el=document.getElementById(id); if(el) el.value=v||''; };
   set('bundleRulePt',bundleRules.pt_word);
@@ -11457,7 +11985,7 @@ document.getElementById('bundleRuleSave').addEventListener('click',async()=>{
       .upsert(Object.assign({id:true,updated_at:new Date().toISOString()},next),
         {onConflict:'id'});
     if(error) throw error;
-    bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT,next);
+    bundleRules=Object.assign({},bundleRules,next);   // sticker words are saved on their own
     bundleRulesReady();
     renderBundleRules();
     renderBundles();
@@ -12345,13 +12873,12 @@ document.getElementById('bundlePrintAllBtn').addEventListener('click',()=>{
   bundlePrintShowSelect();
 });
 
-// Words taken off a label, and only a label. Not the seed words from Settings:
-// that list also decides what counts as a seed, and it has DIY in it, which
-// belongs on the tape.
-const LABEL_STRIP_WORDS='seed, seeds, popular';
-function bundleComboNameClean(name){
+// Words taken off a label, and only a label -- Sticker words on Bundle SKU
+// Settings. Not the seed words: that list also decides what counts as a seed,
+// and it has DIY in it, which belongs on the tape.
+function bundleComboNameClean(name,words){
   let s=String(name||'').trim();
-  bundleWordList(LABEL_STRIP_WORDS).forEach(w=>{
+  bundleWordList(words==null?bundleRules.label_strip_words:words).forEach(w=>{
     s=s.replace(new RegExp('(^|[^a-z])'+bundleReEscape(w)+'(?=[^a-z]|$)','ig'),'$1 ');
   });
   s=s.replace(/\(\s*\)|\[\s*\]/g,' ')   // brackets a removed word left empty
@@ -22110,6 +22637,13 @@ async function renderSidePdfAll(side,pages,onPage,from){
   // print-quality resolution (300dpi), uncapped except for a safety ceiling
   // against runaway canvas sizes on very large custom sheets
   const px=Math.min(6000,Math.round(Math.max(p.w,p.h)/25.4*300));
+  // A filled bleed is worked out in the background. The sheets are drawn once
+  // small to ask for every fill they need, and the PDF waits for all of them —
+  // never a sheet printed with the stand-in edge because a fill was still going.
+  if(bleedModeNow()==='content'||bleedModeNow()==='ai'){
+    for(let i=0;i<pages;i++) renderSide(side,document.createElement('canvas'),160,{forExport:true,page:(from||0)+i});
+    await bleedJobsSettled();
+  }
   const sources=await printVectorSources(side);
   return await gtBuildPdf(pages,async(i,forms)=>{
     if(onPage) onPage(i);
