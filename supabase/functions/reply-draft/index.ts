@@ -314,7 +314,7 @@ function words(s: string) {
     .filter((w) => w.length > 2 && !STOP.has(w));
 }
 
-type Example = { id: string; buyer_text: string; reply_text: string; hits: number; edited: boolean };
+type Example = { id: string; buyer_text: string; reply_text: string; hits: number; edited: boolean; chat_key?: string | null; buyer?: string | null };
 type Fact = { fact: string; photos: string[] };
 
 // Which attached photo, if any, this question is asking to be shown.
@@ -339,12 +339,23 @@ function photosFor(message: string, facts: Fact[]): Fact[] {
   return scored.slice(0, 2).map((x) => x.f);
 }
 
-function pick(message: string, rows: Example[], want = 6): Example[] {
+function pick(message: string, rows: Example[], want = 6, contextKey?: string): Example[] {
   const asked = [...new Set(words(message))];
+  const hasContext = contextKey && contextKey.length > 0;
+
   if (!asked.length) {
     // Nothing to match on — a sticker, an order number on its own. The most
     // used replies are still a better guide to the shop's voice than nothing.
-    return rows.slice().sort((a, b) => (b.hits ?? 0) - (a.hits ?? 0)).slice(0, 3);
+    // Prefer examples from the same conversation if available
+    const byContext = rows.slice()
+      .sort((a, b) => {
+        const aMatch = hasContext && a.chat_key === contextKey ? 1 : 0;
+        const bMatch = hasContext && b.chat_key === contextKey ? 1 : 0;
+        if (aMatch !== bMatch) return bMatch - aMatch;
+        return (b.hits ?? 0) - (a.hits ?? 0);
+      })
+      .slice(0, 3);
+    return byContext.length > 0 ? byContext : rows.slice().sort((a, b) => (b.hits ?? 0) - (a.hits ?? 0)).slice(0, 3);
   }
   const scored = rows.map((row) => {
     const has = new Set(words(row.buyer_text + " " + row.reply_text));
@@ -356,6 +367,9 @@ function pick(message: string, rows: Example[], want = 6): Example[] {
     // an edited reply is a correction somebody bothered to make; it is worth
     // more as an example than a draft that happened to be accepted as written
     if (row.edited) score += 0.25;
+    // Strong bonus for examples from the same conversation thread: they have
+    // the right customer context, not just word overlap
+    if (hasContext && row.chat_key === contextKey) score += 2.0;
     return { row, score: score + Math.min(1.2, (row.hits ?? 0) * 0.15) };
   }).filter((s) => s.score > 0.5);
   scored.sort((a, b) => b.score - a.score);
@@ -512,7 +526,7 @@ Deno.serve(async (req) => {
     // very most — a shop that has approved a thousand replies has a thousand
     // short lines, not a corpus — and ranking needs to see all of them.
     const { data: exRows } = await asUser.from("reply_examples")
-      .select("id,buyer_text,reply_text,hits,edited,created_at")
+      .select("id,buyer_text,reply_text,hits,edited,created_at,chat_key,buyer")
       .order("created_at", { ascending: false })
       .limit(1000);
     const examples = (exRows ?? []) as Example[];
@@ -559,7 +573,9 @@ Deno.serve(async (req) => {
       return json({ facts: out });
     }
 
-    const used = pick(message, examples);
+    // Use chat_key from request to prioritize examples from the same conversation
+    const chatKey = String(body?.chat_key ?? "").trim();
+    const used = pick(message, examples, 6, chatKey || undefined);
     // Worked out before the draft rather than after: a reply that says "here
     // is the chart" with no chart attached is worse than one that never
     // mentioned a chart at all.
