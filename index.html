@@ -6577,6 +6577,20 @@ body.mc-docked .mc-bubble{display:none !important;}
   </div>
 </div>
 
+<!-- ---- Matte or gloss, asked before a gift tag line is opened: they are two
+     runs and two PDFs, and a tag laid out on the wrong one is laid out twice ---- -->
+<div class="sheet-bg" id="mcFinSheet">
+  <div class="sheet" style="max-width:420px;">
+    <button class="req-x" id="mcFinClose" title="Close" aria-label="Close">&times;</button>
+    <div class="sheet-title">Matte or gloss?</div>
+    <p class="hint" style="margin:0 0 10px;"><b id="mcFinWhat"></b></p>
+    <div style="display:flex;gap:8px;">
+      <button type="button" class="btn-outline" data-mc-fin-pick="Matte" style="flex:1;">Matte</button>
+      <button type="button" class="btn-outline" data-mc-fin-pick="Gloss" style="flex:1;">Gloss</button>
+    </div>
+  </div>
+</div>
+
 <!-- ---- The sheet those SKUs just made. Small and centred like every other
      pop-up here rather than the full-screen enlarge: this is a look at what
      was built and a way to save it, not a place to inspect detail. ---- -->
@@ -7179,14 +7193,18 @@ function exifDpi(bin,t){
   if(!(y>1)) y=x;
   return unit===3?{x:x*2.54,y:y*2.54}:unit===1?null:{x,y};
 }
-// The artwork's own printed size in mm. A file that says nothing of its
-// resolution is taken at 72 per inch, as Photoshop and Illustrator open it.
+// The artwork's own printed size in mm, or null where the file says nothing of
+// its resolution.
 function artRealMm(img){
   if(!img||!img.naturalWidth) return null;
-  if(img._realMm) return img._realMm;
+  if(img._realMm!==undefined) return img._realMm;
   let dpi=null;
   try{ dpi=imageDpi(img.src); }catch(e){}
-  const dx=(dpi&&dpi.x)||72, dy=(dpi&&dpi.y)||dx;
+  // A file that says nothing has no printed size to keep. Taken at 72 per inch
+  // a 1200px PNG was 423mm across, drawn into an 89mm card — the sheet looked
+  // zoomed right in on every design. null, and the caller fits it instead.
+  if(!dpi||!(dpi.x>0)) return img._realMm=null;
+  const dx=dpi.x, dy=dpi.y>0?dpi.y:dx;
   return img._realMm={w:img.naturalWidth/dx*25.4, h:img.naturalHeight/dy*25.4};
 }
 async function fileToImageData(file){
@@ -7323,10 +7341,10 @@ function fitArtToCard(side){
     ? state.designs[0].img : state.final[side].img;
   if(!img) return;
   const L=layoutMm();
-  if(state.artFit==='actual'){
-    const r=artRealMm(img);
+  const r=state.artFit==='actual'?artRealMm(img):null;
+  if(r){
     state.art[side]={wMm:r.w,hMm:r.h};
-  }else if(state.artFit==='original'){
+  }else if(state.artFit==='original'||state.artFit==='actual'){
     const f=Math.min(L.cardW/img.naturalWidth,L.cardH/img.naturalHeight);
     state.art[side]={wMm:img.naturalWidth*f,hMm:img.naturalHeight*f};
   }else{
@@ -7513,18 +7531,35 @@ function renderSide(side,canvas,maxDim,opts){
     let wMm=a.wMm, hMm=a.hMm;
     // Actual size: each design in the list at the size its own file gives;
     // the single artwork at the WIDTH/HEIGHT box, which starts at that size
-    if(state.artFit==='actual'&&line&&artRealMm(img)){
-      ({w:wMm,h:hMm}=artRealMm(img));
-    }else if(state.artFit==='original'&&img.naturalWidth&&img.naturalHeight){
-      const f=Math.min(a.wMm/img.naturalWidth,a.hMm/img.naturalHeight);
+    const real=state.artFit==='actual'?artRealMm(img):null;
+    if(real&&line){
+      ({w:wMm,h:hMm}=real);
+    }else if((state.artFit==='original'||(state.artFit==='actual'&&!real))
+      &&img.naturalWidth&&img.naturalHeight){
+      // a design with no size of its own fits its card; the box may be another
+      // design's actual size
+      const L=line&&state.artFit==='actual'?layoutMm():null;
+      const bw=L?L.cardW:a.wMm, bh=L?L.cardH:a.hMm;
+      const f=Math.min(bw/img.naturalWidth,bh/img.naturalHeight);
       wMm=img.naturalWidth*f; hMm=img.naturalHeight*f;
     }
     // the sheet's bleed unless this design keeps its own
     const bleedMm=bleedMmFor(line);
-    const effW=wMm+bleedMm*2, effH=hMm+bleedMm*2;
+    // Artwork sent at the wrong shape sits inside the placeholder with paper
+    // either side, and a bleed made from its own edges stopped short of the cut.
+    // The made-up edge is carried out to the placeholder and past it by the
+    // bleed, so the card prints to the edge whatever shape it was sent at.
+    const padX=bleedMm>0?Math.max(0,(ph.wMm-wMm)/2):0;
+    const padY=bleedMm>0?Math.max(0,(ph.hMm-hMm)/2):0;
+    const bX=bleedMm+padX, bY=bleedMm+padY;
+    const effW=wMm+bX*2, effH=hMm+bY*2;
     // Mirror and Extend keep the artwork at its own size and make the bleed up
-    // from its edges; Stretch enlarges the picture into it as it always did
-    const grow=bleedMm>0&&bleedModeNow()!=='stretch';
+    // from its edges; Stretch enlarges the picture into it as it always did —
+    // except across a gap, where stretching would squash the picture out of
+    // shape, so the gap is extended instead
+    const padded=padX>0||padY>0;
+    const bleedMode=bleedModeNow()==='stretch'?'extend':bleedModeNow();
+    const grow=bleedMm>0&&(bleedModeNow()!=='stretch'||padded);
     // the sheet's turn and the design's own, one on top of the other: the
     // sheet turns everything printed on it, and a design that arrived on its
     // side turns again inside its own box
@@ -7556,7 +7591,9 @@ function renderSide(side,canvas,maxDim,opts){
     ctx.save();
     ctx.translate(cx,cy);
     ctx.rotate(rotDeg*Math.PI/180);
-    ctx.drawImage(grow?bleedArt(img,trimW,trimH,bleedMm,bleedModeNow()):img,-srcW/2,-srcH/2,srcW,srcH);
+    // the bleed along the picture's own axes, which a quarter turn swaps
+    ctx.drawImage(grow?bleedArt(img,trimW,trimH,swapped?bY:bX,bleedMode,swapped?bX:bY):img,
+      -srcW/2,-srcH/2,srcW,srcH);
     // a pixel short of the trim, so the ring overlaps the placed page rather
     // than leaving a hairline of paper between them
     if(ringOnly){ const iw=trimW*sc-1, ih=trimH*sc-1; ctx.clearRect(-iw/2,-ih/2,iw,ih); }
@@ -8830,12 +8867,18 @@ document.getElementById('bleedModeSeg').addEventListener('click',async e=>{
 // the picture alone would have been drawn into the trim. Kept per picture —
 // the sheet redraws on every keystroke and this is not free on a big file.
 var bleedArtMemo=new WeakMap();
-function bleedArt(img,trimW,trimH,mm,mode){
+// mmY is the bleed top and bottom where it differs from the sides — artwork
+// that is not the placeholder's shape has further to reach one way than the other
+function bleedArt(img,trimW,trimH,mm,mode,mmY){
   const nW=img.naturalWidth||img.width, nH=img.naturalHeight||img.height;
   if(!nW||!nH||!(trimW>0)||!(trimH>0)) return img;
-  // one mirrored copy is as far as a mirror can honestly reach
-  const bx=Math.max(1,Math.min(nW,Math.round(mm*nW/trimW)));
-  const by=Math.max(1,Math.min(nH,Math.round(mm*nH/trimH)));
+  if(mmY===undefined) mmY=mm;
+  const bx=Math.max(1,Math.round(mm*nW/trimW));
+  const by=Math.max(1,Math.round(mmY*nH/trimH));
+  // One mirrored copy is as far as a mirror can honestly reach. Capping the
+  // bleed there instead squeezed the picture when it was drawn into its box,
+  // so a gap wider than the picture is extended rather than mirrored.
+  if(mode==='mirror'&&(bx>nW||by>nH)) mode='extend';
   if(mode==='content'||mode==='ai'){
     const job=bleedJob(img,bx,by,mode);
     return job.canvas||bleedArtPx(img,bx,by,'extend');
@@ -8867,9 +8910,11 @@ function bleedArtPx(img,bx,by,mode){
     // The outermost pixels pulled outward. Each edge is first squeezed along
     // its length and stretched back, so a busy edge smears into soft colour
     // instead of leaving a comb of streaks through the bleed.
+    // softened by how far that edge reaches: a side carried across a wide gap
+    // no longer blurs the top and bottom, which only reach the bleed
     const soft=(sx,sy,sw,sh,along)=>{
       const t=document.createElement('canvas');
-      const n=Math.max(2,Math.round(along/Math.max(4,Math.max(bx,by)/2)));
+      const n=Math.max(2,Math.round(along/Math.max(4,(sw>sh?by:bx)/2)));
       t.width=sw>sh?n:1; t.height=sw>sh?1:n;
       const tc=t.getContext('2d');
       tc.imageSmoothingQuality='high';
@@ -8884,6 +8929,25 @@ function bleedArtPx(img,bx,by,mode){
     ctx.drawImage(R,bx+nW,by,bx,nH);
     ctx.drawImage(T,bx,0,nW,by);
     ctx.drawImage(B,bx,by+nH,nW,by);
+    // The edge pixels themselves over that, solid at the cut and fading out
+    // across the bleed: sharp where a cut a hair off would show it, soft only
+    // where it is trimmed away.
+    const fade=(sx,sy,sw,sh,dx,dy,dw,dh,gx0,gy0,gx1,gy1)=>{
+      const t=document.createElement('canvas');
+      t.width=Math.max(1,dw); t.height=Math.max(1,dh);
+      const tc=t.getContext('2d');
+      tc.imageSmoothingEnabled=false;
+      tc.drawImage(img,sx,sy,sw,sh,0,0,t.width,t.height);
+      const g=tc.createLinearGradient(gx0,gy0,gx1,gy1);
+      g.addColorStop(0,'rgba(0,0,0,1)'); g.addColorStop(0.35,'rgba(0,0,0,0.8)'); g.addColorStop(1,'rgba(0,0,0,0)');
+      tc.globalCompositeOperation='destination-in';
+      tc.fillStyle=g; tc.fillRect(0,0,t.width,t.height);
+      ctx.drawImage(t,dx,dy);
+    };
+    fade(0,0,1,nH, 0,by,bx,nH, bx,0,0,0);
+    fade(nW-1,0,1,nH, bx+nW,by,bx,nH, 0,0,bx,0);
+    fade(0,0,nW,1, bx,0,nW,by, 0,by,0,0);
+    fade(0,nH-1,nW,1, bx,by+nH,nW,by, 0,0,0,by);
     // corners take the colour of the corner itself, flat
     const dot=document.createElement('canvas'); dot.width=dot.height=1;
     const dc=dot.getContext('2d');
@@ -8908,7 +8972,9 @@ var bleedJobMemo=new WeakMap(), bleedJobWanted=new WeakMap(), bleedJobPending=ne
 var bleedJobChain=Promise.resolve();
 // the longest side a fill is worked at; the result is enlarged back onto the
 // full picture, whose own pixels are then laid over it untouched
-const BLEED_FILL_PX=1200;
+const BLEED_FILL_PX=3600;
+// the AI's own pass is coarser; the patch pass after it restores the detail
+const AI_WORK_PX=1200;
 // Progress stays up for as long as the work goes on — a square of AI fill
 // outlasts the few seconds an ordinary message is shown for. The outcome is an
 // ordinary message.
@@ -8967,29 +9033,48 @@ async function bleedFill(img,bx,by,mode,say){
   base.width=W; base.height=H;
   // the Extend canvas for exactly these bleed pixels
   base.getContext('2d').drawImage(bleedArtPx(img,bx,by,'extend'),0,0);
-  let f=Math.min(1,BLEED_FILL_PX/Math.max(W,H));
-  // the AI works in 512 px squares, so the picture must be at least that big
-  if(mode==='ai') f=Math.max(f,512/Math.min(W,H));
-  const least=mode==='ai'?512:1;
-  const w=Math.max(least,Math.round(W*f)), h=Math.max(least,Math.round(H*f));
-  const small=document.createElement('canvas');
-  small.width=w; small.height=h;
-  const sctx=small.getContext('2d',{willReadFrequently:true});
-  sctx.imageSmoothingQuality='high';
-  sctx.drawImage(base,0,0,w,h);
-  // the part of the small picture that is the artwork, whole pixels only
-  const x0=Math.ceil(bx*f), y0=Math.ceil(by*f);
-  const x1=Math.floor((bx+nW)*f), y1=Math.floor((by+nH)*f);
-  const data=sctx.getImageData(0,0,w,h);
-  const filled=mode==='ai'
-    ? await lamaFill(data,x0,y0,x1,y1,say)
-    : await patchFill(data,x0,y0,x1,y1,say);
-  sctx.putImageData(filled,0,0);
+  // a canvas scaled by f, with where the artwork sits in it in whole pixels
+  const scaled=(src,f,least)=>{
+    const w=Math.max(least,Math.round(W*f)), h=Math.max(least,Math.round(H*f));
+    const c=document.createElement('canvas');
+    c.width=w; c.height=h;
+    const ctx=c.getContext('2d',{willReadFrequently:true});
+    ctx.imageSmoothingQuality='high';
+    ctx.drawImage(src,0,0,w,h);
+    return {c,ctx,data:ctx.getImageData(0,0,w,h),
+      x0:Math.ceil(bx*f),y0:Math.ceil(by*f),x1:Math.floor((bx+nW)*f),y1:Math.floor((by+nH)*f)};
+  };
+  let guide=base;
+  if(mode==='ai'){
+    // The AI decides what the bleed should show, working in 512 px squares —
+    // so on a smaller copy, which alone would come back soft.
+    const f=Math.max(Math.min(1,AI_WORK_PX/Math.max(W,H)),512/Math.min(W,H));
+    const a=scaled(base,f,512);
+    a.ctx.putImageData(await lamaFill(a.data,a.x0,a.y0,a.x1,a.y1,say),0,0);
+    guide=document.createElement('canvas');
+    guide.width=W; guide.height=H;
+    const gctx=guide.getContext('2d');
+    gctx.imageSmoothingQuality='high';
+    gctx.drawImage(a.c,0,0,W,H);
+    gctx.drawImage(img,bx,by,nW,nH);
+  }
+  // Then real patches of the artwork, at the artwork's own resolution, are
+  // matched into the bleed — the whole fill for Content-aware, and for AI a
+  // light pass that keeps what the AI drew but gives it the picture's own
+  // sharpness back.
+  const f=Math.min(1,BLEED_FILL_PX/Math.max(W,H));
+  const p=scaled(guide,f,1);
+  p.ctx.putImageData(await patchFill(p.data,p.x0,p.y0,p.x1,p.y1,say,
+    mode==='ai'?{levels:2,coarseEm:2,label:'Sharpening the AI fill'}:{}),0,0);
+  if(p.c.width===W&&p.c.height===H){
+    p.ctx.drawImage(img,bx,by,nW,nH);
+    return p.c;
+  }
   const out=document.createElement('canvas');
   out.width=W; out.height=H;
   const octx=out.getContext('2d');
   octx.imageSmoothingQuality='high';
-  octx.drawImage(small,0,0,W,H);
+  octx.drawImage(p.c,0,0,W,H);
   octx.drawImage(img,bx,by,nW,nH);
   return out;
 }
@@ -8999,33 +9084,36 @@ async function bleedFill(img,bx,by,mode,say){
 // what surrounds it, coarse to fine, and the overlapping patches vote on its
 // colour. Run in a worker so the page keeps moving while it thinks.
 let patchWorkerUrl=null;
-function patchFill(imageData,x0,y0,x1,y1,say){
+function patchFill(imageData,x0,y0,x1,y1,say,opts){
+  opts=opts||{};
   if(!patchWorkerUrl) patchWorkerUrl=URL.createObjectURL(new Blob(
     ['('+patchWorkerMain.toString()+')()'],{type:'text/javascript'}));
   return new Promise((res,rej)=>{
     const wk=new Worker(patchWorkerUrl);
     wk.onmessage=e=>{
       const m=e.data;
-      if(m.progress!==undefined){ say(`Filling the bleed from the artwork… ${Math.round(m.progress*100)}%`,true); return; }
+      if(m.progress!==undefined){ say(`${opts.label||'Filling the bleed from the artwork'}… ${Math.round(m.progress*100)}%`,true); return; }
       wk.terminate();
       if(m.error) rej(new Error(m.error));
       else res(new ImageData(new Uint8ClampedArray(m.data),imageData.width,imageData.height));
     };
     wk.onerror=e=>{ wk.terminate(); rej(new Error(e.message||'worker error')); };
     const buf=imageData.data.slice().buffer;
-    wk.postMessage({w:imageData.width,h:imageData.height,data:buf,x0,y0,x1,y1},[buf]);
+    wk.postMessage({w:imageData.width,h:imageData.height,data:buf,x0,y0,x1,y1,
+      levels:opts.levels||0,coarseEm:opts.coarseEm||0},[buf]);
   });
 }
 function patchWorkerMain(){
   self.onmessage=e=>{
     try{
-      const {w,h,data,x0,y0,x1,y1}=e.data;
-      const out=run(w,h,new Uint8ClampedArray(data),x0,y0,x1,y1,p=>self.postMessage({progress:p}));
+      const {w,h,data,x0,y0,x1,y1,levels,coarseEm}=e.data;
+      const out=run(w,h,new Uint8ClampedArray(data),x0,y0,x1,y1,p=>self.postMessage({progress:p}),
+        {levels:levels||7,coarseEm:coarseEm||6});
       self.postMessage({data:out.buffer},[out.buffer]);
     }catch(err){ self.postMessage({error:String((err&&err.message)||err)}); }
   };
   const R=3;   // 7 x 7 patches
-  function run(W,H,rgba,X0,Y0,X1,Y1,progress){
+  function run(W,H,rgba,X0,Y0,X1,Y1,progress,opts){
     if(X1-X0<R*2+2||Y1-Y0<R*2+2) throw new Error('the artwork is too small to match patches from');
     // the pyramid: halved until the bleed is a few pixels deep
     const levels=[];
@@ -9033,7 +9121,7 @@ function patchWorkerMain(){
     for(let i=0;i<rgba.length;i++) img[i]=rgba[i];
     let lv={w:W,h:H,img,x0:X0,y0:Y0,x1:X1,y1:Y1};
     levels.push(lv);
-    while(levels.length<7){
+    while(levels.length<opts.levels){
       const ring=Math.min(lv.x0,lv.y0,lv.w-lv.x1,lv.h-lv.y1);
       const nx0=Math.ceil(lv.x0/2), ny0=Math.ceil(lv.y0/2), nx1=Math.floor(lv.x1/2), ny1=Math.floor(lv.y1/2);
       if(ring<8||nx1-nx0<R*4+2||ny1-ny0<R*4+2) break;
@@ -9050,7 +9138,7 @@ function patchWorkerMain(){
     }
     let prev=null;
     let work=0, done=0;
-    const emOf=L=>L===0?2:(L===levels.length-1?6:3);
+    const emOf=L=>L===0?2:(L===levels.length-1?opts.coarseEm:3);
     levels.forEach((l,L)=>{ work+=emOf(L)*(l.w*l.h-(l.x1-l.x0)*(l.y1-l.y0)); });
     for(let L=levels.length-1;L>=0;L--){
       const {w,h,img,x0,y0,x1,y1}=levels[L];
@@ -9120,6 +9208,29 @@ function patchWorkerMain(){
           img[t*4]=acc[t*4]/ws[t]; img[t*4+1]=acc[t*4+1]/ws[t]; img[t*4+2]=acc[t*4+2]/ws[t]; img[t*4+3]=acc[t*4+3]/ws[t];
         }
       };
+      // The last word at full size: each pixel takes its colour from the single
+      // best-matching patch over it rather than an average of all of them. An
+      // average of several slightly different patches is exactly what blurs.
+      const sharpVote=()=>{
+        const best=new Float32Array(w*h).fill(Infinity), val=new Float32Array(w*h*4);
+        eachTarget(false,(x,y)=>{
+          const i=y*w+x, qx=nnX[i], qy=nnY[i], d=dist[i];
+          for(let dy=-R;dy<=R;dy++){
+            const ty=y+dy; if(ty<0||ty>=h) continue;
+            for(let dx=-R;dx<=R;dx++){
+              const tx=x+dx; if(tx<0||tx>=w||known(tx,ty)) continue;
+              const t=ty*w+tx;
+              if(d>=best[t]) continue;
+              best[t]=d;
+              const si=((qy+dy)*w+qx+dx)*4;
+              val[t*4]=img[si]; val[t*4+1]=img[si+1]; val[t*4+2]=img[si+2]; val[t*4+3]=img[si+3];
+            }
+          }
+        });
+        for(let t=0;t<w*h;t++) if(best[t]<Infinity){
+          img[t*4]=val[t*4]; img[t*4+1]=val[t*4+1]; img[t*4+2]=val[t*4+2]; img[t*4+3]=val[t*4+3];
+        }
+      };
       const pass=rev=>{
         const dir=rev?-1:1;
         eachTarget(rev,(x,y)=>{
@@ -9140,7 +9251,8 @@ function patchWorkerMain(){
       if(prev){ measure(); vote(); }
       const em=emOf(L), area=w*h-(x1-x0)*(y1-y0);
       for(let it=0;it<em;it++){
-        measure(); pass(it%2===1); pass(it%2===0); vote();
+        measure(); pass(it%2===1); pass(it%2===0);
+        if(L===0&&it===em-1) sharpVote(); else vote();
         done+=area; progress(Math.min(0.99,done/work));
       }
       prev={w,h,nnX,nnY};
@@ -32787,6 +32899,12 @@ function mcRepaintRow(it){
       head.classList.toggle('all-done',done===g.items.length);
       const c=head.querySelector('.mc-order-count');
       if(c) c.textContent=`${done} of ${g.items.length} done`;
+      // and the buttons beside it, which were left as the last full redraw had
+      // them — Clear greyed out on an order that had just been put on a sheet
+      const ok=head.querySelector('[data-mc-ord-ok]');
+      if(ok) ok.disabled=done===g.items.length;
+      const cl=head.querySelector('[data-mc-ord-clear]');
+      if(cl) cl.disabled=!g.items.some(mcLaid);
     }
   }
   mcSyncBatchButtons();
@@ -33255,7 +33373,8 @@ async function mcClearOrder(orderId){
   if(!mcBatch||mcBatch.status!=='open'){
     showMsg(out,'This batch is completed — re-open it to change it.',false); return;
   }
-  const on=mcItems.filter(i=>String(i.order_id||'')===String(orderId)&&mcLaid(i));
+  // an order with no number is grouped, and so named, as '—'
+  const on=mcItems.filter(i=>String(i.order_id||'—')===String(orderId)&&mcLaid(i));
   if(!on.length){ showMsg(out,`Nothing on ${orderId} is on a sheet.`,false); return; }
   if(!confirm(`Take order ${orderId} off the sheets?\n\n`
     +`${on.length} line${on.length===1?'':'s'} — the page each was put on and the layout `
@@ -33286,7 +33405,11 @@ async function mcClearOrder(orderId){
     mcGtHome.ids=mcGtHome.ids.filter(id=>!ids.has('mc-'+String(id)));
   for(const it of on){
     const sku=String(it.sku||'');
-    if(!culled.has('mc-'+String(it.id))){
+    // Only a line that is itself on a sheet takes anything off one. A copied
+    // or custom line can share its SKU with another order's print line, and
+    // clearing it used to take that order's cards off.
+    const onSheet=it.tile==='sheetPrint'||it.tile==='giftTag';
+    if(onSheet&&!culled.has('mc-'+String(it.id))){
       // Two orders of one card are one line on the print sheet, at the sum of
       // the two — so clearing one takes its share off rather than the whole
       // line, which used to leave the other order's cards unprinted or this
@@ -33300,7 +33423,7 @@ async function mcClearOrder(orderId){
         print++;
       }else{
         const shared=mcItems.some(x=>x!==it&&String(x.sku||'')===sku
-          &&String(x.order_id||'')!==String(orderId)
+          &&String(x.order_id||'—')!==String(orderId)
           &&(x.tile==='sheetPrint'||x.tile==='giftTag'));
         if(!shared){
           const w=mcRemoveSku(sku);
@@ -34543,10 +34666,12 @@ function mcSummaryButtons(shown){
 // been opened holds the folder as a handle and not one file name, so matching a
 // SKU against it answered "no artwork" for every line — the layout landed and
 // the picture never did. Everything that looks a SKU up asks for this first.
-async function mcDesignsReady(){
+async function mcDesignsReady(ask){
   if(loadDesignFiles.length) return true;
   const dir=await loadDesignDirGet();
-  if(!dir||!await loadDesignDirOk(dir,false)) return false;
+  // after a reload the folder is remembered but its permission is not; a press
+  // of Create can ask for it, where otherwise nothing matched and nothing said
+  if(!dir||!await loadDesignDirOk(dir,!!ask)) return false;
   await loadDesignRescan();
   return !!loadDesignFiles.length;
 }
@@ -35803,6 +35928,31 @@ document.getElementById('mcPageNew').addEventListener('click',()=>mcPageAnswer('
 document.getElementById('mcPageClose').addEventListener('click',()=>mcPageAnswer(''));
 document.getElementById('mcPageSheet').addEventListener('click',e=>{
   if(e.target.id==='mcPageSheet') mcPageAnswer('');
+});
+// Matte or gloss, every time a gift tag line is created. The one the line is
+// already on is lit, so a line being opened again is one tap on the same answer.
+// Resolves 'Matte', 'Gloss', or null where it was closed.
+let mcFinAsk=null;
+function mcAskFinish(it){
+  document.getElementById('mcFinWhat').textContent=
+    [it.order_id,it.design_name||it.sku].filter(Boolean).join(' · ')||'This gift tag';
+  const now=it.sheet_item&&it.sheet_item.finish;
+  document.querySelectorAll('#mcFinSheet [data-mc-fin-pick]').forEach(b=>{
+    b.classList.toggle('btn-primary',b.dataset.mcFinPick===now);
+    b.classList.toggle('btn-outline',b.dataset.mcFinPick!==now);
+  });
+  if(mcFinAsk) mcFinAsk(null);
+  document.getElementById('mcFinSheet').classList.add('open');
+  return new Promise(res=>{ mcFinAsk=res; });
+}
+function mcFinAnswer(v){
+  document.getElementById('mcFinSheet').classList.remove('open');
+  const f=mcFinAsk; mcFinAsk=null; if(f) f(v);
+}
+document.getElementById('mcFinSheet').addEventListener('click',e=>{
+  const b=e.target.closest('[data-mc-fin-pick]');
+  if(b){ mcFinAnswer(b.dataset.mcFinPick); return; }
+  if(e.target.id==='mcFinSheet'||e.target.id==='mcFinClose') mcFinAnswer(null);
 });
 
 // ---------- gift tags: the shape a run of them is cut to ----------
@@ -37350,6 +37500,24 @@ async function mcWinOpen(id){
     showMsg(document.getElementById('mcBatchMsg'),'This batch is completed — re-open it to work on it.',false);
     return;
   }
+  // A gift tag is matte or gloss before it is anything else: the two are
+  // separate runs, so the sheet it opens onto depends on the answer. What the
+  // line is gets settled first, from Routing, so a fresh line is asked too.
+  if(!it.tile) await mcAutoTile(it);
+  if(it.tile==='giftTag'){
+    const fin=await mcAskFinish(it);
+    if(!fin) return;
+    if(fin!==((it.sheet_item&&it.sheet_item.finish)||'')){
+      const was=it.sheet_item;
+      it.sheet_item={...(was||{}),finish:fin};
+      if(!await mcSave(it,{sheet_item:it.sheet_item})){
+        it.sheet_item=was;
+        showMsg(document.getElementById('mcBatchMsg'),'Could not save the finish — check the connection.',false);
+        return;
+      }
+      mcRepaintRow(it);
+    }
+  }
   // The builder is one global object, so a window that edited "the current
   // line" while somebody clicked another would write line A's artwork into
   // line B and nothing would look wrong. One line is live; switching commits.
@@ -37370,7 +37538,13 @@ async function mcWinOpen(id){
   // the columns, the docked panel and a print sheet's own laying all move the
   // list about, so the line is put back in front twice: once the layout has
   // been through a frame, and again when whatever the follow was doing is done
-  mcSplitFollow(it).finally(()=>{ if(mcWinItem===id) mcScrollToLine(id); });
+  // and the builder's Save is asked about once the builder is the one in front:
+  // asked only as the panel was drawn, it was asked of the screen being left
+  mcSplitFollow(it).finally(()=>{
+    if(mcWinItem!==id) return;
+    mcScrollToLine(id);
+    if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync();
+  });
   requestAnimationFrame(()=>requestAnimationFrame(()=>{
     if(mcWinItem===id) mcScrollToLine(id); }));
   // Routing already says where this SKU goes, so being asked again on every
@@ -37379,7 +37553,11 @@ async function mcWinOpen(id){
   if(!it.tile) mcAutoTile(it).then(()=>{
     if(mcWinItem!==id) return;
     mcWinRender();
-    mcSplitFollow(it).finally(()=>{ if(mcWinItem===id) mcScrollToLine(id); });
+    mcSplitFollow(it).finally(()=>{
+      if(mcWinItem!==id) return;
+      mcScrollToLine(id);
+      if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync();
+    });
   });
   // and what both gift tag libraries are called, so the design picker can say
   // "it is on the other page" instead of "no design matches"
@@ -37556,8 +37734,15 @@ function mcWinRender(){
     if(val===mcChoiceOf(it)) return;
     await mcCommit();
     const c=mcChoices().find(x=>x.value===val)||null;
+    // turned into a gift tag here is created as one, so it is asked the same
+    let fin='';
+    if(c&&c.tile==='giftTag'&&it.tile!=='giftTag'){
+      fin=await mcAskFinish(it);
+      if(!fin){ e.target.value=mcChoiceOf(it); return; }
+    }
     const patch={tile:c?c.tile:null};
     it.tile=patch.tile;
+    if(fin){ it.sheet_item={...(it.sheet_item||{}),finish:fin}; patch.sheet_item=it.sheet_item; }
     if(c&&c.page){
       const si={...(it.sheet_item||{}),page:c.page};
       // a design picked out of the other page's library is not this page's
@@ -37734,12 +37919,21 @@ function mcScopePickerTo(tpl){
   const list=tpl&&Array.isArray(tpl.folders)?tpl.folders:[];
   ldSetTemplateFolder(list[0]||'');
 }
+// Each run is numbered. The panel is drawn again while one is still fetching —
+// templates or paper lists arriving do it — and a second line's Create can
+// land mid-way; a run that is no longer the latest stops rather than laying
+// its card onto somebody else's sheet. Returns true when something was laid,
+// false when nothing matched, null when it stopped or has already said why.
+let mcAutoRun=0;
 async function mcAutoLayoutFor(it,sel){
+  const run=++mcAutoRun;
+  const live=()=>run===mcAutoRun&&mcWinItem===it.id;
   const msg=document.getElementById('mcWinMsg');
   const names=mcNamesOf(it);
   // the folder is what the SKU is matched against, so it is read before the
   // matching rather than after it
-  await mcDesignsReady();
+  const ready=await mcDesignsReady(true);
+  if(!live()) return null;
   // Routing is asked about the line — its SKU, and the variation its lines
   // carry — before anything is read off a file name. Asked with whichever of
   // its names happened to match a PNG, a rule written against the SKU never
@@ -37756,7 +37950,13 @@ async function mcAutoLayoutFor(it,sel){
   // failing a route, the folder the PNG was found in still names a template —
   // which is how a shop that has never written a rule is served at all
   const tpl=routed||mcTemplateFor([{sku:sku||names[0]||'',name:asked.name}]);
-  if(!tpl&&!pick) return;
+  if(!pick&&msg){
+    showMsg(msg,!ready
+      ? 'The designs folder needs permission — open Load design once, then press Create again.'
+      : `No design file named ${escapeHtml(names.join(' / ')||'this line')} in the designs folder`
+        +' — use Front to pick one.',false);
+  }
+  if(!tpl&&!pick) return false;
   // The sheet in the builder may be the very one this line belongs on: the
   // same template, with designs already laid on it. Then this is another card
   // for that sheet, not a reason to start a fresh one — and starting a fresh
@@ -37777,6 +37977,7 @@ async function mcAutoLayoutFor(it,sel){
   if(tpl&&!sameSheet){
     if(!routed) mcScopePickerTo(tpl);
     const {data,error}=await sb.from('templates').select('data').eq('id',tpl.id).single();
+    if(!live()) return null;
     if(!error&&data){
       applyPrintState(data.data);
       // what the builder is now holding, said out loud: it is what the next
@@ -37803,6 +38004,7 @@ async function mcAutoLayoutFor(it,sel){
     // right, the picture was the template's, and Create looked like it had
     // added nothing at all.
     await printArtReady();
+    if(!live()) return null;
     if(!sameSheet){ state.designs=[]; }
     setArtMode('preset',true);
     // what this line prints, not what was ordered: extras added on the batch
@@ -37817,10 +38019,29 @@ async function mcAutoLayoutFor(it,sel){
       ?(state.designs||[]).find(d=>d.source&&d.source.path===pick.path):null);
     if(mine) mine.qty=want;
     else if(same) same.qty=Math.max(1,(Number(same.qty)||0)+want);
-    else { const line=await addDesignLine(pick,want,sku); if(line) line.mcLine=it.id; }
+    else {
+      let line=null;
+      try{ line=await addDesignLine(pick,want,sku); }
+      catch(err){
+        setArtMode('preset');
+        if(msg&&live()) showMsg(msg,`Could not load ${escapeHtml(pick.name)}: `
+          +escapeHtml((err&&err.message)||'unknown error')+' — use Front to pick it again.',false);
+        return null;
+      }
+      // another line was opened while the file was read: this card is not its
+      if(!live()){
+        if(line){ state.designs=state.designs.filter(d=>d!==line); renderDesignLines(); drawAll(); }
+        return null;
+      }
+      if(line) line.mcLine=it.id;
+    }
     if(mine||same){ renderDesignLines(); drawAll(); }
     setArtMode('preset');
     mcWinLive=true;
+  }
+  if(!pick){
+    if(typeof mcLinePreview==='function') mcLinePreview();
+    return !!tpl;
   }
   if(msg) showMsg(msg,[tpl?`${sameSheet?'Added to the sheet on':'Layout:'} ${tpl.name}`:'',
     pick?`Artwork: ${pick.name}`:'']
@@ -37829,6 +38050,7 @@ async function mcAutoLayoutFor(it,sel){
   // sheet, whichever list the press came from
   if(pick) mcSay(sameSheet?'Added to the sheet':'Added');
   if(typeof mcLinePreview==='function') mcLinePreview();
+  return true;
 }
 // Open full builder leaves the panel where it is, over the screen being
 // worked. Its picture of the line was drawn once, on the way in, and then sat
@@ -37904,7 +38126,7 @@ function mcCustomWire(it){
     mcLinePreview();
   });
   // a line that already has a layout puts it back the moment it is opened
-  if(it.design){
+  const restore=()=>{
     applyPrintState(it.design);
     mcSetOrderId(it.order_id);
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
@@ -37922,11 +38144,30 @@ function mcCustomWire(it){
       sel.value=mcWinTplId;
     if(mcWinTplId) mcScopePickerTo(mcTemplateById(mcWinTplId));
     mcApplyArt(it).then(mcLinePreview);
+  };
+  const failed=err=>{
+    const m=document.getElementById('mcWinMsg');
+    if(m) showMsg(m,'Could not lay this line out: '
+      +escapeHtml((err&&err.message)||'unknown error'),false);
+  };
+  // A layout saved with no artwork on it is what a first open that found no
+  // file leaves behind — the folder not yet permitted, a file not yet there —
+  // and restoring it cleared the sheet and never looked for the file again.
+  // So it looks again, and only falls back to the empty layout if still nothing.
+  const hasArt=!!(it.design&&(mcDesignArt(it.design)
+    ||(it.art&&(it.art.front||it.art.back))));
+  if(it.design&&hasArt){
+    restore();
+  }else if(it.design){
+    mcAutoLayoutFor(it,sel)
+      // false is "found nothing"; null is a run that stopped or already said why
+      .then(ok=>{ if(ok===false&&mcWinItem===it.id) restore(); })
+      .catch(failed);
   }else{
     // Nothing saved on it yet, and the line's own name already says what it
     // wants: the template named after this SKU's designs folder, and the
     // <SKU>.png inside it. Found here rather than hunted for on every line.
-    mcAutoLayoutFor(it,sel);
+    mcAutoLayoutFor(it,sel).catch(failed);
   }
   document.getElementById('mcWinBody').querySelectorAll('[data-mc-art]').forEach(b=>{
     b.addEventListener('click',()=>mcPickArt(it,b.dataset.mcArt));
@@ -39594,7 +39835,10 @@ function mcSaveChipMode(){
   if(currentScreen==='tool-custom'){
     const it=mcWinItem?mcItem(mcWinItem):null;
     const t=it?mcTile(it):null;
-    return (t&&t.mode==='per-order')?'line':'';
+    // A line nothing has said the kind of — no Routing rule for its SKU — is
+    // opened on this builder all the same, and was worked here with nothing
+    // to save it with. Saving it here makes it a Custom Template line.
+    return (t&&t.mode==='per-order')||(it&&!it.tile)?'line':'';
   }
   return '';
 }
@@ -39668,12 +39912,15 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     // into the builder. Working the sheet here IS putting one in, so it is
     // said outright rather than left to whether the panel got there first.
     mcWinLive=true;
+    const untyped=!it.tile;
+    if(untyped) it.tile='custom';
     const kept=await mcKeepBuilderArt(it);
     it.design=mcLineSnapshot();
     it.paper_type=state.paperType||it.paper_type||'';
     it.gsm=state.gsm||it.gsm||'';
     const ok=await mcSave(it,{design:it.design,paper_type:it.paper_type,
-      gsm:it.gsm,...(kept||{}),...mcDonePatch(it,true)});
+      gsm:it.gsm,...(untyped?{tile:'custom'}:{}),...(kept||{}),...mcDonePatch(it,true)});
+    if(!ok&&untyped) it.tile=null;
     if(!ok){ mcSaveChipSaid('It did not save — try again',false); return; }
     mcRepaintRow(it);
     mcSyncBatchButtons();
