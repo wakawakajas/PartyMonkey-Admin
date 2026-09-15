@@ -184,6 +184,12 @@ button:focus-visible{outline:2px solid var(--blueprint);outline-offset:2px;}
 /* Clear is only there while there is a picture to clear, and a button given
    the hidden attribute inside a flex row still needs telling */
 .upload-slot [data-clear-art][hidden]{display:none;}
+/* what a single artwork prints at, and the fix when that is too little */
+.art-quality{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;font-size:12px;color:var(--muted);}
+.art-quality [data-art-dpi]{flex:1 1 120px;min-width:0;}
+.art-quality .low{color:#B24C25;font-weight:700;}
+.art-quality .ok{color:var(--blueprint);font-weight:700;}
+.art-quality[hidden],.art-quality [hidden]{display:none;}
 .slot-label{font-size:11.5px;font-weight:600;margin-bottom:5px;}
 .ph-list{max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:14px;padding:8px;background:transparent;}
 .ph-card{border:1px solid var(--border);border-radius:14px;padding:11px;margin-bottom:8px;background:var(--nest);}
@@ -5809,6 +5815,10 @@ body.mc-docked .mc-bubble{display:none !important;}
               <button class="btn-outline btn-sm" data-pick="final|front">Upload</button>
               <button class="btn-outline btn-sm" data-clear-art="front" hidden>Clear</button>
             </div>
+            <div class="art-quality" id="artQFront" hidden>
+              <span data-art-dpi></span>
+              <button type="button" class="btn-outline btn-sm" data-enhance-art="front" hidden>✨ Enhance</button>
+            </div>
             <div class="grid2" style="margin-top:8px;">
               <label class="field"><span>WIDTH</span><input type="number" step="0.1" id="artWFront" placeholder="—"/></label>
               <label class="field"><span>HEIGHT</span><input type="number" step="0.1" id="artHFront" placeholder="—"/></label>
@@ -5819,6 +5829,10 @@ body.mc-docked .mc-bubble{display:none !important;}
               <div class="info" id="finalInfoBack">No file</div>
               <button class="btn-outline btn-sm" data-pick="final|back">Upload</button>
               <button class="btn-outline btn-sm" data-clear-art="back" hidden>Clear</button>
+            </div>
+            <div class="art-quality" id="artQBack" hidden>
+              <span data-art-dpi></span>
+              <button type="button" class="btn-outline btn-sm" data-enhance-art="back" hidden>✨ Enhance</button>
             </div>
             <div class="grid2" style="margin-top:8px;">
               <label class="field"><span>WIDTH</span><input type="number" step="0.1" id="artWBack" placeholder="—"/></label>
@@ -5863,9 +5877,24 @@ body.mc-docked .mc-bubble{display:none !important;}
           <button type="button" class="chip chip-state" data-bleed="2.5" title="2.5 mm">2.5</button>
           <button type="button" class="chip chip-state" data-bleed="3" title="3 mm">3</button>
           <button type="button" class="chip chip-state" data-bleed="3.5" title="3.5 mm">3.5</button>
+          <button type="button" class="chip chip-state" data-bleed="5" title="5 mm">5</button>
         </div>
       </div>
       <p class="hint" style="margin-top:7px;margin-bottom:0;">Extends each copy of the artwork this far past its placeholder on every side, still centred — the extra size the card is trimmed down from, not extra spacing.</p>
+      <!-- How the bleed is made. Stretch is what it always did; the other two
+           keep the artwork at its trim size and make the bleed up around it,
+           which is what a client file drawn with no bleed at all needs. -->
+      <div class="seg" id="bleedModeSeg" style="margin-top:10px;">
+        <button type="button" data-bleedmode="stretch">Stretch</button>
+        <button type="button" data-bleedmode="mirror">Mirror</button>
+        <button type="button" data-bleedmode="extend">Extend edges</button>
+      </div>
+      <p class="hint" style="margin-top:7px;margin-bottom:0;"><b>Stretch</b> enlarges the artwork into the bleed, so its edges are trimmed off. <b>Mirror</b> and <b>Extend edges</b> keep the artwork at its size and build the bleed from its own edges — nothing near the edge is cut. Mirror suits photos and patterns, Extend suits flat colours and gradients.</p>
+
+      <div class="sect-label">Client file fix</div>
+      <p class="hint">For a file that came in at the wrong size, too low a resolution or with no bleed: fits it to the card, adds 5 mm bleed made from its own edges, and AI-upscales any side under 300 DPI.</p>
+      <button type="button" class="btn-primary" id="printReadyBtn" style="width:100%;">⚡ Make print-ready</button>
+      <div id="printReadyMsg"></div>
     </div>
   </div>
 
@@ -6951,7 +6980,7 @@ const state={
   // 'card' — every design stretched to the placeholder, which is what gets
   // trimmed; 'original' — the file's own proportions, fitted inside it
   artFit:'actual',
-  bleed:{enabled:true,mm:2.5},
+  bleed:{enabled:true,mm:2.5,mode:'stretch'},
   rotate:{front:0,back:0},
   // names the exported files, and saved with the template: a template is now
   // a job that comes back — the same order id every time it is reprinted —
@@ -7218,6 +7247,7 @@ function refreshSlots(){
     const b=document.querySelector(`[data-clear-art="${side}"]`);
     if(b) b.hidden=!state.final[side].data;
   });
+  refreshArtQuality();
 }
 
 // ---------- geometry ----------
@@ -7463,6 +7493,9 @@ function renderSide(side,canvas,maxDim,opts){
     // the sheet's bleed unless this design keeps its own
     const bleedMm=bleedMmFor(line);
     const effW=wMm+bleedMm*2, effH=hMm+bleedMm*2;
+    // Mirror and Extend keep the artwork at its own size and make the bleed up
+    // from its edges; Stretch enlarges the picture into it as it always did
+    const grow=bleedMm>0&&bleedModeNow()!=='stretch';
     // the sheet's turn and the design's own, one on top of the other: the
     // sheet turns everything printed on it, and a design that arrived on its
     // side turns again inside its own box
@@ -7475,14 +7508,29 @@ function renderSide(side,canvas,maxDim,opts){
     // the same way, is filled by that file's page placed under this render.
     // The shift is in the rectangle rather than around it, the placing having
     // no canvas transform to sit inside.
-    if(opts.vec&&opts.vec.take(key,
+    // A grown bleed places the page at the trim only and draws just the ring
+    // of bleed around it, so the file's own colours still print everywhere
+    // inside the cut and only the made-up edge is pixels.
+    const trimW=swapped?hMm:wMm, trimH=swapped?wMm:hMm;
+    let ringOnly=false;
+    if(opts.vec){
+      if(grow){
+        ringOnly=opts.vec.take(key,
+          {x:ph.xMm+ph.wMm/2-trimW/2+shift.xMm, y:ph.yMm+ph.hMm/2-trimH/2+shift.yMm,
+           w:trimW, h:trimH, rot:rotDeg},
+          {x:(wMm-ph.wMm)/2, y:(hMm-ph.hMm)/2});
+      }else if(opts.vec.take(key,
         {x:ph.xMm+ph.wMm/2-boxW/2+shift.xMm, y:ph.yMm+ph.hMm/2-boxH/2+shift.yMm,
          w:boxW, h:boxH, rot:rotDeg},
         {x:(effW-ph.wMm)/2, y:(effH-ph.hMm)/2})) return;
+    }
     ctx.save();
     ctx.translate(cx,cy);
     ctx.rotate(rotDeg*Math.PI/180);
-    ctx.drawImage(img,-srcW/2,-srcH/2,srcW,srcH);
+    ctx.drawImage(grow?bleedArt(img,trimW,trimH,bleedMm,bleedModeNow()):img,-srcW/2,-srcH/2,srcW,srcH);
+    // a pixel short of the trim, so the ring overlaps the placed page rather
+    // than leaving a hairline of paper between them
+    if(ringOnly){ const iw=trimW*sc-1, ih=trimH*sc-1; ctx.clearRect(-iw/2,-ih/2,iw,ih); }
     ctx.restore();
   };
   // On Preset the design queue drives the front: it is laid into the
@@ -7633,6 +7681,7 @@ function drawAll(){
   // a Magic Create line is live in the builder with its panel over the top —
   // the same rule the gift tag sheet follows
   if(typeof mcPrintLiveSync==='function') mcPrintLiveSync();
+  refreshArtQuality();
 }
 // Which of the two identities #appScreen is wearing. Called before every
 // navigation into the builder — the Place Card tile sets 'placecard', every
@@ -8682,6 +8731,7 @@ function refreshArtInputs(){
   document.getElementById('shiftBackX').value=round(fromMm(state.shift.back.xMm,state.paper.unit));
   document.getElementById('shiftBackY').value=round(fromMm(state.shift.back.yMm,state.paper.unit));
   syncBleedChips();
+  syncBleedModeSeg();
 }
 // the quick bleeds are always the millimetre figure, whatever unit is on screen
 function syncBleedChips(){
@@ -8723,6 +8773,284 @@ document.querySelectorAll('#bleedPresets [data-bleed]').forEach(b=>{
     state.bleed.mm=parseFloat(b.dataset.bleed);
     refreshArtInputs(); drawAll();
   });
+});
+
+// ---------- how the bleed is made ----------
+// Clients send artwork cut exactly to the card, with nothing past the edge.
+// Stretching that into the bleed trims the edges of the picture off — a name
+// too close to the edge loses its first letter. Mirror and Extend leave the
+// picture at its size and invent only what lies beyond the cut.
+function bleedModeNow(){
+  const m=state.bleed&&state.bleed.mode;
+  return m==='mirror'||m==='extend'?m:'stretch';
+}
+function syncBleedModeSeg(){
+  document.querySelectorAll('#bleedModeSeg [data-bleedmode]').forEach(b=>
+    b.classList.toggle('on',b.dataset.bleedmode===bleedModeNow()));
+}
+document.getElementById('bleedModeSeg').addEventListener('click',e=>{
+  const b=e.target.closest('[data-bleedmode]'); if(!b) return;
+  state.bleed.mode=b.dataset.bleedmode;
+  syncBleedModeSeg(); drawAll();
+});
+// The picture with its bleed built on, in its own pixels: the same pixels per
+// millimetre as the picture, so it is drawn into the bleed box exactly where
+// the picture alone would have been drawn into the trim. Kept per picture —
+// the sheet redraws on every keystroke and this is not free on a big file.
+var bleedArtMemo=new WeakMap();
+function bleedArt(img,trimW,trimH,mm,mode){
+  const nW=img.naturalWidth||img.width, nH=img.naturalHeight||img.height;
+  if(!nW||!nH||!(trimW>0)||!(trimH>0)) return img;
+  // one mirrored copy is as far as a mirror can honestly reach
+  const bx=Math.max(1,Math.min(nW,Math.round(mm*nW/trimW)));
+  const by=Math.max(1,Math.min(nH,Math.round(mm*nH/trimH)));
+  let memo=bleedArtMemo.get(img);
+  if(!memo){ memo=new Map(); bleedArtMemo.set(img,memo); }
+  const k=mode+'|'+bx+'|'+by;
+  if(memo.has(k)) return memo.get(k);
+  if(memo.size>=4) memo.clear();
+  const c=document.createElement('canvas');
+  c.width=nW+bx*2; c.height=nH+by*2;
+  const ctx=c.getContext('2d');
+  if(mode==='mirror'){
+    // the picture and its eight reflections, each folded about the edge it
+    // touches; the canvas edge crops them to the bleed
+    for(const fx of [-1,0,1]) for(const fy of [-1,0,1]){
+      ctx.save();
+      ctx.translate(bx+(fx>0?nW*2:0),by+(fy>0?nH*2:0));
+      ctx.scale(fx?-1:1,fy?-1:1);
+      ctx.drawImage(img,0,0,nW,nH);
+      ctx.restore();
+    }
+  }else{
+    // The outermost pixels pulled outward. Each edge is first squeezed along
+    // its length and stretched back, so a busy edge smears into soft colour
+    // instead of leaving a comb of streaks through the bleed.
+    const soft=(sx,sy,sw,sh,along)=>{
+      const t=document.createElement('canvas');
+      const n=Math.max(2,Math.round(along/Math.max(4,Math.max(bx,by)/2)));
+      t.width=sw>sh?n:1; t.height=sw>sh?1:n;
+      const tc=t.getContext('2d');
+      tc.imageSmoothingQuality='high';
+      tc.drawImage(img,sx,sy,sw,sh,0,0,t.width,t.height);
+      return t;
+    };
+    const d=Math.max(1,Math.min(3,nW,nH));   // how deep an edge is read
+    const L=soft(0,0,d,nH,nH), R=soft(nW-d,0,d,nH,nH);
+    const T=soft(0,0,nW,d,nW), B=soft(0,nH-d,nW,d,nW);
+    ctx.imageSmoothingQuality='high';
+    ctx.drawImage(L,0,by,bx,nH);
+    ctx.drawImage(R,bx+nW,by,bx,nH);
+    ctx.drawImage(T,bx,0,nW,by);
+    ctx.drawImage(B,bx,by+nH,nW,by);
+    // corners take the colour of the corner itself, flat
+    const dot=document.createElement('canvas'); dot.width=dot.height=1;
+    const dc=dot.getContext('2d');
+    const corner=(sx,sy,dx,dy)=>{
+      dc.clearRect(0,0,1,1); dc.drawImage(img,sx,sy,d,d,0,0,1,1);
+      ctx.drawImage(dot,dx,dy,bx,by);
+    };
+    corner(0,0,0,0); corner(nW-d,0,bx+nW,0);
+    corner(0,nH-d,0,by+nH); corner(nW-d,nH-d,bx+nW,by+nH);
+    ctx.drawImage(img,bx,by,nW,nH);
+  }
+  memo.set(k,c);
+  return c;
+}
+
+// ---------- what a single artwork prints at ----------
+// Clients send a screenshot, a WhatsApp photo, a logo off a website. The
+// number that matters is pixels across the size it is actually printed at,
+// not whatever the file happens to be tagged with.
+var PRINT_DPI=300;
+function artIsVector(o){
+  return !!(o&&(/\.(pdf|ai)$/i.test(o.name||'')||(o.file&&o.file.type==='application/pdf')));
+}
+function artPrintDpi(side){
+  const o=state.final[side], img=o&&o.img, a=state.art[side];
+  if(!img||!img.naturalWidth||!a||!(a.wMm>0)||!(a.hMm>0)) return null;
+  let wMm=a.wMm, hMm=a.hMm;
+  if(state.artFit==='original'){
+    const f=Math.min(a.wMm/img.naturalWidth,a.hMm/img.naturalHeight);
+    wMm=img.naturalWidth*f; hMm=img.naturalHeight*f;
+  }
+  return Math.min(img.naturalWidth/(wMm/25.4),img.naturalHeight/(hMm/25.4));
+}
+var artEnhancing={front:false,back:false};
+function refreshArtQuality(){
+  ['front','back'].forEach(side=>{
+    const box=document.getElementById('artQ'+(side==='front'?'Front':'Back'));
+    if(!box) return;
+    const o=state.final[side];
+    const txt=box.querySelector('[data-art-dpi]'), btn=box.querySelector('[data-enhance-art]');
+    if(!o||!o.img){ box.hidden=true; return; }
+    box.hidden=false;
+    if(artEnhancing[side]) return;   // the progress line is the enhancer's until it finishes
+    if(artIsVector(o)){
+      txt.innerHTML='<span class="ok">PDF</span> · prints sharp at any size';
+      btn.hidden=true; return;
+    }
+    const dpi=artPrintDpi(side);
+    const px=o.img.naturalWidth+' × '+o.img.naturalHeight+' px';
+    if(!dpi){ txt.textContent=px; btn.hidden=true; return; }
+    const low=dpi<PRINT_DPI*0.95;
+    txt.innerHTML=`<span class="${low?'low':'ok'}">${Math.round(dpi)} DPI</span> · ${px}`
+      +(low?' · will print soft':'');
+    btn.hidden=!low;
+  });
+}
+document.querySelectorAll('[data-enhance-art]').forEach(b=>
+  b.addEventListener('click',()=>enhanceArt(b.dataset.enhanceArt)));
+
+// ---------- AI upscaling ----------
+// ESRGAN, run in the browser on the graphics card: the picture never leaves
+// this machine. Loaded the first time it is asked for — about 3 MB, cached by
+// the browser after that — so the builder itself opens no slower for it.
+const UPSCALE_LIBS=[
+  'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
+  'https://cdn.jsdelivr.net/npm/@upscalerjs/default-model@1.0.0/dist/umd/index.min.js',
+  'https://cdn.jsdelivr.net/npm/upscaler@1.0.0/dist/browser/umd/upscaler.min.js',
+];
+const UPSCALE_MODELS={
+  2:['https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-medium@1.0.0/dist/umd/models/esrgan-medium/src/x2/index.min.js','ESRGANMedium2x'],
+  4:['https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-medium@1.0.0/dist/umd/models/esrgan-medium/src/x4/index.min.js','ESRGANMedium4x'],
+};
+// the longest side an upscale may produce: past this the graphics card, not
+// the print, is what gives out
+const UPSCALE_MAX_PX=6000;
+const upscaleScripts=new Map(), upscalers=new Map();
+function upscaleScript(src){
+  if(!upscaleScripts.has(src)) upscaleScripts.set(src,new Promise((res,rej)=>{
+    const el=document.createElement('script');
+    el.src=src; el.async=false; el.crossOrigin='anonymous';
+    el.onload=res;
+    el.onerror=()=>{ upscaleScripts.delete(src); rej(new Error('Could not load the upscaler — check the internet connection.')); };
+    document.head.appendChild(el);
+  }));
+  return upscaleScripts.get(src);
+}
+async function upscalerFor(scale){
+  if(upscalers.has(scale)) return upscalers.get(scale);
+  for(const src of UPSCALE_LIBS) await upscaleScript(src);
+  const [src,name]=UPSCALE_MODELS[scale];
+  await upscaleScript(src);
+  const u=new window.Upscaler({model:window[name]});
+  upscalers.set(scale,u);
+  return u;
+}
+// Upscales a picture by 2 or 4. The model sees colour only, so a picture with
+// transparency has its see-through part carried across on its own, smoothly
+// enlarged, and put back on the result.
+async function upscaleImage(img,scale,onProgress){
+  const nW=img.naturalWidth, nH=img.naturalHeight;
+  // The model darkens the outermost pixel of whatever it is given, and a
+  // mirrored bleed would fold that line straight onto the cut. So it is given
+  // the picture with a mirrored margin, and the margin is cut off afterwards.
+  const pad=Math.min(8,nW,nH);
+  const src=document.createElement('canvas');
+  src.width=nW+pad*2; src.height=nH+pad*2;
+  const sctx=src.getContext('2d',{willReadFrequently:true});
+  sctx.drawImage(bleedArt(img,nW,nH,pad,'mirror'),0,0);
+  const data=sctx.getImageData(0,0,src.width,src.height).data;
+  let clear=false;
+  for(let i=3;i<data.length;i+=4) if(data[i]<255){ clear=true; break; }
+  if(clear){
+    sctx.globalCompositeOperation='destination-over';
+    sctx.fillStyle='#fff'; sctx.fillRect(0,0,src.width,src.height);
+    sctx.globalCompositeOperation='source-over';
+  }
+  const u=await upscalerFor(scale);
+  const out=await u.execute(src,{patchSize:64,padding:6,output:'base64',
+    progress:p=>{ if(onProgress) onProgress(p); }});
+  const up=await loadImage(out.startsWith('data:')?out:'data:image/png;base64,'+out);
+  const c=document.createElement('canvas');
+  c.width=nW*scale; c.height=nH*scale;
+  const ctx=c.getContext('2d');
+  const k=up.naturalWidth/src.width;   // what the model actually gave back
+  ctx.drawImage(up,pad*k,pad*k,nW*k,nH*k,0,0,c.width,c.height);
+  if(clear){
+    ctx.globalCompositeOperation='destination-in';
+    ctx.imageSmoothingQuality='high';
+    ctx.drawImage(img,0,0,c.width,c.height);
+    ctx.globalCompositeOperation='source-over';
+  }
+  return c;
+}
+// Brings one side's artwork up to print resolution at the size it is printed.
+// The file keeps its printed size: its DPI tag goes up with its pixels, so an
+// artwork on Actual size lands exactly where it was.
+async function enhanceArt(side){
+  const o=state.final[side];
+  if(!o||!o.img||artIsVector(o)||artEnhancing[side]) return false;
+  const box=document.getElementById('artQ'+(side==='front'?'Front':'Back'));
+  const txt=box.querySelector('[data-art-dpi]'), btn=box.querySelector('[data-enhance-art]');
+  const dpi=artPrintDpi(side);
+  if(!dpi||dpi>=PRINT_DPI*0.95) return false;
+  const img=o.img;
+  const want=PRINT_DPI/dpi;
+  let scale=want<=2?2:4;
+  if(Math.max(img.naturalWidth,img.naturalHeight)*scale>UPSCALE_MAX_PX) scale=2;
+  if(Math.max(img.naturalWidth,img.naturalHeight)*scale>UPSCALE_MAX_PX){
+    txt.innerHTML='<span class="low">Too large to upscale here</span> — '+Math.round(dpi)+' DPI';
+    return false;
+  }
+  artEnhancing[side]=true; btn.hidden=true;
+  txt.textContent='Loading the upscaler…';
+  try{
+    const c=await upscaleImage(img,scale,p=>{
+      txt.textContent=`Upscaling ×${scale}… ${Math.round(p*100)}%`;
+    });
+    // still the same artwork on the sheet: nothing is moved or refitted
+    if(state.final[side].img!==img){ artEnhancing[side]=false; refreshArtQuality(); return false; }
+    let tag=null;
+    try{ tag=imageDpi(o.data); }catch(e){}
+    const dx=(tag&&tag.x)||72, dy=(tag&&tag.y)||dx;
+    const data=pngWithDpi(c.toDataURL('image/png'),dx*scale,dy*scale);
+    const up=await loadImage(data);
+    const name=(o.name||'artwork').replace(/(\.[^.]+)?$/,'')+` · enhanced ×${scale}.png`;
+    // the upload was a JPEG or PNG on disk; the file now printing is this one
+    state.final[side]={...o,data,img:up,name,file:null};
+    artEnhancing[side]=false;
+    refreshSlots(); drawAll();
+    return true;
+  }catch(err){
+    artEnhancing[side]=false;
+    refreshArtQuality();
+    txt.innerHTML='<span class="low">Upscale failed</span> — '+escapeHtml((err&&err.message)||'unknown error');
+    return false;
+  }finally{
+    artEnhancing[side]=false;
+  }
+}
+
+// ---------- the client file fix, in one tap ----------
+// What was done by hand in Photoshop for every client file: fit it to the
+// card, give it 5 mm of bleed from its own edges, bring it up to 300 DPI.
+document.getElementById('printReadyBtn').addEventListener('click',async()=>{
+  const out=document.getElementById('printReadyMsg');
+  const btn=document.getElementById('printReadyBtn');
+  const sides=['front','back'].filter(s=>state.final[s].img);
+  if(!sides.length){ showMsg(out,'Upload the client’s artwork under Single artwork first.',false); return; }
+  btn.disabled=true;
+  try{
+    state.bleed.enabled=true;
+    state.bleed.mm=5;
+    if(bleedModeNow()==='stretch') state.bleed.mode='mirror';
+    setArtFit('card');   // refits both sides and redraws
+    const soft=sides.filter(s=>!artIsVector(state.final[s])&&(artPrintDpi(s)||PRINT_DPI)<PRINT_DPI*0.95);
+    const done=[];
+    for(const s of soft){
+      showMsg(out,`Upscaling the ${s}…`,true);
+      if(await enhanceArt(s)) done.push(s);
+    }
+    const failed=soft.filter(s=>!done.includes(s));
+    const parts=['fitted to the card','5 mm '+(bleedModeNow()==='mirror'?'mirrored':'extended')+' bleed'];
+    if(done.length) parts.push(done.join(' and ')+' upscaled to print resolution');
+    showMsg(out,(failed.length?'⚠ ':'✓ ')+parts.join(', ')
+      +(failed.length?` — ${failed.join(' and ')} could not be upscaled, see above.`:'.'),!failed.length);
+  }finally{
+    btn.disabled=false;
+  }
 });
 // ---------- the design list ----------
 function designTallyText(){
@@ -10470,7 +10798,7 @@ const bundleShopName=v=>v==='planttalks'?'Plant Talks':'PartyMonkey';
 // word like Custom or PT a day away from whoever noticed it was wrong. One row
 // for the team, read when the screen opens and again whenever the day's jobs
 // are.
-const BUNDLE_RULES_DEFAULT={pt_word:'PT',seed_words:'seed, seeds, all, popular',
+const BUNDLE_RULES_DEFAULT={pt_word:'PT',seed_words:'seed, seeds',
   made_to_order:'Custom',pm_combos_only:true};
 let bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT);
 const bundleWordList=v=>String(v==null?'':v).split(/[,\n]/).map(x=>x.trim()).filter(Boolean);
@@ -12017,18 +12345,19 @@ document.getElementById('bundlePrintAllBtn').addEventListener('click',()=>{
   bundlePrintShowSelect();
 });
 
+// Words taken off a label, and only a label. Not the seed words from Settings:
+// that list also decides what counts as a seed, and it has DIY in it, which
+// belongs on the tape.
+const LABEL_STRIP_WORDS='seed, seeds, popular';
 function bundleComboNameClean(name){
   let s=String(name||'').trim();
-  bundleWordList(bundleRules.seed_words).forEach(w=>{
+  bundleWordList(LABEL_STRIP_WORDS).forEach(w=>{
     s=s.replace(new RegExp('(^|[^a-z])'+bundleReEscape(w)+'(?=[^a-z]|$)','ig'),'$1 ');
   });
-  s=s.replace(/\s+/g,' ')
-     .replace(/^\s+/,'')
-     .replace(/[\s\-–—_,.·/|()]+$/,'')
-     .replace(/[\-–—]/g,' ')
-     .replace(/[\(\)]/g,' ')
+  s=s.replace(/\(\s*\)|\[\s*\]/g,' ')   // brackets a removed word left empty
+     .replace(/[\-–—_]+/g,' ')
      .replace(/\s+/g,' ')
-     .trim();
+     .replace(/^[\s,.·/|]+|[\s,.·/|]+$/g,'').trim();
   return s||String(name||'').trim();
 }
 
@@ -20381,6 +20710,8 @@ function applyPrintState(meta,name){
   if(meta.foldLine) state.foldLine=Object.assign(state.foldLine,meta.foldLine);
   document.getElementById('foldLineToggle').checked=state.foldLine.enabled;
   if(meta.bleed) state.bleed=Object.assign(state.bleed,meta.bleed);
+  if(!(meta.bleed&&meta.bleed.mode)) state.bleed.mode='stretch';
+  syncBleedModeSeg();
   // and the switch is told, the way every other one on this panel is. It was
   // the only control left saying what the markup said rather than what the
   // template said: a layout saved with bleed off came back with the switch
