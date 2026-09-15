@@ -5921,7 +5921,7 @@ body.mc-docked .mc-bubble{display:none !important;}
       <div id="bleedFillMsg"></div>
 
       <div class="sect-label">Client file fix</div>
-      <p class="hint">For a file that came in at the wrong size, too low a resolution or with no bleed: fits it to the card, adds 2.5 mm bleed made from its own edges, and AI-upscales any side under 300 DPI.</p>
+      <p class="hint">For a file that came in at the wrong size, too low a resolution or with no bleed: keeps it at actual size (fitted to the card when the file says no size), turns a portrait file to lie along a landscape card, adds 2.5 mm bleed made from its own edges, and AI-upscales any side under 300 DPI.</p>
       <button type="button" class="btn-primary" id="printReadyBtn" style="width:100%;">⚡ Make print-ready</button>
       <div id="printReadyMsg"></div>
     </div>
@@ -7242,9 +7242,23 @@ async function useArtFile(group,side,file,source){
     // the file itself is kept beside the picture of it — a File is a handle on
     // what is on disk, not a copy of it, and the export needs the real thing
     state[group][side]={data:dataURL,img,name:file.name,source:source||null,file};
+    if(group==='final') matchCardOrientation(side,img);
     fitArtToCard(side);
     refreshSlots();refreshArtInputs();drawAll();
   }catch(err){ infoEl.textContent=(err&&err.message)||'Could not read that file'; }
+}
+// Clients send a portrait photo of a landscape card as often as not. Turned a
+// quarter here, it lands the long way along the card at its actual size
+// rather than as a thin strip across the middle. Only the quarter is decided —
+// a side already turned upside down for the press stays upside down.
+function matchCardOrientation(side,img){
+  const L=layoutMm();
+  if(!img||!img.naturalWidth||!(L.cardW>0)||!(L.cardH>0)||L.cardW===L.cardH) return;
+  if(img.naturalWidth===img.naturalHeight) return;
+  const cardWide=L.cardW>L.cardH, artWide=img.naturalWidth>img.naturalHeight;
+  const rot=((state.rotate[side]||0)%360+360)%360;
+  const turned=rot%180!==0;
+  if((cardWide!==artWide)!==turned) state.rotate[side]=(rot+(turned?270:90))%360;
 }
 function pickFileFor(group,side){
   const inp=document.createElement('input');
@@ -7341,12 +7355,16 @@ function fitArtToCard(side){
     ? state.designs[0].img : state.final[side].img;
   if(!img) return;
   const L=layoutMm();
+  // the box is the footprint on the sheet, so a picture turned a quarter
+  // takes its width from its height
+  const turned=((state.rotate[side]||0)%180)!==0;
+  const iw=turned?img.naturalHeight:img.naturalWidth, ih=turned?img.naturalWidth:img.naturalHeight;
   const r=state.artFit==='actual'?artRealMm(img):null;
   if(r){
-    state.art[side]={wMm:r.w,hMm:r.h};
+    state.art[side]=turned?{wMm:r.h,hMm:r.w}:{wMm:r.w,hMm:r.h};
   }else if(state.artFit==='original'||state.artFit==='actual'){
-    const f=Math.min(L.cardW/img.naturalWidth,L.cardH/img.naturalHeight);
-    state.art[side]={wMm:img.naturalWidth*f,hMm:img.naturalHeight*f};
+    const f=Math.min(L.cardW/iw,L.cardH/ih);
+    state.art[side]={wMm:iw*f,hMm:ih*f};
   }else{
     state.art[side]={wMm:L.cardW,hMm:L.cardH};
   }
@@ -7532,16 +7550,20 @@ function renderSide(side,canvas,maxDim,opts){
     // Actual size: each design in the list at the size its own file gives;
     // the single artwork at the WIDTH/HEIGHT box, which starts at that size
     const real=state.artFit==='actual'?artRealMm(img):null;
+    // wMm × hMm is the footprint, after any quarter turn
+    const onSide=((((state.rotate[side]||0)+designRotOf(line))%360+360)%180)!==0;
+    const iw=onSide?img.naturalHeight:img.naturalWidth, ih=onSide?img.naturalWidth:img.naturalHeight;
     if(real&&line){
       ({w:wMm,h:hMm}=real);
+      if(onSide) [wMm,hMm]=[hMm,wMm];
     }else if((state.artFit==='original'||(state.artFit==='actual'&&!real))
       &&img.naturalWidth&&img.naturalHeight){
       // a design with no size of its own fits its card; the box may be another
       // design's actual size
       const L=line&&state.artFit==='actual'?layoutMm():null;
       const bw=L?L.cardW:a.wMm, bh=L?L.cardH:a.hMm;
-      const f=Math.min(bw/img.naturalWidth,bh/img.naturalHeight);
-      wMm=img.naturalWidth*f; hMm=img.naturalHeight*f;
+      const f=Math.min(bw/iw,bh/ih);
+      wMm=iw*f; hMm=ih*f;
     }
     // the sheet's bleed unless this design keeps its own
     const bleedMm=bleedMmFor(line);
@@ -9401,11 +9423,13 @@ function artPrintDpi(side){
   const o=state.final[side], img=o&&o.img, a=state.art[side];
   if(!img||!img.naturalWidth||!a||!(a.wMm>0)||!(a.hMm>0)) return null;
   let wMm=a.wMm, hMm=a.hMm;
-  if(state.artFit==='original'){
-    const f=Math.min(a.wMm/img.naturalWidth,a.hMm/img.naturalHeight);
-    wMm=img.naturalWidth*f; hMm=img.naturalHeight*f;
+  const turned=((state.rotate[side]||0)%180)!==0;
+  const iw=turned?img.naturalHeight:img.naturalWidth, ih=turned?img.naturalWidth:img.naturalHeight;
+  if(state.artFit==='original'||(state.artFit==='actual'&&!artRealMm(img))){
+    const f=Math.min(a.wMm/iw,a.hMm/ih);
+    wMm=iw*f; hMm=ih*f;
   }
-  return Math.min(img.naturalWidth/(wMm/25.4),img.naturalHeight/(hMm/25.4));
+  return Math.min(iw/(wMm/25.4),ih/(hMm/25.4));
 }
 var artEnhancing={front:false,back:false};
 function refreshArtQuality(){
@@ -9567,7 +9591,9 @@ document.getElementById('printReadyBtn').addEventListener('click',async()=>{
     state.bleed.enabled=true;
     state.bleed.mm=2.5;
     if(bleedModeNow()==='stretch') state.bleed.mode='mirror';
-    setArtFit('card');   // refits both sides and redraws
+    // Actual size, the way the builder opens: a file that says how big it is
+    // prints that big, and one that does not is fitted to the card
+    setArtFit('actual');   // refits both sides and redraws
     const soft=sides.filter(s=>!artIsVector(state.final[s])&&(artPrintDpi(s)||PRINT_DPI)<PRINT_DPI*0.95);
     const done=[];
     for(const s of soft){
@@ -9575,7 +9601,7 @@ document.getElementById('printReadyBtn').addEventListener('click',async()=>{
       if(await enhanceArt(s)) done.push(s);
     }
     const failed=soft.filter(s=>!done.includes(s));
-    const parts=['fitted to the card','2.5 mm '+({mirror:'mirrored',extend:'extended',content:'content-aware',ai:'AI-filled'}[bleedModeNow()])+' bleed'];
+    const parts=['actual size','2.5 mm '+({mirror:'mirrored',extend:'extended',content:'content-aware',ai:'AI-filled'}[bleedModeNow()])+' bleed'];
     if(done.length) parts.push(done.join(' and ')+' upscaled to print resolution');
     showMsg(out,(failed.length?'⚠ ':'✓ ')+parts.join(', ')
       +(failed.length?` — ${failed.join(' and ')} could not be upscaled, see above.`:'.'),!failed.length);
@@ -10766,7 +10792,18 @@ function showScreen(name,viaBack){
   if(name==='gift-tag-settings') gtSettingsOpen();
   if(name==='print-paper') ppOpen();
   if(name==='magic') mcOpenOverview();
-  if(name==='magic-batch') mcOpenBatch();
+  // A sheet lent to the Gift Tag screen is written back on the way off it, and
+  // the batch reads its lines fresh as it opens. Opened first, the read could
+  // land before the write-back had and show the lines as they were before the
+  // trip — so where a sheet is out, the batch waits for it to come home.
+  // (asked inside a try: the first screen of a session is shown before the
+  // line declaring mcGtHome has run, and reading it then throws)
+  let gtLentOut=false;
+  try{ gtLentOut=!!mcGtHome&&name!=='tool-gift-tag'&&name!=='tool-gift-tag-design'; }catch(e){}
+  if(name==='magic-batch'){
+    if(gtLentOut) mcGtReturn().catch(()=>{}).then(()=>{ if(currentScreen==='magic-batch') mcOpenBatch(); });
+    else mcOpenBatch();
+  }
   // whether the two columns hold together on the screen being gone to
   mcSplitSync(name);
   // the batch's live channel belongs to the batch, and to nothing after it —
@@ -10776,7 +10813,8 @@ function showScreen(name,viaBack){
   if(typeof mcPdfBubbleSync==='function') mcPdfBubbleSync();
   // a batch that lent its sheet to the Gift Tag screen takes it back on
   // the way out, whichever way somebody leaves
-  if(name!=='tool-gift-tag'&&name!=='tool-gift-tag-design') mcGtReturn();
+  if(name!=='tool-gift-tag'&&name!=='tool-gift-tag-design'&&!(gtLentOut&&name==='magic-batch'))
+    mcGtReturn();
   // walking off the builder any other way spends the batch's ticket back, so
   // a Back pressed much later somewhere else is not sent to a stale batch
   mcDropBatchTicket(name);
@@ -33864,7 +33902,7 @@ async function mcDownloadPlanSel(){
           await mcPut(dir,e.name,bytes);
           for(const it of e.set) await mcMarkExported(it,run);
           done++;
-        }catch(err){ failed.push(e.name); }
+        }catch(err){ failed.push(`${e.name} (${(err&&err.message)||'unknown error'})`); }
       }
     });
     mcRenderItems();
@@ -33913,7 +33951,8 @@ async function mcDownloadPlanEntry(i){
 // through is the layout that was just built, not a second opinion about it.
 let mcPlanPage=0, mcPlanPages=1, mcPlanDrawing=false;
 async function mcShowPlanEntry(i,page){
-  const e=mcPlan[i]; if(!e||mcPlanDrawing) return;
+  // the builder is borrowed by a download; drawing a proof swaps it mid-file
+  const e=mcPlan[i]; if(!e||mcPlanDrawing||mcBusy) return;
   const msg=document.getElementById('mcPlanMsg');
   const stage=document.getElementById('mcPlanStage');
   const c=document.getElementById('mcPlanCanvas');
@@ -33934,8 +33973,10 @@ async function mcShowPlanEntry(i,page){
         applyPrintState(e.it.design);
         state.orderId=e.it.order_id;
         await mcApplyArt(e.it);
-        renderSide(e.side,c,dim,{page:0});
-        mcPlanPages=1; mcPlanPage=0;
+        // every sheet the file will have — extras can run a line onto a second
+        mcPlanPages=Math.max(1,sheetCount());
+        if(mcPlanPage>=mcPlanPages) mcPlanPage=mcPlanPages-1;
+        renderSide(e.side,c,dim,{page:mcPlanPage});
       }else{
         mcPlanPages=Math.max(1,await MC_TILES[e.tile].preview(e,c,dim,mcPlanPage)||1);
         if(mcPlanPage>=mcPlanPages) mcPlanPage=mcPlanPages-1;
@@ -37372,11 +37413,16 @@ function mcSnapshot(){
   // and Download All walked past it. Paths rather than pixels, so the file is
   // still placed whole at export and a row stays a row anybody can sync.
   const front=state.final.front;
-  return {paper:state.paper,layout:state.layout,placeholders:state.placeholders,
+  // Copies, not the builder's own objects. applyPrintState writes into those in
+  // place, so every line saved in a session shared one bleed, one set of marks
+  // and one art box — the last line loaded decided them for all the PDFs, and
+  // the operator's own builder came back with the last export's settings.
+  const cp=v=>v==null?v:JSON.parse(JSON.stringify(v));
+  return {paper:cp(state.paper),layout:cp(state.layout),placeholders:cp(state.placeholders),
     showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
-    refMark:state.refMark,foldLine:state.foldLine,bleed:state.bleed,
-    shift:state.shift,rotate:state.rotate,
-    artMode:state.artMode,artFit:state.artFit,art:state.art,
+    refMark:cp(state.refMark),foldLine:cp(state.foldLine),bleed:cp(state.bleed),
+    shift:cp(state.shift),rotate:cp(state.rotate),
+    artMode:state.artMode,artFit:state.artFit,art:cp(state.art),
     design:front&&front.source&&front.source.path
       ?{path:front.source.path,name:front.name||''}:null,
     designs:(state.designs||[]).filter(d=>d.source&&d.source.path).map(d=>
@@ -37616,7 +37662,19 @@ async function mcWinOpen(id){
   // the builder is borrowed by an export: switching now would save the export's
   // sheet onto the line being left
   if(mcBusy){ showMsg(document.getElementById('mcBatchMsg'),'An export is running — wait for it to finish.',false); return; }
-  if(mcWinItem&&mcWinItem!==id&&!await mcCommit()) return;
+  const leaving=mcWinItem&&mcWinItem!==id;
+  if(leaving&&!await mcCommit()) return;
+  // The line just left is saved; its cards and artwork are still on the
+  // builder. A line with nothing of its own to put there — no kind, no layout —
+  // was shown them under its own order ID, and Save wrote them onto it.
+  if(leaving&&!it.tile&&!it.design){
+    state.designs=[]; state.page=0;
+    state.final.front={data:null,img:null,name:''};
+    state.final.back={data:null,img:null,name:''};
+    mcLaidTemplate=null;
+    if(typeof refreshSlots==='function') refreshSlots();
+    renderDesignLines(); refreshArtInputs(); drawAll();
+  }
   if(!mcHomeState) mcHomeState={meta:mcSnapshot(),orderId:state.orderId,
     paperType:state.paperType,gsm:state.gsm,tplFolder:ldTplFolder};
   mcWinItem=id;
@@ -38220,20 +38278,33 @@ function mcCustomWire(it){
   sel.addEventListener('change',async()=>{
     if(!sel.value) return;
     mcWinTplId=sel.value;
-    const {data,error}=await sb.from('templates').select('data').eq('id',sel.value).single();
-    if(error||!data) return;
+    const want=sel.value;
+    const {data,error}=await sb.from('templates').select('data').eq('id',want).single();
+    // another line opened while it was fetched: this layout is not that line's
+    if(mcWinItem!==it.id) return;
+    if(error||!data){
+      const m=document.getElementById('mcWinMsg');
+      if(m) showMsg(m,'Could not load that layout: '
+        +escapeHtml((error&&error.message)||'nothing came back'),false);
+      return;
+    }
     applyPrintState(data.data);
-    mcScopePickerTo(mcTemplateById(sel.value));   // and the designs it prints
+    mcLaidTemplate=String(want);                   // what the builder now holds
+    mcScopePickerTo(mcTemplateById(want));         // and the designs it prints
     mcSetOrderId(it.order_id);
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
     ppFillSelects();
     mcWinLive=true;
-    await mcApplyArt(it);
+    await mcApplyArt(it,()=>mcWinItem===it.id);
     mcLinePreview();
   });
   // a line that already has a layout puts it back the moment it is opened
   const restore=()=>{
     applyPrintState(it.design);
+    // This line's own saved sheet, not a template laid fresh. Left naming the
+    // last template, the next line on that template took this sheet for its own
+    // and added its card to it — another customer's card in its PDF.
+    mcLaidTemplate=null;
     mcSetOrderId(it.order_id);
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
     ppFillSelects();
@@ -38249,7 +38320,7 @@ function mcCustomWire(it){
     if(sel&&mcWinTplId&&sel.querySelector(`option[value="${mcWinTplId}"]`))
       sel.value=mcWinTplId;
     if(mcWinTplId) mcScopePickerTo(mcTemplateById(mcWinTplId));
-    mcApplyArt(it).then(mcLinePreview);
+    mcApplyArt(it,()=>mcWinItem===it.id).then(mcLinePreview);
   };
   const failed=err=>{
     const m=document.getElementById('mcWinMsg');
@@ -38436,7 +38507,11 @@ async function mcArtDataURL(path){
     mcArtCache.delete(mcArtCache.keys().next().value);
   return made;
 }
-async function mcApplyArt(it){
+// `live`, where given, says whether the line is still the one open: a slow
+// download for a line somebody has already moved on from landed on the next
+// line's builder, and its Save then kept that artwork as its own.
+async function mcApplyArt(it,live){
+  const gone=()=>!!live&&!live();
   const art=it.art||{};
   // The layout this line was saved with may name its own artwork off the
   // designs folder, and applying it started that read — so it is waited for
@@ -38444,6 +38519,7 @@ async function mcApplyArt(it){
   // a single artwork holding a blank sheet: the picture was loading, the wipe
   // won, and the line came out unprintable.
   await printArtReady();
+  if(gone()) return;
   // A picture uploaded onto the line itself beats it: that is this line's own
   // artwork, and a design list left over from working the tool by hand would
   // sit on top of it and print somebody else's job. Cleared as it always was
@@ -38461,6 +38537,7 @@ async function mcApplyArt(it){
     }
     try{
       const got=await mcArtDataURL(art[side]);
+      if(gone()) return;
       state.final[side]={data:got.data,img:got.img,name:side,
         file:got.file||null,mcPath:art[side]};
       fitArtToCard(side);
@@ -39160,13 +39237,19 @@ async function mcGtWriteBack(edited,home){
     // sheets instead of sharing one.
     it.sheet_item={...(it.sheet_item||{}),
       designId:l.designId,qty:l.qty,vals:l.vals||{},extra:l.extra||[],
+      // the extras are whatever the sheet now prints past the order; left as
+      // they were, the line went on saying the old number of extras
+      extra_qty:Math.max(0,(Number(l.qty)||0)-(Number(it.qty)||0)),
       page:(it.sheet_item&&it.sheet_item.page)||home.page||gtMode};
+    // and a tag on the sheet is a gift tag line — Download All goes by the tile
+    const retile=l.designId&&it.tile!=='giftTag';
+    if(retile) it.tile='giftTag';
     // A line on a sheet has been dealt with — that is the rule everywhere else
     // here, and the tick comes off again by itself when a tag is taken off the
     // sheet. It was the one way onto a sheet that left the batch reading as if
     // nothing had been done, so a morning's work looked untouched on the list.
     // A row still waiting for a design is not on the sheet yet and is left open.
-    await mcSave(it,{sheet_item:it.sheet_item,
+    await mcSave(it,{sheet_item:it.sheet_item,...(retile?{tile:'giftTag'}:{}),
       ...(l.designId?mcDonePatch(it,true):{})});
     mcRepaintRow(it);
   }
@@ -39291,6 +39374,9 @@ async function mcRenderLine(it,side){
   state.orderId=it.order_id;
   state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
   await mcApplyArt(it);
+  // artwork that would not load came out as blank paper, and was marked done
+  if(it.art&&it.art[side]&&!(state.final[side]&&state.final[side].img))
+    throw new Error(`the ${side} artwork for ${it.order_id||it.sku||'a line'} could not be loaded`);
   // every sheet this line comes to, not the first one. A per-order sheet is
   // one page until the design list outgrows it — which is exactly what adding
   // extras does — and the pages past the first were being left off the PDF.
@@ -39387,6 +39473,7 @@ async function mcDownloadAll(){
   const guard=e=>{ e.preventDefault(); e.returnValue=''; };
   window.addEventListener('beforeunload',guard);
   let files=0,bundles=0;
+  const failed=[], bad=new Set();
   const run=new Set();            // one press of Download All is one download
   const wasLive=mcWinLive;
   try{
@@ -39397,19 +39484,32 @@ async function mcDownloadAll(){
         const e=plan[n];
         showMsg(out,`${n+1} of ${plan.length} — ${escapeHtml(e.what)}…`,true);
         await new Promise(r=>setTimeout(r));      // let that message actually paint
-        const bytes=e.kind==='line'
-          ? await mcRenderLine(e.it,e.side)
-          : await MC_TILES[e.tile].make(e);
+        let bytes;
+        // One line whose artwork will not load is that line's problem: it is
+        // left unmarked and named at the end, and the rest still come out.
+        try{
+          bytes=e.kind==='line'
+            ? await mcRenderLine(e.it,e.side)
+            : await MC_TILES[e.tile].make(e);
+        }catch(err){
+          if(e.kind!=='line') throw err;
+          failed.push(`${e.name} (${(err&&err.message)||'unknown error'})`);
+          (e.set||[]).forEach(it=>bad.add(it.id));
+          continue;
+        }
         await mcPut(dir,e.name,bytes);
         if(e.kind==='line') files++; else bundles++;
-        // marked as it goes: a crash at 180 of 214 then costs 34, not 214
-        for(const it of e.set) await mcMarkExported(it,run);
+        // marked as it goes: a crash at 180 of 214 then costs 34, not 214 —
+        // and a line with a side that was not made is not marked at all
+        for(const it of e.set) if(!bad.has(it.id)) await mcMarkExported(it,run);
       }
     });
     mcRenderItems();
     showMsg(out,`✓ ${files} order file${files===1?'':'s'}`
       +(bundles?` and ${bundles} sheet${bundles===1?'':'s'}`:'')
-      +` ${dir?'saved into '+dir.name:'downloaded'}`,true);
+      +` ${dir?'saved into '+dir.name:'downloaded'}`
+      +(failed.length?` · ${failed.length} not made: ${failed.slice(0,3).join('; ')}`:''),
+      !failed.length);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
   }finally{
