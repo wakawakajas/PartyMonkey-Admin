@@ -5921,7 +5921,7 @@ body.mc-docked .mc-bubble{display:none !important;}
       <div id="bleedFillMsg"></div>
 
       <div class="sect-label">Client file fix</div>
-      <p class="hint">For a file that came in at the wrong size, too low a resolution or with no bleed: fits it to the card, adds 5 mm bleed made from its own edges, and AI-upscales any side under 300 DPI.</p>
+      <p class="hint">For a file that came in at the wrong size, too low a resolution or with no bleed: fits it to the card, adds 2.5 mm bleed made from its own edges, and AI-upscales any side under 300 DPI.</p>
       <button type="button" class="btn-primary" id="printReadyBtn" style="width:100%;">⚡ Make print-ready</button>
       <div id="printReadyMsg"></div>
     </div>
@@ -7545,12 +7545,10 @@ function renderSide(side,canvas,maxDim,opts){
     }
     // the sheet's bleed unless this design keeps its own
     const bleedMm=bleedMmFor(line);
-    // Artwork sent at the wrong shape sits inside the placeholder with paper
-    // either side, and a bleed made from its own edges stopped short of the cut.
-    // The made-up edge is carried out to the placeholder and past it by the
-    // bleed, so the card prints to the edge whatever shape it was sent at.
-    const padX=bleedMm>0?Math.max(0,(ph.wMm-wMm)/2):0;
-    const padY=bleedMm>0?Math.max(0,(ph.hMm-hMm)/2):0;
+    // The bleed grows from the artwork's own edges and no further. Artwork
+    // smaller than its placeholder keeps the paper round it: filling that gap
+    // made the empty placeholder part of the picture, and it printed that way.
+    const padX=0, padY=0;
     const bX=bleedMm+padX, bY=bleedMm+padY;
     const effW=wMm+bX*2, effH=hMm+bY*2;
     // Mirror and Extend keep the artwork at its own size and make the bleed up
@@ -9558,7 +9556,7 @@ async function enhanceArt(side){
 
 // ---------- the client file fix, in one tap ----------
 // What was done by hand in Photoshop for every client file: fit it to the
-// card, give it 5 mm of bleed from its own edges, bring it up to 300 DPI.
+// card, give it 2.5 mm of bleed from its own edges, bring it up to 300 DPI.
 document.getElementById('printReadyBtn').addEventListener('click',async()=>{
   const out=document.getElementById('printReadyMsg');
   const btn=document.getElementById('printReadyBtn');
@@ -9567,7 +9565,7 @@ document.getElementById('printReadyBtn').addEventListener('click',async()=>{
   btn.disabled=true;
   try{
     state.bleed.enabled=true;
-    state.bleed.mm=5;
+    state.bleed.mm=2.5;
     if(bleedModeNow()==='stretch') state.bleed.mode='mirror';
     setArtFit('card');   // refits both sides and redraws
     const soft=sides.filter(s=>!artIsVector(state.final[s])&&(artPrintDpi(s)||PRINT_DPI)<PRINT_DPI*0.95);
@@ -9577,7 +9575,7 @@ document.getElementById('printReadyBtn').addEventListener('click',async()=>{
       if(await enhanceArt(s)) done.push(s);
     }
     const failed=soft.filter(s=>!done.includes(s));
-    const parts=['fitted to the card','5 mm '+({mirror:'mirrored',extend:'extended',content:'content-aware',ai:'AI-filled'}[bleedModeNow()])+' bleed'];
+    const parts=['fitted to the card','2.5 mm '+({mirror:'mirrored',extend:'extended',content:'content-aware',ai:'AI-filled'}[bleedModeNow()])+' bleed'];
     if(done.length) parts.push(done.join(' and ')+' upscaled to print resolution');
     showMsg(out,(failed.length?'⚠ ':'✓ ')+parts.join(', ')
       +(failed.length?` — ${failed.join(' and ')} could not be upscaled, see above.`:'.'),!failed.length);
@@ -32630,7 +32628,8 @@ async function mcCreateBatch(){
   btn.disabled=true; btn.textContent='Creating…';
   try{
     const H=mcPending.headers;
-    const col=name=>{ const i=H.indexOf(name); return i<0?null:i; };
+    // "not in this file" is an empty name, which a column with no heading matched
+    const col=name=>{ if(!name) return null; const i=H.indexOf(name); return i<0?null:i; };
     const idx={}; Object.keys(mcPending.map).forEach(k=>{ idx[k]=col(mcPending.map[k]); });
     const cell=(r,k)=>idx[k]==null?'':String(r[idx[k]]==null?'':r[idx[k]]).trim();
 
@@ -32660,7 +32659,16 @@ async function mcCreateBatch(){
     for(let i=0;i<rows.length;i+=MC_CHUNK){
       btn.textContent=`Creating… ${Math.min(i+MC_CHUNK,rows.length)}/${rows.length}`;
       const {error}=await sb.from('magic_items').insert(rows.slice(i,i+MC_CHUNK));
-      if(error) throw error;
+      if(error){
+        // A slice that failed left a batch with part of the file in it, sitting
+        // in Open, and pressing Create again made a second one beside it. What
+        // landed is taken back out, so trying again starts from nothing.
+        try{
+          await sb.from('magic_items').delete().eq('batch_id',batch.id);
+          await sb.from('magic_batches').delete().eq('id',batch.id);
+        }catch(e){ /* the error that matters is the one being reported */ }
+        throw error;
+      }
     }
     mcPending=null; mcRenderMap();
     document.getElementById('mcUploadMsg').innerHTML='';
@@ -32886,6 +32894,9 @@ function mcRepaintRow(it){
   // a line lent by another batch is worked here but listed there — there is no
   // row of its own to repaint, and redrawing this batch's list says nothing
   if(!row){ if(!mcShared.some(x=>x.id===it.id)) mcRenderItems(); return; }
+  // a line ticked under "To do", or unticked under "Done", no longer belongs in
+  // the list on screen — repainting it in place left it sitting there
+  if(mcFilter!=='all'&&(mcFilter==='done')!==!!it.status){ mcRenderItems(); mcSyncBatchButtons(); return; }
   const holder=document.createElement('div');
   holder.innerHTML=mcLineHtml(it);
   row.replaceWith(holder.firstElementChild);
@@ -33128,7 +33139,9 @@ async function mcAddLineTo(orderId){
   if(mcBatch.status!=='open'){
     showMsg(out,'This batch is completed — re-open it to add to it.',false); return;
   }
-  const sibs=mcItems.filter(i=>String(i.order_id||'')===String(orderId));
+  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
+  // an order with no number is grouped, and so named, as '—'
+  const sibs=mcItems.filter(i=>String(i.order_id||'—')===String(orderId));
   const from=sibs[0]||null;
   // The name is asked for rather than guessed. A second design has a different
   // name from the first by definition, and a line copied off its neighbour
@@ -33146,7 +33159,7 @@ async function mcAddLineTo(orderId){
   const row={
     user_id:session.user.id, batch_id:mcBatch.id,
     sort_order:Math.max(0,...mcItems.map(i=>Number(i.sort_order)||0))+1,
-    order_id:String(orderId), buyer:(from&&from.buyer)||'', sku,
+    order_id:orderId==='—'?'':String(orderId), buyer:(from&&from.buyer)||'', sku,
     product:cut<0?sku:sku.slice(0,cut),
     design_name:cut<0?'':sku.slice(cut+1),
     qty:1, message:'', note:'', image_url:'', raw:{}
@@ -33156,7 +33169,8 @@ async function mcAddLineTo(orderId){
     showMsg(out,'Could not add it: '+((error&&error.message)||'nothing came back'),false);
     return;
   }
-  mcItems.push(data);
+  // the live channel can deliver the new row before this insert returns
+  if(!mcItems.some(x=>x.id===data.id)) mcItems.push(data);
   mcRenderItems(); mcSyncBatchButtons();
   if(typeof mcRenderSummary==='function') mcRenderSummary();
   showMsg(out,`✓ ${escapeHtml(sku)} added to ${escapeHtml(String(orderId))}.`,true);
@@ -33173,6 +33187,7 @@ async function mcCopyLine(id,btn){
   try{
   if(!mcBatch||mcBatch.status!=='open'){
     showMsg(out,'This batch is completed — re-open it first.',false); return; }
+  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
   if(!canPickFolder()){
     showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false);
     return; }
@@ -33188,7 +33203,9 @@ async function mcCopyLine(id,btn){
   try{
     const r=await mcCopyInto(dir,src);
     if(!r.n){
-      showMsg(out,`${src.name} is no longer in the designs folder.`,false);
+      showMsg(out,r.clash.length
+        ? `A different ${escapeHtml(src.name)} is already in that folder — nothing was copied.`
+        : `${escapeHtml(src.name)} is no longer in the designs folder.`,false);
       return;
     }
     const was=it.sheet_item||{};
@@ -33297,7 +33314,9 @@ async function mcAddExtra(id){
   const si={...(it.sheet_item||{}),extra_qty:want};
   // a line already on a sheet prints from what its sheet_item says, so the
   // figure the sheet reads moves with the extras rather than a step behind
-  if(si.designId||si.path) si.qty=Math.max(1,(Number(it.qty)||0)+want);
+  // — and so does a figure the SKU summary wrote, which mcQty reads first and
+  // which otherwise went on printing whatever it said before the extras changed
+  if(si.designId||si.path||si.qty!=null) si.qty=Math.max(1,(Number(it.qty)||0)+want);
   const was=it.sheet_item;
   it.sheet_item=si;
   if(!await mcSave(it,{sheet_item:si})){ it.sheet_item=was; return; }
@@ -33373,6 +33392,7 @@ async function mcClearOrder(orderId){
   if(!mcBatch||mcBatch.status!=='open'){
     showMsg(out,'This batch is completed — re-open it to change it.',false); return;
   }
+  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
   // an order with no number is grouped, and so named, as '—'
   const on=mcItems.filter(i=>String(i.order_id||'—')===String(orderId)&&mcLaid(i));
   if(!on.length){ showMsg(out,`Nothing on ${orderId} is on a sheet.`,false); return; }
@@ -33546,6 +33566,10 @@ async function mcToggleDone(id,quiet){
   const it=mcItem(id); if(!it||!sb) return;
   if(mcBatch&&mcBatch.status!=='open'){
     showMsg(document.getElementById('mcBatchMsg'),'This batch is completed — re-open it first.',false);
+    return;
+  }
+  if(mcBusy){
+    showMsg(document.getElementById('mcBatchMsg'),'An export is running — wait for it to finish.',false);
     return;
   }
   // Undoing somebody else's tick is a bigger thing than making your own, so
@@ -33821,8 +33845,10 @@ async function mcDownloadPlanSel(){
   const idx=[...mcPlanSel].sort((a,b)=>a-b).filter(i=>mcPlan[i]);
   if(!idx.length||mcBusy||mcPlanDrawing) return;
   const msg=document.getElementById('mcPlanMsg');
-  const dir=await exportFolderReady(true);      // first, while the tap is still ours
-  mcBusy=true; mcSyncBatchButtons(); mcRenderPlan();
+  mcBusy=true; mcSyncBatchButtons(); mcRenderPlan();   // before the picker: one run at a time
+  let dir=null;
+  try{ dir=await exportFolderReady(true); }     // first, while the tap is still ours
+  catch(e){ mcBusy=false; mcSyncBatchButtons(); mcRenderPlan(); throw e; }
   let done=0; const failed=[];
   const run=new Set();            // one press of Download is one download
   try{
@@ -33858,8 +33884,10 @@ document.getElementById('mcPlanSelAll').addEventListener('click',()=>{
 async function mcDownloadPlanEntry(i){
   const e=mcPlan[i]; if(!e||mcBusy||mcPlanDrawing) return;
   const msg=document.getElementById('mcPlanMsg');
-  const dir=await exportFolderReady(true);       // first, while the tap is still ours
-  mcBusy=true; mcSyncBatchButtons(); mcRenderPlan();
+  mcBusy=true; mcSyncBatchButtons(); mcRenderPlan();   // before the picker: one run at a time
+  let dir=null;
+  try{ dir=await exportFolderReady(true); }      // first, while the tap is still ours
+  catch(e){ mcBusy=false; mcSyncBatchButtons(); mcRenderPlan(); throw e; }
   showMsg(msg,'Rendering at print resolution…',true);
   await new Promise(r=>setTimeout(r));           // let that message actually paint
   try{
@@ -34522,7 +34550,12 @@ function mcRenderSummary(){
 // through and print the order in full — the opposite of what was asked.
 async function mcSetSkuQty(sku,want){
   const out=document.getElementById('mcSummaryMsg');
-  const lines=mcItems.filter(it=>(it.sku||it.product||it.design_name||'—')===sku);
+  // the same guards as every other change to the batch's lines; the box is
+  // redrawn so it does not go on showing a figure that was not saved
+  if(!mcBatch||mcBatch.status!=='open'){
+    showMsg(out,'This batch is completed — re-open it to change it.',false); mcRenderSummary(); return; }
+  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); mcRenderSummary(); return; }
+  const lines=mcItems.filter(it=>mcRowKey(it)===sku);
   if(!lines.length) return;
   // Two different figures, and they were one. `onSheet` is what this SKU is set
   // to print now — which is what the box shows and what a new share is worked
@@ -34708,7 +34741,10 @@ function mcLineForSku(sku){
   const tagged=state.designs.find(d=>d.sku&&d.sku===key);
   if(tagged) return tagged;
   const pick=designFileForSku(key); if(!pick) return null;
-  return state.designs.find(d=>d.source&&d.source.path===pick.path)||null;
+  // by file only where nothing says whose it is: a line added for another SKU
+  // is that SKU's, and answering for it let Remove here take that one off
+  const same=s=>!s||String(s).trim().toLowerCase()===key.trim().toLowerCase();
+  return state.designs.find(d=>same(d.sku)&&d.source&&d.source.path===pick.path)||null;
 }
 // ---------- both gift tag pages ----------
 // Gift Tag is two pages now — Festive and Custom — each with its own folder,
@@ -34808,7 +34844,9 @@ function mcGiftLineForSku(sku){
     const tagged=order.find(l=>l.sku&&l.sku===key);
     if(tagged) return {mode:p.mode,line:tagged};
     if(hit&&hit.mode===p.mode){
-      const l=order.find(l=>l.designId===hit.design.id);
+      // by design only where the line is not somebody else's SKU
+      const l=order.find(l=>(!l.sku||String(l.sku).trim().toLowerCase()===key.trim().toLowerCase())
+        &&l.designId===hit.design.id);
       if(l) return {mode:p.mode,line:l};
     }
   }
@@ -35609,7 +35647,8 @@ const mcCopyToClean=v=>String(v==null?'':v).trim().split('\\').join('/')
 // not a file, so it is not kept as one: the row is left with nothing mapped and
 // falls back to the file named after the SKU, the same as any unmapped row.
 const mcCopyPathClean=v=>{
-  const s=String(v==null?'':v).trim();
+  // written the Windows way it was never found: the folder is walked on '/'
+  const s=String(v==null?'':v).trim().split('\\').join('/').replace(/^\/+/,'');
   return /[\\/]$/.test(s)?'':s.slice(0,400);
 };
 // The template travels by name, which is what somebody working the sheet in
@@ -36286,7 +36325,11 @@ async function mcAddSkusToGiftTag(rows,opts){
       const qty=Math.max(1,Math.round(Number(row.qty)||1));
       // already on the order: set it to the batch's figure rather than doubling,
       // the same rule the print sheet follows
-      const had=gtOrder.find(l=>(l.sku&&l.sku===row.sku)||l.designId===d.id);
+      // a line added for another SKU is that SKU's, even on the same design —
+      // matching it by design wrote this SKU's figure over the other's
+      const had=gtOrder.find(l=>l.sku
+        ? String(l.sku).trim().toLowerCase()===String(row.sku).trim().toLowerCase()
+        : l.designId===d.id);
       if(had){ had.qty=qty; had.sku=row.sku; had.shape=shape||had.shape||''; u++; }
       else { gtOrder.push({id:gtId('l'),designId:d.id,qty,vals:{},sku:row.sku,shape}); a++; }
       laid.push({sku:row.sku,designId:d.id,shape});
@@ -36546,11 +36589,15 @@ async function mcMarkCopiedLines(sku,src,folder){
   if(!mcBatch||mcBatch.status!=='open') return 0;
   let n=0;
   for(const it of mcItems.filter(i=>mcRowKey(i)===String(sku))){
-    const was=it.sheet_item||{};
+    const orig=it.sheet_item, was=orig||{};
+    const tick={status:it.status,acted_by:it.acted_by,acted_at:it.acted_at};
     const si={...was,copied:{path:src.path,name:mcCopyWhat(src),
       to:String(folder||''),at:new Date().toISOString()}};
+    const patch={sheet_item:si,...mcDonePatch(it,true)};
     it.sheet_item=si;
-    await mcSave(it,{sheet_item:si,...mcDonePatch(it,true)});
+    // a save that was refused leaves the line as it was, rather than saying it
+    // was copied on this screen and nowhere else
+    if(!await mcSave(it,patch)){ it.sheet_item=orig; Object.assign(it,tick); continue; }
     n++;
   }
   if(n){ mcRenderItems(); mcSyncBatchButtons(); }
@@ -36684,8 +36731,10 @@ async function mcCopySku(sku,btn){
   try{
     const r=await mcCopyInto(dir,src);
     if(!r.n){
-      showMsg(out,`${src.name} is no longer in the designs folder — `
-        +'reconnect it under Load design.',false);
+      showMsg(out,r.clash.length
+        ? `A different ${escapeHtml(src.name)} is already in that folder — nothing was copied.`
+        : `${escapeHtml(src.name)} is no longer in the designs folder — `
+          +'reconnect it under Load design.',false);
       return;
     }
     const done=await mcMarkCopiedLines(sku,src,src.to);
@@ -36713,15 +36762,21 @@ async function mcCopyInto(dir,src){
   const list=[{name:src.name,path:src.path}];
   if(!list.length) return {done:0,already:0,n:0,gone:[]};
   const target=await mcCopyTarget(dir,src.to);
-  let done=0,already=0; const gone=[];
+  let done=0,already=0; const gone=[],clash=[];
   for(const f of list){
     const file=f.handle?await f.handle.getFile():await mcSrcFileByPath(f.path);
     if(!file){ gone.push(f.name); continue; }
-    let there=false;
-    try{ await target.getFileHandle(f.name); there=true; }catch(e){ /* not there — good */ }
+    let there=null;
+    try{ there=await (await target.getFileHandle(f.name)).getFile(); }catch(e){ /* not there — good */ }
+    // Two designs can share a file name from different folders — Front.pdf for
+    // Christmas and for Birthday. The name alone said the second was already
+    // there, ticked it off, and never copied it.
+    if(there&&there.size!==file.size){ clash.push(f.name); continue; }
     if(there) already++; else { await writeIntoFolder(target,f.name,file); done++; }
   }
-  return {done,already,n:list.length,gone};
+  // what is actually in the folder now — a file that could not be read is not,
+  // and counting the list instead ticked lines off that had nothing copied
+  return {done,already,n:done+already,gone,clash};
 }
 // Copies a whole list in one press. Reported as one line at the end rather
 // than one per SKU: a morning's batch is two hundred of these.
@@ -36748,7 +36803,7 @@ async function mcCopyRows(rows){
     if(!src){ missing.push(r.sku); continue; }
     try{
       const got=await mcCopyInto(dir,src);
-      if(!got.n){ missing.push(r.sku); continue; }
+      if(!got.n){ (got.clash.length?failed:missing).push(r.sku); continue; }
       done+=got.done; already+=got.already;
       ticked+=await mcMarkCopiedLines(r.sku,src,src.to);
     }catch(err){ failed.push(r.sku); }
@@ -36759,7 +36814,8 @@ async function mcCopyRows(rows){
     ticked?`${ticked} line${ticked===1?'':'s'} ticked off`:'',
     missing.length?`${missing.length} with no file to copy: ${missing.slice(0,3).join(', ')}`
       +(missing.length>3?'…':''):'',
-    failed.length?`${failed.length} failed: ${failed.slice(0,3).join(', ')}`:'']
+    failed.length?`${failed.length} failed (a different file of that name may already be there): `
+      +`${failed.slice(0,3).join(', ')}`:'']
     .filter(Boolean).join(' · ');
   // out loud in the shortest true words: what landed, and what did not
   mcTold(out,note||'Nothing to copy.',!failed.length&&!missing.length,
@@ -37171,6 +37227,22 @@ document.getElementById('mcReopenBtn').addEventListener('click',async()=>{
 
 // ---------- several people, one batch ----------
 let mcRoutesEcho=null;           // routing changes arrive in a flock; read once after them
+// Does an incoming row say what this screen already holds? Compared value by
+// value with the keys in a fixed order — the local copy was built by spreads
+// and its keys are not in the order the database sends them.
+function mcSameRow(a,b){
+  const norm=v=>{
+    if(Array.isArray(v)) return v.map(norm);
+    if(v&&typeof v==='object'){
+      const o={}; Object.keys(v).sort().forEach(k=>{ if(v[k]!==undefined) o[k]=norm(v[k]); });
+      return o;
+    }
+    return v===undefined?null:v;
+  };
+  try{
+    return Object.keys(b).every(k=>JSON.stringify(norm(a[k]))===JSON.stringify(norm(b[k])));
+  }catch(e){ return false; }
+}
 function mcWatch(){
   if(!sb||!mcBatch||mcChannel) return;
   try{
@@ -37189,10 +37261,14 @@ function mcWatch(){
             }
             const row=p.new;
             if(!row||!row.id) return;
-            // an echo of our own write would only make the row we just painted
-            // flicker; the optimistic paint already said the same thing
-            if(row.acted_by&&row.acted_by===mcMyId) return;
             const i=mcItems.findIndex(x=>x.id===row.id);
+            // An echo of our own write would only make the row we just painted
+            // flicker, so a row that says exactly what this screen already holds
+            // is let go. It used to be judged by who last ticked the line — which
+            // stays on the row for good, so every later change anybody else made
+            // to a line this machine had ever ticked was thrown away here, and
+            // then saved over the next time this machine touched the line.
+            if(i>=0&&mcSameRow(mcItems[i],row)) return;
             if(i<0){
               // A line this screen has never seen — somebody in the office has
               // just added one to the batch the packing room is working. It was
@@ -37206,8 +37282,11 @@ function mcWatch(){
               mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
               return;
             }
-            mcItems[i]=row;
-            mcRepaintRow(row);
+            // into the object already held, not in place of it: the open panel
+            // and its handlers keep hold of that object, and a replaced one went
+            // on being edited and saved from a copy nothing else could see
+            Object.assign(mcItems[i],row);
+            mcRepaintRow(mcItems[i]);
             // the summary is this same list added up by SKU, so a change to a
             // line is a change to it — repainting only the row left the totals
             // and the "on the sheet" marks a step behind whatever just happened
@@ -37227,6 +37306,19 @@ function mcWatch(){
               if(document.getElementById('mcRouteSheet').classList.contains('open'))
                 mcRenderRoutes();
             },400);
+          })
+      // Completed or re-opened on another machine. Without this the other
+      // screen went on calling the batch open, and every guard against
+      // changing a completed batch let its ticks and clears through.
+      .on('postgres_changes',
+          {event:'UPDATE',schema:'public',table:'magic_batches',filter:'id=eq.'+mcBatch.id},
+          p=>{
+            const row=p.new;
+            if(!row||!mcBatch||row.id!==mcBatch.id) return;
+            if(row.status===mcBatch.status&&row.completed_at===mcBatch.completed_at) return;
+            Object.assign(mcBatch,row);
+            mcSyncBatchButtons();
+            mcRenderItems(); mcRenderSummary();
           })
       .subscribe();
   }catch(e){ mcChannel=null; }
@@ -37521,7 +37613,10 @@ async function mcWinOpen(id){
   // The builder is one global object, so a window that edited "the current
   // line" while somebody clicked another would write line A's artwork into
   // line B and nothing would look wrong. One line is live; switching commits.
-  if(mcWinItem&&mcWinItem!==id) await mcCommit();
+  // the builder is borrowed by an export: switching now would save the export's
+  // sheet onto the line being left
+  if(mcBusy){ showMsg(document.getElementById('mcBatchMsg'),'An export is running — wait for it to finish.',false); return; }
+  if(mcWinItem&&mcWinItem!==id&&!await mcCommit()) return;
   if(!mcHomeState) mcHomeState={meta:mcSnapshot(),orderId:state.orderId,
     paperType:state.paperType,gsm:state.gsm,tplFolder:ldTplFolder};
   mcWinItem=id;
@@ -37568,7 +37663,11 @@ function mcWinClose(){
   // from elsewhere (leaving the batch, completing it) is actually let go of
   // even while it was sitting minimised as the bubble, not the panel
   if(!mcWinItem) return;
-  mcCommit().finally(()=>{
+  if(mcBusy){ showMsg(document.getElementById('mcBatchMsg'),'An export is running — wait for it to finish.',false); return; }
+  mcCommit().then(ok=>{
+    // A layout that did not save is still only on this screen. Handing the
+    // builder back now would throw it away after saying it was kept.
+    if(!ok&&!confirm('This line\'s layout did not save.\n\nOK — close it anyway and lose the changes.\nCancel — keep it open and try again.')) return;
     mcWinEl.classList.remove('open');
     mcWinItem=null;
     mcWinMin=false;
@@ -37978,7 +38077,14 @@ async function mcAutoLayoutFor(it,sel){
     if(!routed) mcScopePickerTo(tpl);
     const {data,error}=await sb.from('templates').select('data').eq('id',tpl.id).single();
     if(!live()) return null;
-    if(!error&&data){
+    // the card went onto whatever geometry the builder already held, and the
+    // message went on to say the layout had loaded
+    if(error||!data){
+      if(msg) showMsg(msg,`Could not load the layout ${escapeHtml(tpl.name)}: `
+        +escapeHtml((error&&error.message)||'nothing came back')+' — press Create again.',false);
+      return null;
+    }
+    {
       applyPrintState(data.data);
       // what the builder is now holding, said out loud: it is what the next
       // line opened checks against to know whether it belongs on this sheet
@@ -39200,10 +39306,14 @@ async function mcDownloadOne(id){
   if(!it||!mcReady(it)) return;
   if(mcBusy) return;
   const t=mcTile(it); if(!t) return;
-  const dir=await exportFolderReady(true);       // first, while the tap is still ours
-  mcBusy=true; mcSyncBatchButtons();
+  mcBusy=true; mcSyncBatchButtons();             // before the picker, or a second press runs too
+  let dir=null;
+  try{ dir=await exportFolderReady(true); }       // first, while the tap is still ours
+  catch(e){ mcBusy=false; mcSyncBatchButtons(); throw e; }
   showMsg(out,'Rendering at print resolution…',true);
   try{
+    // the line open in the builder is exported as it stands, not as last saved
+    if(mcWinItem===it.id&&t.mode==='per-order') await mcCommit();
     await mcBorrowBuilder(async()=>{
       if(t.mode!=='per-order'){
         // the tag side has to know which page this design is on before it can
@@ -39268,12 +39378,17 @@ async function mcDownloadAll(){
   if(mcBusy) return;
   const ready=mcItems.filter(mcReady);
   if(!ready.length){ showMsg(out,'Nothing is ready to export yet — press Create on a line first.',false); return; }
-  const dir=await exportFolderReady(true);       // first, while the tap is still ours
+  // busy before the folder is asked for: a second press while the picker was
+  // open ran the whole export twice, both borrowing the one builder
   mcBusy=true; mcSyncBatchButtons();
+  let dir=null;
+  try{ dir=await exportFolderReady(true); }   // first, while the tap is still ours
+  catch(e){ mcBusy=false; mcSyncBatchButtons(); throw e; }
   const guard=e=>{ e.preventDefault(); e.returnValue=''; };
   window.addEventListener('beforeunload',guard);
   let files=0,bundles=0;
   const run=new Set();            // one press of Download All is one download
+  const wasLive=mcWinLive;
   try{
     await mcWinCommitAndPark();
     const plan=await mcExportPlan();
@@ -39299,6 +39414,10 @@ async function mcDownloadAll(){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
   }finally{
     window.removeEventListener('beforeunload',guard);
+    // the builder is handed back holding the open line's layout, so that line is
+    // live again — parked for good, whatever was changed on it afterwards was
+    // never saved when it was closed
+    if(mcWinItem) mcWinLive=wasLive;
     mcBusy=false; mcSyncBatchButtons(); mcExportFolderLbl();
   }
 }
@@ -39310,7 +39429,11 @@ function mcBatchDate(){
 async function mcWinCommitAndPark(){
   if(!mcWinEl.classList.contains('open')) return;
   await mcCommit();
-  mcWinLive=false;
+  // Not parked any more. The builder is handed back holding this line's layout
+  // when the export is done, so the line is still live — setting it otherwise
+  // meant anything changed on it after a download was never saved on close.
+  // What parking protected against, the window being closed or another line
+  // opened mid-export, is refused by those two instead.
 }
 // The gift tag sheet is drawn by the gift tag screen's own machinery, which
 // reads the order off one module-level list. The batch's lines are lent to it
