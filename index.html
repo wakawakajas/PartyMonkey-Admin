@@ -9294,16 +9294,17 @@ let lamaSessionP=null;
 async function lamaCached(){
   try{ return !!(await (await caches.open(MODEL_CACHE)).match(LAMA_URL)); }catch(e){ return false; }
 }
-async function lamaModelBytes(say){
+// One model file, fetched once and kept in the browser's own storage.
+async function modelBytes(url,size,label,say){
   let cache=null;
   try{
     cache=await caches.open(MODEL_CACHE);
-    const hit=await cache.match(LAMA_URL);
+    const hit=await cache.match(url);
     if(hit) return new Uint8Array(await hit.arrayBuffer());
   }catch(e){ cache=null; }
-  const res=await fetch(LAMA_URL);
-  if(!res.ok||!res.body) throw new Error('could not download the AI model ('+res.status+')');
-  const total=Number(res.headers.get('content-length'))||LAMA_SIZE;
+  const res=await fetch(url);
+  if(!res.ok||!res.body) throw new Error('could not download the '+label+' ('+res.status+')');
+  const total=Number(res.headers.get('content-length'))||size;
   const reader=res.body.getReader(), parts=[];
   let got=0, shown=-1;
   for(;;){
@@ -9311,36 +9312,42 @@ async function lamaModelBytes(say){
     if(done) break;
     parts.push(value); got+=value.length;
     const mb=Math.round(got/1048576);
-    if(mb!==shown){ shown=mb; say(`Downloading the AI model, once… ${mb} of ${Math.round(total/1048576)} MB`,true); }
+    if(mb!==shown){ shown=mb; say(`Downloading the ${label}, once… ${mb} of ${Math.round(total/1048576)} MB`,true); }
   }
   const bytes=new Uint8Array(got);
   let at=0; for(const p of parts){ bytes.set(p,at); at+=p.length; }
-  if(cache) try{ await cache.put(LAMA_URL,new Response(bytes,{headers:{'content-type':'application/octet-stream'}})); }catch(e){}
+  if(cache) try{ await cache.put(url,new Response(bytes,{headers:{'content-type':'application/octet-stream'}})); }catch(e){}
   return bytes;
 }
-// The model runs in a worker of its own, on the processor: the graphics card
-// route cannot run LaMa's Fourier layers, and on the page's own thread a
-// quarter of a minute per square would freeze everything while it thought.
+// A model runs in a worker of its own, so the page keeps moving while it
+// thinks. Returns call(message, transfer) → the worker's reply.
+function modelWorker(main,onDead){
+  const url=URL.createObjectURL(new Blob(['('+main.toString()+')()'],{type:'text/javascript'}));
+  const wk=new Worker(url);
+  let seq=0;
+  const waiting=new Map();
+  wk.onmessage=e=>{
+    const m=e.data, p=waiting.get(m.id);
+    if(!p) return;
+    waiting.delete(m.id);
+    if(m.error) p.rej(new Error(m.error)); else p.res(m);
+  };
+  wk.onerror=e=>{
+    for(const p of waiting.values()) p.rej(new Error(e.message||'the AI worker stopped'));
+    waiting.clear(); if(onDead) onDead();
+  };
+  return (msg,transfer)=>new Promise((res,rej)=>{
+    const id=++seq; waiting.set(id,{res,rej}); wk.postMessage({...msg,id},transfer||[]);
+  });
+}
+// LaMa runs on the processor: the graphics card route cannot run its Fourier
+// layers, and on the page's own thread a quarter of a minute per square would
+// freeze everything while it thought.
 function lamaSession(say){
   if(!lamaSessionP) lamaSessionP=(async()=>{
-    const bytes=await lamaModelBytes(say);
+    const bytes=await modelBytes(LAMA_URL,LAMA_SIZE,'AI model',say);
     say('Starting the AI model…',true);
-    const url=URL.createObjectURL(new Blob(['('+lamaWorkerMain.toString()+')()'],{type:'text/javascript'}));
-    const wk=new Worker(url);
-    let seq=0;
-    const waiting=new Map();
-    wk.onmessage=e=>{
-      const m=e.data, p=waiting.get(m.id); if(!p) return;
-      waiting.delete(m.id);
-      if(m.error) p.rej(new Error(m.error)); else p.res(m);
-    };
-    wk.onerror=e=>{
-      for(const p of waiting.values()) p.rej(new Error(e.message||'the AI worker stopped'));
-      waiting.clear(); lamaSessionP=null;
-    };
-    const call=(msg,transfer)=>new Promise((res,rej)=>{
-      const id=++seq; waiting.set(id,{res,rej}); wk.postMessage({...msg,id},transfer||[]);
-    });
+    const call=modelWorker(lamaWorkerMain,()=>{ lamaSessionP=null; });
     await call({type:'init',ortBase:ORT_BASE,bytes:bytes.buffer},[bytes.buffer]);
     return {run:async(image,mask)=>{
       const im=image.slice(), mk=mask.slice();
@@ -9458,6 +9465,126 @@ document.querySelectorAll('[data-enhance-art]').forEach(b=>
   b.addEventListener('click',()=>enhanceArt(b.dataset.enhanceArt)));
 
 // ---------- AI upscaling ----------
+// Real-ESRGAN x4plus, the open model behind most "AI upscale" buttons: crisp
+// on text, logos and photos alike. 67 MB, fetched once, run on the graphics
+// card where the browser offers one. The small ESRGAN below is kept only as
+// the fallback for when this one cannot be had.
+const SR_URL='https://huggingface.co/SceneWorks/real-esrgan-onnx/resolve/main/real_esrgan_x4.onnx';
+const SR_SIZE=67051616;
+// squares of the picture the model sees at once, and the margin each borrows
+// from its neighbours so no seam shows where they meet
+const SR_TILE=192, SR_PAD=12;
+let srSessionP=null;
+function srSession(say){
+  if(!srSessionP) srSessionP=(async()=>{
+    const bytes=await modelBytes(SR_URL,SR_SIZE,'upscaler',say);
+    say('Starting the upscaler…',true);
+    const call=modelWorker(srWorkerMain,()=>{ srSessionP=null; });
+    const init=await call({type:'init',ortBase:ORT_BASE,bytes:bytes.buffer},[bytes.buffer]);
+    return {gpu:!!init.gpu,run:async(rgb,w,h)=>{
+      const buf=rgb.slice().buffer;
+      const m=await call({type:'run',rgb:buf,w,h},[buf]);
+      return {data:new Float32Array(m.data),gpu:m.gpu};
+    }};
+  })().catch(err=>{ srSessionP=null; throw err; });
+  return srSessionP;
+}
+function srWorkerMain(){
+  let session=null, gpu=false, bytes=null;
+  const open=async ep=>self.ort.InferenceSession.create(bytes,{executionProviders:[ep]});
+  self.onmessage=async e=>{
+    const m=e.data;
+    try{
+      if(m.type==='init'){
+        importScripts(m.ortBase+'ort.webgpu.min.js');
+        self.ort.env.wasm.wasmPaths=m.ortBase;
+        self.ort.env.wasm.numThreads=1;
+        bytes=new Uint8Array(m.bytes);
+        if(self.navigator.gpu){ try{ session=await open('webgpu'); gpu=true; }catch(err){ session=null; } }
+        if(!session) session=await open('wasm');
+        self.postMessage({id:m.id,gpu});
+      }else if(m.type==='run'){
+        const ort=self.ort;
+        const feed=()=>({[session.inputNames[0]]:new ort.Tensor('float32',new Float32Array(m.rgb),[1,3,m.h,m.w])});
+        let out;
+        try{ out=await session.run(feed()); }
+        catch(err){
+          // a graphics card that took the model but cannot run it
+          if(!gpu) throw err;
+          session=await open('wasm'); gpu=false;
+          out=await session.run(feed());
+        }
+        const d=new Float32Array(out[session.outputNames[0]].data);
+        self.postMessage({id:m.id,data:d.buffer,gpu},[d.buffer]);
+      }
+    }catch(err){ self.postMessage({id:m.id,error:String((err&&err.message)||err)}); }
+  };
+}
+// The picture enlarged by `scale` (up to 4): Real-ESRGAN makes it four times
+// over, square by square, and each square is drawn straight into the result
+// at the size asked for — the four-times picture is never held whole.
+async function upscaleSharp(img,scale,onProgress,say){
+  const nW=img.naturalWidth, nH=img.naturalHeight;
+  const sess=await srSession(say);
+  const src=document.createElement('canvas');
+  src.width=nW; src.height=nH;
+  const sctx=src.getContext('2d',{willReadFrequently:true});
+  sctx.drawImage(img,0,0);
+  const px=sctx.getImageData(0,0,nW,nH).data;
+  let clear=false;
+  for(let i=3;i<px.length;i+=4) if(px[i]<255){ clear=true; break; }
+  const out=document.createElement('canvas');
+  out.width=Math.round(nW*scale); out.height=Math.round(nH*scale);
+  const octx=out.getContext('2d');
+  octx.imageSmoothingQuality='high';
+  const k=out.width/nW, kh=out.height/nH;
+  const T=SR_TILE+SR_PAD*2;
+  // pixels past the picture's edge are its mirror image, so the edge is never
+  // the edge of what the model sees — it darkens whatever edge it is shown
+  const at=(i,n)=>{ if(i<0) i=-i-1; if(i>=n) i=2*n-i-1; return Math.max(0,Math.min(n-1,i)); };
+  const rgb=new Float32Array(3*T*T);
+  const tile=document.createElement('canvas');
+  tile.width=tile.height=T*4;
+  const tctx=tile.getContext('2d');
+  const tdata=tctx.createImageData(T*4,T*4);
+  const cols=Math.ceil(nW/SR_TILE), rows=Math.ceil(nH/SR_TILE), total=cols*rows;
+  let done=0;
+  for(let ty=0;ty<nH;ty+=SR_TILE) for(let tx=0;tx<nW;tx+=SR_TILE){
+    const ox=tx-SR_PAD, oy=ty-SR_PAD;
+    for(let y=0;y<T;y++){
+      const sy=at(oy+y,nH);
+      for(let x=0;x<T;x++){
+        const i=(sy*nW+at(ox+x,nW))*4, o=y*T+x;
+        // on white where the picture is see-through; its alpha is put back after
+        const a=clear?px[i+3]/255:1, w=1-a;
+        rgb[o]=(px[i]*a/255)+w; rgb[T*T+o]=(px[i+1]*a/255)+w; rgb[2*T*T+o]=(px[i+2]*a/255)+w;
+      }
+    }
+    const r=await sess.run(rgb,T,T), d=r.data;
+    sess.gpu=r.gpu;
+    const S=T*4, SS=S*S, dd=tdata.data;
+    for(let o=0;o<SS;o++){
+      dd[o*4]=d[o]*255; dd[o*4+1]=d[SS+o]*255; dd[o*4+2]=d[2*SS+o]*255; dd[o*4+3]=255;
+    }
+    tctx.putImageData(tdata,0,0);
+    // only this square's own part is kept; the margin was there for context
+    octx.save();
+    octx.beginPath();
+    octx.rect(Math.round(tx*k),Math.round(ty*kh),Math.round(Math.min(nW,tx+SR_TILE)*k)-Math.round(tx*k),
+      Math.round(Math.min(nH,ty+SR_TILE)*kh)-Math.round(ty*kh));
+    octx.clip();
+    octx.drawImage(tile,ox*k,oy*kh,T*k,T*kh);
+    octx.restore();
+    done++;
+    if(onProgress) onProgress(done/total,sess.gpu);
+  }
+  if(clear){
+    octx.globalCompositeOperation='destination-in';
+    octx.drawImage(img,0,0,out.width,out.height);
+    octx.globalCompositeOperation='source-over';
+  }
+  return out;
+}
 // ESRGAN, run in the browser on the graphics card: the picture never leaves
 // this machine. Loaded the first time it is asked for — about 3 MB, cached by
 // the browser after that — so the builder itself opens no slower for it.
@@ -9542,27 +9669,47 @@ async function enhanceArt(side){
   const dpi=artPrintDpi(side);
   if(!dpi||dpi>=PRINT_DPI*0.95) return false;
   const img=o.img;
-  const want=PRINT_DPI/dpi;
-  let scale=want<=2?2:4;
-  if(Math.max(img.naturalWidth,img.naturalHeight)*scale>UPSCALE_MAX_PX) scale=2;
-  if(Math.max(img.naturalWidth,img.naturalHeight)*scale>UPSCALE_MAX_PX){
+  const long=Math.max(img.naturalWidth,img.naturalHeight);
+  // exactly as much as 300 DPI needs, four times at most — more pixels than
+  // the print can use only make every fill and export after this slower
+  let scale=Math.min(4,PRINT_DPI/dpi);
+  if(long*scale>UPSCALE_MAX_PX) scale=UPSCALE_MAX_PX/long;
+  if(scale<1.1){
     txt.innerHTML='<span class="low">Too large to upscale here</span> — '+Math.round(dpi)+' DPI';
     return false;
   }
+  const shown=Math.round(scale*10)/10;
   artEnhancing[side]=true; btn.hidden=true;
   txt.textContent='Loading the upscaler…';
+  const say=t=>{ txt.textContent=t.replace(/<[^>]+>/g,''); };
   try{
-    const c=await upscaleImage(img,scale,p=>{
-      txt.textContent=`Upscaling ×${scale}… ${Math.round(p*100)}%`;
-    });
+    let c;
+    try{
+      c=await upscaleSharp(img,scale,(p,gpu)=>{
+        txt.textContent=`Upscaling ×${shown}… ${Math.round(p*100)}%`+(gpu?'':' (on the processor — slow)');
+      },say);
+    }catch(err){
+      // no Real-ESRGAN to be had: the small model, softer but still better than nothing
+      console.warn('Real-ESRGAN unavailable, using the small upscaler:',err);
+      const small=scale<=2?2:4;
+      const soft=await upscaleImage(img,small,p=>{ txt.textContent=`Upscaling ×${small} (basic)… ${Math.round(p*100)}%`; });
+      c=document.createElement('canvas');
+      c.width=Math.round(img.naturalWidth*scale); c.height=Math.round(img.naturalHeight*scale);
+      const cx=c.getContext('2d'); cx.imageSmoothingQuality='high';
+      cx.drawImage(soft,0,0,c.width,c.height);
+    }
     // still the same artwork on the sheet: nothing is moved or refitted
     if(state.final[side].img!==img){ artEnhancing[side]=false; refreshArtQuality(); return false; }
+    // The printed size stays what it was: the DPI tag rises with the pixels.
+    // A file that never said its size is told the size it is printing at, or
+    // Actual size would read the new tag and blow it up.
     let tag=null;
     try{ tag=imageDpi(o.data); }catch(e){}
-    const dx=(tag&&tag.x)||72, dy=(tag&&tag.y)||dx;
-    const data=pngWithDpi(c.toDataURL('image/png'),dx*scale,dy*scale);
+    const k=c.width/img.naturalWidth;
+    const dx=tag&&tag.x>0?tag.x*k:dpi*k, dy=tag&&tag.y>0?tag.y*k:dx;
+    const data=pngWithDpi(c.toDataURL('image/png'),dx,dy);
     const up=await loadImage(data);
-    const name=(o.name||'artwork').replace(/(\.[^.]+)?$/,'')+` · enhanced ×${scale}.png`;
+    const name=(o.name||'artwork').replace(/(\.[^.]+)?$/,'')+` · enhanced ×${shown}.png`;
     // the upload was a JPEG or PNG on disk; the file now printing is this one
     state.final[side]={...o,data,img:up,name,file:null};
     artEnhancing[side]=false;
@@ -33422,22 +33569,13 @@ async function mcExtraToSheet(it){
   state.page=0;
   renderDesignLines(); refreshArtInputs(); drawAll();
 }
-// A whole order off the sheets. What goes is where it was put and the layout
-// it was given; the order itself stays on the batch, and artwork uploaded to a
-// line is a file somebody chose and is left where it is.
-async function mcClearOrder(orderId){
-  const out=document.getElementById('mcBatchMsg');
-  if(!mcBatch||mcBatch.status!=='open'){
-    showMsg(out,'This batch is completed — re-open it to change it.',false); return;
-  }
-  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
-  // an order with no number is grouped, and so named, as '—'
-  const on=mcItems.filter(i=>String(i.order_id||'—')===String(orderId)&&mcLaid(i));
-  if(!on.length){ showMsg(out,`Nothing on ${orderId} is on a sheet.`,false); return; }
-  if(!confirm(`Take order ${orderId} off the sheets?\n\n`
-    +`${on.length} line${on.length===1?'':'s'} — the page each was put on and the layout `
-    +'it was given.\n\nThe order stays on the batch, and any artwork uploaded to a line '
-    +'is kept.')) return;
+// An order's lines off the sheets they are on — the gift tag rows lent for
+// them by id, and each print line's share taken off the SKU's total. Clear
+// and Delete both do this, and Delete used to do its own rougher version: it
+// asked only this batch whether a card was wanted elsewhere, so another
+// batch's tags of the same SKU went with it, and a card shared inside the
+// batch was left at the full figure. Says what it took off where.
+function mcOffSheets(on,orderId){
   let print=0,gift=0;
   // The tags this order was lent onto the gift tag sheet, taken off by line.
   // Going by SKU could not do it: a lent row carries no SKU, so it was found by
@@ -33462,7 +33600,7 @@ async function mcClearOrder(orderId){
   if(mcGtHome&&Array.isArray(mcGtHome.ids))
     mcGtHome.ids=mcGtHome.ids.filter(id=>!ids.has('mc-'+String(id)));
   for(const it of on){
-    const sku=String(it.sku||'');
+    const sku=mcRowKey(it);          // the key the sheets were laid by
     // Only a line that is itself on a sheet takes anything off one. A copied
     // or custom line can share its SKU with another order's print line, and
     // clearing it used to take that order's cards off.
@@ -33480,8 +33618,8 @@ async function mcClearOrder(orderId){
         if(at.line.qty<=0) state.designs=state.designs.filter(d=>d.id!==at.line.id);
         print++;
       }else{
-        const shared=mcItems.some(x=>x!==it&&String(x.sku||'')===sku
-          &&String(x.order_id||'—')!==String(orderId)
+        const shared=mcPool().some(x=>x!==it&&mcRowKey(x)===mcRowKey(it)
+          &&!on.includes(x)
           &&(x.tile==='sheetPrint'||x.tile==='giftTag'));
         if(!shared){
           const w=mcRemoveSku(sku);
@@ -33489,8 +33627,35 @@ async function mcClearOrder(orderId){
         }
       }
     }
+  }
+  return {print,gift};
+}
+// A whole order off the sheets. What goes is where it was put and the layout
+// it was given; the order itself stays on the batch, and artwork uploaded to a
+// line is a file somebody chose and is left where it is.
+async function mcClearOrder(orderId){
+  const out=document.getElementById('mcBatchMsg');
+  if(!mcBatch||mcBatch.status!=='open'){
+    showMsg(out,'This batch is completed — re-open it to change it.',false); return;
+  }
+  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
+  // an order with no number is grouped, and so named, as '—'
+  const on=mcItems.filter(i=>String(i.order_id||'—')===String(orderId)&&mcLaid(i));
+  if(!on.length){ showMsg(out,`Nothing on ${orderId} is on a sheet.`,false); return; }
+  if(!confirm(`Take order ${orderId} off the sheets?\n\n`
+    +`${on.length} line${on.length===1?'':'s'} — the page each was put on and the layout `
+    +'it was given.\n\nThe order stays on the batch, and any artwork uploaded to a line '
+    +'is kept.')) return;
+  const {print,gift}=mcOffSheets(on,orderId);
+  let unsaved=0;
+  for(const it of on){
+    const keep={tile:it.tile,sheet_item:it.sheet_item,design:it.design,
+      status:it.status,acted_by:it.acted_by,acted_at:it.acted_at};
     it.tile=null; it.sheet_item=null; it.design=null;
-    await mcSave(it,{tile:null,sheet_item:null,design:null,...mcDonePatch(it,false)});
+    // a line that did not save is put back as the batch still has it
+    if(!await mcSave(it,{tile:null,sheet_item:null,design:null,...mcDonePatch(it,false)})){
+      Object.assign(it,keep); unsaved++;
+    }
   }
   // a line open on the builder has just had its layout taken away, and the
   // sheet beside it should not go on holding the tag either
@@ -33502,7 +33667,9 @@ async function mcClearOrder(orderId){
   // a line open in the window has just had its layout taken away; it should
   // not go on showing it
   if(mcWinItem&&on.some(i=>i.id===mcWinItem)) mcWinRender();
-  showMsg(out,`Took ${on.length} line${on.length===1?'':'s'} of ${orderId} off the sheets.`,true);
+  if(unsaved) showMsg(out,`${unsaved} of ${on.length} lines of ${orderId} did not save — `
+    +'they are off the sheet here but not on the batch. Try again.',false);
+  else showMsg(out,`Took ${on.length} line${on.length===1?'':'s'} of ${orderId} off the sheets.`,true);
 }
 // ---------- hold an order's header to delete it ----------
 // Clear takes an order off the sheets and leaves it on the batch. Delete takes
@@ -33566,20 +33733,10 @@ async function mcDeleteOrder(orderId){
     +`${lines.length} line${lines.length===1?'':'s'} go, with wherever they had been put `
     +'and the layout they were given. The rest of the batch is untouched, and any '
     +'artwork uploaded to a line is kept.\n\nThis cannot be undone.')) return;
-  // off the sheets first, so a card nobody else is asking for stops being
-  // printed — the same rule Clear follows
-  let print=0,gift=0;
-  lines.forEach(it=>{
-    if(!mcLaid(it)) return;
-    const sku=String(it.sku||'');
-    const shared=mcItems.some(x=>x!==it&&String(x.sku||'')===sku
-      &&String(x.order_id||'—')!==String(orderId)
-      &&(x.tile==='sheetPrint'||x.tile==='giftTag'));
-    if(shared) return;
-    const w=mcRemoveSku(sku);
-    if(w==='print') print++; else if(w==='gift') gift++;
-  });
   const ids=lines.map(i=>i.id);
+  // Deleted first and taken off the sheets after. The other way round, a
+  // delete that failed left the cards gone from the sheet and the order still
+  // on the batch, with nothing redrawn to say so.
   for(let i=0;i<ids.length;i+=MC_CHUNK){
     const {error}=await sb.from('magic_items').delete().in('id',ids.slice(i,i+MC_CHUNK));
     if(error){
@@ -33588,6 +33745,9 @@ async function mcDeleteOrder(orderId){
       return;
     }
   }
+  // off the sheets, so a card nobody else is asking for stops being printed —
+  // exactly as Clear does it
+  const {print,gift}=mcOffSheets(lines.filter(mcLaid),orderId);
   const gone=new Set(ids);
   mcItems=mcItems.filter(i=>!gone.has(i.id));
   if(print){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
@@ -33615,7 +33775,7 @@ async function mcToggleDone(id,quiet){
   if(it.status&&!quiet&&!confirm('Mark this line as not done?\n\n'
       +(it.design_name||it.sku)+'\n\nOn a shared batch this may be somebody else\'s work.')) return;
   const was=it.status;
-  const wasTile=it.tile, wasItem=it.sheet_item;
+  const wasTile=it.tile, wasItem=it.sheet_item, wasBy=it.acted_by, wasAt=it.acted_at;
   const now=was?null:'done';
   it.status=now;
   it.acted_by=now?mcMyId:null;
@@ -33641,6 +33801,7 @@ async function mcToggleDone(id,quiet){
   const {error}=await sb.from('magic_items').update(patch).eq('id',id);
   if(error){
     it.status=was; it.tile=wasTile; it.sheet_item=wasItem;
+    it.acted_by=wasBy; it.acted_at=wasAt;             // who ticked it, too
     mcRepaintRow(it);                                 // and back again
     showMsg(document.getElementById('mcBatchMsg'),'Could not save that: '+error.message,false);
     return;
@@ -33896,11 +34057,12 @@ async function mcDownloadPlanSel(){
         const e=mcPlan[i];
         showMsg(msg,`Rendering ${done+1} of ${idx.length} — ${escapeHtml(e.name)}…`,true);
         try{
+          mcBundleSkipped=new Set();
           const bytes=e.kind==='line'
             ? await mcRenderLine(e.it,e.side)
             : await MC_TILES[e.tile].make(e);
           await mcPut(dir,e.name,bytes);
-          for(const it of e.set) await mcMarkExported(it,run);
+          await mcMarkMade(e,run,failed);
           done++;
         }catch(err){ failed.push(`${e.name} (${(err&&err.message)||'unknown error'})`); }
       }
@@ -33930,6 +34092,7 @@ async function mcDownloadPlanEntry(i){
   await new Promise(r=>setTimeout(r));           // let that message actually paint
   try{
     await mcWinCommitAndPark();
+    mcBundleSkipped=new Set();
     await mcBorrowBuilder(async()=>{
       const bytes=e.kind==='line'
         ? await mcRenderLine(e.it,e.side)
@@ -33938,9 +34101,11 @@ async function mcDownloadPlanEntry(i){
     });
     // marked exported the way the whole run marks them, so a line fetched on
     // its own is not asked for again by the batch it came from
-    for(const it of e.set) await mcMarkExported(it);
+    const left=[];
+    await mcMarkMade(e,undefined,left);
     mcRenderItems();
-    showMsg(msg,`✓ ${escapeHtml(e.name)} ${dir?'saved into '+escapeHtml(dir.name):'downloaded'}`,true);
+    showMsg(msg,`✓ ${escapeHtml(e.name)} ${dir?'saved into '+escapeHtml(dir.name):'downloaded'}`
+      +(left.length?` · ${left.length} left out: ${escapeHtml(left.slice(0,3).join(', '))}`:''),!left.length);
   }catch(err){
     showMsg(msg,'Export failed: '+((err&&err.message)||'unknown error'),false);
   }finally{ mcBusy=false; mcSyncBatchButtons(); mcExportFolderLbl(); mcRenderPlan(); }
@@ -34080,7 +34245,9 @@ document.getElementById('mcPlanSheet').addEventListener('click',e=>{
 // it is what everything acting on a row has to match on. Half the code matched
 // on `sku` alone, so a row named after its product marked no lines at all: Add
 // laid the sheet and left every line of it untouched and unticked.
-const mcRowKey=it=>String((it&&(it.sku||it.product||it.design_name))||'—');
+// trimmed: "TY-01" and "TY-01 " off a spreadsheet are one SKU, and as two rows
+// both matched TY-01.png and the second set the first one's figure on the sheet
+const mcRowKey=it=>String((it&&(it.sku||it.product||it.design_name))||'').trim()||'—';
 function mcSummaryRows(){
   const map=new Map();
   mcItems.forEach(it=>{
@@ -34658,6 +34825,21 @@ async function mcSetSkuQty(sku,want){
 // here to change, and saying so is the row's job, not this one's.
 function mcSkuQtyToSheet(sku,qty){
   const want=Math.max(1,Math.round(Number(qty)||0));
+  // On a sheet the batch has lent out, this SKU is one row an order, and each
+  // row takes its own line's share — the shares were just written onto the
+  // lines. Setting the first row to the whole figure left the others as they
+  // were, and the sheet printed more than was typed.
+  const key=String(sku||'');
+  const lent=(typeof mcGtLentRows==='function'&&mcGtHome?mcGtLentRows():[])
+    .map(l=>({l,it:mcItem(String(l.id).slice(3))}))
+    .filter(x=>x.it&&mcRowKey(x.it)===key);
+  if(lent.length){
+    lent.forEach(({l,it})=>{ l.qty=Math.max(1,mcQty(it)||1); });
+    if(typeof gtRenderOrder==='function') gtRenderOrder();
+    if(typeof gtDraw==='function') gtDraw();
+    if(mcSummaryOpen()) mcSumStageDraw('gift');
+    return true;
+  }
   const on=mcWhereIsSku(sku);
   if(!on||!on.line||on.line.qty===want) return false;
   on.line.qty=want;
@@ -35003,7 +35185,14 @@ function mcRemoveSku(sku){
     }
   }
   const p=mcLineForSku(key);
-  if(p){ state.designs=state.designs.filter(d=>d.id!==p.id); hit=hit||'print'; }
+  if(p){
+    state.designs=state.designs.filter(d=>d.id!==p.id);
+    // Off both sheets at once says 'gift', and the callers redraw only the one
+    // they are told — so the print sheet goes on showing the card it just lost.
+    // That one case redraws its own print sheet here.
+    if(hit==='gift'){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
+    hit=hit||'print';
+  }
   if(hit) return hit;
   // nothing in the builder to take off where the sheet was only ever a mark on
   // the lines — the caller clears that either way
@@ -36362,15 +36551,33 @@ async function mcAddSkusToGiftTag(rows,opts){
     }
     let a=0,u=0;
     const laid=[];
+    // Where the batch has this page lent out, its lines are on the sheet one row
+    // an order and are the sheet's rows for these SKUs. A row of the page's own
+    // beside them printed the SKU twice, and matching one of them set that one
+    // order's tag to the whole SKU's figure — so nothing is added here, and the
+    // lines are lent below once they are marked.
+    const lentHere=!!mcGtHome&&mcGtHome.page===m;
     here.forEach(({row,d,shape})=>{
+      if(lentHere){
+        gtOrder.forEach(l=>{
+          if(!mcGtLent(l)||String(l.sku||'').trim().toLowerCase()
+            !==String(row.sku).trim().toLowerCase()) return;
+          const it=mcItem(String(l.id).slice(3));
+          l.designId=d.id; if(it) l.qty=Math.max(1,mcQty(it)||1);
+          l.shape=shape||l.shape||'';
+        });
+        u++;
+        laid.push({sku:row.sku,designId:d.id,shape});
+        return;
+      }
       const qty=Math.max(1,Math.round(Number(row.qty)||1));
       // already on the order: set it to the batch's figure rather than doubling,
       // the same rule the print sheet follows
       // a line added for another SKU is that SKU's, even on the same design —
       // matching it by design wrote this SKU's figure over the other's
-      const had=gtOrder.find(l=>l.sku
+      const had=gtOrder.find(l=>!mcGtLent(l)&&(l.sku
         ? String(l.sku).trim().toLowerCase()===String(row.sku).trim().toLowerCase()
-        : l.designId===d.id);
+        : l.designId===d.id));
       if(had){ had.qty=qty; had.sku=row.sku; had.shape=shape||had.shape||''; u++; }
       else { gtOrder.push({id:gtId('l'),designId:d.id,qty,vals:{},sku:row.sku,shape}); a++; }
       laid.push({sku:row.sku,designId:d.id,shape});
@@ -36379,6 +36586,18 @@ async function mcAddSkusToGiftTag(rows,opts){
     // is laid out on the cuts of the sheet that is open, which is the wrong die
     await mcGtShapesInHand();
     await mcMarkLinesOnSheet(laid,m);
+    // and the lines just marked that are on the lent run but not on its sheet
+    if(lentHere){
+      const keys=new Set(laid.map(x=>String(x.sku)));
+      const on=new Set(gtOrder.map(l=>String(l.id||'')));
+      mcItems.filter(it=>keys.has(mcRowKey(it))&&it.tile==='giftTag'
+        &&mcGtFinishOf(it)===mcGtHome.finish&&!on.has('mc-'+it.id))
+        .forEach(it=>{
+          gtOrder.push(mcGtLine(it));
+          if(!mcGtHome.ids.includes(it.id)) mcGtHome.ids.push(it.id);
+          a++;
+        });
+    }
     added+=a; updated+=u;
     per.push(`${a+u} on ${mcGtPage(m).name}`);
   }
@@ -37051,12 +37270,15 @@ document.getElementById('mcSummaryBulkNone').addEventListener('click',()=>{
 });
 document.getElementById('mcSummaryBulkApply').addEventListener('click',async()=>{
   const out=document.getElementById('mcSummaryMsg');
-  if(!mcSel.size){ showMsg(out,'Nothing is selected.',false); return; }
+  // the rows ticked that are on screen — ticks left on rows a search has since
+  // hidden, or on SKUs no longer in the batch, were set too without being seen
+  const skus=mcSummaryShownRows().filter(r=>mcSel.has(String(r.sku))).map(r=>String(r.sku));
+  if(!skus.length){ showMsg(out,'Nothing is selected.',false); return; }
   const dest=document.getElementById('mcSummaryBulkDest').value;
-  const n=mcSel.size;
+  const n=skus.length;
   if(n>1&&!confirm(`Set ${n} SKUs to ${dest?mcDestLabel(dest):'no route of their own'}?`
     +'\n\nRouting is shared, so this is how they are added for everybody.')) return;
-  await mcBulkDest([...mcSel],dest);
+  await mcBulkDest(skus,dest);
 });
 // The other shape the job takes: a dozen SKUs that are all the same card, or a
 // shop whose whole run is one sheet. The picker is opened once and what comes
@@ -37664,6 +37886,7 @@ async function mcWinOpen(id){
   if(mcBusy){ showMsg(document.getElementById('mcBatchMsg'),'An export is running — wait for it to finish.',false); return; }
   const leaving=mcWinItem&&mcWinItem!==id;
   if(leaving&&!await mcCommit()) return;
+  if(leaving) mcWiredLine=null;
   // The line just left is saved; its cards and artwork are still on the
   // builder. A line with nothing of its own to put there — no kind, no layout —
   // was shown them under its own order ID, and Save wrote them onto it.
@@ -37675,8 +37898,15 @@ async function mcWinOpen(id){
     if(typeof refreshSlots==='function') refreshSlots();
     renderDesignLines(); refreshArtInputs(); drawAll();
   }
+  // the operator's own place in their own work, all of it — the same things an
+  // export's borrow keeps, so closing the line hands back what was there
   if(!mcHomeState) mcHomeState={meta:mcSnapshot(),orderId:state.orderId,
-    paperType:state.paperType,gsm:state.gsm,tplFolder:ldTplFolder};
+    paperType:state.paperType,gsm:state.gsm,tplFolder:ldTplFolder,
+    // copies of the rows: a line laid onto this same sheet sets their counts
+    designs:(state.designs||[]).map(d=>({...d})),page:state.page,artMode:state.artMode,
+    final:{front:state.final.front,back:state.final.back},
+    template:typeof selectedTemplate!=='undefined'?selectedTemplate:null,
+    search:(document.getElementById('templateSearch')||{}).value||''};
   mcWinItem=id;
   mcWinMin=false;                // Create always opens the window itself, not the bubble
   mcWinEl.classList.add('open');
@@ -37722,12 +37952,13 @@ function mcWinClose(){
   // even while it was sitting minimised as the bubble, not the panel
   if(!mcWinItem) return;
   if(mcBusy){ showMsg(document.getElementById('mcBatchMsg'),'An export is running — wait for it to finish.',false); return; }
-  mcCommit().then(ok=>{
+  mcCommit().then(async ok=>{
     // A layout that did not save is still only on this screen. Handing the
     // builder back now would throw it away after saying it was kept.
     if(!ok&&!confirm('This line\'s layout did not save.\n\nOK — close it anyway and lose the changes.\nCancel — keep it open and try again.')) return;
     mcWinEl.classList.remove('open');
     mcWinItem=null;
+    mcWiredLine=null;
     mcWinMin=false;
     mcBubbleSync();
     // closing the panel closes the split with it: there is no line left for
@@ -37738,14 +37969,31 @@ function mcWinClose(){
     mcSplitEnd();
     // hand the builder back the way it was found
     if(mcHomeState){
-      applyPrintState(mcHomeState.meta);
-      mcSetOrderId(mcHomeState.orderId||'');
-      state.paperType=mcHomeState.paperType||''; state.gsm=mcHomeState.gsm||'';
+      const home=mcHomeState; mcHomeState=null;
+      applyPrintState(home.meta);
+      // The layout alone kept only designs that came off the folder: an
+      // artwork uploaded by hand, a design with no path, and the template that
+      // was picked were lost, and the last line's artwork stayed on the sheet.
+      // They are put back the way an export's borrow puts them back — after the
+      // layout's own artwork has finished loading, or it lands over them.
+      if(home.designs){
+        await printArtReady().catch(()=>{});
+        state.designs=home.designs; state.page=home.page||0;
+        state.final.front=home.final.front; state.final.back=home.final.back;
+        setArtMode(home.artMode,true);
+        if(typeof setSelectedTemplate==='function') setSelectedTemplate(home.template);
+        const box=document.getElementById('templateSearch');
+        if(box) box.value=home.search||'';
+        mcLaidTemplate=null;
+        if(typeof refreshSlots==='function') refreshSlots();
+        renderDesignLines(); refreshArtInputs(); drawAll();
+      }
+      mcSetOrderId(home.orderId||'');
+      state.paperType=home.paperType||''; state.gsm=home.gsm||'';
       // the design picker was scoped to the batch's template; it goes back to
       // the folder of whatever the operator had loaded
-      if(typeof mcHomeState.tplFolder==='string') ldSetTemplateFolder(mcHomeState.tplFolder);
+      if(typeof home.tplFolder==='string') ldSetTemplateFolder(home.tplFolder);
       ppFillSelects();
-      mcHomeState=null;
     }
     if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync();
     if(wasSplit) showScreen('magic-batch',true);
@@ -37890,6 +38138,7 @@ function mcWinRender(){
     const val=e.target.value;
     if(val===mcChoiceOf(it)) return;
     await mcCommit();
+    mcWiredLine=null;          // a line turned into something else is laid out afresh
     const c=mcChoices().find(x=>x.value===val)||null;
     // turned into a gift tag here is created as one, so it is asked the same
     let fin='';
@@ -37897,6 +38146,9 @@ function mcWinRender(){
       fin=await mcAskFinish(it);
       if(!fin){ e.target.value=mcChoiceOf(it); return; }
     }
+    // a sheet on loan is handed back before the line changes page or kind —
+    // switched under it, the loan wrote the old page back over this choice
+    if(mcGtHome) await mcGtReturn();
     const patch={tile:c?c.tile:null};
     it.tile=patch.tile;
     if(fin){ it.sheet_item={...(it.sheet_item||{}),finish:fin}; patch.sheet_item=it.sheet_item; }
@@ -37905,7 +38157,7 @@ function mcWinRender(){
       // a design picked out of the other page's library is not this page's
       // design, and carrying it across would lay out nothing
       const was=si.designId?mcGtModeOfDesign(si.designId):'';
-      if(was&&was!==c.page){ delete si.designId; si.vals={}; }
+      if(was&&was!==c.page){ delete si.designId; si.vals={}; si.shape=''; si.extra=[]; }
       it.sheet_item=si; patch.sheet_item=si;
       // and the library on hand has to be that page's, or the picker below
       // would be offering the other one's designs
@@ -37952,7 +38204,12 @@ async function mcCommit(){
   const t=mcTile(it);
   if(!(t&&t.mode==='per-order'&&mcWinLive)) return true;
   it.design=mcLineSnapshot();
-  const ok=await mcSave(it,{design:it.design});
+  // and the paper and weight the builder was left on: changed there and then
+  // closed, the export went on naming and printing the line's old figure
+  const patch={design:it.design};
+  if(state.paperType&&state.paperType!==it.paper_type) patch.paper_type=it.paper_type=state.paperType;
+  if(state.gsm&&state.gsm!==it.gsm) patch.gsm=it.gsm=state.gsm;
+  const ok=await mcSave(it,patch);
   if(!ok){
     const strip=document.getElementById('mcBatchMsg');
     if(strip) showMsg(strip,`The layout for ${escapeHtml(it.order_id||'that line')} `
@@ -38245,8 +38502,15 @@ function mcLinePreview(){
   try{ renderSide('front',c,Math.max(360,Math.max(w,h)),{page:0}); }
   catch(e){ stage.style.display='none'; }
 }
+// The line whose layout is already in the builder. The panel is drawn again for
+// all sorts of reasons while one line is open — the template and paper lists
+// arriving, an artwork cleared, Create pressed on it again — and every redraw
+// used to put the saved layout back, over whatever had been dragged since.
+let mcWiredLine=null;
 function mcCustomWire(it){
-  mcWinLive=false; mcWinTplId='';
+  const again=mcWiredLine===it.id&&mcWinLive;
+  mcWiredLine=it.id;
+  if(!again){ mcWinLive=false; mcWinTplId=''; }
   // This line's order stamps the sheet and names the files it comes out as, so
   // the box says it the moment the line is opened rather than only when a
   // layout happens to land. A line with no layout of its own and no rule to
@@ -38333,7 +38597,12 @@ function mcCustomWire(it){
   // So it looks again, and only falls back to the empty layout if still nothing.
   const hasArt=!!(it.design&&(mcDesignArt(it.design)
     ||(it.art&&(it.art.front||it.art.back))));
-  if(it.design&&hasArt){
+  if(again){
+    // already laid out and being worked: the picker is told which layout it is,
+    // and nothing is loaded over the top
+    if(sel&&mcWinTplId&&sel.querySelector(`option[value="${mcWinTplId}"]`)) sel.value=mcWinTplId;
+    mcLinePreview();
+  }else if(it.design&&hasArt){
     restore();
   }else if(it.design){
     mcAutoLayoutFor(it,sel)
@@ -38372,7 +38641,7 @@ function mcCustomWire(it){
       showMsg(msg,'Choose a saved layout first.',false); return;
     }
     // asked before anything is written, so a cancelled answer costs nothing
-    if(!(it.gsm||state.gsm)){
+    if(!(state.gsm||it.gsm)){
       const g=await askGsm(`${it.design_name||it.sku||'This line'} has no GSM yet. `
         +'It is a third of the file name, and a line without one cannot be printed.');
       if(!g){ showMsg(msg,'Not saved — this line needs a GSM to be printable.',false); return; }
@@ -38385,8 +38654,11 @@ function mcCustomWire(it){
     // itself: paper and GSM are two thirds of the file name, and a line
     // missing them is a line whose PDF button stays greyed out with the
     // layout and the artwork both sitting on it
-    it.paper_type=it.paper_type||state.paperType||'';
-    it.gsm=it.gsm||state.gsm||'';
+    // What the builder says wins, the same as the chip on the builder: the
+    // panel's own boxes write into it the moment they change, and a figure
+    // changed on the builder beside this is newer than the line's.
+    it.paper_type=state.paperType||it.paper_type||'';
+    it.gsm=state.gsm||it.gsm||'';
     if(await mcSave(it,{design:it.design,paper_type:it.paper_type,
       gsm:it.gsm,...(kept||{}),...mcDonePatch(it,true)})){
       const why=mcWhyNotReady(it);
@@ -38641,7 +38913,14 @@ const mcGtDesign=id=>((typeof gtLib!=='undefined'&&gtLib.designs)||[])
 // drawn for it can be sitting in the other page's library, where the picker
 // here never looked. Taking it is the operator saying which page is right.
 async function mcGtMoveToPage(it,mode,id){
-  const si={...(it.sheet_item||{}),page:mode,designId:id,vals:{}};
+  // The sheet out on loan is handed back first. Switched under it, the loan was
+  // parked with this line's old design on it and written back over the move
+  // on the way out — the line ended on the new page holding the old page's
+  // design, which no sheet can print.
+  if(mcGtHome) await mcGtReturn();
+  // and the old page's cutting file and text boxes stay behind with it: a
+  // line's own shape wins, so it was cut to the other page's die
+  const si={...(it.sheet_item||{}),page:mode,designId:id,vals:{},shape:'',extra:[]};
   it.tile='giftTag'; it.sheet_item=si;
   await mcSave(it,{tile:'giftTag',sheet_item:si});
   if(typeof gtSetMode==='function'&&gtMode!==mode) await gtSetMode(mode);
@@ -38663,7 +38942,7 @@ const mcGtLine=it=>({id:'mc-'+it.id,
   // found the row by its design instead, which is another order as often as
   // this one, and where nothing matched it took the mark off the lines and
   // left the tags sitting on the sheet.
-  sku:(it&&it.sku)||'',
+  sku:it?mcRowKey(it):'',          // the summary's key, which is the SKU or what stands in for one
   designId:(it.sheet_item&&it.sheet_item.designId)||'',
   qty:(it.sheet_item&&it.sheet_item.qty)||mcQty(it)||1,
   vals:(it.sheet_item&&it.sheet_item.vals)||{},
@@ -38785,7 +39064,7 @@ function mcGiftWire(it){
     const d=mcGtDesign(mcGtPick);
     box.value=d?(d.name||''):'';
     openPanel(false);
-    drawWords();
+    drawWords(); markShown();
     drawPrev();
     // And onto the sheet beside this, where the tag is actually worked. Its row
     // was lent blank, and it used to sit blank until Save was pressed — so a
@@ -38883,7 +39162,14 @@ function mcGiftWire(it){
         </div>`;
     }).join('');
   }
-  drawWords();
+  // what the boxes held when last filled from the line — the measure of what
+  // has been changed in the panel since, which is what wins over the sheet
+  let shown=null;
+  const markShown=()=>{
+    const q=document.getElementById('mcGtQty');
+    shown={qty:Math.max(1,Math.round(Number(q&&q.value)||1)),vals:panelVals()};
+  };
+  drawWords(); markShown();
   drawPrev();
   // The panel is not closed when Open full builder is pressed — it sits over
   // that screen with this same line on it, and used to go on showing what the
@@ -38904,7 +39190,7 @@ function mcGiftWire(it){
     }
     const q=document.getElementById('mcGtQty');
     if(q&&live.qty&&Number(q.value)!==Number(live.qty)) q.value=live.qty;
-    drawWords();                 // the inputs are rewritten from the line
+    drawWords(); markShown();    // the inputs are rewritten from the line
     drawPrev();                  // and the tag is drawn from the inputs
   };
   // a design matched by name on the way in has a shape as surely as one picked
@@ -38947,14 +39233,19 @@ function mcGiftWire(it){
     else if(mcGtHome) await mcGtOpenFull(page,fin);
   });
 
-  // everything typed into the panel, back in the shape the sheet is drawn from
-  function collect(){
+  // what the panel's boxes say, field by field
+  function panelVals(){
     const vals={};
     words.querySelectorAll('[data-mc-gtf]').forEach(el=>{
       const [id,key]=el.dataset.mcGtf.split('|');
       const v=vals[id]||(vals[id]={});
       v[key]=key==='size'?(Number(el.value)||undefined):el.value;
     });
+    return vals;
+  }
+  // everything typed into the panel, back in the shape the sheet is drawn from
+  function collect(){
+    const vals=panelVals();
     const fin=document.querySelector('#mcGtFinish [data-mc-fin].on');
     // built onto what the line already carries rather than in place of it:
     // which gift tag page this line is on is not asked here, and a fresh
@@ -38973,12 +39264,34 @@ function mcGiftWire(it){
     // field, and anything the sheet has never heard of is left as it was.
     const live=(typeof gtOrder!=='undefined'&&gtOrder||[])
       .find(l=>String(l.id||'')==='mc-'+it.id);
+    // — except what was changed here since the boxes were last filled from the
+    // line. The sheet winning outright threw those away: Add more put the new
+    // total in the box and the save read the sheet's old one back, and words
+    // retyped in the panel were replaced by the sheet's. What changed here wins
+    // and goes onto the sheet's row too, so the two stop disagreeing.
     if(live){
+      const sq=shown?shown.qty:out.qty;
+      const qtyHere=out.qty!==sq;
+      const merged={...(live.vals||{})};
+      let wordsHere=false;
+      Object.keys(vals).forEach(id=>{
+        Object.keys(vals[id]).forEach(key=>{
+          const was=shown&&shown.vals[id]?shown.vals[id][key]:vals[id][key];
+          if(vals[id][key]===was) return;
+          merged[id]={...(merged[id]||{}),[key]:vals[id][key]};
+          wordsHere=true;
+        });
+      });
       out.designId=live.designId||out.designId;
-      out.qty=Math.max(1,Math.round(Number(live.qty)||out.qty));
-      out.vals={...(out.vals||{}),...(live.vals||{})};
+      if(!qtyHere) out.qty=Math.max(1,Math.round(Number(live.qty)||out.qty));
+      out.vals=merged;
       // and the boxes themselves, not only what was typed into them
       out.extra=(live.extra||[]).map(f=>({...f}));
+      if(qtyHere||wordsHere){
+        live.qty=out.qty; live.vals=merged;
+        shown={qty:out.qty,vals};       // said on the sheet now, so no longer a change
+        if(typeof gtDraw==='function') try{ gtDraw(); }catch(e){}
+      }
     }
     // Add more here and Add Extra on the line are the same figure asked two
     // ways, so what is over the order is written down rather than left to be
@@ -39141,11 +39454,26 @@ async function mcGtOpenFull(page,finish){
   // The next order worked lands on the sheet already open where it belongs on
   // it, which is what "same finish, same page" means, and starts a sheet of its
   // own where it does not.
+  // A row of the page's own that the SKU summary added for one of these SKUs is
+  // the same tags as the lines being lent for it — kept beside them, the SKU
+  // printed twice. The lent lines are the batch's rows for it now.
+  const lentKeys=new Set(lines.map(x=>mcRowKey(x).trim().toLowerCase()));
+  const dupe=l=>!mcGtLent(l)&&l.sku&&lentKeys.has(String(l.sku).trim().toLowerCase());
   if(mcGtHome){
+    mcGtHome.dropped=(mcGtHome.dropped||[]).concat(gtOrder.filter(dupe));
+    gtOrder=gtOrder.filter(l=>!dupe(l));
     const on=new Map(gtOrder.map(l=>[String(l.id||''),l]));
     for(const x of lines){
       const key='mc-'+x.id, had=on.get(key);
-      if(!had){ gtOrder.push(mcGtLine(x)); mcGtHome.ids.push(x.id); continue; }
+      if(!had){
+        // Lent once and not on the sheet now means it was taken off with the ×
+        // since, and has not been written back yet. Putting it back here undid
+        // that — unless it is the very line being opened, which is asked for.
+        if(mcGtHome.ids.includes(x.id)&&!(here&&x.id===here.id)) continue;
+        gtOrder.push(mcGtLine(x));
+        if(!mcGtHome.ids.includes(x.id)) mcGtHome.ids.push(x.id);
+        continue;
+      }
       // the line that was lent blank has just been given a design in the panel:
       // it takes it here rather than arriving as an empty row on the sheet
       const si=x.sheet_item||{};
@@ -39161,8 +39489,9 @@ async function mcGtOpenFull(page,finish){
     // opening the full builder read as the sheet being emptied — an afternoon
     // of lines keyed in by hand gone, with nothing to say they were coming
     // back. Only the rows the batch lent are ever taken away again.
-    const own=gtOrder.filter(l=>!mcGtLent(l));
-    mcGtHome={ids:lines.map(l=>l.id),page:want,finish:fin};
+    const own=gtOrder.filter(l=>!mcGtLent(l)&&!dupe(l));
+    // set aside rather than deleted: they are the page's, and go back on return
+    mcGtHome={ids:lines.map(l=>l.id),page:want,finish:fin,dropped:gtOrder.filter(dupe)};
     gtOrder=own.concat(lines.map(mcGtLine));
   }
   // and the sheet says which run it is, because that is what names its PDF
@@ -39192,6 +39521,17 @@ function mcGtLiveDesign(it,id){
   if(typeof gtDraw==='function') gtDraw();
   if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync();
 }
+// Every row the batch has lent, wherever it is sitting: on the sheet on screen,
+// or parked in the other page's order because the screen switched pages since
+// (the SKU summary's Add and the export's previews both do). Nothing is moved.
+function mcGtLentRows(){
+  const out=[], seen=new Set();
+  const take=l=>{ const k=String((l&&l.id)||''); if(mcGtLent(l)&&!seen.has(k)){ seen.add(k); out.push(l); } };
+  (gtOrder||[]).forEach(take);
+  if(typeof gtOrders!=='undefined'&&gtOrders)
+    Object.values(gtOrders).forEach(list=>{ if(Array.isArray(list)&&list!==gtOrder) list.forEach(take); });
+  return out;
+}
 // Called on the way off the Gift Tag screen, whichever way somebody leaves it.
 async function mcGtReturn(){
   if(!mcGtHome) return;
@@ -39216,6 +39556,13 @@ async function mcGtReturn(){
   // the batch's rows go back to the batch; everything else on the sheet is the
   // page's own and stays exactly as it was left, edits and all
   gtOrder=gtOrder.filter(l=>!mcGtLent(l));
+  // and the page's own rows that were set aside for the loan come back
+  const back=(home.dropped||[]).filter(l=>!gtOrder.some(x=>x.id===l.id));
+  if(back.length){
+    const target=(home.page===gtMode||typeof gtOrders==='undefined')?null:home.page;
+    if(target) gtOrders[target]=(gtOrders[target]||[]).concat(back);
+    else gtOrder=gtOrder.concat(back);
+  }
   if(typeof gtRenderOrder==='function') gtRenderOrder();
   await mcGtWriteBack(edited,home);
   if(mcOnBatch()) mcRenderItems();
@@ -39325,8 +39672,11 @@ async function mcBorrowBuilder(fn){
     search:(document.getElementById('templateSearch')||{}).value||''};
   try{ return await fn(); }
   finally{
-    state.final.front=keep.final.front; state.final.back=keep.final.back;
     applyPrintState(keep.meta);
+    // the layout starts its own artwork loading, and that landed after the
+    // design list was put back and replaced it — so it is waited for first
+    await printArtReady().catch(()=>{});
+    state.final.front=keep.final.front; state.final.back=keep.final.back;
     state.designs=keep.designs; state.page=keep.page;
     setArtMode(keep.artMode,true);
     mcSetOrderId(keep.orderId||'');
@@ -39398,8 +39748,11 @@ async function mcDownloadOne(id){
   catch(e){ mcBusy=false; mcSyncBatchButtons(); throw e; }
   showMsg(out,'Rendering at print resolution…',true);
   try{
-    // the line open in the builder is exported as it stands, not as last saved
+    mcBundleSkipped=new Set();
+    // the line open in the builder is exported as it stands, not as last saved,
+    // and so is a gift tag sheet out on loan
     if(mcWinItem===it.id&&t.mode==='per-order') await mcCommit();
+    if(t.mode!=='per-order'&&mcGtHome) await mcGtWriteBack(mcGtLentRows(),mcGtHome);
     await mcBorrowBuilder(async()=>{
       if(t.mode!=='per-order'){
         // the tag side has to know which page this design is on before it can
@@ -39419,6 +39772,12 @@ async function mcDownloadOne(id){
       }
       showMsg(out,`✓ ${n} file${n===1?'':'s'} ${dir?'saved into '+dir.name:'downloaded'}`,true);
     });
+    // a sheet that came out without this line's own design is not this line done
+    if(mcBundleSkipped.has(it.id)){
+      showMsg(out,`${escapeHtml(it.sku||'This line')} has no design to put on its sheet — `
+        +'nothing of it is in that file, and it is left not downloaded.',false);
+      return;
+    }
     await mcMarkExported(it);
     mcRepaintRow(it);
   }catch(err){
@@ -39456,6 +39815,16 @@ async function mcExportPlan(){
         what:`${tile.name} · ${b.set.length} line${b.set.length===1?'':'s'}`}));
     }
   }
+  // Two files of one name in one run are one file: the folder keeps whichever
+  // was written last. Two personalised cards on one order with the same
+  // design, paper and weight did it, and so did two templates of one name. The
+  // second and after take a number, just before the extension.
+  const used=new Map();
+  plan.forEach(e=>{
+    const k=String(e.name||'').toLowerCase();
+    const n=(used.get(k)||0)+1; used.set(k,n);
+    if(n>1) e.name=String(e.name).replace(/(\.[^.]+)?$/,m=>`-${n}${m}`);
+  });
   return plan;
 }
 document.getElementById('mcDownloadAllBtn').addEventListener('click',()=>mcDownloadAll());
@@ -39488,6 +39857,7 @@ async function mcDownloadAll(){
         // One line whose artwork will not load is that line's problem: it is
         // left unmarked and named at the end, and the rest still come out.
         try{
+          mcBundleSkipped=new Set();
           bytes=e.kind==='line'
             ? await mcRenderLine(e.it,e.side)
             : await MC_TILES[e.tile].make(e);
@@ -39501,7 +39871,7 @@ async function mcDownloadAll(){
         if(e.kind==='line') files++; else bundles++;
         // marked as it goes: a crash at 180 of 214 then costs 34, not 214 —
         // and a line with a side that was not made is not marked at all
-        for(const it of e.set) if(!bad.has(it.id)) await mcMarkExported(it,run);
+        await mcMarkMade({set:e.set.filter(it=>!bad.has(it.id))},run,failed);
       }
     });
     mcRenderItems();
@@ -39527,6 +39897,10 @@ function mcBatchDate(){
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
 }
 async function mcWinCommitAndPark(){
+  // A gift tag sheet out on loan holds edits that reach the lines only on
+  // Save or on leaving, and the export reads the lines — so they are written
+  // back first, or the PDF is the sheet as it was before them.
+  if(mcGtHome) await mcGtWriteBack(mcGtLentRows(),mcGtHome);
   if(!mcWinEl.classList.contains('open')) return;
   await mcCommit();
   // Not parked any more. The builder is handed back holding this line's layout
@@ -39613,7 +39987,7 @@ async function mcPrintLay(lines,template){
   for(const it of lines){
     const si=it.sheet_item||{};
     const pick=(loadDesignFiles||[]).find(f=>f.path===si.path)||designFileForSku(it.sku);
-    if(!pick){ missing.push(it.sku||si.name||''); continue; }
+    if(!pick){ missing.push(it.sku||si.name||''); mcBundleSkipped.add(it.id); continue; }
     const qty=Math.max(1,Math.round(Number(si.qty||mcQty(it))||1));
     // two lines of one SKU are two orders for the same card: they add up
     const had=state.designs.find(d=>d.source&&d.source.path===pick.path);
@@ -39625,6 +39999,22 @@ async function mcPrintLay(lines,template){
       : 'nothing landed on the print sheet');
   setArtMode('preset');
   return {pages:sheetCount(),missing};
+}
+// The lines a sheet was asked to carry and could not — a design gone from the
+// folder, a tag with no design in its library. Filled while a sheet is made and
+// read straight after, so only what actually came out in the file is marked as
+// downloaded. Cleared by whoever starts a make.
+let mcBundleSkipped=new Set();
+// what a set of lines came to once made: marked where they came out, and the
+// ones that did not named for the message
+async function mcMarkMade(e,run,failed){
+  for(const it of e.set){
+    if(mcBundleSkipped.has(it.id)){
+      failed.push(`${it.order_id||it.sku||'a line'} (no design found for ${it.sku||'it'})`);
+      continue;
+    }
+    await mcMarkExported(it,run);
+  }
 }
 async function mcPrintBundle(lines,template){
   const {pages}=await mcPrintLay(lines,template);
@@ -39697,6 +40087,9 @@ async function mcGiftBundle(lines,mode){
     // paper is worse than an error, so it is one. Said with the page's name on
     // it, because this is what a line built on the other page looks like.
     const lost=gtOrder.filter(l=>!gtDesign(l.designId)).length;
+    // the lines whose tags could not be drawn are left out of the file, and so
+    // are not marked as having come out in it
+    gtOrder.forEach(l=>{ if(mcGtLent(l)&&!gtDesign(l.designId)) mcBundleSkipped.add(String(l.id).slice(3)); });
     if(lost===gtOrder.length)
       throw new Error(`${gtOrder.length===1?'this line has no design'
         :`none of these ${gtOrder.length} lines has a design`} in the ${where} library `
@@ -40106,12 +40499,15 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
       // The lines stay lent: this is a save, not a way out. mcGtReturn writes
       // exactly the same thing on the way off the screen, so saving here and
       // then leaving writes the same values twice rather than two answers.
-      await mcGtWriteBack(gtOrder,mcGtHome);
+      // Every lent row, not only the ones on the page on screen. After a page
+      // switch they were parked elsewhere, this saw none of them, and wrote the
+      // whole loan off the batch as if every tag had been taken off.
+      const lent=mcGtLentRows();
+      await mcGtWriteBack(lent,mcGtHome);
       // and what is lent is now what is on the batch, so a tag taken off after
       // this is measured against this rather than against what was lent
-      mcGtHome.ids=gtOrder.map(l=>String(l.id||''))
-        .filter(x=>x.startsWith('mc-')).map(x=>x.slice(3));
-      const n=gtOrder.filter(l=>l&&l.designId&&mcGtLent(l)).length;
+      mcGtHome.ids=lent.map(l=>String(l.id).slice(3));
+      const n=lent.filter(l=>l&&l.designId).length;
       if(mcOnBatch()) mcRenderItems();
       mcSyncBatchButtons();
       if(mcWinItem) mcWinRender();
