@@ -38490,6 +38490,17 @@ function mcWinRender(){
     gtSetMode(page).then(()=>{ if(mcWinItem===it.id) mcWinRender(); });
     return;
   }
+  // and the one-off this line was given, which no folder holds and this library
+  // was emptied of the moment a page was opened. The line kept its own copy;
+  // without it back the panel shows no design at all and reads as a line that
+  // was never saved.
+  if(it.tile==='giftTag'&&mcGtNeedsOneOff(it)){
+    const body='<p class="hint" style="margin:12px 0 0;">Fetching this line’s '
+      +'one-off design…</p>';
+    document.getElementById('mcWinBody').innerHTML=head+picker+body+'<div id="mcWinMsg"></div>';
+    mcGtRehydrate(it).then(()=>{ if(mcWinItem===it.id) mcWinRender(); });
+    return;
+  }
   const body=t?t.body(it):'<p class="hint" style="margin:12px 0 0;">Pick a tile above to '
     +'work on this line, or leave it as it is and mark it done from the list.</p>';
   // whatever the last render hung on the document goes with it: the body is
@@ -39331,6 +39342,12 @@ function mcGiftBody(it){
               aria-label="Show every design">▾</button>
       <div class="combo-panel" id="mcGtPanel" role="listbox"></div>
     </div>
+    ${(si.designId&&!chosen)?`<p class="hint" style="margin:0 0 8px;color:var(--rust);">
+      ${si.oneOff
+        ? 'The one-off design saved on this line could not be fetched back — pick it '
+          +'again, or put the artwork in the designs folder if it is wanted more than once.'
+        : 'The design saved on this line is not in this page’s library any more — pick '
+          +'one again before it is printed.'}</p>`:''}
     <canvas class="mc-gt-prev" id="mcGtPrev"></canvas>
     <div class="grid2" style="margin-bottom:8px;">
       <label class="field"><span>HOW MANY${
@@ -39371,6 +39388,89 @@ function mcGiftBody(it){
 }
 const mcGtDesign=id=>((typeof gtLib!=='undefined'&&gtLib.designs)||[])
   .find(d=>d.id===id)||null;
+
+// ---------- a one-off design on a batch line ----------
+// A one-off belongs to the session that made it: it is never written into the
+// designs folder and never reaches library.json, and the library is emptied and
+// read again every time a folder is opened — the other gift tag page picked,
+// the browser reloaded, the export switching pages to build the sheet. The
+// design was gone by then and the line was left pointing at an id nothing could
+// find: the panel showed no design, so it read as never having saved, and the
+// export counted the line as lost and walked past it. The artwork had been on
+// the line the whole time.
+//
+// So a line given a one-off keeps its own copy — the bytes in the bucket beside
+// its other artwork, the rest of the design on the row — and it is put back
+// into the library whenever the line is looked at, laid out or printed. A
+// library design needs none of this: it is in the folder, and the folder is
+// read again every time.
+const mcGtOneOffExt=f=>{
+  const m=String(f||'').match(/\.(pdf|png|jpe?g|webp|svg)$/i);
+  return (m?m[0]:'.png').toLowerCase().replace('.jpeg','.jpg');
+};
+async function mcGtPutOneOff(it,d){
+  const blob=(typeof gtAssets!=='undefined')?gtAssets.get(d.file):null;
+  if(!sb||!blob) return null;
+  const uid=await mcWhoAmI();
+  const path=`${uid}/magic/${it.id}-tag${mcGtOneOffExt(d.file)}`;
+  const up=await sb.storage.from(PHOTO_BUCKET)
+    .upload(path,blob,{contentType:blob.type||'application/octet-stream',upsert:true});
+  if(up.error) throw up.error;
+  return path;
+}
+// Called with the sheet_item about to be written, and writes into it. The bytes
+// go up once; the name, the words and the hole can all be changed on the sheet
+// afterwards, so those are refreshed every time.
+async function mcGtKeepOneOffOn(it,si){
+  if(!si) return;
+  const d=si.designId?mcGtDesign(si.designId):null;
+  if(!d||!d.adhoc){
+    // not a one-off any more — what is kept on the line is another design's
+    if(si.oneOff) si.oneOff=null;
+    return;
+  }
+  const had=si.oneOff&&si.oneOff.id===d.id&&si.oneOff.path?si.oneOff:null;
+  let path=had?had.path:null;
+  if(!path){
+    try{ path=await mcGtPutOneOff(it,d); }catch(e){ path=null; }
+    if(!path) return;               // nothing kept, and nothing claimed to be
+  }
+  si.oneOff={id:d.id,name:d.name||'',file:d.file||path,path,
+    fields:(d.fields||[]),hole:d.hole||null};
+}
+// The copies these lines are carrying, back into the library — only the ones
+// the library cannot already answer for, so a page still holding its one-offs
+// is not made to fetch them again.
+// Copies that would not come back. Held so the panel, which redraws itself
+// once the fetch is done, does not go round for ever on one that cannot be
+// fetched. Only failures are written down: a copy that came back fine is
+// fetched again as often as the library is emptied under it.
+const mcGtOneOffBad=new Set();
+async function mcGtRehydrate(lines){
+  if(!sb||typeof gtLib==='undefined') return;
+  const list=(Array.isArray(lines)?lines:[lines]).filter(Boolean);
+  for(const it of list){
+    const one=it&&it.sheet_item&&it.sheet_item.oneOff;
+    if(!one||!one.id||!one.path) continue;
+    if(mcGtDesign(one.id)) continue;
+    try{
+      const {data,error}=await sb.storage.from(PHOTO_BUCKET).download(one.path);
+      if(error||!data){ mcGtOneOffBad.add(one.path); continue; }
+      if(mcGtDesign(one.id)) continue;
+      const d=gtNormalizeDesign({id:one.id,name:one.name||'One-off',
+        file:one.file||one.path,adhoc:true,fields:one.fields||[],hole:one.hole});
+      gtAssets.set(d.file,data);
+      try{ gtImgs.set(d.id,await loadImage(await gtArtURL(data,d.file))); }catch(e){}
+      gtLib.designs.push(d);
+    }catch(e){ mcGtOneOffBad.add(one.path); }
+  }
+}
+// Whether any of these lines is waiting on a copy the library has not got and
+// this session has not already failed to fetch.
+const mcGtNeedsOneOff=lines=>(Array.isArray(lines)?lines:[lines]).some(it=>{
+  const one=it&&it.sheet_item&&it.sheet_item.oneOff;
+  return !!(one&&one.id&&one.path&&!mcGtOneOffBad.has(one.path)&&!mcGtDesign(one.id));
+});
 // Move a line to the gift tag page its design is actually on, and give it that
 // design. Routing sends a line to a page by its name — "Custom Gift Tag-TD-1"
 // is caught by a rule about gift tags and lands on Festive — and the design
@@ -39386,6 +39486,7 @@ async function mcGtMoveToPage(it,mode,id){
   // line's own shape wins, so it was cut to the other page's die
   const si={...(it.sheet_item||{}),page:mode,designId:id,vals:{},shape:'',extra:[]};
   it.tile='giftTag'; it.sheet_item=si;
+  await mcGtKeepOneOffOn(it,si);
   await mcSave(it,{tile:'giftTag',sheet_item:si});
   if(typeof gtSetMode==='function'&&gtMode!==mode) await gtSetMode(mode);
   if(mcWinItem===it.id) mcWinRender();
@@ -39811,6 +39912,8 @@ function mcGiftWire(it){
     const msg=document.getElementById('mcWinMsg');
     if(!mcGtPick){ showMsg(msg,'Search for a design and pick one first.',false); return; }
     it.sheet_item=collect();
+    // a one-off is nobody's file but this session's, so the line takes a copy
+    await mcGtKeepOneOffOn(it,it.sheet_item);
     if(await mcSave(it,{sheet_item:it.sheet_item,...mcDonePatch(it,true)})){
       showMsg(msg,'✓ On the sheet',true);
       mcRepaintRow(it);
@@ -39824,6 +39927,7 @@ function mcGiftWire(it){
     const msg=document.getElementById('mcWinMsg');
     if(!mcGtPick){ showMsg(msg,'Search for a design and pick one first.',false); return; }
     it.sheet_item=collect();
+    await mcGtKeepOneOffOn(it,it.sheet_item);
     if(!await mcSave(it,{sheet_item:it.sheet_item})) return;
     mcRepaintRow(it);
     await mcGtOpenFull(it.sheet_item.page||mcLinePage(it),it.sheet_item.finish);
@@ -39933,6 +40037,10 @@ async function mcGtOpenFull(page,finish){
       escapeHtml(fin.toLowerCase())} sheet yet.`,false);
     return;
   }
+  // the one-offs among them, back in the library before the sheet is laid —
+  // the page switch above read the folder again, and a folder has never heard
+  // of a one-off
+  await mcGtRehydrate(lines);
   // A sheet already lent is added to rather than built again. Saving a design
   // to the line brings us back through here, and rebuilding the order from the
   // rows would throw away every word dragged and every box resized on the sheet
@@ -40074,6 +40182,10 @@ async function mcGtWriteBack(edited,home){
       // they were, the line went on saying the old number of extras
       extra_qty:Math.max(0,(Number(l.qty)||0)-(Number(it.qty)||0)),
       page:(it.sheet_item&&it.sheet_item.page)||home.page||gtMode};
+    // A design picked over there can be a one-off, which lives in this session
+    // and nowhere else. The line takes its own copy, or it comes back tomorrow
+    // pointing at a design the library has never heard of.
+    await mcGtKeepOneOffOn(it,it.sheet_item);
     // and a tag on the sheet is a gift tag line — Download All goes by the tile
     const retile=l.designId&&it.tile!=='giftTag';
     if(retile) it.tile='giftTag';
@@ -40571,6 +40683,8 @@ function mcGiftBundles(lines){
 async function mcGiftPreview(lines,mode,canvas,dim,page){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
+  // what the file will be is what is proofed, one-off copies included
+  await mcGtRehydrate(lines);
   const keep=gtOrder, keepPage=gtPage;
   gtOrder=lines.map(mcGtLine);
   try{
@@ -40595,6 +40709,10 @@ async function mcGiftBundle(lines,mode){
   // laid out, and an export that failed on "nothing landed on the sheet".
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
   const where=mcGtPage(gtMode).name;
+  // and the one-offs these lines carry their own copies of. The switch above
+  // empties the library and reads the folder again, which is exactly what took
+  // a one-off off the sheet — so they go back in after it, not before.
+  await mcGtRehydrate(lines);
   if(!gtSheet.slots||!gtSheet.slots.length)
     throw new Error(`the ${where} gift tag sheet has no places on it — set its layout up `
       +'on the Gift Tag screen first');
