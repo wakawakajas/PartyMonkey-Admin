@@ -5944,7 +5944,7 @@ body.mc-docked .mc-bubble{display:none !important;}
       <div id="bleedFillMsg"></div>
 
       <div class="sect-label">Client file fix</div>
-      <p class="hint">For a file that came in at the wrong size, too low a resolution or with no bleed: keeps it at actual size (fitted to the card when the file says no size), turns a portrait file to lie along a landscape card, adds 2.5 mm bleed made from its own edges, and AI-upscales any side under 300 DPI.</p>
+      <p class="hint">For a file that came in at the wrong size, too low a resolution or with no bleed: keeps the file's own proportions inside the card, turns a portrait file to lie along a landscape card, adds 2.5 mm of bleed in whichever style suits its edges — extended for flat colour, mirrored for a busy edge, content-aware where detail runs right off it — carried across whatever the wrong shape leaves empty so it reaches the cut, and AI-upscales any side under 300 DPI.</p>
       <button type="button" class="btn-primary" id="printReadyBtn" style="width:100%;">⚡ Make print-ready</button>
       <div id="printReadyMsg"></div>
     </div>
@@ -9806,8 +9806,40 @@ async function enhanceArt(side){
 }
 
 // ---------- the client file fix, in one tap ----------
-// What was done by hand in Photoshop for every client file: fit it to the
-// card, give it 2.5 mm of bleed from its own edges, bring it up to 300 DPI.
+// How busy this picture is right at its edges: the average step from one
+// pixel to the next along all four of them, 0 for a flat colour and rising
+// with detail. Read off a small copy — the question is what the edge is like,
+// not what any one pixel is — and 0 for a picture that cannot be read.
+function edgeBusyness(img){
+  try{
+    const nw=img.naturalWidth||img.width, nh=img.naturalHeight||img.height;
+    if(!nw||!nh) return 0;
+    const f=Math.min(1,256/Math.max(nw,nh));
+    const w=Math.max(8,Math.round(nw*f)), h=Math.max(8,Math.round(nh*f));
+    const c=document.createElement('canvas'); c.width=w; c.height=h;
+    const cx=c.getContext('2d',{willReadFrequently:true});
+    cx.drawImage(img,0,0,w,h);
+    const d=cx.getImageData(0,0,w,h).data;
+    const px=(x,y)=>(y*w+x)*4;
+    const step=(a,b)=>(Math.abs(d[a]-d[b])+Math.abs(d[a+1]-d[b+1])+Math.abs(d[a+2]-d[b+2]))/3;
+    let sum=0,n=0;
+    for(let x=1;x<w;x++){ sum+=step(px(x-1,0),px(x,0))+step(px(x-1,h-1),px(x,h-1)); n+=2; }
+    for(let y=1;y<h;y++){ sum+=step(px(0,y-1),px(0,y))+step(px(w-1,y-1),px(w-1,y)); n+=2; }
+    return n?sum/n:0;
+  }catch(e){ return 0; }   // a picture the canvas will not read says nothing
+}
+// And which made-up bleed suits it. A flat colour or a gradient extends
+// cleanly, and mirroring it would fold a seam onto the cut; an ordinary busy
+// edge mirrors convincingly; an edge with detail running right off it — a
+// photograph, a crowded pattern — folds visibly when mirrored, so the texture
+// is matched into the bleed instead, which is what the hand fix did.
+function bestBleedMode(imgs){
+  const busy=imgs.filter(Boolean).reduce((m,img)=>Math.max(m,edgeBusyness(img)),0);
+  return busy<4?'extend':busy<12?'mirror':'content';
+}
+// What was done by hand in Photoshop for every client file: the file's own
+// proportions inside the card, 2.5 mm of bleed made from its own edges and
+// carried across whatever the wrong shape left empty, and 300 DPI.
 document.getElementById('printReadyBtn').addEventListener('click',async()=>{
   const out=document.getElementById('printReadyMsg');
   const btn=document.getElementById('printReadyBtn');
@@ -9817,10 +9849,17 @@ document.getElementById('printReadyBtn').addEventListener('click',async()=>{
   try{
     state.bleed.enabled=true;
     state.bleed.mm=2.5;
-    if(bleedModeNow()==='stretch') state.bleed.mode='mirror';
-    // Actual size, the way the builder opens: a file that says how big it is
-    // prints that big, and one that does not is fitted to the card
-    setArtFit('actual');   // refits both sides and redraws
+    // the bleed that suits what was sent, rather than one fixed choice
+    state.bleed.mode=bestBleedMode(sides.map(s=>state.final[s].img));
+    syncBleedModeSeg();
+    // and it reaches the cut on a file sent at the wrong shape, which is the
+    // file this button exists for
+    state.bleed.fillGap=true;
+    document.getElementById('bleedFillGap').checked=true;
+    // The file's own proportions, fitted inside the card: a client file at the
+    // wrong ratio keeps its shape and is made up to the edge, rather than
+    // being squashed to fit.
+    setArtFit('original');   // refits both sides and redraws
     const soft=sides.filter(s=>!artIsVector(state.final[s])&&(artPrintDpi(s)||PRINT_DPI)<PRINT_DPI*0.95);
     const done=[];
     for(const s of soft){
@@ -9828,7 +9867,8 @@ document.getElementById('printReadyBtn').addEventListener('click',async()=>{
       if(await enhanceArt(s)) done.push(s);
     }
     const failed=soft.filter(s=>!done.includes(s));
-    const parts=['actual size','2.5 mm '+({mirror:'mirrored',extend:'extended',content:'content-aware',ai:'AI-filled'}[bleedModeNow()])+' bleed'];
+    const parts=['its own proportions',
+      '2.5 mm '+({mirror:'mirrored',extend:'extended',content:'content-aware',ai:'AI-filled'}[bleedModeNow()])+' bleed to the edge'];
     if(done.length) parts.push(done.join(' and ')+' upscaled to print resolution');
     showMsg(out,(failed.length?'⚠ ':'✓ ')+parts.join(', ')
       +(failed.length?` — ${failed.join(' and ')} could not be upscaled, see above.`:'.'),!failed.length);
