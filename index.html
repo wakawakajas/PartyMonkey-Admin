@@ -2536,8 +2536,10 @@ body.mc-docked .mc-bubble{display:none !important;}
    small one is the one nobody trusts. There is one builder now: the screen
    that has always drawn these sheets, put beside the list instead of behind
    it. The list keeps its own scroll so a two-hundred-line batch does not push
-   the sheet off the top, and the panel that says what THIS line is — its
-   template, its paper, its artwork — is docked at the head of that list.
+   the sheet off the top, and the panel that says what THIS line is — which
+   page builds it, which saved layout it is on — is docked at the head of that
+   list. What the sheet beside it already asks (the paper, the weight, the
+   picture) the panel hands over rather than asking twice.
    Only where there is room for two columns; below that the builder is a screen
    of its own the way it always was. */
 @media (min-width:1024px){
@@ -2612,6 +2614,15 @@ body.mc-docked .mc-bubble{display:none !important;}
      line, and which run it goes on. */
   body.mc-split #mcWin #mcGtCombo,body.mc-split #mcWin #mcGtSaveBtn,
   body.mc-split #mcWin #mcSaveLineBtn{display:none !important;}
+  /* The paper, the weight and the two artwork slots, where the sheet beside
+     this carries the same four. Two pairs of boxes for one answer is worse
+     than none: the panel shows what the line was saved with and the sheet
+     shows what the builder is set to, and side by side one of them always
+     looks wrong. The sheet's pair wins — it is the one being worked, it is
+     what the file name preview reads, and it now writes straight onto the
+     line. The gift tag panel keeps its pair: that sheet has no such boxes. */
+  body.mc-split #mcWin #mcStockRow.mc-on-sheet-too,
+  body.mc-split #mcWin #mcArtBlock{display:none !important;}
   .mc-split-only{display:none;}
   body.mc-split .mc-split-only{display:block;}
   /* neither column slides: they are both on screen at once, and a screen
@@ -7773,19 +7784,49 @@ function drawCategoryText(ctx,sc,page){
     });
   });
 }
-function drawAll(){
-  // measure the card the canvas actually sits in, so the sheet fills whatever
-  // space it has — two across on a phone, or stacked in the desktop rail
-  // Scoped to this screen. Unscoped, these two picked the first card and the
-  // first wrap in the whole document — which is another screen's, sitting at
-  // zero width while it is hidden. The sheet was then sized off nothing and
-  // fell back to its floor of 120px however much room it actually had.
+// How wide the card the sheet is drawn into actually is, measured once and
+// kept. Scoped to this screen: unscoped, these two picked the first card and
+// the first wrap in the whole document — which is another screen's, sitting at
+// zero width while it is hidden, and the sheet was sized off nothing.
+// A screen that measures nothing keeps the width it last had rather than
+// falling back to the floor of 120px.
+let sheetCardW=0;
+function sheetCardWNow(){
   const host=document.querySelector('#appScreen .preview-card');
   const wrap=document.getElementById('appScreen');
-  const avail=host&&host.clientWidth
+  return host&&host.clientWidth
     ? host.clientWidth-24                                   // card padding
     : ((wrap&&wrap.clientWidth||0)-10)/2-22;
-  const cardW=Math.max(120,avail);
+}
+function measureSheetCardW(){
+  const avail=sheetCardWNow();
+  if(avail>0) sheetCardW=avail;
+  return sheetCardW;
+}
+// What a redraw is allowed to do with that measurement. The canvas a redraw
+// had just sized fed back into the box it is measured from, and the sheet
+// crept larger with every click on the panel — so a redraw never grows it.
+// A box that has got narrower is honoured at once, the canvas only ever being
+// too big for it; growing is left to the observer and the window below, which
+// are the things that know the box has actually changed.
+function sheetDrawW(){
+  const now=sheetCardWNow();
+  if(now>0&&(!sheetCardW||now<sheetCardW-0.5)) sheetCardW=now;
+  return sheetCardW||now;
+}
+// the box actually changing size: a window resized, a panel docked beside the
+// sheet, the builder opened on a screen that was not being measured before
+if(window.ResizeObserver){
+  const roTarget=document.getElementById('appScreen');
+  if(roTarget) new ResizeObserver(()=>{
+    const was=sheetCardW;
+    if(Math.abs(measureSheetCardW()-was)>0.5&&currentScreen==='tool-custom') drawAll();
+  }).observe(roTarget);
+}
+function drawAll(){
+  // the sheet fills whatever space its card has — two across on a phone, or
+  // stacked in the desktop rail
+  const cardW=Math.max(120,sheetDrawW());
   const p=paperMm();
   const dim=Math.max(140,cardW*Math.max(p.w,p.h)/p.w);
   const page=clampPage();
@@ -10968,7 +11009,9 @@ function showScreen(name,viaBack){
     // a new screen, and folding the sheets again there would be undoing what
     // somebody had just unfolded to look at
     if(moving) pcFoldSheetsDefault();
-    pcPaintMode(); drawAll(); ppLoad(); // canvases were hidden (0 size) while off-screen; redraw now they're visible
+    // the sheet is measured afresh on the way in — a redraw never grows it on
+    // its own, and the card it sits in was another width, or none, off-screen
+    pcPaintMode(); measureSheetCardW(); drawAll(); ppLoad();
     // arriving with the active designs-folder set to the wrong mode (e.g. left
     // in Place Card, came back through Magic Create) — bring it in line
     if(loadDesignDirMode!==ldActiveMode())
@@ -32152,7 +32195,7 @@ function plLeave(){
 Object.keys(FILTERS).forEach(filterLabel);
 
 // ---------- init ----------
-window.addEventListener('resize',drawAll);
+window.addEventListener('resize',()=>{ measureSheetCardW(); drawAll(); });
 writeLayoutInputs();
 generateGrid();
 renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();
@@ -32231,6 +32274,13 @@ function ppFillSelects(){
   if(el) el.addEventListener('change',()=>{
     state[id==='artPaperType'?'paperType':'gsm']=el.value;
     refreshPdfNamingPreview();       // both can be in the file name
+    // and onto the batch line this builder is building, if it is building one.
+    // In the split these are the only pair on screen — the panel's copy stands
+    // down beside them — so without this the line kept whatever it was created
+    // with until something saved, and the row and the PDF button both went on
+    // saying it had no paper.
+    if(typeof mcNoteBuilderStock==='function')
+      mcNoteBuilderStock(id==='artPaperType'?'paper_type':'gsm',el.value);
   });
 });
 document.getElementById('printSettingsBtn')
@@ -32321,7 +32371,7 @@ async function ppEnsureValue(kind,value){
 // quietly made unprintable.
 const MC_STOCK_PARTS=[['paper','mcPaperPart','mcPaperPicks','mcPaperNew','paper'],
                       ['gsm','mcGsmPart','mcGsmPicks','mcGsmNew','weight']];
-async function mcAskStock(why,want){
+async function mcAskStock(why,want,cancelLabel){
   const need={paper:!!(want&&want.paper),gsm:!!(want&&want.gsm)};
   if(!need.paper&&!need.gsm) return {};
   // The lists live on another screen, and this is asked on a batch that may
@@ -32337,6 +32387,10 @@ async function mcAskStock(why,want){
     both?'What is it printed on?':need.paper?'Which paper?':'Which GSM?';
   document.getElementById('mcGsmWhy').textContent=why||'';
   document.getElementById('mcGsmUse').textContent=both?'Use these':'Use this';
+  // what walking away costs, said on the button that does it: nothing at all
+  // where this was only offered, and the save where the save is asking
+  document.getElementById('mcGsmCancel').textContent=
+    cancelLabel||'Cancel — do not save yet';
   msg.innerHTML='';
   // the first box worth typing into: a list with nothing on it has nothing to
   // tap, so the keyboard goes straight there
@@ -32438,6 +32492,36 @@ const mcStockWant=it=>({paper:!(state.paperType||(it&&it.paper_type)),
 // asks about — the builder may only be holding the last line's paper.
 const mcStockWantLine=it=>({paper:!(it&&it.paper_type),gsm:!(it&&it.gsm)});
 const mcStockMissing=w=>!!(w&&(w.paper||w.gsm));
+// Lines this session has already put the question to. Cancel is a real answer
+// — "not now" — and a question that comes back every time the panel redraws is
+// a question nobody can get past to do the work.
+const mcStockAsked=new Set();
+// The question, asked of a line as it is opened. The picker asks it when
+// somebody chooses the tile by hand, but most lines never go through the
+// picker: Routing writes the tile the moment the line is opened, and those
+// arrived already made with nothing said about what they print on. Offered,
+// never insisted on — Cancel leaves the line exactly as it was.
+async function mcAskStockFor(it){
+  if(!it||mcWinItem!==it.id) return;
+  if(!(it.tile==='custom'||it.tile==='placeCard'||it.tile==='giftTag')) return;
+  if(mcStockAsked.has(it.id)) return;
+  const want=mcStockWantLine(it);
+  if(!mcStockMissing(want)) return;
+  mcStockAsked.add(it.id);
+  const t=mcTile(it);
+  const ans=await mcAskStock(`${it.design_name||it.sku||'This line'} is on `
+    +`${(t&&t.name)||'this page'}. What is it printed on? This can be left until later.`,
+    want,'Not now — leave it blank');
+  if(!ans||mcWinItem!==it.id) return;
+  const patch={};
+  if(ans.paper) patch.paper_type=it.paper_type=ans.paper;
+  if(ans.gsm) patch.gsm=it.gsm=ans.gsm;
+  if(!Object.keys(patch).length) return;
+  mcUseStock(ans);
+  await mcSave(it,patch);
+  mcRepaintRow(it); mcSyncBatchButtons();
+  if(mcWinItem===it.id) mcWinRender();
+}
 document.querySelectorAll('[data-pp-add]').forEach(b=>
   b.addEventListener('click',()=>ppAdd(b.dataset.ppAdd)));
 ['ppPaperNew','ppGsmNew'].forEach(id=>{
@@ -38083,6 +38167,9 @@ async function mcWinOpen(id){
     if(mcWinItem!==id) return;
     mcScrollToLine(id);
     if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync();
+    // and what it prints on, where nothing has said yet. After the follow, so
+    // the sheet this line is on is already up behind the question.
+    if(it.tile) mcAskStockFor(it);
   });
   requestAnimationFrame(()=>requestAnimationFrame(()=>{
     if(mcWinItem===id) mcScrollToLine(id); }));
@@ -38096,6 +38183,10 @@ async function mcWinOpen(id){
       if(mcWinItem!==id) return;
       mcScrollToLine(id);
       if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync();
+      // Routing made this line what it is without anybody being asked
+      // anything — which is exactly the line that reaches the sheet with no
+      // paper on it and no obvious reason why its PDF button is grey.
+      mcAskStockFor(it);
     });
   });
   // and what both gift tag libraries are called, so the design picker can say
@@ -38307,9 +38398,15 @@ function mcWinRender(){
     if(c&&(c.tile==='custom'||c.tile==='placeCard'||c.tile==='giftTag')){
       const want=mcStockWantLine(it);
       if(mcStockMissing(want)){
+        mcStockAsked.add(it.id);   // asked here, so opening it does not ask again
+        // Asked, never insisted on. Turning a line into something is the work;
+        // a question in the way of it is a question that gets cancelled all
+        // morning. Cancel here leaves the line exactly as this always made it
+        // — with no paper and no weight — and the save asks again at the point
+        // where it actually matters.
         stock=await mcAskStock(`${it.design_name||it.sku||'This line'} is going on `
-          +`${c.label}. What is it printed on?`,want);
-        if(!stock){ e.target.value=mcChoiceOf(it); return; }
+          +`${c.label}. What is it printed on? This can be left until later.`,
+          want,'Not now — leave it blank');
       }
     }
     // turned into a gift tag here is created as one, so it is asked the same
@@ -38450,12 +38547,17 @@ const mcPcOf=it=>(it&&it.tile==='placeCard')?'placecard':'custom';
 // something on stock carries them, and they read the same lists the create-time
 // question offers — so an answer given there can be corrected here without
 // going anywhere.
-function mcStockRowHtml(it){
+// `alsoOnSheet` says the builder beside this has the very same pair — then the
+// panel's copy stands down in the split rather than showing a second, emptier
+// answer to one question next to the real one. The gift tag sheet has no such
+// boxes, so its panel keeps them at every width.
+function mcStockRowHtml(it,alsoOnSheet){
   const opts=k=>'<option value="">—</option>'+ppOf(k).map(r=>
     `<option value="${escapeHtml(r.value)}"${
       (k==='paper'?it.paper_type:it.gsm)===r.value?' selected':''}>${
       escapeHtml(r.value)}</option>`).join('');
-  return `<div class="paper-row" style="margin-top:8px;">
+  return `<div class="paper-row${alsoOnSheet?' mc-on-sheet-too':''}" id="mcStockRow"
+      style="margin-top:8px;">
       <label class="field"><span>PAPER TYPE</span>
         <select id="mcPaperSel">${opts('paper')}</select></label>
       <label class="field"><span>GSM</span>
@@ -38489,29 +38591,39 @@ function mcCustomBody(it){
   return `<div class="sect-label" style="margin-top:14px;">${pc?'Place card':'Layout'}</div>
     <label class="field"><span>${pc?'SAVED PLACE CARD':'SAVED TEMPLATE'}</span>
       <select id="mcTplSel">${opts.join('')}</select></label>
-    ${mcStockRowHtml(it)}
+    ${mcStockRowHtml(it,true)}
     <p class="hint" style="margin:6px 0 0;">Choosing one loads it into the builder for
       this line. ${it.design?'This line already has a layout of its own.':''}</p>
     <p class="hint mc-split-only" style="margin:6px 0 0;">The sheet itself is beside
       this — lay the cards out there${pc?', give the categories their words,':''} and press
-      <b>Save to ${escapeHtml(it.order_id||'the line')}</b>.</p>
+      <b>Save to ${escapeHtml(it.order_id||'the line')}</b>. The paper, the weight and the
+      picture are set on that sheet and land on this line as they are chosen, so they are
+      not asked for twice here.</p>
     <!-- the sheet as it stands, here rather than a trip to the full builder:
          paper and GSM are chosen by looking at the card, not at a form -->
     <div class="mc-line-stage" id="mcLineStage" style="display:none;">
       <canvas id="mcLineCanvas"></canvas>
     </div>
 
-    <div class="sect-label" style="margin-top:16px;">Artwork</div>
-    <div class="grid2">
-      ${['front','back'].map(side=>`
-        <div class="upload-slot">
-          <div class="thumb" id="mcThumb-${side}">${art[side]
-            ? '<span class="ico">✓</span>' : '<span class="ico">＋</span>'}</div>
-          <div class="info" id="mcInfo-${side}">${art[side]?side==='front'?'Front loaded':'Back loaded':'No file'}</div>
-          <button class="btn-outline btn-sm" data-mc-art="${side}">${side==='front'?'Front':'Back'}</button>
-          ${art[side]?`<button class="btn-outline btn-sm" data-mc-art-clear="${side}"
-            title="Take this line's ${side} artwork off">Clear</button>`:''}
-        </div>`).join('')}
+    <!-- Front and Back again, and in the split the sheet beside this is already
+         showing the pair that matters: a file put in over there is filed onto
+         this line by the save, so the two slots here are the same two questions
+         asked twice, with the emptier copy on the left. Hidden rather than
+         taken out — off the split there is no sheet beside this, and then this
+         is the only way a line gets a picture. -->
+    <div id="mcArtBlock">
+      <div class="sect-label" style="margin-top:16px;">Artwork</div>
+      <div class="grid2">
+        ${['front','back'].map(side=>`
+          <div class="upload-slot">
+            <div class="thumb" id="mcThumb-${side}">${art[side]
+              ? '<span class="ico">✓</span>' : '<span class="ico">＋</span>'}</div>
+            <div class="info" id="mcInfo-${side}">${art[side]?side==='front'?'Front loaded':'Back loaded':'No file'}</div>
+            <button class="btn-outline btn-sm" data-mc-art="${side}">${side==='front'?'Front':'Back'}</button>
+            ${art[side]?`<button class="btn-outline btn-sm" data-mc-art-clear="${side}"
+              title="Take this line's ${side} artwork off">Clear</button>`:''}
+          </div>`).join('')}
+      </div>
     </div>
 
     <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;">
@@ -39966,6 +40078,27 @@ async function mcMarkExported(it,run){
 // PDF button up here is — and until this, they said nothing back to the batch:
 // no download stamp, no tick, and a line reading as untouched beside a PDF
 // that was already on the drive.
+// The builder's own paper and GSM boxes, onto the line they are being set for.
+// Down there they are the pair the operator actually uses in the split, and
+// until this they reached the line only when something saved — so the row said
+// one thing, the boxes another, and the PDF button stayed grey beside a sheet
+// that plainly had both answered.
+async function mcNoteBuilderStock(key,value){
+  try{
+    if(mcSaveChipMode()!=='line') return;
+    const it=mcWinItem?mcItem(mcWinItem):null;
+    if(!it||it[key]===value) return;
+    it[key]=value;
+    await mcSave(it,{[key]:value});
+    mcRepaintRow(it);
+    mcSyncBatchButtons();
+    // and the panel's own copy, where it is on screen, so the two never
+    // disagree about a line either of them can set
+    const sel=document.getElementById(key==='paper_type'?'mcPaperSel':'mcGsmSel');
+    if(sel&&sel.value!==value&&sel.querySelector(`option[value="${CSS.escape(value)}"]`))
+      sel.value=value;
+  }catch(e){ /* the batch is not the builder's to break */ }
+}
 async function mcNoteBuilderExport(){
   try{
     if(mcSaveChipMode()!=='line') return;
