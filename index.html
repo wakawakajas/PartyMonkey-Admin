@@ -7287,6 +7287,43 @@ async function shrink(dataURL,maxPx,q){
   ctx.drawImage(img,0,0,c.width,c.height);
   return c.toDataURL('image/jpeg',q);
 }
+// A PDF that carries the back as its second page. Page 2 is lifted out into a
+// one-page PDF of its own — copied, not redrawn — so the back is a file like
+// any other: placed whole by the export, filed on a line and read back the
+// same. null for a file that is not a PDF or has only the one page.
+async function pdfBackPage(file){
+  if(!/\.pdf$/i.test(file.name||'')&&file.type!=='application/pdf') return null;
+  if(!window.pdfjsLib) return null;
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  let pages=0;
+  try{
+    const doc=await pdfjsLib.getDocument({data:bytes.slice()}).promise;
+    pages=doc.numPages; doc.destroy();
+  }catch(e){ return null; }
+  if(pages<2) return null;
+  const enc=new TextEncoder();
+  let last=0; const alloc=()=>++last;
+  const catalog=alloc(), kids=alloc(), page=alloc(), content=alloc();
+  const em=await pdfLift.embedPage(bytes,1,alloc);
+  const f=n=>(Math.round(n*1e4)/1e4).toString();
+  const draw=enc.encode(`q 1 0 0 1 ${f(-em.x)} ${f(-em.y)} cm /Fm0 Do Q`);
+  const objs=[
+    {num:catalog,parts:[enc.encode(`${catalog} 0 obj\n<< /Type /Catalog /Pages ${kids} 0 R >>\nendobj\n`)]},
+    {num:kids,parts:[enc.encode(`${kids} 0 obj\n<< /Type /Pages /Kids [${page} 0 R] /Count 1 >>\nendobj\n`)]},
+    {num:page,parts:[enc.encode(`${page} 0 obj\n<< /Type /Page /Parent ${kids} 0 R /MediaBox [0 0 ${f(em.w)} ${f(em.h)}]`
+      +` /Resources << /XObject << /Fm0 ${em.form} 0 R >> >> /Contents ${content} 0 R >>\nendobj\n`)]},
+    {num:content,parts:[enc.encode(`${content} 0 obj\n<< /Length ${draw.length} >>\nstream\n`),draw,
+      enc.encode('\nendstream\nendobj\n')]},
+    ...em.objs];
+  const parts=[enc.encode('%PDF-1.7\n')], off=new Map();
+  let pos=parts[0].length;
+  objs.forEach(o=>{ off.set(o.num,pos); o.parts.forEach(p=>{ parts.push(p); pos+=p.length; }); });
+  let xref=`xref\n0 ${last+1}\n0000000000 65535 f \n`;
+  for(let n=1;n<=last;n++) xref+=off.has(n)?String(off.get(n)).padStart(10,'0')+' 00000 n \n':'0000000000 65535 f \n';
+  parts.push(enc.encode(xref+`trailer\n<< /Size ${last+1} /Root ${catalog} 0 R >>\nstartxref\n${pos}\n%%EOF\n`));
+  const name=String(file.name||'artwork.pdf').replace(/\.pdf$/i,'')+' (back).pdf';
+  return new File(parts,name,{type:'application/pdf'});
+}
 // however the artwork arrived — chosen, or pasted
 // source: {dir:'loadDesignDir',path} when the file came off the NAS presets
 // folder — kept so a template can point back at the same file later. A plain
@@ -7295,6 +7332,17 @@ async function useArtFile(group,side,file,source){
   const infoEl=document.getElementById('finalInfo'+(side==='front'?'Front':'Back'));
   infoEl.textContent='Loading…';
   try{
+    // a two-page PDF is the front and the back together, whichever Upload it
+    // came in through
+    if(group==='final'){
+      const back=await pdfBackPage(file).catch(()=>null);
+      if(back){
+        if(side==='back') infoEl.textContent='';
+        await useArtFile(group,'front',file,source);
+        await useArtFile(group,'back',back);
+        return;
+      }
+    }
     const dataURL=await fileToImageData(file);
     const img=await loadImage(dataURL);
     // the file itself is kept beside the picture of it — a File is a handle on
@@ -39347,6 +39395,15 @@ async function mcPickArt(it,side){
   inp.accept='image/png,image/jpeg,image/webp,application/pdf,.pdf,.png,.jpg,.jpeg';
   inp.onchange=async()=>{
     const f=inp.files[0]; if(!f) return;
+    // a two-page PDF fills the line's front and back at once
+    const back=await pdfBackPage(f).catch(()=>null);
+    if(back){ await mcUseArt(it,'front',f); await mcUseArt(it,'back',back); }
+    else await mcUseArt(it,side,f);
+  };
+  inp.click();
+}
+async function mcUseArt(it,side,f){
+  {
     const msg=document.getElementById('mcWinMsg');
     const info=document.getElementById('mcInfo-'+side);
     if(info) info.textContent='Loading…';
@@ -39372,8 +39429,7 @@ async function mcPickArt(it,side){
       if(info) info.textContent='No file';
       if(msg) showMsg(msg,'Could not use that file: '+((err&&err.message)||'unknown error'),false);
     }
-  };
-  inp.click();
+  }
 }
 // Downloaded as bytes rather than loaded from a signed URL: an image fetched
 // cross-origin taints the canvas, and a tainted canvas throws on getImageData
