@@ -5730,10 +5730,10 @@ body.mc-docked .mc-bubble{display:none !important;}
           </div>
           <!-- Closing in on one card, inside this canvas. ⤢ beside it is the
                other thing: that opens the sheet over the whole screen. -->
-          <button class="icon-btn" id="phZoomOutBtn" title="Further out">−</button>
-          <button class="icon-btn" id="phZoomBtn"
-                  title="Fill the view with the card being worked on — the first one until a card is picked">Zoom in</button>
-          <button class="icon-btn" id="phZoomInBtn" title="Closer in">+</button>
+          <button class="icon-btn" data-ph-zoom="out" data-side="front" title="Further out">−</button>
+          <button class="icon-btn" data-ph-zoom="fit" data-side="front"
+                  title="Fill the view with the card being worked on — the bottom-left one until a card is picked">Zoom in</button>
+          <button class="icon-btn" data-ph-zoom="in" data-side="front" title="Closer in">+</button>
           <button class="icon-btn" data-rotate-left="front" title="Rotate left">↺</button>
           <button class="icon-btn" data-rotate-right="front" title="Rotate right">↻</button>
           <button class="icon-btn" data-enlarge="front" title="Open the sheet over the whole screen">⤢</button>
@@ -5813,10 +5813,15 @@ body.mc-docked .mc-bubble{display:none !important;}
     <div class="preview-card" data-side="back">
       <div class="top-row"><span class="fold-lbl" data-fold="back"
              title="Show or hide this sheet">BACK</span>
-        <div style="display:flex;gap:4px;">
+        <div style="display:flex;gap:4px;align-items:center;">
+          <!-- the same zoom as the front, on this sheet's own window -->
+          <button class="icon-btn" data-ph-zoom="out" data-side="back" title="Further out">−</button>
+          <button class="icon-btn" data-ph-zoom="fit" data-side="back"
+                  title="Fill the view with the card being worked on — the bottom-left one until a card is picked">Zoom in</button>
+          <button class="icon-btn" data-ph-zoom="in" data-side="back" title="Closer in">+</button>
           <button class="icon-btn" data-rotate-left="back" title="Rotate left">↺</button>
           <button class="icon-btn" data-rotate-right="back" title="Rotate right">↻</button>
-          <button class="icon-btn" data-enlarge="back">⤢</button>
+          <button class="icon-btn" data-enlarge="back" title="Open the sheet over the whole screen">⤢</button>
           <button class="icon-btn" data-fold="back" title="Hide this sheet">▾</button>
         </div>
       </div>
@@ -7913,20 +7918,20 @@ if(window.ResizeObserver){
 // at through a window: zooming fills that window with one placeholder rather
 // than making the canvas bigger, which is what the ⤢ enlarge does and is a
 // different thing — that covers the screen, this stays in the card it lives in.
-// Front only: the back is one picture behind every card, with nothing to close
-// in on. The same shape as the gift tag sheet's zoom, which works the same way.
-let phZoomOn=false;
-let phZoomScale=1;                 // 1 is the whole sheet; 8 is eight times closer
-let phZoomAt=null;                 // what the window is centred on, in mm
+// Each sheet has its own window — the front and the back are looked at
+// separately, the back's artwork being worth closing in on as much as the
+// front's. The same shape as the gift tag sheet's zoom, which works this way.
+const phZ={front:{on:false,scale:1,at:null},back:{on:false,scale:1,at:null}};
+const phZs=side=>phZ[side==='back'?'back':'front'];
 const PH_ZOOM_MAX=60;
 // The window, always — the whole sheet when nothing is zoomed, so everything
 // that maps a pointer onto the sheet asks one question rather than two.
-function phView(){
-  const p=paperMm();
-  if(!phZoomOn) return {x:0,y:0,w:p.w,h:p.h};
-  const z=Math.max(1,Math.min(PH_ZOOM_MAX,phZoomScale));
+function phView(side){
+  const p=paperMm(), Z=phZs(side);
+  if(!Z.on) return {x:0,y:0,w:p.w,h:p.h};
+  const z=Math.max(1,Math.min(PH_ZOOM_MAX,Z.scale));
   const w=p.w/z, h=p.h/z;
-  const c=phZoomAt||{x:p.w/2,y:p.h/2};
+  const c=Z.at||{x:p.w/2,y:p.h/2};
   // held inside the paper, so the window never shows a strip of nothing beside
   // the edge cards
   const clamp=(v,hi)=>Math.min(Math.max(v,0),Math.max(0,hi));
@@ -7942,50 +7947,57 @@ function phFillScale(ph){
     Math.min(p.w/(ph.wMm*1.06), p.h/(ph.hMm*1.06))));
 }
 // fill the window with one card, wherever it sits on the sheet
-function phZoomToPh(ph){
+function phZoomToPh(ph,side){
   if(!ph) return false;
-  phZoomScale=phFillScale(ph);
-  phZoomAt={x:ph.xMm+ph.wMm/2,y:ph.yMm+ph.hMm/2};
-  phZoomOn=true;
+  const Z=phZs(side);
+  Z.scale=phFillScale(ph);
+  Z.at={x:ph.xMm+ph.wMm/2,y:ph.yMm+ph.hMm/2};
+  Z.on=true;
   return true;
 }
+function phZoomOff(side){ const Z=phZs(side); Z.on=false; Z.scale=1; }
 // The card being worked on — the one selected, or the bottom-left one when
 // none is. Bottom left is where the sheet starts filling, so it is the first
 // card a design lands on and the one worth looking at before anything has been
 // picked. Taken from fillOrder rather than from the list, which is in the order
-// the boxes happened to be drawn.
+// the boxes happened to be drawn. The back's cards stand where the front's do,
+// so the card picked is the same card on either side.
 const phZoomTarget=()=>phSelected()[0]||fillOrder()[0]||null;
 // closer in or further out about the middle of the window, or about a point on
 // the sheet where one is given — which is what the wheel hands over
-function phZoomBy(mul,about){
-  const p=paperMm();
-  const before=phView();
-  const z=Math.max(1,Math.min(PH_ZOOM_MAX,(phZoomOn?phZoomScale:1)*mul));
-  if(z<=1){ phZoomOn=false; phZoomScale=1; drawAll(); return; }
+function phZoomBy(mul,about,side){
+  const Z=phZs(side);
+  const before=phView(side);
+  const z=Math.max(1,Math.min(PH_ZOOM_MAX,(Z.on?Z.scale:1)*mul));
+  if(z<=1){ phZoomOff(side); drawAll(); return; }
   const at=about||{x:before.x+before.w/2,y:before.y+before.h/2};
   // the point under the pointer stays under it: the window shrinks towards it
-  const k=(phZoomOn?phZoomScale:1)/z;
-  phZoomAt={x:at.x+((before.x+before.w/2)-at.x)*k,
-            y:at.y+((before.y+before.h/2)-at.y)*k};
-  phZoomScale=z; phZoomOn=true;
+  const k=(Z.on?Z.scale:1)/z;
+  Z.at={x:at.x+((before.x+before.w/2)-at.x)*k,
+        y:at.y+((before.y+before.h/2)-at.y)*k};
+  Z.scale=z; Z.on=true;
   drawAll();
 }
-// A card selected while the sheet is zoomed is the card to be looking at — the
+// A card selected while a sheet is zoomed is the card to be looking at — the
 // list, the panel and the arrow keys all change the selection, and the window
-// followed none of them.
+// followed none of them. Either side that is zoomed goes to it.
 function phZoomFollowSel(){
-  if(!phZoomOn) return;
-  const ph=phSelected()[0];
-  if(ph) phZoomAt={x:ph.xMm+ph.wMm/2,y:ph.yMm+ph.hMm/2};
+  const ph=phSelected()[0]; if(!ph) return;
+  ['front','back'].forEach(side=>{
+    const Z=phZs(side);
+    if(Z.on) Z.at={x:ph.xMm+ph.wMm/2,y:ph.yMm+ph.hMm/2};
+  });
 }
 function phZoomSync(){
-  const b=document.getElementById('phZoomBtn');
   const any=state.placeholders.length>0;
-  if(b){ b.textContent=phZoomOn?'Whole sheet':'Zoom in'; b.classList.toggle('on',phZoomOn); b.disabled=!any; }
-  const i=document.getElementById('phZoomInBtn');
-  const o=document.getElementById('phZoomOutBtn');
-  if(i) i.disabled=!any||phZoomScale>=PH_ZOOM_MAX;
-  if(o) o.disabled=!phZoomOn;
+  document.querySelectorAll('[data-ph-zoom]').forEach(b=>{
+    const Z=phZs(b.dataset.side), what=b.dataset.phZoom;
+    if(what==='fit'){
+      b.textContent=Z.on?'Whole sheet':'Zoom in';
+      b.classList.toggle('on',Z.on); b.disabled=!any;
+    }else if(what==='in') b.disabled=!any||(Z.on&&Z.scale>=PH_ZOOM_MAX);
+    else b.disabled=!Z.on;
+  });
 }
 function drawAll(){
   // the sheet fills whatever space its card has — two across on a phone, or
@@ -7994,10 +8006,10 @@ function drawAll(){
   const p=paperMm();
   const dim=Math.max(140,cardW*Math.max(p.w,p.h)/p.w);
   const page=clampPage();
-  renderSide('front',document.getElementById('canvasFront'),dim,{page,view:phView()});
+  renderSide('front',document.getElementById('canvasFront'),dim,{page,view:phView('front')});
   // the back is the same on every sheet — one backing design, printed behind
   // whatever the front happens to be carrying
-  renderSide('back',document.getElementById('canvasBack'),dim,{page});
+  renderSide('back',document.getElementById('canvasBack'),dim,{page,view:phView('back')});
   refreshSheetNav();
   phZoomSync();
   undoNote('print');
@@ -8629,13 +8641,13 @@ document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
   const at=e=>{
     const r=c.getBoundingClientRect();
     if(!r.width||!r.height) return null;
-    const V=phView();
+    const V=phView('front');
     return {x:V.x+(e.clientX-r.left)/r.width*V.w, y:V.y+(e.clientY-r.top)/r.height*V.h};
   };
   // the handle is drawn 7 canvas pixels across, so that is what it is worth in
   // millimetres at whatever size the sheet is being shown — which is smaller
   // the closer in it is looked at, or the corner would swallow the whole card
-  const grip=()=>{ const V=phView(); return c.width?Math.max(0.2,8*V.w/c.width):1.5; };
+  const grip=()=>{ const V=phView('front'); return c.width?Math.max(0.2,8*V.w/c.width):1.5; };
   const hit=q=>{
     if(!q) return null;
     const g=grip();
@@ -8661,8 +8673,8 @@ document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
       // about by — there is more sheet than window, and no other way to reach
       // it. A marquee round several cards is a whole-sheet gesture anyway, and
       // shift still draws one for the cards that are in view.
-      if(phZoomOn&&!e.shiftKey){
-        pan={x:e.clientX,y:e.clientY,at:phView()}; band=null; tap=null;
+      if(phZs('front').on&&!e.shiftKey){
+        pan={x:e.clientX,y:e.clientY,at:phView('front')}; band=null; tap=null;
         try{ c.setPointerCapture(e.pointerId); }catch(err){}
         e.preventDefault();
         return;
@@ -8694,8 +8706,8 @@ document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
       const r=c.getBoundingClientRect();
       if(!r.width||!r.height) return;
       // the paper follows the finger: a pixel of travel is a pixel of sheet
-      phZoomAt={x:pan.at.x+pan.at.w/2-(e.clientX-pan.x)/r.width*pan.at.w,
-                y:pan.at.y+pan.at.h/2-(e.clientY-pan.y)/r.height*pan.at.h};
+      phZs('front').at={x:pan.at.x+pan.at.w/2-(e.clientX-pan.x)/r.width*pan.at.w,
+                        y:pan.at.y+pan.at.h/2-(e.clientY-pan.y)/r.height*pan.at.h};
       drawAll();
       return;
     }
@@ -8743,32 +8755,57 @@ document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
   };
   c.addEventListener('pointerup',stop);
   c.addEventListener('pointercancel',stop);
-  // the wheel closes in on whatever is under the pointer, the way every other
-  // canvas in this app does
+  phZoomWheel(c,'front');
+})();
+// the wheel closes in on whatever is under the pointer, the way every other
+// canvas in this app does
+function phZoomWheel(c,side){
   c.addEventListener('wheel',e=>{
     if(!state.placeholders.length) return;
     e.preventDefault();
     const r=c.getBoundingClientRect();
     if(!r.width||!r.height) return;
-    const V=phView();
+    const V=phView(side);
     phZoomBy(e.deltaY<0?1.2:1/1.2,
-      {x:V.x+(e.clientX-r.left)/r.width*V.w, y:V.y+(e.clientY-r.top)/r.height*V.h});
+      {x:V.x+(e.clientX-r.left)/r.width*V.w, y:V.y+(e.clientY-r.top)/r.height*V.h},side);
   },{passive:false});
+}
+// The back has no cards to pick or drag — it is one picture behind all of
+// them — so zoomed in, the whole of it drags the sheet about.
+(function phBackPan(){
+  const c=document.getElementById('canvasBack');
+  if(!c) return;
+  let pan=null;
+  c.addEventListener('pointerdown',e=>{
+    if(!phZs('back').on) return;
+    pan={x:e.clientX,y:e.clientY,at:phView('back')};
+    try{ c.setPointerCapture(e.pointerId); }catch(err){}
+    e.preventDefault();
+  });
+  c.addEventListener('pointermove',e=>{
+    if(!pan) return;
+    e.preventDefault();
+    const r=c.getBoundingClientRect();
+    if(!r.width||!r.height) return;
+    phZs('back').at={x:pan.at.x+pan.at.w/2-(e.clientX-pan.x)/r.width*pan.at.w,
+                     y:pan.at.y+pan.at.h/2-(e.clientY-pan.y)/r.height*pan.at.h};
+    drawAll();
+  });
+  const stop=()=>{ pan=null; };
+  c.addEventListener('pointerup',stop);
+  c.addEventListener('pointercancel',stop);
+  phZoomWheel(c,'back');
 })();
-document.getElementById('phZoomBtn').addEventListener('click',()=>{
-  if(phZoomOn){ phZoomOn=false; phZoomScale=1; drawAll(); return; }
-  // straight to the card being worked on, and to the first one when none has
-  // been picked yet
-  if(!phZoomToPh(phZoomTarget())) return;
-  drawAll();
-});
-document.getElementById('phZoomInBtn').addEventListener('click',()=>{
-  // the first press from the whole sheet fills the window with the card being
-  // worked on, rather than closing in by an amount that suits no sheet
-  if(!phZoomOn){ if(!phZoomToPh(phZoomTarget())) return; drawAll(); return; }
-  phZoomBy(1.4);
-});
-document.getElementById('phZoomOutBtn').addEventListener('click',()=>phZoomBy(1/1.4));
+// − / Zoom in / + on each sheet, each working its own window
+document.querySelectorAll('[data-ph-zoom]').forEach(b=>b.addEventListener('click',()=>{
+  const side=b.dataset.side, Z=phZs(side), what=b.dataset.phZoom;
+  if(what==='out'){ phZoomBy(1/1.4,null,side); return; }
+  if(what==='fit'&&Z.on){ phZoomOff(side); drawAll(); return; }
+  // Zoom in, and the first + from the whole sheet, go straight to the card
+  // being worked on rather than closing in by an amount that suits no sheet
+  if(what==='fit'||!Z.on){ if(!phZoomToPh(phZoomTarget(),side)) return; drawAll(); return; }
+  phZoomBy(1.4,null,side);
+}));
 // Arrow keys nudge, Delete drops, Ctrl+A takes the lot — the keys that go with
 // a canvas you can point at.
 document.addEventListener('keydown',e=>{
