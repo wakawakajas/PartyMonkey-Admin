@@ -7293,18 +7293,13 @@ async function shrink(dataURL,maxPx,q){
 // same. null for a file that is not a PDF or has only the one page.
 async function pdfBackPage(file){
   if(!/\.pdf$/i.test(file.name||'')&&file.type!=='application/pdf') return null;
-  if(!window.pdfjsLib) return null;
   const bytes=new Uint8Array(await file.arrayBuffer());
-  let pages=0;
-  try{
-    const doc=await pdfjsLib.getDocument({data:bytes.slice()}).promise;
-    pages=doc.numPages; doc.destroy();
-  }catch(e){ return null; }
-  if(pages<2) return null;
   const enc=new TextEncoder();
   let last=0; const alloc=()=>++last;
   const catalog=alloc(), kids=alloc(), page=alloc(), content=alloc();
-  const em=await pdfLift.embedPage(bytes,1,alloc);
+  // a file with no second page simply has none to lift
+  let em;
+  try{ em=await pdfLift.embedPage(bytes,1,alloc); }catch(e){ return null; }
   const f=n=>(Math.round(n*1e4)/1e4).toString();
   const draw=enc.encode(`q 1 0 0 1 ${f(-em.x)} ${f(-em.y)} cm /Fm0 Do Q`);
   const objs=[
@@ -7328,18 +7323,20 @@ async function pdfBackPage(file){
 // source: {dir:'loadDesignDir',path} when the file came off the NAS presets
 // folder — kept so a template can point back at the same file later. A plain
 // Upload has no reusable path, so it's left null.
-async function useArtFile(group,side,file,source){
+async function useArtFile(group,side,file,source,split=true){
   const infoEl=document.getElementById('finalInfo'+(side==='front'?'Front':'Back'));
   infoEl.textContent='Loading…';
   try{
     // a two-page PDF is the front and the back together, whichever Upload it
     // came in through
-    if(group==='final'){
+    // (each side is then loaded without asking again, or the front would find
+    // the same second page and start over, for ever)
+    if(group==='final'&&split){
       const back=await pdfBackPage(file).catch(()=>null);
       if(back){
         if(side==='back') infoEl.textContent='';
-        await useArtFile(group,'front',file,source);
-        await useArtFile(group,'back',back);
+        await Promise.all([useArtFile(group,'front',file,source,false),
+          useArtFile(group,'back',back,null,false)]);
         return;
       }
     }
