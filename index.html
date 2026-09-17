@@ -3777,7 +3777,12 @@ body.mc-docked .mc-bubble{display:none !important;}
       <p class="hint" style="margin:0 0 10px;">Taken off a Bundle SKU's name before its sticker
         prints. Dashes become spaces, and brackets left empty go too — so with <b>seeds</b> and
         <b>popular</b> here, <i>Seeds-Mimosa (10pc)</i> prints <i>Mimosa (10pc)</i> and
-        <i>DIY-Mimosa (Popular)</i> prints <i>DIY Mimosa</i>. Case does not matter.</p>
+        <i>DIY-Mimosa (Popular)</i> prints <i>DIY Mimosa</i>. Case does not matter. Each shop
+        has its own list; an order uses its shop's.</p>
+      <div class="chips chips-left" id="stickerShopTabs" style="margin:0 0 10px;">
+        <button class="chip on" type="button" data-sticker-shop="partymonkey">PartyMonkey</button>
+        <button class="chip" type="button" data-sticker-shop="planttalks">Plant Talks</button>
+      </div>
       <form class="pk-add" id="stickerWordAdd" autocomplete="off" style="margin-bottom:8px;">
         <label class="field" style="margin-bottom:6px;"><span>ADD A WORD</span>
           <input type="text" id="stickerWordNew" placeholder="e.g. Popular" maxlength="60" required/></label>
@@ -11974,7 +11979,8 @@ const bundleShopName=v=>v==='planttalks'?'Plant Talks':'PartyMonkey';
 // for the team, read when the screen opens and again whenever the day's jobs
 // are.
 const BUNDLE_RULES_DEFAULT={pt_word:'PT',seed_words:'seed, seeds',
-  made_to_order:'Custom',pm_combos_only:true,label_strip_words:'seed, seeds, popular'};
+  made_to_order:'Custom',pm_combos_only:true,label_strip_words:'seed, seeds, popular',
+  label_strip_words_pt:'seed, seeds, popular'};
 let bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT);
 const bundleWordList=v=>String(v==null?'':v).split(/[,\n]/).map(x=>x.trim()).filter(Boolean);
 // A word has to stand on its own -- beside a space, a dash, a dot or a digit,
@@ -12028,6 +12034,8 @@ async function loadBundleRules(){
     if(r) bundleRules=Object.assign({},BUNDLE_RULES_DEFAULT,r);
     if(bundleRules.label_strip_words==null)            // column not added yet
       bundleRules.label_strip_words=BUNDLE_RULES_DEFAULT.label_strip_words;
+    if(bundleRules.label_strip_words_pt==null)         // one list for both, until split
+      bundleRules.label_strip_words_pt=bundleRules.label_strip_words;
   }catch(e){ /* not set up yet -- what the app was born with stands */ }
   bundleRulesReady();
 }
@@ -12498,12 +12506,18 @@ async function openBundleSettings(){
 }
 
 // ---- sticker words: taken off a Bundle SKU's name before it prints ----
-// Kept in one field on bundle_settings and written back whole on every change,
-// so an add, an edit and a removal are each one save.
+// A list each shop: label_strip_words is PartyMonkey's, label_strip_words_pt
+// Plant Talks'. Each is one field on bundle_settings, written back whole on
+// every change, so an add, an edit and a removal are each one save.
 const stickerPicked=new Set();              // words ticked, lower-cased
-const stickerWords=()=>bundleWordList(bundleRules.label_strip_words);
+let stickerShop='partymonkey';              // the list on screen
+const stickerField=shop=>shop==='planttalks'?'label_strip_words_pt':'label_strip_words';
+const stickerWordsFor=shop=>bundleWordList(bundleRules[stickerField(shop)]);
+const stickerWords=()=>stickerWordsFor(stickerShop);
 function renderStickerWords(){
   const el=document.getElementById('stickerWordList'); if(!el) return;
+  document.querySelectorAll('[data-sticker-shop]').forEach(b=>
+    b.classList.toggle('on',b.dataset.stickerShop===stickerShop));
   const words=stickerWords();
   for(const k of [...stickerPicked]) if(!words.some(w=>w.toLowerCase()===k)) stickerPicked.delete(k);
   el.innerHTML=words.length?words.map((w,i)=>`<div class="ph-card pl-hidden-row" data-sticker-i="${i}">
@@ -12523,24 +12537,24 @@ function renderStickerWords(){
 function stickerTest(){
   const v=document.getElementById('stickerWordTest').value.trim();
   document.getElementById('stickerWordTestOut').innerHTML=v
-    ?'Prints: <b>'+escapeHtml(bundleComboNameClean(v))+'</b>':'';
+    ?'Prints: <b>'+escapeHtml(bundleComboNameClean(v,stickerShop))+'</b>':'';
 }
 async function stickerSave(words,done){
   const msg=document.getElementById('stickerWordMsg');
   const session=await requireSession(msg); if(!session) return false;
-  const label_strip_words=words.join(', ');
+  const field=stickerField(stickerShop), value=words.join(', ');
   try{
     const {error}=await sb.from('bundle_settings')
-      .upsert({id:true,label_strip_words,updated_at:new Date().toISOString()},{onConflict:'id'});
+      .upsert({id:true,[field]:value,updated_at:new Date().toISOString()},{onConflict:'id'});
     if(error) throw error;
-    bundleRules.label_strip_words=label_strip_words;
+    bundleRules[field]=value;
     renderStickerWords();
     if(done) showMsg(msg,'✓ '+done,true); else msg.innerHTML='';
     return true;
   }catch(err){
     renderStickerWords();
     showMsg(msg,/column|relation|does not exist|schema cache/i.test(err.message||'')
-      ? 'Run supabase-migration-STICKER-WORDS.sql in Supabase first.'
+      ? 'Run supabase-migration-STICKER-WORDS-SHOP.sql in Supabase first.'
       : 'Could not save: '+escapeHtml(err.message||String(err)),false);
     return false;
   }
@@ -12599,6 +12613,13 @@ document.getElementById('stickerWordDel').addEventListener('click',()=>{
   stickerSave(words.filter(w=>!gone.includes(w)),'Removed '+gone.length+'.');
 });
 document.getElementById('stickerWordTest').addEventListener('input',stickerTest);
+document.getElementById('stickerShopTabs').addEventListener('click',e=>{
+  const b=e.target.closest('[data-sticker-shop]'); if(!b) return;
+  stickerShop=b.dataset.stickerShop;
+  stickerPicked.clear();
+  document.getElementById('stickerWordMsg').innerHTML='';
+  renderStickerWords();
+});
 function renderBundleRules(){
   const set=(id,v)=>{ const el=document.getElementById(id); if(el) el.value=v||''; };
   set('bundleRulePt',bundleRules.pt_word);
@@ -13574,7 +13595,8 @@ let seedLabelPending=null;           // the one line waiting on the sheet
 function seedLabelAsk(jobId,pieceId){
   const j=bundleJobById(jobId); if(!j) return;
   const x=(j.pieces||[]).find(p=>String(p.id)===String(pieceId)); if(!x) return;
-  const text=bundleComboNameClean(j.combo_name);
+  const o=bundleOrderNow();
+  const text=bundleComboNameClean(j.combo_name,o?bundleShopOf(o):'');
   seedLabelPending={jobId:j.id,sku:x.sku,text};
   const txtField=document.getElementById('seedLabelText');
   const qty=document.getElementById('seedLabelQty');
@@ -13628,11 +13650,12 @@ document.getElementById('bundlePrintAllBtn').addEventListener('click',()=>{
 });
 
 // Words taken off a label, and only a label -- Sticker words on Bundle SKU
-// Settings. Not the seed words: that list also decides what counts as a seed,
-// and it has DIY in it, which belongs on the tape.
-function bundleComboNameClean(name,words){
+// Settings, the list of the shop the order is for. Not the seed words: that
+// list also decides what counts as a seed, and it has DIY in it, which
+// belongs on the tape.
+function bundleComboNameClean(name,shop){
   let s=String(name||'').trim();
-  bundleWordList(words==null?bundleRules.label_strip_words:words).forEach(w=>{
+  stickerWordsFor(shop).forEach(w=>{
     s=s.replace(new RegExp('(^|[^a-z])'+bundleReEscape(w)+'(?=[^a-z]|$)','ig'),'$1 ');
   });
   s=s.replace(/\(\s*\)|\[\s*\]/g,' ')   // brackets a removed word left empty
@@ -13648,7 +13671,7 @@ function bundlePrintShowSelect(){
   const html=p.items.map((item,i)=>`
     <label style="display:flex;align-items:center;padding:8px;cursor:pointer;border-bottom:1px solid var(--color-border);">
       <input type="checkbox" id="bundlePrintItem${i}" ${p.selected.has(i)?'checked':''} style="margin-right:8px;"/>
-      <span>${bundleComboNameClean(item.job.combo_name)}</span>
+      <span>${escapeHtml(bundleComboNameClean(item.job.combo_name,bundleShopOf(p.order)))}</span>
     </label>
   `).join('');
   document.getElementById('bundlePrintSelectList').innerHTML=html;
@@ -13680,7 +13703,7 @@ document.getElementById('bundlePrintGo').addEventListener('click',()=>{
   p.selected.forEach(i=>{
     const item=p.items[i];
     if(item && item.job){
-      const text=bundleComboNameClean(item.job.combo_name);
+      const text=bundleComboNameClean(item.job.combo_name,shop);
       const copies=Math.max(1,Math.min(99,item.job.sets||1));
       rows.push({jobId:item.jobId,sku:item.job.id,text:text,copies:copies});
     }
