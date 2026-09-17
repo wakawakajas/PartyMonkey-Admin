@@ -7492,26 +7492,53 @@ function fitArtToCard(side){
 // at the top, where it is easiest to feed again and least likely to be cut
 // into. Rows are banded rather than sorted on an exact Y so a placeholder
 // nudged a hair out of line still counts as part of its row.
-function fillOrder(){
-  const ph=state.placeholders;
+function fillOrder(list){
+  const ph=list||state.placeholders;
   if(ph.length<2) return ph.slice();
   const band=Math.max(0.5,(ph.reduce((s,x)=>s+x.hMm,0)/ph.length)/2);
   return ph.slice().sort((a,b)=>
     (Math.round(b.yMm/band)-Math.round(a.yMm/band))||(a.xMm-b.xMm));
 }
-// The boxes the artwork goes into, in fill order. On Place Card a box sitting
-// inside another box is where that card's words go — the Names strip on a tent
+// The boxes the artwork goes into, in fill order. On Place Card a box that
+// belongs to a category is where a card's words go — the Names half of a tent
 // card — not a card of its own. Counted as one, it took a design each: fifteen
-// tent cards on a twelve-card sheet filled the strips too and showed as nine.
-// Of two identical boxes the first is the card.
+// tent cards on a twelve-card sheet filled the Names boxes too and showed as
+// nine, each picture centred on half a card and spilling over the next.
+// So a card is a box with no category, grown to take in the words boxes
+// joined to it — the half beside it or a strip inside it — and the design is
+// laid on the whole of that. A sheet where every box has a category is all
+// cards, as before; so is Custom Template.
 function artOrder(){
-  const order=fillOrder();
-  if(pcMode!=='placecard') return order;
-  const E=0.01, all=state.placeholders;
-  const inside=(ph,o)=>ph.xMm>=o.xMm-E&&ph.yMm>=o.yMm-E
-    &&ph.xMm+ph.wMm<=o.xMm+o.wMm+E&&ph.yMm+ph.hMm<=o.yMm+o.hMm+E;
-  return order.filter(ph=>!all.some((o,j)=>o!==ph&&inside(ph,o)
-    &&(!inside(o,ph)||j<all.indexOf(ph))));
+  const all=state.placeholders;
+  if(pcMode!=='placecard') return fillOrder();
+  const cards=all.filter(ph=>!ph.cat), words=all.filter(ph=>ph.cat);
+  if(!cards.length||!words.length) return fillOrder();
+  const span=(a0,a1,b0,b1)=>Math.max(0,Math.min(a1,b1)-Math.max(a0,b0));
+  const E=1;   // mm: a box drawn a hair short of its neighbour still touches it
+  // how firmly a words box is joined to a card: overlapping, or edge to edge
+  // along most of the shorter side; 0 is not joined at all
+  const joined=(w,c)=>{
+    const ox=span(w.xMm,w.xMm+w.wMm,c.xMm,c.xMm+c.wMm);
+    const oy=span(w.yMm,w.yMm+w.hMm,c.yMm,c.yMm+c.hMm);
+    const gx=Math.max(c.xMm-(w.xMm+w.wMm),w.xMm-(c.xMm+c.wMm));
+    const gy=Math.max(c.yMm-(w.yMm+w.hMm),w.yMm-(c.yMm+c.hMm));
+    if(gx<=E&&gy<=E&&ox*oy>0) return 2+ox*oy;                        // overlapping
+    if(gy<=E&&ox>=Math.min(w.wMm,c.wMm)*0.8) return 1+ox;            // above / below
+    if(gx<=E&&oy>=Math.min(w.hMm,c.hMm)*0.8) return 1+oy;            // either side
+    return 0;
+  };
+  const grown=new Map(cards.map(c=>[c,{id:c.id,label:c.label,
+    xMm:c.xMm,yMm:c.yMm,r:c.xMm+c.wMm,b:c.yMm+c.hMm}]));
+  words.forEach(w=>{
+    let best=null,score=0;
+    cards.forEach(c=>{ const k=joined(w,c); if(k>score){ score=k; best=c; } });
+    if(!best) return;
+    const g=grown.get(best);
+    g.xMm=Math.min(g.xMm,w.xMm); g.yMm=Math.min(g.yMm,w.yMm);
+    g.r=Math.max(g.r,w.xMm+w.wMm); g.b=Math.max(g.b,w.yMm+w.hMm);
+  });
+  return fillOrder([...grown.values()].map(g=>
+    ({id:g.id,label:g.label,xMm:g.xMm,yMm:g.yMm,wMm:g.r-g.xMm,hMm:g.b-g.yMm,card:true})));
 }
 const artPerSheet=()=>artOrder().length;
 // one entry per physical card, in the order the lines are listed. The same
@@ -7695,7 +7722,8 @@ function renderSide(side,canvas,maxDim,opts){
   // per image rather than once is what lets a list of designs at different
   // shapes each keep its own without any of them being stretched.
   const one=(img,ph,line,key)=>{
-    let wMm=a.wMm, hMm=a.hMm;
+    // a Place Card card is its own box and its words together, and fills that
+    let wMm=ph.card?ph.wMm:a.wMm, hMm=ph.card?ph.hMm:a.hMm;
     // Actual size: each design in the list at the size its own file gives;
     // the single artwork at the WIDTH/HEIGHT box, which starts at that size
     const real=state.artFit==='actual'?artRealMm(img):null;
@@ -7710,7 +7738,7 @@ function renderSide(side,canvas,maxDim,opts){
       // a design with no size of its own fits its card; the box may be another
       // design's actual size
       const L=line&&state.artFit==='actual'?layoutMm():null;
-      const bw=L?L.cardW:a.wMm, bh=L?L.cardH:a.hMm;
+      const bw=L?L.cardW:wMm, bh=L?L.cardH:hMm;
       const f=Math.min(bw/iw,bh/ih);
       wMm=iw*f; hMm=ih*f;
     }
