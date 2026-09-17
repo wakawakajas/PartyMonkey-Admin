@@ -7296,15 +7296,21 @@ async function shrink(dataURL,maxPx,q){
 // one-page PDF of its own — copied, not redrawn — so the back is a file like
 // any other: placed whole by the export, filed on a line and read back the
 // same. null for a file that is not a PDF or has only the one page.
-async function pdfBackPage(file){
+// The two sides of such a file, each its own one-page PDF, or null.
+async function pdfSides(file){
   if(!/\.pdf$/i.test(file.name||'')&&file.type!=='application/pdf') return null;
   const bytes=new Uint8Array(await file.arrayBuffer());
+  const back=await pdfPageFile(bytes,1,file.name,'back');
+  if(!back) return null;
+  return {front:await pdfPageFile(bytes,0,file.name,'front')||file,back};
+}
+async function pdfPageFile(bytes,index,fileName,label){
   const enc=new TextEncoder();
   let last=0; const alloc=()=>++last;
   const catalog=alloc(), kids=alloc(), page=alloc(), content=alloc();
   // a file with no second page simply has none to lift
   let em;
-  try{ em=await pdfLift.embedPage(bytes,1,alloc); }catch(e){ return null; }
+  try{ em=await pdfLift.embedPage(bytes,index,alloc); }catch(e){ return null; }
   const f=n=>(Math.round(n*1e4)/1e4).toString();
   const draw=enc.encode(`q 1 0 0 1 ${f(-em.x)} ${f(-em.y)} cm /Fm0 Do Q`);
   const objs=[
@@ -7321,7 +7327,7 @@ async function pdfBackPage(file){
   let xref=`xref\n0 ${last+1}\n0000000000 65535 f \n`;
   for(let n=1;n<=last;n++) xref+=off.has(n)?String(off.get(n)).padStart(10,'0')+' 00000 n \n':'0000000000 65535 f \n';
   parts.push(enc.encode(xref+`trailer\n<< /Size ${last+1} /Root ${catalog} 0 R >>\nstartxref\n${pos}\n%%EOF\n`));
-  const name=String(file.name||'artwork.pdf').replace(/\.pdf$/i,'')+' (back).pdf';
+  const name=String(fileName||'artwork.pdf').replace(/\.pdf$/i,'')+` (${label}).pdf`;
   return new File(parts,name,{type:'application/pdf'});
 }
 // however the artwork arrived — chosen, or pasted
@@ -7337,11 +7343,13 @@ async function useArtFile(group,side,file,source,split=true){
     // (each side is then loaded without asking again, or the front would find
     // the same second page and start over, for ever)
     if(group==='final'&&split){
-      const back=await pdfBackPage(file).catch(()=>null);
-      if(back){
+      const sides=await pdfSides(file).catch(()=>null);
+      if(sides){
         if(side==='back') infoEl.textContent='';
-        await Promise.all([useArtFile(group,'front',file,source,false),
-          useArtFile(group,'back',back,null,false)]);
+        // a front off the designs folder stays the file its path names; an
+        // uploaded one is just its own page, so a line files half the bytes
+        await Promise.all([useArtFile(group,'front',source?file:sides.front,source,false),
+          useArtFile(group,'back',sides.back,null,false)]);
         return;
       }
     }
@@ -39429,40 +39437,47 @@ async function mcPickArt(it,side){
   inp.accept='image/png,image/jpeg,image/webp,application/pdf,.pdf,.png,.jpg,.jpeg';
   inp.onchange=async()=>{
     const f=inp.files[0]; if(!f) return;
-    // a two-page PDF fills the line's front and back at once
-    const back=await pdfBackPage(f).catch(()=>null);
-    if(back){ await mcUseArt(it,'front',f); await mcUseArt(it,'back',back); }
-    else await mcUseArt(it,side,f);
+    // a two-page PDF fills the line's front and back at once, each side
+    // carrying only its own page up to the line
+    const sides=await pdfSides(f).catch(()=>null);
+    await mcUseArt(it,sides?[['front',sides.front],['back',sides.back]]:[[side,f]]);
   };
   inp.click();
 }
-async function mcUseArt(it,side,f){
-  {
-    const msg=document.getElementById('mcWinMsg');
-    const info=document.getElementById('mcInfo-'+side);
-    if(info) info.textContent='Loading…';
-    try{
+// `pairs` is [[side,file],…]: every side is drawn onto the sheet first, then
+// filed together and saved once, so a front and back do not queue behind
+// each other's upload.
+async function mcUseArt(it,pairs){
+  const msg=document.getElementById('mcWinMsg');
+  const info=side=>document.getElementById('mcInfo-'+side);
+  pairs.forEach(([side])=>{ const i=info(side); if(i) i.textContent='Loading…'; });
+  try{
+    const got=await Promise.all(pairs.map(async([side,f])=>{
       const dataURL=await fileToImageData(f);
       const img=await loadImage(dataURL);
       // the file itself beside the picture of it, the way the tool's own
       // upload keeps it — the export places the real thing where it can
       state.final[side]={data:dataURL,img,name:f.name,file:f};
       fitArtToCard(side);
-      refreshSlots(); refreshArtInputs(); drawAll();
-      const path=await mcPutArt(it,side,f,dataURL,img);
-      state.final[side].mcPath=path;
-      it.art=Object.assign({},it.art,{[side]:path});
-      await mcSave(it,{art:it.art});
-      if(info) info.textContent=side==='front'?'Front loaded':'Back loaded';
+      return {side,f,dataURL,img};
+    }));
+    refreshSlots(); refreshArtInputs(); drawAll();
+    const paths=await Promise.all(got.map(g=>mcPutArt(it,g.side,g.f,g.dataURL,g.img)));
+    const art=Object.assign({},it.art);
+    got.forEach((g,k)=>{ state.final[g.side].mcPath=paths[k]; art[g.side]=paths[k]; });
+    it.art=art;
+    await mcSave(it,{art:it.art});
+    got.forEach(({side})=>{
+      const i=info(side); if(i) i.textContent=side==='front'?'Front loaded':'Back loaded';
       const th=document.getElementById('mcThumb-'+side);
       if(th) th.innerHTML='<span class="ico">✓</span>';
-      mcRepaintRow(it);
-      if(typeof mcLinePreview==='function') mcLinePreview();
-      if(msg) showMsg(msg,'✓ Artwork saved to this line',true);
-    }catch(err){
-      if(info) info.textContent='No file';
-      if(msg) showMsg(msg,'Could not use that file: '+((err&&err.message)||'unknown error'),false);
-    }
+    });
+    mcRepaintRow(it);
+    if(typeof mcLinePreview==='function') mcLinePreview();
+    if(msg) showMsg(msg,'✓ Artwork saved to this line',true);
+  }catch(err){
+    pairs.forEach(([side])=>{ const i=info(side); if(i) i.textContent='No file'; });
+    if(msg) showMsg(msg,'Could not use that file: '+((err&&err.message)||'unknown error'),false);
   }
 }
 // Downloaded as bytes rather than loaded from a signed URL: an image fetched
