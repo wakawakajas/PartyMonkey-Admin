@@ -2090,6 +2090,8 @@ img.mc-shot,img.mc-sum-shot{cursor:zoom-in;}
   border:1px solid var(--border-strong);background:transparent;color:var(--muted);}
 .mc-line-acts button[data-mc-create]{color:var(--french);border-color:var(--french);}
 .mc-line-acts button[data-mc-pdf]{color:var(--muted);}
+/* not ready still answers a press — with what it is waiting for */
+.mc-line-acts button[data-mc-pdf].mc-not-ready{opacity:.45;}
 /* extras are the one figure on a line the customer did not ask for, so the
    button that adds them wears the same colour as the count it changes */
 .mc-line-acts button[data-mc-extra]{color:var(--amber);border-color:var(--amber);}
@@ -33615,7 +33617,7 @@ function mcLineHtml(it){
   // sheet being run again. Absent rather than present and broken where a line
   // has no tile at all.
   const pdf=t
-    ? `<button type="button" data-mc-pdf="${it.id}"${mcReady(it)?'':' disabled'}
+    ? `<button type="button" data-mc-pdf="${it.id}"${mcReady(it)?'':' class="mc-not-ready" aria-disabled="true"'}
          title="${!mcReady(it)?escapeHtml(mcWhyNotReady(it))
            :t.mode==='per-order'?'Save this line as a print-ready PDF'
            :`Save this line on a ${escapeHtml(t.name.toLowerCase())} of its own`}">PDF</button>` : '';
@@ -38950,6 +38952,8 @@ function mcMissingCol(error,body){
   if(!/column|schema cache/i.test(m)) return '';
   return Object.keys(body).find(k=>m.includes("'"+k+"'"))||'';
 }
+// why the last write did not go, for a message that is somewhere it will be read
+let mcLastSaveError='';
 async function mcSave(it,patch){
   // `return` on its own handed back undefined, which every caller reads as
   // failure anyway — but says so out loud now, because "no connection" and
@@ -38971,6 +38975,7 @@ async function mcSave(it,patch){
     ({error}=await sb.from('magic_items').update(rest).eq('id',it.id));
   }
   const msg=document.getElementById('mcWinMsg');
+  mcLastSaveError=error?String(error.message||'the write was refused'):'';
   if(error&&msg) showMsg(msg,'Could not save: '+error.message,false);
   return !error;
 }
@@ -39413,6 +39418,13 @@ function mcCustomWire(it){
     // layout first" over a sheet that plainly had one on it.
     if(!mcWinLive&&!(state.placeholders||[]).length){
       showMsg(msg,'Choose a saved layout first.',false); return;
+    }
+    // and what the sheet would be saved without, said before it is
+    {
+      const miss=mcSheetMissing(it);
+      if(miss.length&&!confirm(mcMissingAsk(it,miss))){
+        showMsg(msg,'Not saved — '+escapeHtml(miss.join('; ')),false); return;
+      }
     }
     // asked before anything is written, so a cancelled answer costs nothing
     {
@@ -40725,7 +40737,15 @@ async function mcRenderLine(it,side){
 async function mcDownloadOne(id){
   const it=mcItem(id);
   const out=document.getElementById('mcBatchMsg');
-  if(!it||!mcReady(it)) return;
+  if(!it) return;
+  // A greyed-out button that did nothing read as the download being broken.
+  // Pressed before the line is ready, it says what the line is still missing.
+  if(!mcReady(it)){
+    showMsg(out,`${escapeHtml(it.order_id||it.sku||'This line')} cannot download yet — `
+      +escapeHtml(mcWhyNotReady(it).replace(/ — press Create$/,''))
+      +'. Open it, fill that in and press Save.',false);
+    return;
+  }
   if(mcBusy) return;
   const t=mcTile(it); if(!t) return;
   mcBusy=true; mcSyncBatchButtons();             // before the picker, or a second press runs too
@@ -41475,13 +41495,37 @@ function mcBuilderSaveSync(){
 // message line of its own that is anywhere near this chip, and a failure
 // written somewhere nobody is looking reads exactly like a button that does
 // nothing. The chip says it itself, and goes back to what it was.
+// What the sheet in the builder would be saved without: nothing to print on
+// it, or designs that will not come back because they are not off the designs
+// folder. Paper and GSM are asked for separately, with their own question.
+function mcSheetMissing(it){
+  const out=[];
+  const pc=it&&it.tile==='placeCard';
+  const art=usingPreset()
+    ? (state.designs||[]).some(d=>d.source&&d.source.path&&Number(d.qty)>0)
+    : !!(state.final.front&&state.final.front.data);
+  const words=pc&&(state.cats||[]).some(c=>(Number(c.count)||0)>0
+    &&((c.lines||[]).some(l=>String(l==null?'':l).trim())
+      ||String(c.pattern==null?'{n}':c.pattern).trim()));
+  if(!art&&!words&&!(it&&it.art&&it.art.front))
+    out.push(pc?'No artwork and no names on the sheet':'No artwork on the sheet');
+  const lost=(state.designs||[]).filter(d=>d.img&&!(d.source&&d.source.path));
+  if(lost.length) out.push(`${lost.map(d=>d.name||'A design').join(', ')} `
+    +`${lost.length===1?'is':'are'} not from the designs folder and will not be kept`);
+  if(usingPreset()&&(state.designs||[]).some(d=>d.source&&d.source.path)
+    &&!(state.designs||[]).some(d=>Number(d.qty)>0))
+    out.push('Every design has a quantity of 0');
+  return out;
+}
+const mcMissingAsk=(it,miss)=>`Before saving to ${it.order_id||'this line'}:\n\n`
+  +miss.map(m=>'• '+m).join('\n')+'\n\nSave anyway?';
 function mcSaveChipSaid(text,ok){
   const chip=document.getElementById('mcSaveChip');
   const what=document.getElementById('mcSaveChipWhat');
   if(!chip||!what) return;
   what.textContent=text;
   chip.classList.toggle('saved',!!ok);
-  setTimeout(mcBuilderSaveSync,ok?2200:4200);
+  setTimeout(mcBuilderSaveSync,ok?2200:7000);
 }
 document.getElementById('mcSaveChip').addEventListener('click',async()=>{
   const chip=document.getElementById('mcSaveChip');
@@ -41513,6 +41557,14 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     if(!(state.placeholders||[]).length){
       mcSaveChipSaid('No layout on this sheet yet',false); return;
     }
+    // What the sheet is missing, asked before it is saved rather than found
+    // afterwards as a PDF button that will not press
+    {
+      const miss=mcSheetMissing(it);
+      if(miss.length&&!confirm(mcMissingAsk(it,miss))){
+        mcSaveChipSaid('Not saved',false); return;
+      }
+    }
     // the same question the panel's Save asks, for the same reason: this sheet
     // is about to become a line that has to print
     {
@@ -41539,14 +41591,16 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     const ok=await mcSave(it,{design:it.design,paper_type:it.paper_type,
       gsm:it.gsm,...(untyped?{tile:'custom'}:{}),...(kept||{}),...(failed.length?{}:mcDonePatch(it,true))});
     if(!ok&&untyped) it.tile=null;
-    if(!ok){ mcSaveChipSaid('It did not save — try again',false); return; }
+    if(!ok){ mcSaveChipSaid('Did not save: '+(mcLastSaveError||'no connection'),false); return; }
     mcRepaintRow(it);
     mcSyncBatchButtons();
     mcWinRender();
     if(failed.length){ mcSaveChipSaid('Saved, but the '+failed.map(f=>f.split(' ')[0]).join(' and ')+' did not upload — save again',false); return; }
+    const why=mcWhyNotReady(it).replace(/ — press Create$/,'');
+    if(why){ mcSaveChipSaid('Saved — but it '+why.replace(/^Needs/,'needs')+' to download',false); return; }
     mcSaveChipSaid('✓ Saved to '+(it.order_id||'the line'),true);
   }catch(err){
-    mcSaveChipSaid('Could not save',false);
+    mcSaveChipSaid('Could not save: '+((err&&err.message)||'unknown error'),false);
   }finally{ chip.disabled=false; }
 });
 
