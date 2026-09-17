@@ -5964,7 +5964,7 @@ body.mc-docked .mc-bubble{display:none !important;}
         <button type="button" class="chip chip-state" data-bleedmode="content">Content-aware</button>
         <button type="button" class="chip chip-state" data-bleedmode="ai">AI fill</button>
       </div>
-      <p class="hint" style="margin-top:7px;margin-bottom:0;"><b>Stretch</b> enlarges the artwork into the bleed, so its edges are trimmed off. Every other style keeps the artwork at its size and makes up only what lies past the cut. <b>Mirror</b> suits photos and patterns, <b>Extend edges</b> flat colours and gradients. <b>Content-aware</b> fills the bleed with texture matched from the artwork, like Photoshop's Content-Aware Fill — a few seconds, works offline. <b>AI fill</b> paints it in with the free LaMa model on this computer — it can continue shapes and scenery a patch cannot, but it is softer, takes about 15 seconds per part of the edge, and the first use downloads about 200 MB once.</p>
+      <p class="hint" style="margin-top:7px;margin-bottom:0;"><b>Stretch</b> enlarges the artwork into the bleed, so its edges are trimmed off. Every other style keeps the artwork at its size and makes up only what lies past the cut. <b>Mirror</b> suits photos and patterns, <b>Extend edges</b> flat colours and gradients. <b>Content-aware</b> fills the bleed with texture matched from the artwork, like Photoshop's Content-Aware Fill — a few seconds, works offline. <b>AI fill</b> paints it in with the free LaMa model on this computer — it can continue shapes and scenery a patch cannot, but it is softer, takes about 15 seconds on most cards, and the first use downloads about 200 MB once.</p>
       <div id="bleedFillMsg"></div>
 
       <div class="sect-label">Client file fix</div>
@@ -9349,8 +9349,6 @@ var bleedJobChain=Promise.resolve();
 // the longest side a fill is worked at; the result is enlarged back onto the
 // full picture, whose own pixels are then laid over it untouched
 const BLEED_FILL_PX=3600;
-// the AI's own pass is coarser; the patch pass after it restores the detail
-const AI_WORK_PX=1200;
 // Progress stays up for as long as the work goes on — a square of AI fill
 // outlasts the few seconds an ordinary message is shown for. The outcome is an
 // ordinary message.
@@ -9424,8 +9422,20 @@ async function bleedFill(img,bx,by,mode,say){
   if(mode==='ai'){
     // The AI decides what the bleed should show, working in 512 px squares —
     // so on a smaller copy, which alone would come back soft.
-    const f=Math.max(Math.min(1,AI_WORK_PX/Math.max(W,H)),512/Math.min(W,H));
-    const a=scaled(base,f,512);
+    // A card no more than twice as long as it is tall is squeezed into a
+    // single square — one pass instead of six or more, and stretched back out
+    // afterwards the fill keeps its shape. Longer pictures take a few.
+    let a;
+    if(Math.max(W,H)<=Math.min(W,H)*2){
+      const c=document.createElement('canvas');
+      c.width=c.height=512;
+      const ctx=c.getContext('2d',{willReadFrequently:true});
+      ctx.imageSmoothingQuality='high';
+      ctx.drawImage(base,0,0,512,512);
+      a={c,ctx,data:ctx.getImageData(0,0,512,512),
+        x0:Math.ceil(bx*512/W),y0:Math.ceil(by*512/H),
+        x1:Math.floor((bx+nW)*512/W),y1:Math.floor((by+nH)*512/H)};
+    }else a=scaled(base,512/Math.min(W,H),512);
     a.ctx.putImageData(await lamaFill(a.data,a.x0,a.y0,a.x1,a.y1,say),0,0);
     guide=document.createElement('canvas');
     guide.width=W; guide.height=H;
@@ -9721,7 +9731,8 @@ function lamaWorkerMain(){
       if(m.type==='init'){
         importScripts(m.ortBase+'ort.wasm.min.js');
         self.ort.env.wasm.wasmPaths=m.ortBase;
-        self.ort.env.wasm.numThreads=1;
+        // every core the computer has, where the browser allows more than one
+        self.ort.env.wasm.numThreads=Math.max(1,Math.min(8,(self.navigator.hardwareConcurrency||2)-1));
         session=await self.ort.InferenceSession.create(new Uint8Array(m.bytes),{executionProviders:['wasm']});
         self.postMessage({id:m.id});
       }else if(m.type==='run'){
@@ -9748,7 +9759,7 @@ async function lamaFill(imageData,x0,y0,x1,y1,say){
   const acc=new Float32Array(w*h*3), ws=new Float32Array(w*h);
   const image=new Float32Array(3*T*T), mask=new Float32Array(T*T);
   for(let k=0;k<tiles.length;k++){
-    say(`AI is filling the bleed… part ${k+1} of ${tiles.length} (about 15 seconds each)`,true);
+    say('AI is filling the bleed…'+(tiles.length>1?` part ${k+1} of ${tiles.length}`:''),true);
     const [tx,ty]=tiles[k];
     for(let y=0;y<T;y++) for(let x=0;x<T;x++){
       const X=tx+x, Y=ty+y, i=(Y*w+X)*4, o=y*T+x;
