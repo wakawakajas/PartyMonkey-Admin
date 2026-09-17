@@ -10082,7 +10082,8 @@ async function enhanceArt(side){
     const up=await loadImage(data);
     const name=(o.name||'artwork').replace(/(\.[^.]+)?$/,'')+` · enhanced ×${shown}.png`;
     // the upload was a JPEG or PNG on disk; the file now printing is this one
-    state.final[side]={...o,data,img:up,name,file:null};
+    // and no longer the line's filed copy, or Save to line would pass it over
+    state.final[side]={...o,data,img:up,name,file:null,mcPath:null};
     artEnhancing[side]=false;
     refreshSlots(); drawAll();
     return true;
@@ -23424,7 +23425,7 @@ async function exportSide(side,msgId){
       showMsg(out,'✓ Downloaded '+filename+many+blank,true);
     }
     // and where a batch line is what was laid out here, the batch is told
-    if(typeof mcNoteBuilderExport==='function') await mcNoteBuilderExport();
+    if(typeof mcNoteBuilderExport==='function') await mcNoteBuilderExport(side);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
   }finally{
@@ -33589,11 +33590,16 @@ function mcLineHtml(it){
   // was not sure about the first time, which is worth seeing from the list.
   // A line stamped before the count was kept says once, which it did.
   const times=Math.max(1,Math.round(Number(it.export_count)||0));
+  // a line with a front and a back that has had only one of them out says which
+  const sides=mcTile(it)&&mcTile(it).mode==='per-order'?mcSides(it):[];
+  const outSides=sides.filter(sd=>mcSideDl(it,sd));
+  const only=sides.length>1&&outSides.length===1
+    ?` · ${outSides[0]==='front'?'Front':'Back'} only`:'';
   const dl=it.exported_at
     ? `<span class="mc-dl-tag" title="This line was written to a PDF ${
         times===1?'once':times+' times'}, last ${
         escapeHtml(new Date(it.exported_at).toLocaleString())}">⬇ Downloaded ${
-        times} time${times===1?'':'s'} · ${
+        times} time${times===1?'':'s'}${only} · ${
         escapeHtml(mcWhenWord(it.exported_at))}</span>`
     : '';
   // the file this line was finished by, and when. A copy-only design never
@@ -34455,6 +34461,13 @@ async function mcOpenPlan(){
 // have been out, that is what it says rather than a number that is true of
 // neither.
 function mcPlanDlTag(e){
+  // one side of one line: only that side's own download counts
+  if(e&&e.kind==='line'){
+    const d=mcSideDl(e.it,e.side);
+    return d?`<span class="mc-dl-tag" title="Last written to a PDF ${
+      escapeHtml(new Date(d.at).toLocaleString())}">⬇ Downloaded ${d.n} time${d.n===1?'':'s'} · ${
+      escapeHtml(mcWhenWord(d.at))}</span>`:'';
+  }
   const set=(e&&e.set)||[];
   const out=set.filter(it=>it&&it.exported_at);
   if(!out.length) return '';
@@ -39372,7 +39385,7 @@ function mcCustomWire(it){
       }
     }
     mcWinLive=true;
-    const kept=await mcKeepBuilderArt(it);
+    const {patch:kept,failed}=await mcKeepBuilderArt(it);
     it.design=mcLineSnapshot();
     // and what the builder was set to, where the line has not been told
     // itself: paper and GSM are two thirds of the file name, and a line
@@ -39384,8 +39397,9 @@ function mcCustomWire(it){
     it.paper_type=state.paperType||it.paper_type||'';
     it.gsm=state.gsm||it.gsm||'';
     if(await mcSave(it,{design:it.design,paper_type:it.paper_type,
-      gsm:it.gsm,...(kept||{}),...mcDonePatch(it,true)})){
+      gsm:it.gsm,...(kept||{}),...(failed.length?{}:mcDonePatch(it,true))})){
       const why=mcWhyNotReady(it);
+      if(failed.length){ showMsg(msg,'Layout saved'+mcArtFailedSay(failed),false); mcRepaintRow(it); return; }
       showMsg(msg,'✓ Saved to this line'+(why?' — '+why:''),true);
       mcRepaintRow(it);
       // saved is finished with, and the next line is on the list behind this
@@ -39421,27 +39435,37 @@ async function mcPutArt(it,side,file,dataURL,img){
 // its path in the layout itself and is passed over here; one uploaded by hand
 // has no path to keep, and until this it was kept nowhere at all — which is a
 // line laid out, saved, and still not ready to download.
+// Returns {patch, failed}: the patch for the row, and the sides whose picture
+// did not reach the bucket. A failure used to be swallowed and the save still
+// said ✓ — a front too big to upload came back as a line with only its back.
 async function mcKeepBuilderArt(it){
-  if(!sb||!it||!state.final) return null;
+  const failed=[];
+  if(!sb||!it||!state.final) return {patch:null,failed};
   const art=Object.assign({},it.art||{});
   let changed=false;
   for(const side of ['front','back']){
     const o=state.final[side];
-    if(!o||!o.data||!o.file) continue;
+    if(!o||!o.data) continue;
     // the front the layout names is kept by its path; a back has no path in a
-    // template, so it is filed here whatever it came off
-    if(side==='front'&&o.source&&o.source.path) continue;
+    // template, so it is filed here whatever it came off. Only while it is
+    // still that file, though — an upscaled front is pixels the path does not hold.
+    if(side==='front'&&o.source&&o.source.path&&o.file) continue;
     if(o.mcPath&&o.mcPath===art[side]) continue; // this is the line's own, back again
     try{
-      art[side]=await mcPutArt(it,side,o.file,o.data,o.img);
+      // an upscaled picture has no file on disk behind it; it is filed as the PNG it is
+      const file=o.file||new File([await (await fetch(o.data)).blob()],
+        (o.name||side).replace(/(\.[^.]+)?$/,'.png'),{type:'image/png'});
+      art[side]=await mcPutArt(it,side,file,o.data,o.img);
       o.mcPath=art[side];
       changed=true;
-    }catch(e){ /* the layout still saves — the picture can be put on again */ }
+    }catch(e){ failed.push(side+' ('+((e&&e.message)||'upload failed')+')'); }
   }
-  if(!changed) return null;
+  if(!changed) return {patch:null,failed};
   it.art=art;
-  return {art};
+  return {patch:{art},failed};
 }
+const mcArtFailedSay=failed=>failed.length
+  ?' — but the '+failed.join(' and the ')+' picture did not upload; save again':'';
 async function mcPickArt(it,side){
   const inp=document.createElement('input');
   inp.type='file';
@@ -40566,14 +40590,31 @@ async function mcBorrowBuilder(fn){
 // rule putting one on a sheet already follows. `run` is one export's worth of
 // lines — a per-order line writes a front and a back, and two files out of one
 // press of Download All is one download, not two.
-async function mcMarkExported(it,run){
+// `side`, where one file was a front or a back, is kept on the line as well:
+// a front downloaded on its own used to read as the back downloaded too.
+async function mcMarkExported(it,run,side){
   if(!it) return false;
   it.exported_at=new Date().toISOString();
   const again=run&&run.has(it.id);
   if(run) run.add(it.id);
   if(!again) it.export_count=Math.max(0,Math.round(Number(it.export_count)||0))+1;
-  return await mcSave(it,{exported_at:it.exported_at,
-    export_count:it.export_count,...mcDonePatch(it,true)});
+  const patch={exported_at:it.exported_at,export_count:it.export_count};
+  if(side==='front'||side==='back'){
+    const si={...(it.sheet_item||{})};
+    const dl={...(si.dl||{})}, had=dl[side]||{};
+    dl[side]={at:it.exported_at,n:Math.max(0,Math.round(Number(had.n)||0))+1};
+    si.dl=dl; it.sheet_item=si; patch.sheet_item=si;
+  }
+  // and it is done once every side it has is out, not at the first of them
+  const whole=!(side==='front'||side==='back')||mcSides(it).every(sd=>mcSideDl(it,sd));
+  return await mcSave(it,{...patch,...(whole?mcDonePatch(it,true):{})});
+}
+// When this side of a line was last downloaded, and how many times. A line
+// stamped before sides were kept answers for both, as it always did.
+function mcSideDl(it,side){
+  const dl=it&&it.sheet_item&&it.sheet_item.dl;
+  if(dl) return dl[side]&&dl[side].at?{at:dl[side].at,n:Math.max(1,Number(dl[side].n)||1)}:null;
+  return it&&it.exported_at?{at:it.exported_at,n:Math.max(1,Math.round(Number(it.export_count)||0))}:null;
 }
 // The same, for a line downloaded from the full builder rather than from the
 // batch. Front and Back down there are this line going out as surely as the
@@ -40601,12 +40642,12 @@ async function mcNoteBuilderStock(key,value){
       sel.value=value;
   }catch(e){ /* the batch is not the builder's to break */ }
 }
-async function mcNoteBuilderExport(){
+async function mcNoteBuilderExport(side){
   try{
     if(mcSaveChipMode()!=='line') return;
     const it=mcWinItem?mcItem(mcWinItem):null;
     if(!it) return;
-    await mcMarkExported(it);
+    await mcMarkExported(it,undefined,side);
     mcRepaintRow(it);
     mcSyncBatchButtons();
   }catch(e){ /* the batch is not the builder's to break */ }
@@ -40651,6 +40692,7 @@ async function mcDownloadOne(id){
   showMsg(out,'Rendering at print resolution…',true);
   try{
     mcBundleSkipped=new Set();
+    const oneRun=new Set();       // a front and a back are one download
     // the line open in the builder is exported as it stands, not as last saved,
     // and so is a gift tag sheet out on loan
     if(mcWinItem===it.id&&t.mode==='per-order') await mcCommit();
@@ -40671,6 +40713,7 @@ async function mcDownloadOne(id){
       for(const side of mcSides(it)){
         await mcPut(dir,mcFilename(it,side),await mcRenderLine(it,side));
         n++;
+        await mcMarkExported(it,oneRun,side);
       }
       showMsg(out,`✓ ${n} file${n===1?'':'s'} ${dir?'saved into '+dir.name:'downloaded'}`,true);
     });
@@ -40680,7 +40723,7 @@ async function mcDownloadOne(id){
         +'nothing of it is in that file, and it is left not downloaded.',false);
       return;
     }
-    await mcMarkExported(it);
+    await mcMarkExported(it,oneRun);
     mcRepaintRow(it);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
@@ -40773,7 +40816,7 @@ async function mcDownloadAll(){
         if(e.kind==='line') files++; else bundles++;
         // marked as it goes: a crash at 180 of 214 then costs 34, not 214 —
         // and a line with a side that was not made is not marked at all
-        await mcMarkMade({set:e.set.filter(it=>!bad.has(it.id))},run,failed);
+        await mcMarkMade({set:e.set.filter(it=>!bad.has(it.id)),side:e.side},run,failed);
       }
     });
     mcRenderItems();
@@ -40915,7 +40958,7 @@ async function mcMarkMade(e,run,failed){
       failed.push(`${it.order_id||it.sku||'a line'} (no design found for ${it.sku||'it'})`);
       continue;
     }
-    await mcMarkExported(it,run);
+    await mcMarkExported(it,run,e.side);
   }
 }
 async function mcPrintBundle(lines,template){
@@ -41446,17 +41489,18 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     mcWinLive=true;
     const untyped=!it.tile;
     if(untyped) it.tile='custom';
-    const kept=await mcKeepBuilderArt(it);
+    const {patch:kept,failed}=await mcKeepBuilderArt(it);
     it.design=mcLineSnapshot();
     it.paper_type=state.paperType||it.paper_type||'';
     it.gsm=state.gsm||it.gsm||'';
     const ok=await mcSave(it,{design:it.design,paper_type:it.paper_type,
-      gsm:it.gsm,...(untyped?{tile:'custom'}:{}),...(kept||{}),...mcDonePatch(it,true)});
+      gsm:it.gsm,...(untyped?{tile:'custom'}:{}),...(kept||{}),...(failed.length?{}:mcDonePatch(it,true))});
     if(!ok&&untyped) it.tile=null;
     if(!ok){ mcSaveChipSaid('It did not save — try again',false); return; }
     mcRepaintRow(it);
     mcSyncBatchButtons();
     mcWinRender();
+    if(failed.length){ mcSaveChipSaid('Saved, but the '+failed.map(f=>f.split(' ')[0]).join(' and ')+' did not upload — save again',false); return; }
     mcSaveChipSaid('✓ Saved to '+(it.order_id||'the line'),true);
   }catch(err){
     mcSaveChipSaid('Could not save',false);
