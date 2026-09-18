@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import cdp, config, duoke, labels, library, macro_store, run_reports, scheduler as scheduler_mod, settings, video
+from agent import cdp, config, duoke, fiery, labels, library, macro_store, run_reports, scheduler as scheduler_mod, settings, video
 from agent.macro_store import MacroNotFoundError
 from agent.panic import PanicWatcher
 from agent.recorder import Recorder
@@ -171,6 +171,12 @@ async def _on_startup() -> None:
         labels.save({})
     if labels.load().get("enabled"):
         labels.watcher.start()
+    # And Magic Create's Download & Print: the app queues the file, this
+    # sends it to the Fiery. fiery.json is written out the same way.
+    if not fiery.CONFIG_PATH.exists():
+        fiery.save({})
+    if fiery.load().get("enabled"):
+        fiery.watcher.start()
 
 
 @app.get("/api/status")
@@ -987,6 +993,61 @@ def labels_print_now() -> JSONResponse:
     except Exception as exc:  # a failed pass is an answer, not a 500
         return JSONResponse(status_code=200, content={
             "report": {"error": f"{type(exc).__name__}: {exc}"}, "status": labels.status()})
+
+
+# ---------------------------------------------------------------- Fiery
+# Magic Create's Download & Print. The app saves the PDF into the Working
+# Folder and queues it in Supabase; the loop in fiery.py sends it to the
+# Fiery with its preset, copies and pages. These routes set that up.
+
+
+class FieryConfig(BaseModel):
+    enabled: Optional[bool] = None
+    fiery_host: Optional[str] = None
+    fiery_username: Optional[str] = None
+    fiery_password: Optional[str] = None
+    api_key: Optional[str] = None
+    folder: Optional[str] = None
+    poll_seconds: Optional[int] = None
+    stale_minutes: Optional[int] = None
+
+
+@app.get("/api/fiery/status")
+def fiery_status() -> dict:
+    return fiery.status()
+
+
+@app.put("/api/fiery/config")
+def fiery_config(body: FieryConfig) -> JSONResponse:
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "poll_seconds" in patch:
+        patch["poll_seconds"] = max(2, min(120, int(patch["poll_seconds"])))
+    saved = fiery.save(patch)
+    if saved.get("enabled"):
+        fiery.watcher.start()
+    else:
+        fiery.watcher.stop()
+    return JSONResponse(content={"saved": fiery.redacted(), "status": fiery.status()})
+
+
+@app.post("/api/fiery/test")
+def fiery_test() -> JSONResponse:
+    """Log in to the Fiery and list its presets, without going near Supabase."""
+    try:
+        return JSONResponse(content=fiery.test())
+    except fiery.FieryError as exc:
+        return JSONResponse(status_code=400, content={"error": "fiery", "detail": str(exc)})
+
+
+@app.post("/api/fiery/send-now")
+def fiery_send_now() -> JSONResponse:
+    """One pass over whatever is queued, right now, and the presets re-read."""
+    try:
+        fiery.sync_presets()
+        return JSONResponse(content={"report": fiery.sync_once(), "status": fiery.status()})
+    except Exception as exc:  # a failed pass is an answer, not a 500
+        return JSONResponse(status_code=200, content={
+            "report": {"error": f"{type(exc).__name__}: {exc}"}, "status": fiery.status()})
 
 
 @app.websocket("/ws")

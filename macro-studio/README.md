@@ -384,6 +384,45 @@ A label queued while this PC was off is not printed later. Anything older than
 `stale_minutes` (30 by default) is failed instead, so a machine switched on at
 four o'clock does not spit out the morning's labels at somebody's back.
 
+## Magic Create straight to the Fiery
+
+**🖨 Download & Print** on a Magic Create batch shows each sheet first (zoom in
+to check it), then asks for the server preset, the copies and the pages. Pigu
+saves the PDF into the Working Folder exactly as ⬇ does and writes a row in
+`fiery_jobs` (run `supabase-migration-FIERY.sql` once). This agent reads that
+file out of the same folder and hands it to the Fiery API: it uploads the file
+with the preset applied, sets the copies, then prints it or leaves it held.
+Pages are cut out of the PDF here, so what reaches the Fiery is only the pages
+that print. The presets are read off the Fiery every few minutes into
+`fiery_presets`, so Pigu offers the same list Command WorkStation shows.
+
+Set it up by editing **`fiery.json`** (written with its defaults the first time
+the agent starts):
+
+```json
+{
+  "enabled": true,
+  "fiery_host": "192.168.1.50",
+  "fiery_username": "operator",
+  "fiery_password": "",
+  "api_key": "",
+  "folder": "C:\\NAS Folders\\Partymonkey NAS\\Working Folder"
+}
+```
+
+- `api_key` is the Fiery API key, free from developer.fiery.com. An evaluation
+  key works straight away; a production key needs approval, and its licence
+  has to be activated on the Fiery.
+- `folder` is the Working Folder as *this* PC sees it. A file that has not
+  reached it yet (the NAS still syncing) is waited for; after `stale_minutes`
+  the job is failed and Pigu says why.
+- The Supabase login is borrowed from `duoke.json`, the same way `labels.json`
+  borrows it.
+
+To check it the first time, `POST /api/fiery/test` logs in and lists the
+presets without going near Supabase. `GET /api/fiery/status` shows the last
+error. `POST /api/fiery/send-now` runs one pass immediately.
+
 ## Downloading a file
 
 A site that hands you a file -- a receipt, an invoice, an export -- gives you
