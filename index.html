@@ -7768,6 +7768,8 @@ function drawFoldOverlay(ctx,sc){
 }
 
 // ---------- drawing ----------
+// how far past its own box a picture may show, whatever size it is made
+const ART_REACH_MM=2.5;
 function renderSide(side,canvas,maxDim,opts){
   opts=opts||{};
   const p=paperMm();
@@ -7870,19 +7872,29 @@ function renderSide(side,canvas,maxDim,opts){
     // of bleed around it, so the file's own colours still print everywhere
     // inside the cut and only the made-up edge is pixels.
     const trimW=swapped?hMm:wMm, trimH=swapped?wMm:hMm;
+    // Nothing of a picture reaches further than ART_REACH_MM past its own box,
+    // however big it is made — on screen, in the PDF and at the printer — so an
+    // enlarged picture never lies over the card beside it.
+    const clip={x:ph.xMm-ART_REACH_MM, y:ph.yMm-ART_REACH_MM,
+      w:ph.wMm+ART_REACH_MM*2, h:ph.hMm+ART_REACH_MM*2};
+    const reach=(x,y)=>({x:Math.min(ART_REACH_MM,x), y:Math.min(ART_REACH_MM,y)});
     let ringOnly=false;
     if(opts.vec){
+      const vclip={x:clip.x+shift.xMm, y:clip.y+shift.yMm, w:clip.w, h:clip.h};
       if(grow){
         ringOnly=opts.vec.take(key,
           {x:ph.xMm+ph.wMm/2-trimW/2+shift.xMm, y:ph.yMm+ph.hMm/2-trimH/2+shift.yMm,
            w:trimW, h:trimH, rot:rotDeg},
-          {x:(wMm-ph.wMm)/2, y:(hMm-ph.hMm)/2});
+          reach((wMm-ph.wMm)/2, (hMm-ph.hMm)/2), vclip);
       }else if(opts.vec.take(key,
         {x:ph.xMm+ph.wMm/2-boxW/2+shift.xMm, y:ph.yMm+ph.hMm/2-boxH/2+shift.yMm,
          w:boxW, h:boxH, rot:rotDeg},
-        {x:(effW-ph.wMm)/2, y:(effH-ph.hMm)/2})) return;
+        reach((effW-ph.wMm)/2, (effH-ph.hMm)/2), vclip)) return;
     }
     ctx.save();
+    ctx.beginPath();
+    ctx.rect(clip.x*sc,clip.y*sc,clip.w*sc,clip.h*sc);
+    ctx.clip();
     ctx.translate(cx,cy);
     ctx.rotate(rotDeg*Math.PI/180);
     // the bleed along the picture's own axes, which a quarter turn swaps
@@ -23549,10 +23561,10 @@ async function printVectorSources(side){
 // and leaving them on top of it.
 function printVecTaker(forms,place){
   const off=state.refMark&&state.refMark.enabled?(Number(state.refMark.offsetMm)||0):null;
-  return {take(key,rect,ext){
+  return {take(key,rect,ext,clip){
     if(!key||!forms.has(key)) return false;
     if(off!==null&&(ext.x>off||ext.y>off)) return false;
-    place.push({key,rect});
+    place.push({key,rect,clip});
     return true;
   }};
 }
@@ -29087,7 +29099,7 @@ async function gtBuildPdf(count,render,sources){
   for(let i=0;i<count;i++){
     const {imgData,wMm,hMm,place,clear,over}=await render(i,forms);
     const W=mmToPt(wMm).toFixed(2), H=mmToPt(hMm).toFixed(2);
-    const put=(place||[]).map(p=>({em:forms.get(p.key),r:p.rect})).filter(u=>u.em);
+    const put=(place||[]).map(p=>({em:forms.get(p.key),r:p.rect,c:p.clip})).filter(u=>u.em);
     // A render made without paper under it has to let what is beneath show
     // through, so it goes in with its alpha channel as a mask. That holds for
     // every page of such a run, not only the pages that ended up with artwork
@@ -29101,7 +29113,7 @@ async function gtBuildPdf(count,render,sources){
     const names=new Map();                // one name per page placed, not per tag
     put.forEach(u=>{ if(!names.has(u.em.form)) names.set(u.em.form,'Fm'+names.size); });
     put.forEach(u=>{
-      const {em,r}=u;
+      const {em,r,c}=u;
       // the sheet is worked in millimetres from the top, a PDF in points from
       // the bottom, and the form draws inside a box of its own choosing
       const X=mmToPt(r.x), Y=mmToPt(hMm-(r.y+r.h)), TW=mmToPt(r.w), TH=mmToPt(r.h);
@@ -29114,7 +29126,9 @@ async function gtBuildPdf(count,render,sources){
         const cx=X+TW/2, cy=Y+TH/2;
         M=mtxMul(M,mtxMul([1,0,0,1,-cx,-cy],mtxMul([co,si,-si,co,0,0],[1,0,0,1,cx,cy])));
       }
-      cs+=`q ${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
+      // a placing that says how far it may reach is cut off there
+      const cut=c?`${f(mmToPt(c.x))} ${f(mmToPt(hMm-(c.y+c.h)))} ${f(mmToPt(c.w))} ${f(mmToPt(c.h))} re W n `:'';
+      cs+=`q ${cut}${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
     });
     cs+=`q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
     // Layers over the page at a finer resolution than it — a place card's
