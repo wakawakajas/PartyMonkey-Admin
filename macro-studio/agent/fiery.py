@@ -28,6 +28,7 @@ from __future__ import annotations
 import http.cookiejar
 import io
 import json
+import os
 import platform
 import ssl
 import threading
@@ -35,7 +36,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import hashlib
 import uuid
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -70,6 +73,9 @@ DEFAULTS: dict[str, Any] = {
     # A job older than this is failed rather than sent -- a PC switched on in
     # the afternoon must not print the morning at somebody.
     "stale_minutes": 30,
+    # How long a job waits for the one before it in the same press to reach
+    # the press, before it is sent anyway.
+    "order_wait_minutes": 20,
 }
 
 _lock = threading.RLock()
@@ -79,7 +85,8 @@ _cache_stamp: float = -1.0
 # One job at a time: two uploads racing each other is two half-finished jobs.
 _send_lock = threading.Lock()
 
-MAX_PER_PASS = 20
+# a whole morning's press in one pass, so a run is not split across two
+MAX_PER_PASS = 60
 
 
 class FieryError(RuntimeError):
@@ -347,6 +354,41 @@ class Fiery:
                          "became -- it is in Command WorkStation, with its copies "
                          "not set.")
 
+    def rip(self, job_id: str) -> None:
+        """Start the Fiery processing a held job now, so it is ready to go the
+        moment it is told to print rather than only starting then."""
+        self._call("PUT", "/jobs/" + urllib.parse.quote(job_id) + "/rip")
+
+    def started(self, job_id: str) -> bool:
+        """Whether a job has got as far as the press -- printing, printed, or
+        finished with some other way (cancelled, gone). Until it has, a job
+        sent to print after it can overtake it: the Fiery prints whichever
+        job is ready first, and a 2 MB file is ready long before a 500 MB one."""
+        try:
+            out = self._call("GET", "/jobs/" + urllib.parse.quote(job_id))
+        except FieryError as exc:
+            return "404" in str(exc)            # gone: nothing left to wait for
+        job = out
+        if isinstance(out, dict) and isinstance(out.get("data"), dict):
+            job = out["data"].get("item") if isinstance(out["data"].get("item"), dict) else out["data"]
+        if not isinstance(job, dict):
+            return True
+        status = str(job.get("status") or "").lower()
+        state = str(job.get("state") or "").lower()
+        if "print" in status or state in ("completed", "canceled", "cancelled", "error",
+                                          "printed", "done printing"):
+            return True
+        stamp = str(job.get("timestamp dedicated to print") or "").strip()
+        return bool(stamp) and stamp not in ("0", "0:0")
+
+    def wait_started(self, job_id: str, minutes: int) -> bool:
+        deadline = time.time() + 60 * max(1, minutes)
+        while time.time() < deadline:
+            if self.started(job_id):
+                return True
+            time.sleep(5)
+        return False
+
     def set_copies(self, job_id: str, copies: int) -> None:
         self._call("PUT", "/jobs/" + urllib.parse.quote(job_id),
                    {"attributes": {"numcopies": str(int(copies))}})
@@ -354,10 +396,10 @@ class Fiery:
     def print_job(self, job_id: str, size: int = 0) -> None:
         """Print once the Fiery has finished taking the file in. A print asked
         for while it is still spooling is refused, so it is asked again -- for
-        a minute, and longer for a big file, which the Fiery takes longer to
-        take in: half a minute more for every 100 MB."""
+        three minutes, and longer for a big file, which the Fiery takes longer
+        to take in and process: a minute more for every 100 MB."""
         last: Optional[Exception] = None
-        tries = 12 + int(size / (100 << 20) * 6)
+        tries = 36 + int(size / (100 << 20) * 12)
         for _ in range(tries):
             try:
                 out = self._call("PUT", "/jobs/" + urllib.parse.quote(job_id) + "/print")
@@ -417,6 +459,115 @@ def _plain(name: str) -> bool:
     return bool(name) and "/" not in name and "\\" not in name and name not in (".", "..")
 
 
+# ---------------------------------------------------------------- slimming
+# A PDF saved from Illustrator with "Preserve Illustrator Editing
+# Capabilities" carries the whole .ai file inside it, as thousands of
+# AIPDFPrivateData blocks hung off the page's /PieceInfo. The press never
+# reads a byte of it -- it is Illustrator's, for opening the file again -- and
+# it is most of the file: a 436 MB gift wrapper is 54 MB of picture and 380 MB
+# of that. The picture itself is stored uncompressed, so it is squeezed too,
+# losslessly: the pixels that arrive are the pixels that left.
+#
+# What goes to the Fiery is a slim copy, made here and kept, so a design
+# printed every morning is slimmed once. The file in the folder is never
+# touched. Anything about the copy that does not check out -- a page's
+# content not byte-for-byte the same, a different page count, a picture that
+# decodes differently -- and the original is sent instead.
+
+CACHE_DIR = config.ROOT_DIR / "fiery-cache"
+CACHE_DAYS = 14
+
+# pypdf refuses streams over 75 MB by default, as a guard against hostile
+# files. These are the shop's own artwork, and a 160 MB picture is ordinary.
+try:
+    import pypdf.filters as _pdf_filters
+    for _name in dir(_pdf_filters):
+        if (_name.startswith(("MAX_", "ZLIB_MAX", "LZW_MAX", "RUN_LENGTH_MAX"))
+                or _name == "FLATE_MAX_BUFFER_SIZE") and isinstance(getattr(_pdf_filters, _name), int):
+            setattr(_pdf_filters, _name, 4 << 30)
+except Exception:
+    pass
+
+
+def _slim(path: Path) -> Optional[Path]:
+    """A slim copy of `path` to send in its place, or None to send it as is."""
+    try:
+        st = path.stat()
+        key = hashlib.sha1(f"{path.name}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()[:20]
+        CACHE_DIR.mkdir(exist_ok=True)
+        done = CACHE_DIR / f"{key}.pdf"
+        if done.exists():
+            return done
+        skip = CACHE_DIR / f"{key}.as-is"
+        if skip.exists():
+            return None
+        if st.st_size < (20 << 20):            # small already: not worth the look
+            return None
+        from pypdf import PdfReader, PdfWriter
+        from pypdf.generic import NameObject
+        reader = PdfReader(str(path))
+        writer = PdfWriter()
+        for page in reader.pages:
+            if "/PieceInfo" in page:
+                del page[NameObject("/PieceInfo")]
+            writer.add_page(page)
+        root = reader.trailer["/Root"]
+        for k in ("/OutputIntents", "/OCProperties"):    # colour and layers, as they were
+            if k in root:
+                writer._root_object[NameObject(k)] = root[k].clone(writer)
+        pictures: list[tuple[str, int, str]] = []
+        seen: set[int] = set()
+        for n, page in enumerate(writer.pages):
+            res = page.get("/Resources")
+            xo = res.get_object().get("/XObject") if res else None
+            if not xo:
+                continue
+            for name, ref in xo.get_object().items():
+                img = ref.get_object()
+                if img.get("/Subtype") != "/Image" or "/Filter" in img or id(img) in seen:
+                    continue
+                seen.add(id(img))
+                pictures.append((str(name), n, hashlib.md5(img._data).hexdigest()))
+                img._data = zlib.compress(img._data, 6)
+                img[NameObject("/Filter")] = NameObject("/FlateDecode")
+        out = io.BytesIO()
+        writer.write(out)
+        data = out.getvalue()
+        # the checks: same pages, same drawing, same pixels
+        check = PdfReader(io.BytesIO(data))
+        if len(check.pages) != len(reader.pages):
+            raise ValueError("page count changed")
+        for a, b in zip(reader.pages, check.pages):
+            if a.get_contents() is not None and a.get_contents().get_data() != b.get_contents().get_data():
+                raise ValueError("page content changed")
+        for name, n, digest in pictures:
+            img = check.pages[n]["/Resources"]["/XObject"][name].get_object()
+            if hashlib.md5(img.get_data()).hexdigest() != digest:
+                raise ValueError("picture changed")
+        if len(data) > st.st_size * 0.8:      # little to gain: send the original
+            skip.write_text("")
+            return None
+        tmp = done.with_suffix(".part")
+        tmp.write_bytes(data)
+        tmp.replace(done)
+        _state["slimmed"] = f"{path.name}: {st.st_size >> 20} MB -> {max(1, len(data) >> 20)} MB"
+        return done
+    except Exception as exc:
+        _state["last_slim_error"] = f"{path.name}: {type(exc).__name__}: {exc}"[:300]
+        return None
+
+
+def _slim_tidy() -> None:
+    """Slim copies not used for a fortnight are thrown away."""
+    try:
+        cutoff = time.time() - CACHE_DAYS * 86400
+        for f in CACHE_DIR.glob("*"):
+            if f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _find_file(row: dict) -> Optional[Path]:
     """The row's file: in the folder itself, or in the folder inside it that
     the app wrote it to -- Copy File puts its files in Pigu Today PRINT, which
@@ -467,6 +618,8 @@ _state: dict[str, Any] = {
     "preset_keys": [],
 }
 _presets_due = 0.0
+# the last job each run sent to print, so the next one waits for it
+_run_last: dict[str, str] = {}
 
 
 def _now() -> str:
@@ -518,18 +671,26 @@ def sync_presets(cloud: Optional[Cloud] = None) -> dict:
     return {"presets": presets}
 
 
-def send_one(fiery: Fiery, row: dict) -> str:
-    """One row to the Fiery. Returns the Fiery's job id."""
+def upload_one(fiery: Fiery, row: dict) -> tuple[str, int]:
+    """One row's file onto the Fiery, held, preset and copies set. Returns
+    the Fiery's job id and how big the file was."""
     path = _find_file(row)
     if path is None:
         raise FieryError(f"{row.get('file_name')} is not in {load().get('folder')}.")
     pages = str(row.get("pages") or "").strip()
     name = path.name if path.suffix.lower() == ".pdf" else path.stem + ".pdf"
+    # the same file with Illustrator's editing data left out, where it has any
+    send = (_slim(path) if path.suffix.lower() == ".pdf" else None) or path
+    if send != path:
+        try:
+            os.utime(send)              # used today: kept another fortnight
+        except OSError:
+            pass
     if path.suffix.lower() == ".pdf" and (not pages or pages.lower() == "all"):
-        pdf: Any = path                 # sent as it is, straight off the disk
-        size = path.stat().st_size
+        pdf: Any = send                 # sent as it is, straight off the disk
+        size = send.stat().st_size
     else:
-        pdf = _only_pages(_as_pdf(path), pages)
+        pdf = _only_pages(_as_pdf(send), pages)
         size = len(pdf)
     job_id = fiery.upload(name, pdf, str(row.get("preset_id") or ""))
     copies = max(1, int(row.get("copies") or 1))
@@ -539,8 +700,26 @@ def send_one(fiery: Fiery, row: dict) -> str:
         # Never printed with the wrong count: the job stays held, and says so.
         raise FieryError(f"The job is on the Fiery, held -- its copies could not "
                          f"be set to {copies}: {exc}") from exc
+    return job_id, size
+
+
+def print_in_turn(fiery: Fiery, row: dict, job_id: str, size: int) -> None:
+    """Print one job of a run once the job before it is at the press."""
+    run = str(row.get("run_id") or "")
+    before = _run_last.get(run) if run else None
+    if before and not fiery.wait_started(before, int(load().get("order_wait_minutes") or 20)):
+        _state["last_error"] = (f"{row.get('file_name')} was sent to print without "
+                                "waiting any longer for the job before it")
+    fiery.print_job(job_id, size)
+    if run:
+        _run_last[run] = job_id
+
+
+def send_one(fiery: Fiery, row: dict) -> str:
+    """One row to the Fiery. Returns the Fiery's job id."""
+    job_id, size = upload_one(fiery, row)
     if row.get("action") == "print":
-        fiery.print_job(job_id, size)
+        print_in_turn(fiery, row, job_id, size)
     return job_id
 
 
@@ -548,6 +727,8 @@ def sync_once() -> dict:
     """One pass: every queued job whose file is in the folder, sent."""
     global _presets_due
     cfg = load()
+    if time.time() >= _presets_due:
+        _slim_tidy()
     report: dict[str, Any] = {"sent": 0, "failed": 0, "waiting": 0, "notes": []}
     cloud = shared_cloud(*_credentials())
     if time.time() >= _presets_due:
@@ -613,19 +794,62 @@ def sync_once() -> dict:
             report["notes"].append(str(exc))
             _state["last_pass_at"] = _now()
             return report
+        def sent(row: dict, job_id: str) -> None:
+            _finish(cloud, row["id"], True, job_id=job_id)
+            report["sent"] += 1
+            _state["sent_total"] += 1
+            _state["last_sent"] = str(row.get("file_name") or "")
+
+        def failed(row: dict, exc: Exception, job_id: str = "") -> None:
+            _finish(cloud, row["id"], False, str(exc), job_id=job_id)
+            report["failed"] += 1
+            report["notes"].append(f"{row.get('file_name')}: {exc}")
+            _state["last_error"] = str(exc)
+
+        # A press to print is taken as one: every file of it goes onto the
+        # Fiery first, held, and is set processing -- then they are printed in
+        # the batch's order. The press is not kept idle waiting on the next
+        # upload, and a small file cannot print ahead of a big one before it.
+        groups: list[list[dict]] = []
+        runs: dict[str, list[dict]] = {}
+        for row in todo:
+            run = str(row.get("run_id") or "")
+            if run and row.get("action") == "print":
+                if run not in runs:
+                    runs[run] = []
+                    groups.append(runs[run])
+                runs[run].append(row)
+            else:
+                groups.append([row])
         try:
-            for row in todo:
-                try:
-                    job_id = send_one(fiery, row)
-                    _finish(cloud, row["id"], True, job_id=job_id)
-                    report["sent"] += 1
-                    _state["sent_total"] += 1
-                    _state["last_sent"] = str(row.get("file_name") or "")
-                except Exception as exc:     # one bad file must not stop the rest
-                    _finish(cloud, row["id"], False, str(exc))
-                    report["failed"] += 1
-                    report["notes"].append(f"{row.get('file_name')}: {exc}")
-                    _state["last_error"] = str(exc)
+            for group in groups:
+                first = group[0]
+                if not (first.get("run_id") and first.get("action") == "print"):
+                    try:
+                        sent(first, send_one(fiery, first))
+                    except Exception as exc:     # one bad file must not stop the rest
+                        failed(first, exc)
+                    continue
+                ready: list[tuple[dict, str, int]] = []
+                for row in group:
+                    try:
+                        job_id, size = upload_one(fiery, row)
+                        cloud.rest("PATCH", f"/fiery_jobs?id=eq.{row['id']}",
+                                   {"fiery_job_id": job_id}, prefer="return=minimal")
+                        ready.append((row, job_id, size))
+                    except Exception as exc:
+                        failed(row, exc)
+                for _, job_id, _ in ready:
+                    try:
+                        fiery.rip(job_id)
+                    except FieryError:
+                        pass                 # it is processed when printed instead
+                for row, job_id, size in ready:
+                    try:
+                        print_in_turn(fiery, row, job_id, size)
+                        sent(row, job_id)
+                    except Exception as exc:
+                        failed(row, exc, job_id)
         finally:
             fiery.logout()
     if report["sent"] and not report["failed"]:
@@ -680,6 +904,8 @@ def status() -> dict:
         "last_sent": _state["last_sent"],
         "last_pass_at": _state["last_pass_at"],
         "last_error": _state["last_error"],
+        "slimmed": _state.get("slimmed", ""),
+        "last_slim_error": _state.get("last_slim_error", ""),
         "config_file": str(CONFIG_PATH),
     }
 

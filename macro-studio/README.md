@@ -428,6 +428,21 @@ not reached this PC yet holds back the rest of its run rather than letting it
 print out of order. PNG and JPEG artwork is turned into a PDF at its own
 resolution on the way.
 
+A press set to print goes onto the Fiery whole first, held and set
+processing, and is then printed in its order — each job let go only once the
+one before it is at the press, because the Fiery prints whichever job is ready
+first and a 2 MB file is ready long before a 500 MB one
+(`order_wait_minutes`, 20 by default, is how long it waits for that).
+
+**Big files are slimmed.** A PDF saved from Illustrator with "Preserve
+Illustrator Editing Capabilities" carries the whole .ai file inside it, which
+the press never reads — a 436 MB gift wrapper is 54 MB of picture. What is
+sent is a copy without it, the picture compressed losslessly; it is checked
+against the original (same pages, same drawing, identical pixels) and the
+original is sent instead if anything differs. Copies are kept in
+`fiery-cache/` for a fortnight, so a design printed daily is slimmed once.
+`GET /api/fiery/status` shows the last one slimmed.
+
 To check it the first time, `POST /api/fiery/test` logs in and lists the
 presets without going near Supabase. `GET /api/fiery/status` shows the last
 error. `POST /api/fiery/send-now` runs one pass immediately.
