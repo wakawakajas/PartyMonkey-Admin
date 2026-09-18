@@ -419,6 +419,15 @@ the agent starts):
 - The Supabase login is borrowed from `duoke.json`, the same way `labels.json`
   borrows it.
 
+**Copied files.** 🖨 Print on an order, or **🖨 Print copied files** under the
+batch, sends Copy File artwork from Pigu Today PRINT (inside the Working
+Folder) in the order the batch lists it, each line's qty as its copies, and
+each SKU on the preset it was given (`fiery_sku_presets`, from
+`supabase-migration-FIERY-COPY.sql`). One press is one run: a file that has
+not reached this PC yet holds back the rest of its run rather than letting it
+print out of order. PNG and JPEG artwork is turned into a PDF at its own
+resolution on the way.
+
 To check it the first time, `POST /api/fiery/test` logs in and lists the
 presets without going near Supabase. `GET /api/fiery/status` shows the last
 error. `POST /api/fiery/send-now` runs one pass immediately.

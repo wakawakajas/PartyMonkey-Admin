@@ -5179,6 +5179,8 @@ body.mc-docked .mc-bubble{display:none !important;}
       <button class="btn-primary" id="mcDownloadAllBtn" style="flex:1 1 200px;height:50px;">Download All</button>
       <button class="btn-outline" id="mcPrintBtn" style="flex:1 1 200px;height:50px;"
         title="See each sheet first, then save it and send it to the Fiery with a server preset, copies and pages">🖨 Download &amp; Print</button>
+      <button class="btn-outline" id="mcCopyPrintBtn" style="flex:1 1 200px;height:50px;"
+        title="Send every order's Copy File artwork to the Fiery, order by order, each line's qty as its copies and each SKU on its own preset">🖨 Print copied files</button>
       <button class="btn-outline" id="mcCompleteBtn" style="flex:1 1 160px;height:50px;">Complete batch</button>
     </div>
     <button class="btn-outline" id="mcReopenBtn" style="width:100%;height:46px;margin-top:8px;display:none;">Re-open batch</button>
@@ -6563,6 +6565,32 @@ body.mc-docked .mc-bubble{display:none !important;}
      is sent to the Fiery. The presets are the Fiery's own, read off it by
      Macro Studio on the shop PC, so what is offered here is what Command
      WorkStation lists, under the same names. ---- -->
+<!-- ---- Magic Create: an order's copied files, sent to the Fiery in order,
+     each SKU on the preset it prints on. Ticking lines and tapping a preset is
+     how a SKU is given one; it is kept for the team after that. ---- -->
+<div class="sheet-bg" id="fieryRunSheet" style="z-index:80;">
+  <div class="sheet" style="max-width:560px;">
+    <button class="req-x" id="fieryRunClose" title="Close" aria-label="Close">×</button>
+    <div class="sheet-title">Print copied files</div>
+    <p class="hint" style="margin:0 0 8px;" id="fieryRunWhat"></p>
+    <div class="al-head">
+      <span id="fieryRunSelLbl"></span>
+      <span class="al-to"><button type="button" class="btn-outline btn-sm" id="fieryRunSelAll">☑ Select all</button></span>
+    </div>
+    <div id="fieryRunList" style="max-height:42vh;overflow:auto;"></div>
+    <div class="sect-label" style="margin-top:10px;">SET PRESET FOR TICKED</div>
+    <div class="chips" id="fieryRunPresets"></div>
+    <div class="sect-label">THEN</div>
+    <div class="chips" id="fieryRunAction">
+      <button type="button" class="btn-outline" data-fr-action="print">Print it</button>
+      <button type="button" class="btn-outline" data-fr-action="hold">Hold it in Fiery</button>
+    </div>
+    <button class="btn-primary" id="fieryRunGo">🖨 Send</button>
+    <div id="fieryRunMsg"></div>
+    <button class="btn-outline" id="fieryRunCancel">Cancel</button>
+  </div>
+</div>
+
 <div class="sheet-bg" id="mcFierySheet" style="z-index:80;">
   <div class="sheet" style="max-width:460px;">
     <button class="req-x" id="mcFieryClose" title="Close" aria-label="Close">×</button>
@@ -33780,6 +33808,8 @@ function mcRenderItems(){
                      :'Mark every line of this order done'}"${all?' disabled':''}>OK all</button>
         <button type="button" class="mc-ord-clear" data-mc-ord-clear="${escapeHtml(g.order_id)}"
           title="Take this order off the sheets"${laid?'':' disabled'}>Clear</button>
+        ${g.items.some(mcIsCopyLine)?`<button type="button" class="mc-ord-clear" data-mc-ord-print="${
+          escapeHtml(g.order_id)}" title="Send this order's copied files to the Fiery, each SKU on its preset">🖨 Print</button>`:''}
       </div>
       ${g.shown.map(mcLineHtml).join('')}
     </div>`;
@@ -34112,6 +34142,8 @@ document.getElementById('mcItems').addEventListener('click',async e=>{
   if(ex){ await mcAddExtra(ex.dataset.mcExtra); return; }
   const oa=e.target.closest('[data-mc-ord-ok]');
   if(oa&&!oa.disabled){ await mcOkOrder(oa.dataset.mcOrdOk); return; }
+  const op=e.target.closest('[data-mc-ord-print]');
+  if(op){ await mcCopyPrintOpen(op.dataset.mcOrdPrint); return; }
   const cl=e.target.closest('[data-mc-ord-clear]');
   if(cl&&!cl.disabled){ await mcClearOrder(cl.dataset.mcOrdClear); return; }
   const ad=e.target.closest('[data-mc-ord-add]');
@@ -35160,7 +35192,9 @@ function fieryNoFolder(msg){
 // `say` is the message lines to report on. True once queued.
 async function fieryQueue(session,dir,names,ans,say,skipped){
   try{
-    const {data,error}=await sb.from('fiery_jobs').insert(names.map(name=>({
+    // a name gets the one set of answers; a row already carries its own
+    const {data,error}=await sb.from('fiery_jobs').insert(names.map(name=>
+      typeof name==='object'?name:({
       user_id:session.user.id,file_name:name,folder:dir.name,
       preset_id:ans.preset_id,preset_name:ans.preset_name,
       copies:ans.copies,pages:ans.pages,action:ans.action}))).select('id');
@@ -35170,7 +35204,7 @@ async function fieryQueue(session,dir,names,ans,say,skipped){
     return true;
   }catch(err){
     const html='Not sent: '+escapeHtml((err&&err.message)||'unknown error')
-      +` — ${names.length===1?escapeHtml(names[0])+' is':names.length+' files are'} in `
+      +` — ${names.length===1?escapeHtml(names[0].file_name||names[0])+' is':names.length+' files are'} in `
       +`${escapeHtml(dir.name)}, but the Fiery was not told. `
       +'Run supabase-migration-FIERY.sql if this is the first time.';
     say.forEach(id=>{ const el=document.getElementById(id); if(el) showMsg(el,html,false); });
@@ -35236,6 +35270,204 @@ document.getElementById('mcPrintBtn').addEventListener('click',async()=>{
   await mcOpenPlan();
   if(mcPlan.length) mcShowPlanEntry(0);
 });
+// ---------- copied files, straight to the Fiery ----------
+// Copy File puts a SKU's artwork into Pigu Today PRINT; this sends what is
+// there to the Fiery, order by order as the batch lists them, each line with
+// its own quantity as the copies and each SKU on the preset it prints on. The
+// preset is the SKU's, set here once and shared (fiery_sku_presets), so the
+// next time that SKU comes round nobody is asked. See supabase-migration-FIERY-COPY.sql.
+function mcIsCopyLine(it){
+  return !!(it&&it.sheet_item&&it.sheet_item.copied)
+    ||mcRouteFor({sku:mcRowKey(it),name:(it&&(it.design_name||it.product))||''})==='copy';
+}
+let fieryRun=null;
+async function mcCopyPrintOpen(orderId){
+  const out=document.getElementById('mcBatchMsg');
+  if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
+  const lines=mcGroups()
+    .filter(g=>orderId===undefined||String(g.order_id)===String(orderId))
+    .flatMap(g=>g.items.filter(mcIsCopyLine));
+  if(!lines.length){
+    showMsg(out,orderId!==undefined?`${escapeHtml(String(orderId))} has no Copy File lines to print.`
+      :'Nothing on this batch is set to Copy File.',false);
+    return;
+  }
+  const session=await fieryReady(out); if(!session) return;
+  const sheet=document.getElementById('fieryRunSheet');
+  const msg=document.getElementById('fieryRunMsg');
+  msg.innerHTML='';
+  let presets=[], skuPreset=new Map();
+  try{
+    const [p,s]=await Promise.all([
+      sb.from('fiery_presets').select('id,name').order('name'),
+      sb.from('fiery_sku_presets').select('sku,preset_id')]);
+    if(p.error) throw p.error;
+    if(s.error) throw s.error;
+    presets=p.data||[];
+    (s.data||[]).forEach(r=>skuPreset.set(String(r.sku),String(r.preset_id)));
+  }catch(err){
+    showMsg(out,'Could not read the presets: '+escapeHtml((err&&err.message)||'unknown error')
+      +' — run supabase-migration-FIERY-COPY.sql if this is the first time.',false);
+    return;
+  }
+  let action='hold';
+  try{ if(localStorage.getItem('mcFieryAction')==='print') action='print'; }catch(e){}
+  fieryRun={orderId,session,presets,skuPreset,action,sel:new Set(),
+    lines:lines.map(it=>({it,sku:mcRowKey(it),order:String(it.order_id||'—'),
+      qty:Math.max(1,mcQty(it)||1)}))};
+  const orders=new Set(fieryRun.lines.map(l=>l.order)).size;
+  document.getElementById('fieryRunWhat').textContent=orderId!==undefined
+    ? `Order ${orderId} — ${lines.length} file${lines.length===1?'':'s'}, sent in this order.`
+    : `${orders} order${orders===1?'':'s'}, ${lines.length} file${lines.length===1?'':'s'} — `
+      +'sent in this order, top to bottom.';
+  fieryRunPaint();
+  sheet.classList.add('open');
+}
+function fieryRunPresetOf(sku){
+  const id=fieryRun.skuPreset.get(String(sku));
+  return fieryRun.presets.find(p=>p.id===id)||null;
+}
+function fieryRunPaint(){
+  const R=fieryRun; if(!R) return;
+  document.getElementById('fieryRunList').innerHTML=R.lines.map((l,i)=>{
+    const p=fieryRunPresetOf(l.sku);
+    const cp=l.it.sheet_item&&l.it.sheet_item.copied;
+    const file=cp&&cp.name?cp.name:'not copied yet — copied when sent';
+    return `<div class="mc-sum-row">
+      <input type="checkbox" class="mc-sum-pick" data-fr-sel="${i}" ${R.sel.has(i)?'checked':''}
+        aria-label="Select ${escapeHtml(l.sku)}"/>
+      <span class="mc-sum-main">
+        <span class="mc-sum-sku">${escapeHtml(l.sku)}</span>
+        <span class="mc-sum-name">${escapeHtml(l.order)} · ${escapeHtml(file)}</span>
+        ${p?`<span class="mc-sum-on">🖨 ${escapeHtml(p.name)}</span>`
+          :'<span class="mc-sum-name" style="color:var(--amber);">No preset yet — tick it and pick one below</span>'}
+      </span>
+      <span class="mc-sum-qty">×<input type="number" class="mc-qty-in" min="1" max="9999" step="1"
+        value="${l.qty}" data-fr-qty="${i}" title="Copies of this file"
+        aria-label="Copies of ${escapeHtml(l.sku)}"/></span>
+    </div>`;
+  }).join('');
+  document.getElementById('fieryRunPresets').innerHTML=R.presets.length
+    ? R.presets.map(p=>`<button type="button" class="btn-outline" data-fr-preset="${
+        escapeHtml(p.id)}">${escapeHtml(p.name)}</button>`).join('')
+    : '<span class="hint" style="margin:0;">No presets yet — Macro Studio on the shop PC reads them off the Fiery.</span>';
+  document.getElementById('fieryRunSelAll').textContent=
+    R.sel.size===R.lines.length?'Tick none':'☑ Select all';
+  document.getElementById('fieryRunSelLbl').textContent=R.sel.size
+    ?`${R.sel.size} ticked — tap a preset to set it on ${R.sel.size===1?'that SKU':'those SKUs'}`
+    :'Tick one, or Select all, then tap a preset to set it';
+  document.querySelectorAll('#fieryRunAction [data-fr-action]').forEach(b=>{
+    const on=b.dataset.frAction===R.action;
+    b.classList.toggle('btn-primary',on); b.classList.toggle('btn-outline',!on);
+  });
+  const missing=R.lines.filter(l=>!fieryRunPresetOf(l.sku)).length;
+  const go=document.getElementById('fieryRunGo');
+  go.disabled=!!missing;
+  go.textContent=missing
+    ? `${missing} still need${missing===1?'s':''} a preset`
+    : `🖨 ${R.action==='print'?'Print':'Send to Held'} — ${R.lines.length} file${R.lines.length===1?'':'s'}`;
+}
+// The preset tapped, onto every ticked line's SKU — saved for the team first,
+// shown after, so the screen never shows a preset nobody else will get.
+async function fieryRunSetPreset(id){
+  const R=fieryRun; if(!R) return;
+  const msg=document.getElementById('fieryRunMsg');
+  const p=R.presets.find(x=>x.id===id); if(!p) return;
+  if(!R.sel.size){ showMsg(msg,'Tick the SKUs to set first — or Select all.',false); return; }
+  const skus=[...new Set([...R.sel].map(i=>R.lines[i].sku))];
+  const {error}=await sb.from('fiery_sku_presets').upsert(skus.map(sku=>({sku,
+    preset_id:p.id,preset_name:p.name,updated_by:R.session.user.id,
+    updated_at:new Date().toISOString()})),{onConflict:'sku'});
+  if(error){ showMsg(msg,'Could not save that: '+escapeHtml(error.message),false); return; }
+  skus.forEach(sku=>R.skuPreset.set(sku,p.id));
+  R.sel.clear();
+  showMsg(msg,`✓ ${skus.length===1?escapeHtml(skus[0]):skus.length+' SKUs'} print on ${escapeHtml(p.name)} from now on.`,true);
+  fieryRunPaint();
+}
+async function fieryRunSend(){
+  const R=fieryRun; if(!R) return;
+  const msg=document.getElementById('fieryRunMsg');
+  if(R.lines.some(l=>!fieryRunPresetOf(l.sku))) return;
+  const go=document.getElementById('fieryRunGo');
+  go.disabled=true;
+  try{
+    // the copy-to folder: asked first, while the tap is still ours
+    const dir=await mcCopyDirReady(true);
+    if(!dir){ showMsg(msg,`Nothing sent — pick the copy-to folder (${escapeHtml(MC_COPY_FOLDER_HINT)}).`,false); return; }
+    // anything not copied yet is copied now, the way Copy File would
+    const need=[...new Set(R.lines.filter(l=>!(l.it.sheet_item&&l.it.sheet_item.copied)).map(l=>l.sku))];
+    const failed=[];
+    if(need.length){
+      showMsg(msg,`Copying ${need.length} file${need.length===1?'':'s'} first…`,true);
+      await mcSrcReady();
+      for(const sku of need){
+        const src=mcCopySource(sku);
+        if(!src){ failed.push(`${sku} (no file to copy)`); continue; }
+        try{
+          const r=await mcCopyInto(dir,src);
+          if(!r.n){ failed.push(`${sku} (${r.clash.length?'a different file of that name is already there':'file gone'})`); continue; }
+          await mcMarkCopiedLines(sku,src,src.to);
+          // lines on a completed batch are not written to, so the file name is
+          // carried here rather than read back off them
+          R.lines.filter(l=>l.sku===sku).forEach(l=>{ l.file=src.name; });
+        }catch(err){ failed.push(`${sku} (${(err&&err.message)||'copy failed'})`); }
+      }
+    }
+    const send=R.lines.filter(l=>l.file||(l.it.sheet_item&&l.it.sheet_item.copied&&l.it.sheet_item.copied.name));
+    if(!send.length){ showMsg(msg,'Nothing sent: '+escapeHtml(failed.join(', ')),false); return; }
+    const run=(crypto.randomUUID&&crypto.randomUUID())||String(Date.now());
+    const rows=send.map((l,i)=>{
+      const p=fieryRunPresetOf(l.sku);
+      return {user_id:R.session.user.id,
+        file_name:l.file||l.it.sheet_item.copied.name,folder:dir.name,
+        preset_id:p.id,preset_name:p.name,copies:l.qty,pages:'',action:R.action,
+        run_id:run,seq:i};
+    });
+    try{ localStorage.setItem('mcFieryAction',R.action); }catch(e){}
+    document.getElementById('fieryRunSheet').classList.remove('open');
+    const names=[...new Set(rows.map(r=>r.preset_name))];
+    const summary={preset_name:names.slice(0,2).join(', ')+(names.length>2?` +${names.length-2}`:''),
+      copies:rows.reduce((a,r)=>a+r.copies,0),pages:'',action:R.action};
+    await fieryQueue(R.session,dir,rows,summary,['mcBatchMsg'],failed);
+    fieryRun=null;
+  }finally{ go.disabled=false; }
+}
+document.getElementById('fieryRunList').addEventListener('change',e=>{
+  const R=fieryRun; if(!R) return;
+  const box=e.target.closest('[data-fr-sel]');
+  if(box){
+    const i=Number(box.dataset.frSel);
+    if(box.checked) R.sel.add(i); else R.sel.delete(i);
+    fieryRunPaint(); return;
+  }
+  const q=e.target.closest('[data-fr-qty]');
+  if(q){
+    const n=Math.round(Number(q.value));
+    R.lines[Number(q.dataset.frQty)].qty=n>=1&&n<=9999?n:1;
+    q.value=R.lines[Number(q.dataset.frQty)].qty;
+  }
+});
+document.getElementById('fieryRunPresets').addEventListener('click',e=>{
+  const b=e.target.closest('[data-fr-preset]'); if(b) fieryRunSetPreset(b.dataset.frPreset);
+});
+document.getElementById('fieryRunAction').addEventListener('click',e=>{
+  const b=e.target.closest('[data-fr-action]'); if(!b||!fieryRun) return;
+  fieryRun.action=b.dataset.frAction; fieryRunPaint();
+});
+document.getElementById('fieryRunSelAll').addEventListener('click',()=>{
+  const R=fieryRun; if(!R) return;
+  if(R.sel.size===R.lines.length) R.sel.clear();
+  else R.lines.forEach((l,i)=>R.sel.add(i));
+  fieryRunPaint();
+});
+document.getElementById('fieryRunGo').addEventListener('click',fieryRunSend);
+const fieryRunShut=()=>{ document.getElementById('fieryRunSheet').classList.remove('open'); fieryRun=null; };
+document.getElementById('fieryRunCancel').addEventListener('click',fieryRunShut);
+document.getElementById('fieryRunClose').addEventListener('click',fieryRunShut);
+document.getElementById('fieryRunSheet').addEventListener('click',e=>{
+  if(e.target.id==='fieryRunSheet') fieryRunShut();
+});
+document.getElementById('mcCopyPrintBtn').addEventListener('click',()=>mcCopyPrintOpen());
 // Drawn through the same code the export uses, on the builder lent for the
 // length of the look and given straight back. The page count comes back from
 // the drawing rather than being worked out separately: what is being paged

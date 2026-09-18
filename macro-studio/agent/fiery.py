@@ -389,12 +389,44 @@ def _only_pages(pdf: bytes, spec: str) -> bytes:
     return out.getvalue()
 
 
-def _find_file(name: str) -> Optional[Path]:
+def _plain(name: str) -> bool:
+    return bool(name) and "/" not in name and "\\" not in name and name not in (".", "..")
+
+
+def _find_file(row: dict) -> Optional[Path]:
+    """The row's file: in the folder itself, or in the folder inside it that
+    the app wrote it to -- Copy File puts its files in Pigu Today PRINT, which
+    sits inside the Working Folder."""
     folder = Path(load().get("folder") or "")
-    if not name or "/" in name or "\\" in name:
+    name = str(row.get("file_name") or "")
+    if not _plain(name):
         return None
-    path = folder / name
-    return path if path.is_file() else None
+    where = [folder / name]
+    sub = str(row.get("folder") or "")
+    if _plain(sub) and sub != folder.name:
+        where.append(folder / sub / name)
+    for path in where:
+        if path.is_file():
+            return path
+    return None
+
+
+_IMAGES = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+
+
+def _as_pdf(path: Path) -> bytes:
+    """A picture made into a one-page PDF at its own resolution, so it prints
+    the size it was drawn. The Fiery takes PDFs; a copied PNG is not one."""
+    if path.suffix.lower() not in _IMAGES:
+        return path.read_bytes()
+    from PIL import Image
+    with Image.open(path) as img:
+        dpi = img.info.get("dpi") or (300, 300)
+        res = float(dpi[0] or 300)
+        page = img.convert("RGB") if img.mode not in ("RGB", "L", "CMYK") else img.copy()
+    out = io.BytesIO()
+    page.save(out, "PDF", resolution=res)
+    return out.getvalue()
 
 
 # ---------------------------------------------------------------- the loop
@@ -464,11 +496,12 @@ def sync_presets(cloud: Optional[Cloud] = None) -> dict:
 
 def send_one(fiery: Fiery, row: dict) -> str:
     """One row to the Fiery. Returns the Fiery's job id."""
-    path = _find_file(str(row.get("file_name") or ""))
+    path = _find_file(row)
     if path is None:
         raise FieryError(f"{row.get('file_name')} is not in {load().get('folder')}.")
-    pdf = _only_pages(path.read_bytes(), str(row.get("pages") or ""))
-    job_id = fiery.upload(path.name, pdf, str(row.get("preset_id") or ""))
+    pdf = _only_pages(_as_pdf(path), str(row.get("pages") or ""))
+    name = path.name if path.suffix.lower() == ".pdf" else path.stem + ".pdf"
+    job_id = fiery.upload(name, pdf, str(row.get("preset_id") or ""))
     copies = max(1, int(row.get("copies") or 1))
     try:
         fiery.set_copies(job_id, copies)
@@ -497,21 +530,36 @@ def sync_once() -> dict:
             report["notes"].append(f"presets: {exc}")
             _state["last_error"] = str(exc)
 
-    rows = cloud.rest("GET", "/fiery_jobs?select=*&status=eq.queued"
-                      "&order=created_at.asc&limit=" + str(MAX_PER_PASS)) or []
+    base = "/fiery_jobs?select=*&status=eq.queued&limit=" + str(MAX_PER_PASS)
+    try:
+        rows = cloud.rest("GET", base + "&order=created_at.asc,seq.asc") or []
+    except CloudError as exc:
+        # supabase-migration-FIERY-COPY.sql not run yet: no seq to sort by
+        if "seq" not in str(exc):
+            raise
+        rows = cloud.rest("GET", base + "&order=created_at.asc") or []
     stale = int(cfg.get("stale_minutes") or 30)
     device = (platform.node() or "shop PC")[:60]
     todo: list[dict] = []
+    # A run whose next file has not arrived yet waits as a whole: sending the
+    # ones after it would print the batch out of order.
+    held: set[str] = set()
     for row in rows:
+        run = str(row.get("run_id") or "")
+        if run and run in held:
+            report["waiting"] += 1
+            continue
         if _age_minutes(row) > stale:
             _finish(cloud, row["id"], False,
                     "too old to send -- queued while Macro Studio was not running"
-                    if _find_file(str(row.get("file_name") or ""))
+                    if _find_file(row)
                     else f"{row.get('file_name')} never arrived in {cfg.get('folder')}")
             report["failed"] += 1
             continue
-        if _find_file(str(row.get("file_name") or "")) is None:
+        if _find_file(row) is None:
             report["waiting"] += 1          # the NAS has not delivered it yet
+            if run:
+                held.add(run)
             continue
         claimed = cloud.rest("PATCH", f"/fiery_jobs?id=eq.{row['id']}&status=eq.queued",
                              {"status": "sending", "device": device, "claimed_at": _now()},
