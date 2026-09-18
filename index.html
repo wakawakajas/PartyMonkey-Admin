@@ -6607,7 +6607,7 @@ body.mc-docked .mc-bubble{display:none !important;}
       <button type="button" class="icon-btn" id="mcPlanNext" aria-label="Next sheet">›</button>
     </div>
     <div id="mcPlanMsg"></div>
-    <button class="btn-primary" id="mcPlanPrintThis" style="display:none;">🖨 Download &amp; print this</button>
+    <button class="btn-primary" id="mcPlanPrintThis" style="display:none;">🖨 Download &amp; print this file</button>
     <button class="btn-primary" id="mcPlanDownload">⬇ Download all</button>
   </div>
 </div>
@@ -13878,21 +13878,18 @@ document.getElementById('bundlePrintAllBtn').addEventListener('click',()=>{
 // Settings, the list of the shop the order is for. Not the seed words: that
 // list also decides what counts as a seed, and it has DIY in it, which
 // belongs on the tape.
-// PartyMonkey keeps its hyphens: "Graduation-Graduation Bear" is the name on
-// the tape, not "Graduation Graduation Bear". Only a hyphen a removed word
-// left dangling at either end, or doubled up in the middle, is tidied away.
+// PartyMonkey prints the Bundle SKU exactly as it is named, hyphens and all:
+// "Graduation-Graduation Bear Bundle (A)" goes on the tape whole.
 function bundleComboNameClean(name,shop){
+  if(String(shop||'').toLowerCase()==='partymonkey')
+    return String(name||'').replace(/\s+/g,' ').trim();
   let s=String(name||'').trim();
   stickerWordsFor(shop).forEach(w=>{
     s=s.replace(new RegExp('(^|[^a-z])'+bundleReEscape(w)+'(?=[^a-z]|$)','ig'),'$1 ');
   });
-  const keepHyphen=String(shop||'').toLowerCase()==='partymonkey';
-  s=s.replace(/\(\s*\)|\[\s*\]/g,' ');  // brackets a removed word left empty
-  s=keepHyphen
-    ? s.replace(/_+/g,' ').replace(/\s*([\-–—])(\s*[\-–—])+\s*/g,'$1')
-       .replace(/^[\s\-–—]+|[\s\-–—]+$/g,'')
-    : s.replace(/[\-–—_]+/g,' ');
-  s=s.replace(/\s+/g,' ')
+  s=s.replace(/\(\s*\)|\[\s*\]/g,' ')   // brackets a removed word left empty
+     .replace(/[\-–—_]+/g,' ')
+     .replace(/\s+/g,' ')
      .replace(/([(\[])\s+/g,'$1').replace(/\s+([)\]])/g,'$1')   // "(40 )" -> "(40)"
      .replace(/^[\s,.·/|]+|[\s,.·/|]+$/g,'').trim();
   return s||String(name||'').trim();
@@ -34917,9 +34914,7 @@ function mcRenderPlan(){
         mcBusy?' disabled':''} title="Save this one file and send it to the Fiery"
         aria-label="Download and print ${escapeHtml(e.name)}">🖨</button>
     </div>`).join('');
-  const all=document.getElementById('mcPlanDownload');
-  all.disabled=mcBusy;
-  all.textContent=`⬇ Download all ${mcPlan.length} file${mcPlan.length===1?'':'s'}`;
+  mcPlanFootSync();
   mcPlanTallySync();
 }
 // What the plan actually adds up to, said in both the units that matter: the
@@ -35873,6 +35868,7 @@ function mcPlanZoomApply(){
   // while there is one
   const printThis=document.getElementById('mcPlanPrintThis');
   if(printThis){ printThis.style.display=on?'':'none'; printThis.disabled=mcBusy; }
+  mcPlanFootSync();
   if(!on) return;
   if(mcPlanZoom<=1){
     // The whole sheet, fitted to the box it is actually in. The CSS fitted it
@@ -35948,7 +35944,22 @@ document.getElementById('mcPlanList').addEventListener('click',e=>{
   const b=e.target.closest('[data-mc-plan]'); if(!b) return;
   mcShowPlanEntry(Number(b.dataset.mcPlan));
 });
+// The button at the foot is about what is on screen: with a sheet open it
+// saves that sheet, and with none open it saves the lot. The whole batch is
+// still one tap away: Download All on the batch screen, or Tick all and
+// ⬇ Ticked here.
+function mcPlanLooking(){
+  const stage=document.getElementById('mcPlanStage');
+  return mcPlanAt>=0&&!!mcPlan[mcPlanAt]&&!!stage&&stage.style.display!=='none';
+}
+function mcPlanFootSync(){
+  const all=document.getElementById('mcPlanDownload'); if(!all) return;
+  all.disabled=mcBusy;
+  all.textContent=mcPlanLooking()?'⬇ Download this file'
+    :`⬇ Download all ${mcPlan.length} file${mcPlan.length===1?'':'s'}`;
+}
 document.getElementById('mcPlanDownload').addEventListener('click',async()=>{
+  if(mcPlanLooking()){ await mcDownloadPlanEntry(mcPlanAt); return; }
   document.getElementById('mcPlanSheet').classList.remove('open');
   await mcDownloadAll();
 });
@@ -40649,7 +40660,17 @@ async function mcKeepBuilderArt(it){
       // an upscaled picture has no file on disk behind it; it is filed as the PNG it is
       const file=o.file||new File([await (await fetch(o.data)).blob()],
         (o.name||side).replace(/(\.[^.]+)?$/,'.png'),{type:'image/png'});
-      art[side]=await mcPutArt(it,side,file,o.data,o.img);
+      try{
+        art[side]=await mcPutArt(it,side,file,o.data,o.img);
+      }catch(e){
+        // The storage takes nothing over 50 MB, and a PDF straight out of
+        // Illustrator is often ten times that. Said as the size, because
+        // "the object exceeded the maximum allowed size" tells nobody what
+        // to do about it.
+        const mb=file&&file.size?file.size/1048576:0;
+        throw new Error(mb>50?`${file.name||'the file'} is ${Math.round(mb)} MB — `
+          +'the most the storage takes is 50 MB':((e&&e.message)||'upload failed'));
+      }
       o.mcPath=art[side];
       changed=true;
     }catch(e){ failed.push(side+' ('+((e&&e.message)||'upload failed')+')'); }
@@ -42734,7 +42755,14 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     mcRepaintRow(it);
     mcSyncBatchButtons();
     mcWinRender();
-    if(failed.length){ mcSaveChipSaid('Saved, but the '+failed.map(f=>f.split(' ')[0]).join(' and ')+' did not upload — save again',false); return; }
+    if(failed.length){
+      // the chip has room for which side; the batch log has room for why
+      mcLogAdd(`${escapeHtml(it.order_id||'This line')}: the layout saved, but the `
+        +escapeHtml(failed.join(' and the '))+' did not upload',false);
+      mcSaveChipSaid('Saved, but the '+failed.map(f=>f.split(' ')[0]).join(' and ')
+        +' did not upload — the reason is in the !! log',false);
+      return;
+    }
     const why=mcWhyNotReady(it).replace(/ — press Create$/,'');
     if(why){ mcSaveChipSaid('Saved — but it '+why.replace(/^Needs/,'needs')+' to download',false); return; }
     mcSaveChipSaid('✓ Saved to '+(it.order_id||'the line'),true);
