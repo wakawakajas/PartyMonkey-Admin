@@ -34277,7 +34277,8 @@ async function mcCopyLine(id,btn){
   if(!canPickFolder()){
     showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false);
     return; }
-  showMsg(out,`Copying ${escapeHtml(it.sku||'')}…`,true);
+  mcLogCopyRun++;
+  mcLogCopy(it.sku,'start');
   mcCopyingOn([it],true);
   // the copy-from folder is read on the way in: a line copied before anything
   // has opened it would otherwise be told there is no file of that name
@@ -34290,9 +34291,9 @@ async function mcCopyLine(id,btn){
   try{
     const r=await mcCopyInto(dir,src);
     if(!r.n){
-      showMsg(out,r.clash.length
-        ? `A different ${escapeHtml(src.name)} is already in that folder — nothing was copied.`
-        : `${escapeHtml(src.name)} is no longer in the designs folder.`,false);
+      mcLogCopy(it.sku,'fail',r.clash.length
+        ? `a different ${src.name} is already in that folder`
+        : `${src.name} is no longer in the designs folder`);
       return;
     }
     const was=it.sheet_item||{};
@@ -34302,12 +34303,11 @@ async function mcCopyLine(id,btn){
     await mcSave(it,{sheet_item:si,...mcDonePatch(it,true)});
     mcRepaintRow(it); mcRenderSummary();
     const where=src.to?`${dir.name}/${src.to}`:dir.name;
-    mcTold(out,`✓ ${r.done?`Copied ${r.done} into ${where}`:`Already in ${where}`}`
-      +' — this line is ticked off.',true,
-      r.done?'Copied, and ticked off':'Already there, ticked off');
+    mcLogCopy(it.sku,'done',`${src.name} ${r.done?'into':'already in'} ${where}`);
+    mcSay(r.done?'Copied, and ticked off':'Already there, ticked off');
   }catch(err){
-    mcTold(out,'Could not copy that: '+((err&&err.message)||'unknown error'),false,
-      'Could not copy that');
+    mcLogCopy(it.sku,'fail',(err&&err.message)||'unknown error');
+    mcSay('Could not copy that');
   }
   }finally{ mcCopyingOn([it],false); free(); }
 }
@@ -35344,11 +35344,28 @@ document.getElementById('mcPrintBtn').addEventListener('click',async()=>{
 // says "still queued" every two seconds, and that is one entry, not fifty.
 const MC_LOG_MAX=150;
 let mcLog=[], mcLogUnseen=0, mcLogUnseenBad=false;
-function mcLogAdd(html,ok){
+function mcLogAdd(html,ok,key){
   const text=String(html||'');
   if(!text.trim()) return;
   const now=Date.now();
-  const top=mcLog[0];
+  // A keyed entry is one thing's story — a file copying, then copied — so it
+  // is changed where it stands rather than added again
+  if(key){
+    const had=mcLog.find(e=>e.key===key);
+    if(had){
+      const same=had.html===text;
+      Object.assign(had,{html:text,ok:!!ok,at:now});
+      if(!same){ mcLogUnseen=Math.max(1,mcLogUnseen); if(!ok) mcLogUnseenBad=true; }
+    }else{
+      mcLog.unshift({html:text,ok:!!ok,at:now,key,going:false});
+      if(mcLog.length>MC_LOG_MAX) mcLog.length=MC_LOG_MAX;
+      mcLogUnseen++;
+      if(!ok) mcLogUnseenBad=true;
+    }
+    mcLogPaint();
+    return;
+  }
+  const top=mcLog[0]&&!mcLog[0].key?mcLog[0]:null;
   if(top&&(top.html===text||top.going)){
     const same=top.html===text;
     Object.assign(top,{html:text,ok:!!ok,at:now,going:!!ok&&/…|^→/.test(text.replace(/<[^>]*>/g,'').trim())});
@@ -35392,6 +35409,20 @@ document.getElementById('mcLogSheet').addEventListener('click',e=>{
 document.getElementById('mcLogClear').addEventListener('click',()=>{
   mcLog=[]; mcLogUnseen=0; mcLogUnseenBad=false; mcLogList(); mcLogPaint(); mcLogShut();
 });
+// One file's copy, said in the log as it happens: Copying… and then what came
+// of it, on the same entry. Keyed by the press as well as the SKU, so copying
+// the same SKU again later is a new entry rather than the old one rewritten.
+let mcLogCopyRun=0;
+function mcLogCopy(sku,state,detail){
+  const key=`copy:${mcLogCopyRun}:${sku}`;
+  const orders=[...new Set(mcItems.filter(x=>mcRowKey(x)===String(sku))
+    .map(x=>String(x.order_id||'—')))];
+  const who=`<b>${escapeHtml(String(sku||''))}</b>${orders.length
+    ?' ('+escapeHtml(orders.slice(0,3).join(', '))+(orders.length>3?` +${orders.length-3}`:'')+')':''}`;
+  if(state==='start') mcLogAdd(`⧉ Copying ${who}…`,true,key);
+  else if(state==='done') mcLogAdd(`⧉ Copied ${who}${detail?' — '+escapeHtml(detail):''}`,true,key);
+  else mcLogAdd(`⚠ Could not copy ${who}${detail?' — '+escapeHtml(detail):''}`,false,key);
+}
 // ---------- where a copied line has got to ----------
 // A Copy File line goes copying → copied → waiting to print → sending →
 // printed (or held, or not printed and why), and the line says which. The
@@ -35405,7 +35436,7 @@ function mcCopyingOn(its,on){
     if(mcOnBatch()) mcRepaintRow(it); });
 }
 const mcFieryState=new Map();
-let mcFieryPollT=null;
+let mcFieryPollT=null, mcFieryStateBatch=null;
 function mcPrintStage(it){
   if(!it) return null;
   const f=mcFieryState.get(it.id);
@@ -35450,9 +35481,17 @@ async function mcFieryStateLoad(){
     if(!was||was.status!==r.status||was.sent_at!==r.sent_at) changed.push(id);
     mcFieryState.set(id,r);
   });
+  // the first read of a batch is what already happened — only what moves
+  // after that is news for the log
+  const news=mcFieryStateBatch===mcBatch.id;
+  mcFieryStateBatch=mcBatch.id;
   for(const id of changed){
     const it=mcItem(id), r=mcFieryState.get(id);
     if(!it) continue;
+    const st=mcPrintStage(it);
+    if(news&&st) mcLogAdd(`${escapeHtml(st.label)} — <b>${escapeHtml(String(it.order_id||'—'))}</b> · ${
+      escapeHtml(mcRowKey(it))}${st.bad&&st.title?': '+escapeHtml(st.title):''}`,!st.bad,
+      `print:${r.created_at}:${id}`);
     // gone to the Fiery: written onto the line so it outlives the job row
     const kept=it.sheet_item&&it.sheet_item.printed;
     if(r.status==='sent'&&(!kept||kept.at!==r.sent_at)){
@@ -35602,19 +35641,28 @@ async function fieryRunSend(ticked){
     if(need.length){
       showMsg(msg,`Copying ${need.length} file${need.length===1?'':'s'} first…`,true);
       await mcSrcReady();
+      mcLogCopyRun++;
       for(const sku of need){
         const src=mcCopySource(sku);
-        if(!src){ failed.push(`${sku} (no file to copy)`); continue; }
+        if(!src){ failed.push(`${sku} (no file to copy)`); mcLogCopy(sku,'fail','no file to copy'); continue; }
         const its=mcItems.filter(x=>mcRowKey(x)===sku);
         mcCopyingOn(its,true);
+        mcLogCopy(sku,'start');
         try{
           const r=await mcCopyInto(dir,src);
-          if(!r.n){ failed.push(`${sku} (${r.clash.length?'a different file of that name is already there':'file gone'})`); continue; }
+          if(!r.n){
+            const why=r.clash.length?'a different file of that name is already there':'file gone';
+            failed.push(`${sku} (${why})`); mcLogCopy(sku,'fail',why); continue;
+          }
           await mcMarkCopiedLines(sku,src,src.to);
+          mcLogCopy(sku,'done',`${src.name} into ${dir.name}`);
           // lines on a completed batch are not written to, so the file name is
           // carried here rather than read back off them
           R.lines.filter(l=>l.sku===sku).forEach(l=>{ l.file=src.name; });
-        }catch(err){ failed.push(`${sku} (${(err&&err.message)||'copy failed'})`); }
+        }catch(err){
+          failed.push(`${sku} (${(err&&err.message)||'copy failed'})`);
+          mcLogCopy(sku,'fail',(err&&err.message)||'copy failed');
+        }
         finally{ mcCopyingOn(its,false); }
       }
     }
@@ -38700,18 +38748,25 @@ async function mcCopyRows(rows){
   // got to as it goes — the count is what tells somebody it is moving, and
   // the SKU is what tells them which file it is on when it stops.
   let i=0;
+  mcLogCopyRun++;
   for(const r of rows){
     showMsg(out,`Copying ${++i} of ${rows.length}… ${escapeHtml(String(r.sku||''))}`,true);
     const src=mcCopySource(r.sku);
-    if(!src){ missing.push(r.sku); continue; }
+    if(!src){ missing.push(r.sku); mcLogCopy(r.sku,'fail','no file to copy'); continue; }
     const its=mcItems.filter(x=>mcRowKey(x)===String(r.sku));
     mcCopyingOn(its,true);
+    mcLogCopy(r.sku,'start');
     try{
       const got=await mcCopyInto(dir,src);
-      if(!got.n){ (got.clash.length?failed:missing).push(r.sku); continue; }
+      if(!got.n){
+        (got.clash.length?failed:missing).push(r.sku);
+        mcLogCopy(r.sku,'fail',got.clash.length?`a different ${src.name} is already there`:`${src.name} is gone`);
+        continue;
+      }
       done+=got.done; already+=got.already;
       ticked+=await mcMarkCopiedLines(r.sku,src,src.to);
-    }catch(err){ failed.push(r.sku); }
+      mcLogCopy(r.sku,'done',`${src.name} ${got.done?'into':'already in'} ${dir.name}`);
+    }catch(err){ failed.push(r.sku); mcLogCopy(r.sku,'fail',(err&&err.message)||'copy failed'); }
     finally{ mcCopyingOn(its,false); }
   }
   mcRenderSummary();
