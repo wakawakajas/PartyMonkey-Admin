@@ -716,6 +716,25 @@ class Cloud:
         )
 
 
+# One signed-in client per login, kept for as long as the agent runs.
+# Every loop -- replies, labels, the Fiery -- used to make a new one each pass,
+# and a new one signs in: three loops every few seconds is hundreds of sign-ins
+# an hour, and Supabase starts answering 429 "rate limit reached", which is
+# minutes of nothing happening. The token it holds is refreshed by rest() when
+# it ages out, so keeping it costs nothing.
+_shared: dict = {}
+_shared_lock = threading.Lock()
+
+
+def shared_cloud(url: str, anon: str, email: str, password: str) -> "Cloud":
+    key = (url or "", anon or "", email or "", password or "")
+    with _shared_lock:
+        cloud = _shared.get(key)
+        if cloud is None:
+            cloud = _shared[key] = Cloud(*key)
+        return cloud
+
+
 # ---------------------------------------------------------------- the window
 
 
@@ -2236,8 +2255,8 @@ def sync_once() -> dict:
     report: dict[str, Any] = {"sent": 0, "threads": 0, "typed": 0, "photos": 0,
                               "products": 0, "history": 0, "catalog": 0,
                               "by_hand": 0, "skipped": 0, "notes": []}
-    cloud = Cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
-                  cfg.get("email", ""), cfg.get("password", ""))
+    cloud = shared_cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
+                         cfg.get("email", ""), cfg.get("password", ""))
     device = (platform.node() or "shop PC")[:60]
 
     # Switched off on the Replies tile in Pigu: DuoKe is not touched at all --

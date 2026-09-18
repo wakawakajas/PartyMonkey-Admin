@@ -35,7 +35,7 @@ from typing import Any, Optional
 from PIL import Image, ImageDraw, ImageFont
 
 from agent import config, duoke
-from agent.duoke import Cloud, CloudError
+from agent.duoke import Cloud, CloudError, shared_cloud
 
 CONFIG_PATH = config.ROOT_DIR / "labels.json"
 
@@ -643,7 +643,7 @@ def sync_once() -> dict:
     cfg = load()
     report: dict[str, Any] = {"printed": 0, "labels": 0, "stale": 0, "notes": []}
     url, anon, email, password = _credentials()
-    cloud = Cloud(url, anon, email, password)
+    cloud = shared_cloud(url, anon, email, password)
     device = (platform.node() or "packing PC")[:60]
 
     rows = _queued(cloud, (cfg.get("store") or "").strip())

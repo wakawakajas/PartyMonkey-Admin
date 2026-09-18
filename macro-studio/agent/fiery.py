@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from agent import config, duoke
-from agent.duoke import Cloud, CloudError
+from agent.duoke import Cloud, CloudError, shared_cloud
 
 CONFIG_PATH = config.ROOT_DIR / "fiery.json"
 
@@ -197,14 +197,17 @@ class Fiery:
             urllib.request.HTTPSHandler(context=context))
 
     def _call(self, method: str, path: str, body: Any = None,
-              data: Optional[bytes] = None, content_type: str = "",
-              timeout: int = 30) -> Any:
+              data: Any = None, content_type: str = "",
+              timeout: int = 30, length: int = 0) -> Any:
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             content_type = "application/json; charset=utf-8"
         req = urllib.request.Request(self.base + path, data=data, method=method)
         if content_type:
             req.add_header("Content-Type", content_type)
+        if length:
+            # a body handed over in pieces has to say how long it is up front
+            req.add_header("Content-Length", str(length))
         req.add_header("Accept", "application/json")
         try:
             with self.opener.open(req, timeout=timeout) as res:
@@ -282,30 +285,48 @@ class Fiery:
         except FieryError:
             return set()
 
-    def upload(self, name: str, pdf: bytes, preset_id: str) -> str:
+    def upload(self, name: str, pdf: Any, preset_id: str) -> str:
         """The job's id on the Fiery. The upload's own answer is read first;
         where it does not say, the job is found as the one that was not there
-        a moment ago."""
+        a moment ago.
+
+        `pdf` is the file's bytes, or the Path of a file to send as it is. A
+        Path is read off the disk a piece at a time as it goes out rather than
+        held whole in memory first -- a gift wrapper is 500 MB, and reading all
+        of it before sending a byte was most of the wait."""
         before = self.job_ids()
         boundary = "----pigu" + uuid.uuid4().hex
-        buf = io.BytesIO()
-
-        def field(key: str, value: str) -> None:
-            buf.write(f"--{boundary}\r\nContent-Disposition: form-data; "
-                      f'name="{key}"\r\n\r\n{value}\r\n'.encode("utf-8"))
-
+        head = b""
         if preset_id:
-            field("preset", preset_id)
+            head += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                     f'name="preset"\r\n\r\n{preset_id}\r\n').encode("utf-8")
         safe = name.replace('"', "'")
-        buf.write(f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
-                  f'filename="{safe}"\r\nContent-Type: application/pdf\r\n\r\n'
-                  .encode("utf-8"))
-        buf.write(pdf)
-        buf.write(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+        head += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+                 f'filename="{safe}"\r\nContent-Type: application/pdf\r\n\r\n').encode("utf-8")
+        tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
+        if isinstance(pdf, Path):
+            size = pdf.stat().st_size
+
+            def pieces():
+                yield head
+                with open(pdf, "rb") as fh:
+                    while True:
+                        chunk = fh.read(1 << 20)
+                        if not chunk:
+                            break
+                        yield chunk
+                yield tail
+            data: Any = pieces()
+            length = len(head) + size + len(tail)
+        else:
+            data = head + pdf + tail
+            length = 0
+        # long enough for the biggest file over a slow link, a minute a 100 MB
+        timeout = max(600, int(length / (100 << 20) * 60))
         query = "?preset=" + urllib.parse.quote(preset_id) if preset_id else ""
-        out = self._call("POST", "/jobs" + query, data=buf.getvalue(),
+        out = self._call("POST", "/jobs" + query, data=data,
                          content_type=f"multipart/form-data; boundary={boundary}",
-                         timeout=600)
+                         timeout=timeout, length=length)
         job_id = ""
         if isinstance(out, str):
             job_id = out.strip().strip('"')
@@ -330,11 +351,14 @@ class Fiery:
         self._call("PUT", "/jobs/" + urllib.parse.quote(job_id),
                    {"attributes": {"numcopies": str(int(copies))}})
 
-    def print_job(self, job_id: str) -> None:
+    def print_job(self, job_id: str, size: int = 0) -> None:
         """Print once the Fiery has finished taking the file in. A print asked
-        for while it is still spooling is refused, so it is asked again."""
+        for while it is still spooling is refused, so it is asked again -- for
+        a minute, and longer for a big file, which the Fiery takes longer to
+        take in: half a minute more for every 100 MB."""
         last: Optional[Exception] = None
-        for _ in range(12):
+        tries = 12 + int(size / (100 << 20) * 6)
+        for _ in range(tries):
             try:
                 out = self._call("PUT", "/jobs/" + urllib.parse.quote(job_id) + "/print")
                 if out is False or (isinstance(out, dict) and out.get("error")):
@@ -470,7 +494,7 @@ def sync_presets(cloud: Optional[Cloud] = None) -> dict:
     global _presets_due
     cfg = load()
     if cloud is None:
-        cloud = Cloud(*_credentials())
+        cloud = shared_cloud(*_credentials())
     fiery = Fiery(cfg)
     fiery.login()
     try:
@@ -499,8 +523,14 @@ def send_one(fiery: Fiery, row: dict) -> str:
     path = _find_file(row)
     if path is None:
         raise FieryError(f"{row.get('file_name')} is not in {load().get('folder')}.")
-    pdf = _only_pages(_as_pdf(path), str(row.get("pages") or ""))
+    pages = str(row.get("pages") or "").strip()
     name = path.name if path.suffix.lower() == ".pdf" else path.stem + ".pdf"
+    if path.suffix.lower() == ".pdf" and (not pages or pages.lower() == "all"):
+        pdf: Any = path                 # sent as it is, straight off the disk
+        size = path.stat().st_size
+    else:
+        pdf = _only_pages(_as_pdf(path), pages)
+        size = len(pdf)
     job_id = fiery.upload(name, pdf, str(row.get("preset_id") or ""))
     copies = max(1, int(row.get("copies") or 1))
     try:
@@ -510,7 +540,7 @@ def send_one(fiery: Fiery, row: dict) -> str:
         raise FieryError(f"The job is on the Fiery, held -- its copies could not "
                          f"be set to {copies}: {exc}") from exc
     if row.get("action") == "print":
-        fiery.print_job(job_id)
+        fiery.print_job(job_id, size)
     return job_id
 
 
@@ -519,7 +549,7 @@ def sync_once() -> dict:
     global _presets_due
     cfg = load()
     report: dict[str, Any] = {"sent": 0, "failed": 0, "waiting": 0, "notes": []}
-    cloud = Cloud(*_credentials())
+    cloud = shared_cloud(*_credentials())
     if time.time() >= _presets_due:
         try:
             sync_presets(cloud)
@@ -604,6 +634,22 @@ def sync_once() -> dict:
     return report
 
 
+def recover() -> int:
+    """Jobs this PC had claimed when it was last shut: they are not coming.
+    Failed rather than queued again -- one of them may already be on the
+    Fiery, and sending it twice prints it twice -- with the error saying
+    where to look."""
+    cloud = shared_cloud(*_credentials())
+    device = (platform.node() or "shop PC")[:60]
+    rows = cloud.rest("GET", "/fiery_jobs?select=id&status=eq.sending&device=eq."
+                      + urllib.parse.quote(device)) or []
+    for row in rows:
+        _finish(cloud, row["id"], False,
+                "Macro Studio was closed while sending this -- check Command "
+                "WorkStation before sending it again")
+    return len(rows)
+
+
 def test() -> dict:
     """Log in and list the presets -- the button to press while setting up."""
     fiery = Fiery(load())
@@ -660,8 +706,15 @@ class Watcher:
 
     def _run(self) -> None:
         self._stop.wait(4)
+        recovered = False
         while not self._stop.is_set():
             cfg = load()
+            if cfg.get("enabled") and not recovered:
+                try:
+                    recover()
+                    recovered = True
+                except Exception as exc:
+                    _state["last_error"] = f"{type(exc).__name__}: {exc}"
             if cfg.get("enabled"):
                 try:
                     sync_once()
