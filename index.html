@@ -632,6 +632,18 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   border-radius:999px;background:var(--lime-ink);color:var(--blueprint);
   font-size:12px;font-weight:700;line-height:1;}
 .tile-badge[hidden]{display:none;}
+/* On/off for Replies, on its tile. Off stops the shop PC reading DuoKe and
+   typing replies back; the tile stays openable and fades so it reads as off. */
+.tile-switch{display:inline-flex;align-items:center;gap:6px;flex-shrink:0;
+  margin-left:auto;margin-right:8px;height:26px;padding:0 10px 0 4px;
+  border-radius:999px;background:rgba(23,26,11,.18);border:1px solid transparent;
+  color:var(--lime-ink);font-size:11.5px;font-weight:700;line-height:1;cursor:pointer;}
+.tile-switch::before{content:'';width:18px;height:18px;border-radius:50%;
+  background:var(--lime-ink);box-sizing:border-box;}
+.tile-switch[aria-checked="false"]{background:transparent;border-color:var(--lime-ink);}
+.tile-switch[aria-checked="false"]::before{background:transparent;border:2px solid var(--lime-ink);}
+.tile-switch + .tile-badge{margin-left:0;}
+.tile.is-off .tile-ico,.tile.is-off .tile-name{opacity:.45;}
 /* ---- team energy, the one question a day on the home screen ---- */
 .meter-card{background:var(--card);border:1px solid var(--border);border-radius:22px;
   padding:16px;margin-bottom:14px;}
@@ -3286,6 +3298,8 @@ body.mc-docked .mc-bubble{display:none !important;}
             <path d="M21 12a8 8 0 0 1-8 8H8l-4 3v-4.5A8 8 0 1 1 21 12z"/>
             <path d="M8.5 11h7M8.5 14.5h4"/>
           </svg>
+          <span class="tile-switch" id="repliesSwitch" role="switch" tabindex="0"
+            aria-checked="true" aria-label="Replies on or off">On</span>
           <span class="tile-badge" id="repliesBadge" hidden></span>
           <span class="tile-go">→</span>
         </span>
@@ -11897,6 +11911,14 @@ document.getElementById('goToRequestBtn').addEventListener('click',()=>showScree
 // installed yet).
 document.getElementById('goToMacroStudioBtn').addEventListener('click',()=>showScreen('macro-studio'));
 document.getElementById('goToRepliesBtn').addEventListener('click',()=>showScreen('replies'));
+// the switch sits inside the tile, so it keeps its click from opening the screen
+document.getElementById('repliesSwitch').addEventListener('click',e=>{
+  e.stopPropagation(); e.preventDefault(); rpToggleOff();
+});
+document.getElementById('repliesSwitch').addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ') return;
+  e.stopPropagation(); e.preventDefault(); rpToggleOff();
+});
 document.getElementById('navRepliesBtn').addEventListener('click',()=>showScreen('replies'));
 document.getElementById('goToBundleSkuBtn').addEventListener('click',()=>showScreen('bundle-sku'));
 document.getElementById('goToFinanceBtn').addEventListener('click',()=>showScreen('finance'));
@@ -41974,16 +41996,42 @@ function rpWatch(){
       if(eventType==='INSERT'&&row.status==='new'&&currentScreen==='replies') chime('request');
     })
     .on('postgres_changes',{event:'*',schema:'public',table:'reply_sync'},({new:row})=>{
-      if(row){ rpBeatRow=row; rpCatalogRow=row; rpRenderBeat(); rpRenderCatalogNote(); }
+      if(row){ rpBeatRow=row; rpCatalogRow=row; rpRenderBeat(); rpRenderCatalogNote(); rpSyncBadge(); }
     })
     .subscribe();
 }
 
+function rpIsOff(){ return !!(rpBeatRow&&rpBeatRow.off_at); }
+
 function rpSyncBadge(){
+  const off=rpIsOff();
+  const sw=rpEl('repliesSwitch'),tile=rpEl('goToRepliesBtn');
+  if(sw){ sw.setAttribute('aria-checked',off?'false':'true'); sw.textContent=off?'Off':'On'; }
+  if(tile) tile.classList.toggle('is-off',off);
   const b=rpEl('repliesBadge');
   if(!b) return;
   b.textContent=String(rpQueue.length);
-  b.hidden=!rpQueue.length;
+  b.hidden=off||!rpQueue.length;
+}
+
+// The switch on the tile. A stamp on reply_sync, which the shop PC reads at
+// the start of every pass -- so it works from any phone.
+async function rpToggleOff(){
+  if(!sb) return;
+  const off=!rpIsOff();
+  const {data:{user:u}={}}=await sb.auth.getUser().catch(()=>({data:{}}));
+  const patch=off
+    ? {off_at:new Date().toISOString(),off_by:(u&&u.email)||''}
+    : {off_at:null,off_by:''};
+  const {error}=await sb.from('reply_sync').update(patch).eq('id',true);
+  if(error){
+    alert(/off_/.test(error.message||'')
+      ? 'Run supabase-migration-REPLIES-OFF.sql in Supabase first — the switch has nowhere to be saved yet.'
+      : 'Could not switch Replies '+(off?'off':'on')+': '+error.message);
+    return;
+  }
+  rpBeatRow=Object.assign({},rpBeatRow||{},patch);
+  rpSyncBadge(); rpRenderBeat();
 }
 
 function rpRenderBeat(){
@@ -41994,6 +42042,11 @@ function rpRenderBeat(){
   if(rpMissing){
     dot.className='rp-dot off';
     text.textContent='Run supabase-migration-REPLIES.sql on the project first — the tables are not there yet.';
+    return;
+  }
+  if(rpIsOff()){
+    dot.className='rp-dot off';
+    text.textContent='Replies are switched off — the shop PC is not reading DuoKe or typing replies. Switch them on from the Replies tile on the home screen.';
     return;
   }
   if(!rpBeatRow||!rpBeatRow.beat_at){

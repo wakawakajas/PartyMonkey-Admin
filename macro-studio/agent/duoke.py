@@ -655,6 +655,16 @@ class Cloud:
         self.rest("PATCH", f"/reply_messages?id=in.({joined})",
                   {"status": "skipped"}, prefer="return=minimal")
 
+    def switched_off(self) -> bool:
+        """Whether somebody has switched Replies off on the tile in Pigu. A
+        project without the REPLIES-OFF migration has no switch, so it is on."""
+        try:
+            out = self.rest("GET", "/reply_sync?select=off_at&id=eq.true")
+        except CloudError:
+            return False
+        row = (out or [{}])[0] if isinstance(out, list) else {}
+        return bool(row.get("off_at"))
+
     def history_wanted(self) -> list[dict]:
         """Rows somebody has pressed Pull chat history on since they were last
         read. Ordered oldest ask first, so a queue of them is served in the
@@ -2229,6 +2239,20 @@ def sync_once() -> dict:
     cloud = Cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
                   cfg.get("email", ""), cfg.get("password", ""))
     device = (platform.node() or "shop PC")[:60]
+
+    # Switched off on the Replies tile in Pigu: DuoKe is not touched at all --
+    # not read, not restored, nothing typed -- until it is switched back on.
+    # The heartbeat still goes, so Pigu can tell "off" from "PC asleep".
+    if cloud.switched_off():
+        report["notes"].append("Replies are switched off in Pigu")
+        report["off"] = True
+        try:
+            cloud.beat(device, False, 0, "Replies are switched off in Pigu")
+        except CloudError as exc:
+            report["notes"].append(str(exc))
+        _state["last_report"] = report
+        _state["last_pass_at"] = datetime.now(timezone.utc).isoformat()
+        return report
 
     hwnd = find_window()
     restored = False
