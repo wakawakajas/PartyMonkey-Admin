@@ -807,6 +807,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* The batch's messages, kept rather than shown: a line under two hundred
    orders is either missed or in the way. The button says there is something
    new, red when some of it went wrong; tapping it is where it is read. */
+.mc-log-btn[hidden]{display:none;}
 .mc-log-btn .ic{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:18px;line-height:1;}
 .mc-log-btn .n{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:12px;}
 .mc-log-btn.new{border-color:var(--blueprint);color:var(--blueprint);}
@@ -13875,14 +13876,21 @@ document.getElementById('bundlePrintAllBtn').addEventListener('click',()=>{
 // Settings, the list of the shop the order is for. Not the seed words: that
 // list also decides what counts as a seed, and it has DIY in it, which
 // belongs on the tape.
+// PartyMonkey keeps its hyphens: "Graduation-Graduation Bear" is the name on
+// the tape, not "Graduation Graduation Bear". Only a hyphen a removed word
+// left dangling at either end, or doubled up in the middle, is tidied away.
 function bundleComboNameClean(name,shop){
   let s=String(name||'').trim();
   stickerWordsFor(shop).forEach(w=>{
     s=s.replace(new RegExp('(^|[^a-z])'+bundleReEscape(w)+'(?=[^a-z]|$)','ig'),'$1 ');
   });
-  s=s.replace(/\(\s*\)|\[\s*\]/g,' ')   // brackets a removed word left empty
-     .replace(/[\-–—_]+/g,' ')
-     .replace(/\s+/g,' ')
+  const keepHyphen=String(shop||'').toLowerCase()==='partymonkey';
+  s=s.replace(/\(\s*\)|\[\s*\]/g,' ');  // brackets a removed word left empty
+  s=keepHyphen
+    ? s.replace(/_+/g,' ').replace(/\s*([\-–—])(\s*[\-–—])+\s*/g,'$1')
+       .replace(/^[\s\-–—]+|[\s\-–—]+$/g,'')
+    : s.replace(/[\-–—_]+/g,' ');
+  s=s.replace(/\s+/g,' ')
      .replace(/([(\[])\s+/g,'$1').replace(/\s+([)\]])/g,'$1')   // "(40 )" -> "(40)"
      .replace(/^[\s,.·/|]+|[\s,.·/|]+$/g,'').trim();
   return s||String(name||'').trim();
@@ -25021,8 +25029,10 @@ function gtSetMode(m,save){
   gtModeJob=gtModeJob.then(run,run);
   return gtModeJob;
 }
+let gtModeAsked=false;
 async function gtSetModeNow(m,save){
   const next=(m==='custom')?'custom':'festive';
+  gtModeAsked=true;
   if(next===gtMode&&gtLoaded){ await gtApplyMode(); return; }
   // the order was built out of the page being left, and belongs to it
   gtOrders[gtMode]=gtOrder;
@@ -29638,20 +29648,34 @@ document.addEventListener('keydown',e=>{
 },true);
 
 // ---------- arriving on the screen ----------
+// The first load, shared. It used to set gtLoaded before it had loaded
+// anything, so a second caller — the split laying a gift tag line onto the
+// sheet — took the library as open and went ahead: it switched to the line's
+// page and put the line on the sheet, and then this load finished, set the
+// page back to whichever was open last, and the page switch that followed
+// parked the line on the other page. The line was on the sheet for a second
+// and then gone. Everybody who arrives while it is running now waits for it.
+let gtOpenJob=null;
 async function gtOpen(){
   if(!gtLoaded){
-    gtLoaded=true;
-    try{
-      gtMode=(await gtIdbGet('gtMode').catch(()=>null))==='custom'?'custom':'festive';
-      const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
-      // the handle survives a reload but its permission may not, and asking
-      // again cannot happen here — that takes a tap, which the button is for
-      if(saved&&await gtDirOk(saved)) gtDir=saved;
-      else if(saved) gtFolderPending=true;
-      await gtLoadLib();
-    }catch(e){}
-    if(!gtSheet.slots.length) gtRebuildSlots();
-    gtWriteSheetInputs();
+    if(!gtOpenJob) gtOpenJob=(async()=>{
+      try{
+        const last=(await gtIdbGet('gtMode').catch(()=>null))==='custom'?'custom':'festive';
+        // the page last open, unless somebody has already asked for one
+        // while this was reading — theirs is the page wanted now
+        if(!gtModeAsked) gtMode=last;
+        const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
+        // the handle survives a reload but its permission may not, and asking
+        // again cannot happen here — that takes a tap, which the button is for
+        if(saved&&await gtDirOk(saved)) gtDir=saved;
+        else if(saved) gtFolderPending=true;
+        await gtLoadLib();
+      }catch(e){}
+      if(!gtSheet.slots.length) gtRebuildSlots();
+      gtWriteSheetInputs();
+      gtLoaded=true;
+    })();
+    await gtOpenJob;
   }
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
   // anything dropped into the folder since the last look is taken on quietly —
