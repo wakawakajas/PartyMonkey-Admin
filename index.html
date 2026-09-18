@@ -6585,7 +6585,10 @@ body.mc-docked .mc-bubble{display:none !important;}
       <button type="button" class="btn-outline" data-fr-action="print">Print it</button>
       <button type="button" class="btn-outline" data-fr-action="hold">Hold it in Fiery</button>
     </div>
-    <button class="btn-primary" id="fieryRunGo">🖨 Send</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn-primary" id="fieryRunGo" style="flex:1 1 180px;">🖨 Print all</button>
+      <button class="btn-outline" id="fieryRunGoSel" style="flex:1 1 180px;" disabled>🖨 Print ticked</button>
+    </div>
     <div id="fieryRunMsg"></div>
     <button class="btn-outline" id="fieryRunCancel">Cancel</button>
   </div>
@@ -35360,12 +35363,18 @@ function fieryRunPaint(){
     const on=b.dataset.frAction===R.action;
     b.classList.toggle('btn-primary',on); b.classList.toggle('btn-outline',!on);
   });
-  const missing=R.lines.filter(l=>!fieryRunPresetOf(l.sku)).length;
-  const go=document.getElementById('fieryRunGo');
-  go.disabled=!!missing;
-  go.textContent=missing
-    ? `${missing} still need${missing===1?'s':''} a preset`
-    : `🖨 ${R.action==='print'?'Print':'Send to Held'} — ${R.lines.length} file${R.lines.length===1?'':'s'}`;
+  // all of them, or only the ticked ones — each says what it would send and
+  // is held back while any of those still has no preset
+  const verb=R.action==='print'?'Print':'Hold';
+  const say=(btn,list,what)=>{
+    const missing=list.filter(l=>!fieryRunPresetOf(l.sku)).length;
+    btn.disabled=!list.length||!!missing;
+    btn.textContent=!list.length?`🖨 ${verb} ticked`
+      :missing?`${missing} still need${missing===1?'s':''} a preset`
+      :`🖨 ${verb} ${what} (${list.length})`;
+  };
+  say(document.getElementById('fieryRunGo'),R.lines,'all');
+  say(document.getElementById('fieryRunGoSel'),[...R.sel].sort((a,b)=>a-b).map(i=>R.lines[i]),'ticked');
 }
 // The preset tapped, onto every ticked line's SKU — saved for the team first,
 // shown after, so the screen never shows a preset nobody else will get.
@@ -35380,22 +35389,23 @@ async function fieryRunSetPreset(id){
     updated_at:new Date().toISOString()})),{onConflict:'sku'});
   if(error){ showMsg(msg,'Could not save that: '+escapeHtml(error.message),false); return; }
   skus.forEach(sku=>R.skuPreset.set(sku,p.id));
-  R.sel.clear();
   showMsg(msg,`✓ ${skus.length===1?escapeHtml(skus[0]):skus.length+' SKUs'} print on ${escapeHtml(p.name)} from now on.`,true);
   fieryRunPaint();
 }
-async function fieryRunSend(){
+// ticked: only the ticked lines, still in the batch's order
+async function fieryRunSend(ticked){
   const R=fieryRun; if(!R) return;
   const msg=document.getElementById('fieryRunMsg');
-  if(R.lines.some(l=>!fieryRunPresetOf(l.sku))) return;
-  const go=document.getElementById('fieryRunGo');
+  const lines=ticked?[...R.sel].sort((a,b)=>a-b).map(i=>R.lines[i]):R.lines;
+  if(!lines.length||lines.some(l=>!fieryRunPresetOf(l.sku))) return;
+  const go=document.getElementById(ticked?'fieryRunGoSel':'fieryRunGo');
   go.disabled=true;
   try{
     // the copy-to folder: asked first, while the tap is still ours
     const dir=await mcCopyDirReady(true);
     if(!dir){ showMsg(msg,`Nothing sent — pick the copy-to folder (${escapeHtml(MC_COPY_FOLDER_HINT)}).`,false); return; }
     // anything not copied yet is copied now, the way Copy File would
-    const need=[...new Set(R.lines.filter(l=>!(l.it.sheet_item&&l.it.sheet_item.copied)).map(l=>l.sku))];
+    const need=[...new Set(lines.filter(l=>!(l.it.sheet_item&&l.it.sheet_item.copied)).map(l=>l.sku))];
     const failed=[];
     if(need.length){
       showMsg(msg,`Copying ${need.length} file${need.length===1?'':'s'} first…`,true);
@@ -35413,7 +35423,7 @@ async function fieryRunSend(){
         }catch(err){ failed.push(`${sku} (${(err&&err.message)||'copy failed'})`); }
       }
     }
-    const send=R.lines.filter(l=>l.file||(l.it.sheet_item&&l.it.sheet_item.copied&&l.it.sheet_item.copied.name));
+    const send=lines.filter(l=>l.file||(l.it.sheet_item&&l.it.sheet_item.copied&&l.it.sheet_item.copied.name));
     if(!send.length){ showMsg(msg,'Nothing sent: '+escapeHtml(failed.join(', ')),false); return; }
     const run=(crypto.randomUUID&&crypto.randomUUID())||String(Date.now());
     const rows=send.map((l,i)=>{
@@ -35460,7 +35470,8 @@ document.getElementById('fieryRunSelAll').addEventListener('click',()=>{
   else R.lines.forEach((l,i)=>R.sel.add(i));
   fieryRunPaint();
 });
-document.getElementById('fieryRunGo').addEventListener('click',fieryRunSend);
+document.getElementById('fieryRunGo').addEventListener('click',()=>fieryRunSend(false));
+document.getElementById('fieryRunGoSel').addEventListener('click',()=>fieryRunSend(true));
 const fieryRunShut=()=>{ document.getElementById('fieryRunSheet').classList.remove('open'); fieryRun=null; };
 document.getElementById('fieryRunCancel').addEventListener('click',fieryRunShut);
 document.getElementById('fieryRunClose').addEventListener('click',fieryRunShut);
