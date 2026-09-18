@@ -76,6 +76,11 @@ DEFAULTS: dict[str, Any] = {
     # How long a job waits for the one before it in the same press to reach
     # the press, before it is sent anyway.
     "order_wait_minutes": 20,
+    # Send a slim copy of big Illustrator PDFs (their editing data left out).
+    # Off until a slim copy has been opened in Acrobat and printed from the
+    # Fiery: the first version of this made files Acrobat and the Fiery could
+    # not read, and nothing on this PC showed it.
+    "slim_pdfs": False,
 }
 
 _lock = threading.RLock()
@@ -491,6 +496,8 @@ except Exception:
 
 def _slim(path: Path) -> Optional[Path]:
     """A slim copy of `path` to send in its place, or None to send it as is."""
+    if not load().get("slim_pdfs"):
+        return None
     try:
         st = path.stat()
         key = hashlib.sha1(f"{path.name}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()[:20]
@@ -512,9 +519,14 @@ def _slim(path: Path) -> Optional[Path]:
                 del page[NameObject("/PieceInfo")]
             writer.add_page(page)
         root = reader.trailer["/Root"]
-        for k in ("/OutputIntents", "/OCProperties"):    # colour and layers, as they were
+        # Colour and layers, as they were. Taken by reference, not by value:
+        # root[k] hands back the object itself, and a stream copied in by
+        # value lands inline in the catalogue -- which the PDF rules forbid,
+        # and which Acrobat and the Fiery refuse outright (no pages) while
+        # Windows' own viewer quietly reads past it.
+        for k in ("/OutputIntents", "/OCProperties"):
             if k in root:
-                writer._root_object[NameObject(k)] = root[k].clone(writer)
+                writer._root_object[NameObject(k)] = root.raw_get(k).clone(writer)
         pictures: list[tuple[str, int, str]] = []
         seen: set[int] = set()
         for n, page in enumerate(writer.pages):
@@ -533,7 +545,8 @@ def _slim(path: Path) -> Optional[Path]:
         out = io.BytesIO()
         writer.write(out)
         data = out.getvalue()
-        # the checks: same pages, same drawing, same pixels
+        # the checks: well formed, same pages, same drawing, same pixels
+        _well_formed(data)
         check = PdfReader(io.BytesIO(data))
         if len(check.pages) != len(reader.pages):
             raise ValueError("page count changed")
@@ -555,6 +568,53 @@ def _slim(path: Path) -> Optional[Path]:
     except Exception as exc:
         _state["last_slim_error"] = f"{path.name}: {type(exc).__name__}: {exc}"[:300]
         return None
+
+
+def _well_formed(data: bytes) -> None:
+    """Refuses a PDF that a strict reader would: a stream anywhere but as an
+    object of its own, a cross-reference table pointing at the wrong place,
+    or a page tree that does not end in pages. Windows' viewer shrugs all of
+    these off, so looking right there proves nothing about Acrobat or the
+    Fiery."""
+    import re
+    from pypdf import PdfReader
+    from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, StreamObject
+    reader = PdfReader(io.BytesIO(data), strict=True)
+    seen: set[tuple[int, int]] = set()
+
+    def walk(obj, top: bool) -> None:
+        if isinstance(obj, IndirectObject):
+            key = (obj.idnum, obj.generation)
+            if key in seen:
+                return
+            seen.add(key)
+            walk(obj.get_object(), True)
+            return
+        if isinstance(obj, StreamObject) and not top:
+            raise ValueError("a stream stored inside another object")
+        if isinstance(obj, DictionaryObject):
+            for k, v in obj.items():
+                if k != "/Parent":
+                    walk(v, False)
+        elif isinstance(obj, ArrayObject):
+            for v in obj:
+                walk(v, False)
+
+    walk(reader.trailer.raw_get("/Root"), False)
+    # every xref entry points at its own object
+    at = int(re.search(rb"startxref\s+(\d+)", data[-256:]).group(1))
+    rows = data[at:].split(b"\n")
+    first, count = (int(x) for x in rows[1].split()[:2])
+    for n in range(count):
+        row = rows[2 + n]
+        if row[17:18] != b"n":
+            continue
+        off = int(row[:10])
+        if not re.match(rb"%d 0 obj" % (first + n), data[off:off + 16]):
+            raise ValueError(f"cross-reference for object {first + n} is wrong")
+    for page in reader.pages:
+        if page.get("/Type") != "/Page":
+            raise ValueError("page tree broken")
 
 
 def _slim_tidy() -> None:
