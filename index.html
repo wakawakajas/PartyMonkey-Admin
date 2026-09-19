@@ -5318,6 +5318,10 @@ body.mc-docked .mc-bubble{display:none !important;}
       <div class="card-body">
         <p class="hint">Designs, fonts and saved phrases live in a folder on this computer or on the network. Pick it once and the app remembers it; copy the folder to a colleague and she has the whole library. Chrome and Edge on a computer only — elsewhere, use the library file below.</p>
         <p class="hint">Anything put in the folder is picked up on its own the next time you come back to this window: artwork becomes a design, a font file a font, an SVG the sheet. The subfolders <strong>designs</strong>, <strong>fonts</strong> and <strong>shape</strong> are where the app keeps things tidy, but a file dropped straight into the folder is read just the same. Each is taken on once and never copied — a file already there is used where it lies — and anything you take out of the library stays out.</p>
+        <label class="field" style="margin-bottom:8px;"><span>OR A FOLDER NAME INSIDE A SHARED ROOT</span>
+          <input type="text" id="gtDirNameInput" placeholder="e.g. Festive Gift Tag" autocomplete="off"/>
+        </label>
+        <p class="hint">Type this page's folder name here and Choose folder picks the shared root it lives inside (e.g. Pigu) instead of this exact folder — pick that same root once for every page and each just reads its own name out of it, so one reconnect after a reload covers all of them. Leave blank to keep choosing this exact folder as before.</p>
         <div class="grid2" style="margin-bottom:10px;">
           <button class="btn-outline" id="gtPickFolderBtn">📁 Choose folder</button>
           <button class="btn-outline" id="gtForgetFolderBtn">Forget folder</button>
@@ -23831,6 +23835,15 @@ async function gtDirRead(dir,path){
 let gtFolderPending=false;
 async function gtEnsureDir(ask){
   if(gtDir) return await gtDirOk(gtDir,ask);
+  const viaRoot=await gtResolveFromRoot(ask);
+  if(viaRoot){
+    gtDir=viaRoot; gtFolderPending=false;
+    await gtIdbPut(gtDirKey(),viaRoot);
+    await gtLoadLib();
+    gtRefreshLibraryUi(); gtRenderOrder(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
+    return true;
+  }
+  if(await gtDirNameGet()){ gtFolderPending=true; return false; }
   const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
   if(!saved) return false;
   if(!await gtDirOk(saved,ask)){ gtFolderPending=true; return false; }
@@ -24358,6 +24371,32 @@ let gtMode='festive';
 // Sticker is a third page built the same way as Custom, under keys of its own.
 const gtDirKey=()=>gtMode==='festive'?'dir':'dir:'+gtMode;
 const gtLibKey=()=>gtMode==='festive'?'lib':'lib:'+gtMode;
+// A folder name typed instead of chosen: it names a subfolder of the shared
+// root below, one per page, so every page can point into the same NAS folder
+// (e.g. Pigu) without each needing its own separate reconnect after a reload —
+// one tap on the root covers whichever pages are named this way.
+const gtDirNameKey=()=>gtMode==='festive'?'dirName':'dirName:'+gtMode;
+async function gtDirNameGet(){ return (await gtIdbGet(gtDirNameKey()).catch(()=>null))||''; }
+async function gtDirNameSet(name){ await gtIdbPut(gtDirNameKey(),name||null); }
+// The root itself, shared by every page that names a folder inside it rather
+// than choosing its own. Read-write, like gtDir — a page's own folder resolved
+// from it needs to write library.json and cut files just the same.
+let gtRootDir=null, gtRootRead=false;
+async function gtRootDirGet(){
+  if(!gtRootRead){ gtRootDir=await gtIdbGet('giftTagRoot').catch(()=>null)||null; gtRootRead=true; }
+  return gtRootDir;
+}
+async function gtRootDirSet(dir){ gtRootDir=dir; gtRootRead=true; await gtIdbPut('giftTagRoot',dir); }
+// This page's folder, off the root and the name, when one is set — null if
+// there is no name, no root, no permission (asked for only when ask is true,
+// off a tap), or no folder of that name inside it.
+async function gtResolveFromRoot(ask){
+  const name=await gtDirNameGet();
+  if(!name) return null;
+  const root=await gtRootDirGet();
+  if(!root||!await gtDirOk(root,ask)) return null;
+  try{ return await root.getDirectoryHandle(name); }catch(e){ return null; }
+}
 const gtOrders={festive:null,custom:null,sticker:null};
 const GT_MODE_TITLE={festive:'Festive Gift Tag',custom:'Custom Gift Tag',sticker:'Sticker'};
 const gtModeOk=m=>Object.prototype.hasOwnProperty.call(GT_MODE_TITLE,m)?m:'festive';
@@ -24419,13 +24458,23 @@ async function gtSetModeNow(m,save){
 // left behind: gtLoadLib empties the library before it reads, and what it
 // reads is this page's own file.
 async function gtSwitchFolder(){
-  gtDir=null; gtFolderPending=false;
-  const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
-  if(saved&&await gtDirOk(saved)) gtDir=saved;
-  else if(saved) gtFolderPending=true;
+  await gtLoadSavedDir();
   await gtLoadLib().catch(()=>{});
   if(!gtSheet.slots.length) gtRebuildSlots();
   gtWriteSheetInputs();
+}
+// Loads this mode's folder without asking for permission — a name resolved
+// silently off the shared root when one is set and already granted this
+// session, the exact remembered folder otherwise. Never prompts: that only
+// happens off a tap, in gtEnsureDir or the Choose folder button.
+async function gtLoadSavedDir(){
+  gtDir=null; gtFolderPending=false;
+  const viaRoot=await gtResolveFromRoot(false);
+  if(viaRoot){ gtDir=viaRoot; await gtIdbPut(gtDirKey(),viaRoot); return; }
+  if(await gtDirNameGet()){ gtFolderPending=true; return; }
+  const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
+  if(saved&&await gtDirOk(saved)) gtDir=saved;
+  else if(saved) gtFolderPending=true;
 }
 async function gtPiguDirGet(){
   if(!gtPiguRead){ gtPiguDir=await gtIdbGet('piguDir').catch(()=>null)||null; gtPiguRead=true; }
@@ -27113,6 +27162,7 @@ document.getElementById('gtResetSlotsBtn').addEventListener('click',async()=>{
 function gtSyncFolderState(){
   const el=document.getElementById('gtFolderState');
   const pick=document.getElementById('gtPickFolderBtn');
+  const nameInput=document.getElementById('gtDirNameInput');
   if(!gtCanUseFolder()){
     el.innerHTML='This browser cannot open a folder — the library is kept in the browser here. Use Export / Import to move it.';
     pick.disabled=true;
@@ -27123,12 +27173,26 @@ function gtSyncFolderState(){
   // chosen here belongs to the page that is open
   const page=`<span class="hint" style="margin:0 0 6px;display:block;">${
     GT_MODE_TITLE[gtMode]} — this page’s own folder</span>`;
-  el.innerHTML=page+(gtDir?`Folder: <strong>${escapeHtml(gtDir.name)}</strong>`
-    :(gtFolderPending
-      ?'⚠ A folder is remembered but not connected yet — the browser asks again each visit. Choose folder, or upload anything, and it reconnects. Until then new files are kept in this browser only.'
-      :'No folder chosen — the library is kept in this browser.'));
-  el.style.borderColor=(!gtDir&&gtFolderPending)?'var(--amber)':'';
-  el.style.color=(!gtDir&&gtFolderPending)?'var(--amber)':'';
+  // async, and never the thing an earlier tap is waiting on: this only ever
+  // repaints a status line, so it settles after the fact rather than holding
+  // up whatever asked for the sync
+  Promise.all([gtDirNameGet(),gtRootDirGet()]).then(([name,root])=>{
+    if(nameInput&&document.activeElement!==nameInput) nameInput.value=name;
+    const rootBit=root?` inside ${escapeHtml(root.name)}`:'';
+    let body;
+    if(gtDir) body=`Folder: <strong>${escapeHtml(gtDir.name)}</strong>`
+      +(name?` — named "${escapeHtml(name)}"${rootBit}`:'');
+    else if(gtFolderPending) body=name
+      ? `⚠ Named "${escapeHtml(name)}"${rootBit||' — no shared root connected yet'} — `
+        +'the browser needs permission again after a reload. Press Choose folder.'
+      : '⚠ A folder is remembered but not connected yet — the browser asks again each visit. Choose folder, or upload anything, and it reconnects. Until then new files are kept in this browser only.';
+    else body=name
+      ? `No shared root connected yet for "${escapeHtml(name)}" — press Choose folder to pick the folder it lives inside.`
+      : 'No folder chosen — the library is kept in this browser.';
+    el.innerHTML=page+body;
+    el.style.borderColor=(!gtDir&&gtFolderPending)?'var(--amber)':'';
+    el.style.color=(!gtDir&&gtFolderPending)?'var(--amber)':'';
+  });
 }
 // The two uploads that belong to the sheet rather than to any one design.
 function gtSyncShapeSlots(){
@@ -27289,32 +27353,52 @@ async function gtAssetPath(folder,file){
   }
   return path;
 }
+// What picking a folder always ends in, once permission on it is settled —
+// shared by the exact-folder pick and the named-subfolder-of-the-root one.
+async function gtApplyPickedDir(dir,msg,label){
+  gtDir=dir; gtFolderPending=false;
+  await gtIdbPut(gtDirKey(),dir);
+  await gtLoadLib();
+  // a folder chosen with nothing in it takes over whatever was in the browser
+  if(!gtLib.designs.length&&!gtLib.fonts.length){
+    const rec=await gtIdbGet(gtLibKey()).catch(()=>null);
+    if(rec&&rec.manifest&&(rec.manifest.designs||[]).length){
+      gtLib.designs=(rec.manifest.designs||[]).map(gtNormalizeDesign);
+      gtLib.fonts=rec.manifest.fonts||[];
+      gtLib.texts=rec.manifest.texts||[];
+      if(rec.manifest.sheet) Object.assign(gtSheet,rec.manifest.sheet);
+      Object.entries(rec.assets||{}).forEach(([k,v])=>gtAssets.set(k,v));
+      await gtHydrate(); await gtSaveLib();
+      showMsg(msg,`✓ ${label} — what was in this browser has been written into it.`,true);
+    }else showMsg(msg,`✓ ${label}.`,true);
+  }else{
+    const extra=await gtScanFolder().catch(()=>0);
+    showMsg(msg,`✓ ${label} — ${gtLib.designs.length} design(s) loaded`
+      +(extra?`, ${extra} of them found loose in it.`:'.'),true);
+  }
+  gtRefreshLibraryUi(); gtRenderOrder(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
+}
 document.getElementById('gtPickFolderBtn').addEventListener('click',async()=>{
   const msg=document.getElementById('gtLibMsg');
+  const name=await gtDirNameGet();
   try{
     const dir=await window.showDirectoryPicker({mode:'readwrite'});
     if(!await gtDirOk(dir,true)){ showMsg(msg,'Permission to that folder was not given.',false); return; }
-    gtDir=dir; gtFolderPending=false;
-    await gtIdbPut(gtDirKey(),dir);
-    await gtLoadLib();
-    // a folder chosen with nothing in it takes over whatever was in the browser
-    if(!gtLib.designs.length&&!gtLib.fonts.length){
-      const rec=await gtIdbGet(gtLibKey()).catch(()=>null);
-      if(rec&&rec.manifest&&(rec.manifest.designs||[]).length){
-        gtLib.designs=(rec.manifest.designs||[]).map(gtNormalizeDesign);
-        gtLib.fonts=rec.manifest.fonts||[];
-        gtLib.texts=rec.manifest.texts||[];
-        if(rec.manifest.sheet) Object.assign(gtSheet,rec.manifest.sheet);
-        Object.entries(rec.assets||{}).forEach(([k,v])=>gtAssets.set(k,v));
-        await gtHydrate(); await gtSaveLib();
-        showMsg(msg,'✓ Folder chosen — what was in this browser has been written into it.',true);
-      }else showMsg(msg,'✓ Folder chosen.',true);
+    if(name){
+      // a name is set, so this pick is the shared root every named page reads
+      // out of, not this page's own folder — every other page named this way
+      // reads from it too, off the same tap
+      await gtRootDirSet(dir);
+      const sub=await dir.getDirectoryHandle(name).catch(()=>null);
+      if(!sub){
+        showMsg(msg,`No folder called "${escapeHtml(name)}" inside ${escapeHtml(dir.name)} — `
+          +'check the spelling, or make that folder, then press Choose folder again.',false);
+        return;
+      }
+      await gtApplyPickedDir(sub,msg,`Root chosen — reading "${name}" inside ${dir.name}`);
     }else{
-      const extra=await gtScanFolder().catch(()=>0);
-      showMsg(msg,`✓ Folder chosen — ${gtLib.designs.length} design(s) loaded`
-        +(extra?`, ${extra} of them found loose in it.`:'.'),true);
+      await gtApplyPickedDir(dir,msg,'Folder chosen');
     }
-    gtRefreshLibraryUi(); gtRenderOrder(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
   }catch(err){
     if(err&&err.name==='AbortError') return;   // they closed the picker, which is not a failure
     showMsg(msg,'Could not open that folder: '+((err&&err.message)||'unknown error'),false);
@@ -27323,9 +27407,32 @@ document.getElementById('gtPickFolderBtn').addEventListener('click',async()=>{
 document.getElementById('gtForgetFolderBtn').addEventListener('click',async()=>{
   gtDir=null;
   await gtIdbPut(gtDirKey(),null);
+  await gtDirNameSet('');
+  const nameInput=document.getElementById('gtDirNameInput');
+  if(nameInput) nameInput.value='';
   await gtSaveLib();   // keep working from the browser copy rather than losing the library
   gtRefreshLibraryUi();
   showMsg(document.getElementById('gtLibMsg'),'✓ Folder forgotten — the library stays in this browser.',true);
+});
+document.getElementById('gtDirNameInput').addEventListener('change',async e=>{
+  const name=e.target.value.trim();
+  e.target.value=name;
+  await gtDirNameSet(name);
+  const msg=document.getElementById('gtLibMsg');
+  if(!name){
+    gtDir=null; gtFolderPending=false;
+    await gtIdbPut(gtDirKey(),null);
+    gtRefreshLibraryUi();
+    showMsg(msg,'✓ Name cleared — Choose folder now picks this page’s own exact folder again.',true);
+    return;
+  }
+  // the root may already be connected and granted from an earlier page or an
+  // earlier tap this session — resolved quietly if so, same as any reload
+  const sub=await gtResolveFromRoot(false);
+  if(sub){ await gtApplyPickedDir(sub,msg,`Reading "${name}" inside ${(await gtRootDirGet()).name}`); return; }
+  gtFolderPending=true; gtRefreshLibraryUi();
+  showMsg(msg,'Saved — press Choose folder to pick the shared root this name lives inside '
+    +'(the same root works for every page named this way).',true);
 });
 // The shape goes on the sheet first and is written to the folder after. It
 // used to be the other way about, and a folder that would not take the write
@@ -29036,11 +29143,9 @@ async function gtOpen(){
         // the page last open, unless somebody has already asked for one
         // while this was reading — theirs is the page wanted now
         if(!gtModeAsked) gtMode=last;
-        const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
         // the handle survives a reload but its permission may not, and asking
         // again cannot happen here — that takes a tap, which the button is for
-        if(saved&&await gtDirOk(saved)) gtDir=saved;
-        else if(saved) gtFolderPending=true;
+        await gtLoadSavedDir();
         await gtLoadLib();
       }catch(e){}
       if(!gtSheet.slots.length) gtRebuildSlots();
