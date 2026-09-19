@@ -255,10 +255,16 @@ miss shouldn't cancel the rest -- but some steps are the reason the ones after t
 make sense. A wait that times out and then saves a PDF of a half-drawn page
 produces a file that looks fine and isn't.
 
-Tick **stop run if this fails** on such a step. The run halts there, the report
-shows why, and nothing downstream gets the chance to write something wrong. Waits
-are the obvious candidates; so is anything whose failure means the page isn't where
-the next step thinks it is.
+Set **if this fails** to **stop the run** on such a step. The run halts there, the
+report shows why, and nothing downstream gets the chance to write something wrong.
+Waits are the obvious candidates; so is anything whose failure means the page isn't
+where the next step thinks it is.
+
+**skip rest of block** is the gentler choice for a step inside a conditional or a
+loop: the rest of that branch (or that loop pass) is abandoned and the run carries
+on after it. A macro that prints three shops' labels uses it so one shop going
+wrong still leaves the other two printed. Inside an "until" loop it doubles as a
+retry: the failed pass ends, the loop checks its condition again and has another go.
 
 ## When a click opens a tab
 

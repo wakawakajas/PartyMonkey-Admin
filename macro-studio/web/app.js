@@ -2078,7 +2078,9 @@ function buildStepRow(step, index, stepsArray, containerEl) {
     addField("store as", editorInput("text", step.store_as, (v) => (step.store_as = v), "80px"));
   }
   addField("delay before (ms)", editorInput("number", step.delay_ms, (v) => (step.delay_ms = v), "80px"));
-  addField("stop run if this fails", editorCheckbox(step.stop_on_fail, (v) => (step.stop_on_fail = v)));
+  const onFailLabels = { "keep going": false, "skip rest of block": "block", "stop the run": true };
+  const onFailNow = step.stop_on_fail === "block" ? "skip rest of block" : step.stop_on_fail ? "stop the run" : "keep going";
+  addField("if this fails", editorSelect(onFailNow, Object.keys(onFailLabels), (v) => (step.stop_on_fail = onFailLabels[v])));
 
   const actions = document.createElement("span");
   actions.className = "step-actions";

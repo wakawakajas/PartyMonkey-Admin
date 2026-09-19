@@ -366,6 +366,14 @@ class ReplayEngine:
             # if the wait for a page's content times out, saving a PDF of it
             # produces a file that looks fine and isn't. Marking such a step
             # "stop the run if this fails" says so.
+            # "block" is the gentler version: give up on the rest of this
+            # conditional branch or loop pass, carry on with what follows
+            # it. One shop's print going wrong shouldn't leave the next
+            # shop's labels unprinted.
+            if result["status"] == "failed" and step.get("stop_on_fail") == "block":
+                self._emit_meta_result(results, exec_counter, step,
+                                       "That step failed -- skipping the rest of this block and carrying on.")
+                return True
             if result["status"] == "failed" and step.get("stop_on_fail"):
                 self._broadcast({"type": "run_halted", "reason": result.get("reason", ""),
                                  "step_id": step.get("id")})
