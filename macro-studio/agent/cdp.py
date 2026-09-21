@@ -93,6 +93,9 @@ def launch(port: int = DEFAULT_PORT, user_data_dir: str = "", url: str = "",
         f"--user-data-dir={profile}",
         "--no-first-run",
         "--no-default-browser-check",
+        # Macros are recorded against a maximised window; a smaller one
+        # switches sites to their narrow layout and the steps miss.
+        "--start-maximized",
         # Chrome stops rendering a window it believes nobody can see, and
         # a page that isn't rendering doesn't update hover state -- so a
         # macro that worked in front failed the moment the window was
@@ -197,7 +200,9 @@ def park_offscreen(port: int = DEFAULT_PORT, only_minimized: bool = False) -> in
             continue  # already parked
         if minimized:
             winapi.restore_without_focus(hwnd)
-        winapi.move_window(hwnd, OFFSCREEN_LEFT, 0, 1400, 950, to_back=True)
+        # Screen-sized, so pages keep the layout they have when maximised.
+        width, height = winapi.screen_size()
+        winapi.move_window(hwnd, OFFSCREEN_LEFT, 0, width, height, to_back=True)
         moved += 1
     return moved
 
@@ -213,7 +218,8 @@ def show_windows(port: int = DEFAULT_PORT) -> int:
             winapi.restore_without_focus(hwnd)
         elif left > -1000:
             continue
-        winapi.move_window(hwnd, 60, 60, 1400, 950, to_back=False)
+        winapi.move_window(hwnd, 0, 0, *winapi.screen_size(), to_back=False)
+        winapi.maximize(hwnd)
         shown += 1
     return shown
 

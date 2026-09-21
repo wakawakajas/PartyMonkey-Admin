@@ -30,4 +30,4 @@ if not exist "%PROFILE%" mkdir "%PROFILE%"
 
 echo Opening Chrome on debugging port %PORT%
 echo Profile: %PROFILE%
-start "" "%CHROME%" --remote-debugging-port=%PORT% --user-data-dir="%PROFILE%" --no-first-run --no-default-browser-check %1
+start "" "%CHROME%" --remote-debugging-port=%PORT% --user-data-dir="%PROFILE%" --no-first-run --no-default-browser-check --start-maximized %1

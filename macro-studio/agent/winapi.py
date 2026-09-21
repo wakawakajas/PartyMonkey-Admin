@@ -218,6 +218,16 @@ def raise_without_focus(hwnd: int) -> None:
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
 
+def maximize(hwnd: int) -> None:
+    user32.ShowWindow(hwnd, 3)  # SW_SHOWMAXIMIZED
+
+
+def screen_size() -> tuple[int, int]:
+    """Primary monitor's width and height -- what a maximised window gets,
+    so a parked one lays pages out the same way."""
+    return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+
+
 def minimize(hwnd: int) -> None:
     """Put a window back where it was found. SW_MINIMIZE rather than
     SW_FORCEMINIMIZE: the polite one, which lets the app animate and lets the
