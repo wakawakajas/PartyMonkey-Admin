@@ -261,7 +261,7 @@ class ReplayEngine:
         if video_error:
             self._broadcast({"type": "video_error", "message": video_error})
 
-        completed = self._run_step_list(steps, allow_foreground, context, results, exec_counter)
+        completed = self._run_step_list(steps, allow_foreground, context, results, exec_counter, top_level=True)
         stopped = not completed
 
         if self._video_recorder is not None:
@@ -326,7 +326,7 @@ class ReplayEngine:
         return None, None
 
     def _run_step_list(self, steps: list[dict], allow_foreground: bool, context: dict,
-                        results: list[dict], exec_counter: list[int]) -> bool:
+                        results: list[dict], exec_counter: list[int], top_level: bool = False) -> bool:
         """Runs a flat list of steps -- the top-level run, or a
         conditional/loop's nested block -- appending each leaf step's
         result to `results` in actual execution order (not list position,
@@ -370,11 +370,13 @@ class ReplayEngine:
             # conditional branch or loop pass, carry on with what follows
             # it. One shop's print going wrong shouldn't leave the next
             # shop's labels unprinted.
-            if result["status"] == "failed" and step.get("stop_on_fail") == "block":
+            # At the top level there's no block to leave -- ending there
+            # would quietly drop everything after it, so it just carries on.
+            if result["status"] == "failed" and step.get("stop_on_fail") == "block" and not top_level:
                 self._emit_meta_result(results, exec_counter, step,
                                        "That step failed -- skipping the rest of this block and carrying on.")
                 return True
-            if result["status"] == "failed" and step.get("stop_on_fail"):
+            if result["status"] == "failed" and step.get("stop_on_fail") is True:
                 self._broadcast({"type": "run_halted", "reason": result.get("reason", ""),
                                  "step_id": step.get("id")})
                 return False
