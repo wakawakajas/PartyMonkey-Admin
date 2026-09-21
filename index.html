@@ -5811,7 +5811,12 @@ body.mc-docked .mc-bubble{display:none !important;}
 
       <div id="singleArtSection">
         <div class="sect-label" style="margin-top:0;">Single artwork</div>
-        <p class="hint">One picture, repeated into every placeholder.</p>
+        <p class="hint" id="finalSplitHintOff">One picture, repeated into every placeholder.</p>
+        <p class="hint" id="finalSplitHintOn" hidden>Several designs, one to each placeholder in turn — upload a PDF with a page per design, or pick several PNG/JPG files at once. Fewer designs than placeholders cycles back to the first; a picture chosen on its own still repeats into every placeholder.</p>
+        <div class="toggle-row" style="margin-bottom:10px;">
+          <span style="font-size:13px;color:var(--muted);">Split into placeholders (multiple designs)</span>
+          <label class="switch"><input type="checkbox" id="finalSplitToggle"/><span class="slider"></span></label>
+        </div>
         <div class="art-sides" style="margin-bottom:14px;">
           <div><div class="slot-label">Front</div>
             <div class="upload-slot">
@@ -7091,6 +7096,14 @@ const state={
   refMark:{enabled:true,offsetMm:5,lenMm:4},
   foldLine:{enabled:false},
   final:{front:{data:null,img:null,name:'',source:null},back:{data:null,img:null,name:'',source:null}},
+  // Split: several designs uploaded at once instead of the one picture above —
+  // a multi-page PDF or several PNG/JPG files chosen together — each going
+  // into its own placeholder in fill order rather than repeating everywhere.
+  // Empty for the ordinary case; state.final[side] is still kept pointed at
+  // the first one, so anything that only ever knew the single picture (the
+  // WIDTH/HEIGHT boxes, the quality check) keeps working off that.
+  finalList:{front:[],back:[]},
+  finalSplit:false,
   art:{front:{wMm:0,hMm:0},back:{wMm:0,hMm:0}},
   // A job is often several designs at a few each rather than one design over
   // and over. Each line is {id,name,qty,data,img,source}; together they fill
@@ -7352,6 +7365,29 @@ async function pdfPageFile(bytes,index,fileName,label){
   const name=String(fileName||'artwork.pdf').replace(/\.pdf$/i,'')+` (${label}).pdf`;
   return new File(parts,name,{type:'application/pdf'});
 }
+// Every page of a PDF, each lifted into its own one-page file the same way a
+// two-page one is split into its front and back — used for Split, where a
+// design is wanted per page rather than just the two sides of the job. null
+// for a file that is not a PDF, is encrypted, or only has the one page (there
+// is nothing to split it into).
+async function pdfAllPageFiles(file){
+  if(!/\.pdf$/i.test(file.name||'')&&file.type!=='application/pdf') return null;
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  let n=1;
+  try{
+    const src=new pdfLift.PdfSrc(bytes);
+    if(src.encrypted()) return null;
+    await src.loadObjStms(inflateBytes);
+    n=Math.max(1,src.count());
+  }catch(e){ return null; }
+  if(n<=1) return null;
+  const out=[];
+  for(let i=0;i<n;i++){
+    const f=await pdfPageFile(bytes,i,file.name,'p'+(i+1));
+    if(f) out.push(f);
+  }
+  return out.length?out:null;
+}
 // however the artwork arrived — chosen, or pasted
 // source: {dir:'loadDesignDir',path} when the file came off the NAS presets
 // folder — kept so a template can point back at the same file later. A plain
@@ -7385,6 +7421,39 @@ async function useArtFile(group,side,file,source,split=true){
     refreshSlots();refreshArtInputs();drawAll();
   }catch(err){ infoEl.textContent=(err&&err.message)||'Could not read that file'; }
 }
+let finalListSeq=0;
+// Split's own way in: several files chosen at once, or one PDF with a page
+// per design. Each file that is itself a multi-page PDF is opened out into
+// one design per page first; a plain PNG/JPG is already one design. The
+// result fills state.finalList[side] in the order picked, and state.final[side]
+// is left pointing at the first of them so the WIDTH/HEIGHT boxes and the
+// quality check — which only ever knew the one picture — still have something
+// to read.
+async function useArtFiles(group,side,files){
+  const infoEl=document.getElementById('finalInfo'+(side==='front'?'Front':'Back'));
+  infoEl.textContent='Loading…';
+  try{
+    const flat=[];
+    for(const file of files){
+      const pages=await pdfAllPageFiles(file).catch(()=>null);
+      if(pages) flat.push(...pages); else flat.push(file);
+    }
+    const list=[];
+    for(const f of flat){
+      try{
+        const dataURL=await fileToImageData(f);
+        const img=await loadImage(dataURL);
+        list.push({id:'fl'+(++finalListSeq),data:dataURL,img,name:f.name,source:null,file:f});
+      }catch(e){ /* one bad file skips rather than stopping the rest */ }
+    }
+    if(!list.length){ infoEl.textContent='Could not read those files'; return; }
+    state.finalList[side]=list;
+    state[group][side]={...list[0]};
+    if(group==='final') matchCardOrientation(side,list[0].img);
+    fitArtToCard(side);
+    refreshSlots();refreshArtInputs();drawAll();
+  }catch(err){ infoEl.textContent=(err&&err.message)||'Could not read those files'; }
+}
 // Clients send a portrait photo of a landscape card as often as not. Turned a
 // quarter here, it lands the long way along the card at its actual size
 // rather than as a thin strip across the middle. Only the quarter is decided —
@@ -7402,7 +7471,14 @@ function pickFileFor(group,side){
   const inp=document.createElement('input');
   inp.type='file';
   inp.accept='image/png,image/jpeg,image/webp,application/pdf,.pdf,.png,.jpg,.jpeg';
-  inp.onchange=()=>{ const f=inp.files[0]; if(f) useArtFile(group,side,f); };
+  const split=group==='final'&&state.finalSplit;
+  if(split) inp.multiple=true;
+  inp.onchange=()=>{
+    const files=Array.from(inp.files||[]);
+    if(!files.length) return;
+    if(split) useArtFiles(group,side,files);
+    else useArtFile(group,side,files[0]);
+  };
   inp.click();
 }
 // The other half of Upload. A single artwork could be swapped for another one
@@ -7413,6 +7489,7 @@ function pickFileFor(group,side){
 // next render, because the panel re-applies whatever the line carries.
 async function clearArtSide(side,it){
   state.final[side]={data:null,img:null,name:'',source:null,file:null};
+  state.finalList[side]=[];
   refreshSlots(); refreshArtInputs(); drawAll();
   const line=it||((typeof mcWinItem!=='undefined'&&mcWinItem&&typeof mcItem==='function')
     ?mcItem(mcWinItem):null);
@@ -7434,13 +7511,14 @@ document.querySelectorAll('[data-pick]').forEach(b=>{
 document.querySelectorAll('[data-clear-art]').forEach(b=>{
   b.addEventListener('click',()=>clearArtSide(b.dataset.clearArt));
 });
-function setSlot(t,i,o){
+function setSlot(t,i,o,list){
   document.getElementById(t).innerHTML=o.data?`<img src="${o.data}"/>`:'<span class="ico">＋</span>';
-  document.getElementById(i).textContent=o.data?(o.name||'Uploaded'):'No file';
+  const n=list&&list.length>1?list.length:0;
+  document.getElementById(i).textContent=o.data?(n?`${n} designs`:(o.name||'Uploaded')):'No file';
 }
 function refreshSlots(){
-  setSlot('finalThumbFront','finalInfoFront',state.final.front);
-  setSlot('finalThumbBack','finalInfoBack',state.final.back);
+  setSlot('finalThumbFront','finalInfoFront',state.final.front,state.finalList.front);
+  setSlot('finalThumbBack','finalInfoBack',state.final.back,state.finalList.back);
   // and Clear is offered only where there is something to clear
   ['front','back'].forEach(side=>{
     const b=document.querySelector(`[data-clear-art="${side}"]`);
@@ -7578,6 +7656,15 @@ function designQueue(){
 const designTotal=()=>designQueue().length;
 // the front prints from the design list only while Preset is the chosen mode
 const usingPreset=()=>state.artMode==='preset';
+// The list this side is split across, or null for the ordinary one-picture
+// case — a single file picked with Split on is nothing to spread out, so it
+// still just repeats, same as Split being off. Never checked on Preset: the
+// design queue already spreads a design across the sheet, and the two are
+// not something to combine.
+function finalSplitList(side){
+  const list=state.finalList&&state.finalList[side];
+  return (state.finalSplit&&list&&list.length>1)?list:null;
+}
 // as many sheets as the quantities need — always at least the one on screen.
 // Single artwork is one sheet however many are wanted: it is the same sheet.
 // On Place Card the words are the other half of it: a category asked for more
@@ -7839,16 +7926,26 @@ function renderSide(side,canvas,maxDim,opts){
   };
   // On Preset the design queue drives the front: it is laid into the
   // placeholders in fill order, and this sheet takes the slice belonging to
-  // its page number. Everything else — the back, and the front on Single
-  // artwork — is the one picture repeated into every placeholder, as ever.
+  // its page number. On Single artwork with Split on, the finalList takes its
+  // place the same way, just without the queue's quantities or its overflow
+  // onto further sheets — a design short of the count cycles back to the
+  // first rather than starting a second sheet. Everything else — the back
+  // ordinarily, and the front with neither on — is the one picture repeated
+  // into every placeholder, as ever.
   const useList=side==='front'&&usingPreset();
+  const splitList=!useList&&finalSplitList(side);
   if(useList&&a.wMm&&a.hMm){
     const order=artOrder(), per=order.length;
     if(per){
       const q=designQueue(), start=(opts.page||0)*per;
       order.forEach((ph,i)=>{ const d=q[start+i]; if(d&&d.img) one(d.img,ph,d,'d:'+d.id); });
     }
-  }else if(!useList){
+  }else if(splitList&&a.wMm&&a.hMm){
+    fillOrder().forEach((ph,i)=>{
+      const d=splitList[i%splitList.length];
+      one(d.img,ph,d,'fl:'+d.id);
+    });
+  }else if(!useList&&!splitList){
     const art=state.final[side].img;
     if(art&&a.wMm&&a.hMm) state.placeholders.forEach(ph=>one(art,ph,null,'final:'+side));
   }
@@ -9264,6 +9361,9 @@ function refreshArtInputs(){
   document.getElementById('shiftBackX').value=round(fromMm(state.shift.back.xMm,state.paper.unit));
   document.getElementById('shiftBackY').value=round(fromMm(state.shift.back.yMm,state.paper.unit));
   document.getElementById('artLinkToggle').checked=!!state.artLink;
+  document.getElementById('finalSplitToggle').checked=!!state.finalSplit;
+  document.getElementById('finalSplitHintOff').hidden=!!state.finalSplit;
+  document.getElementById('finalSplitHintOn').hidden=!state.finalSplit;
   syncBleedChips();
   syncBleedModeSeg();
 }
@@ -9310,6 +9410,16 @@ document.getElementById('refitArtBtn').addEventListener('click',()=>{
 });
 document.getElementById('artLinkToggle').addEventListener('change',e=>{
   state.artLink=e.target.checked;
+});
+// Off, an Upload here is one file for the one picture, as ever. On, it takes
+// several — or a multi-page PDF — and spreads them across the placeholders
+// next time either side is (re)uploaded; nothing already on screen changes
+// until then.
+document.getElementById('finalSplitToggle').addEventListener('change',e=>{
+  state.finalSplit=e.target.checked;
+  document.getElementById('finalSplitHintOff').hidden=state.finalSplit;
+  document.getElementById('finalSplitHintOn').hidden=!state.finalSplit;
+  refreshSlots(); drawAll();
 });
 document.getElementById('bleedToggle').addEventListener('change',e=>{
   state.bleed.enabled=e.target.checked;drawAll();
@@ -23020,7 +23130,11 @@ async function printVectorSources(side){
   if(side==='front'&&usingPreset()) state.designs.forEach(d=>{
     if(d.img&&Number(d.qty)>0) want.push(['d:'+d.id,d]);
   });
-  else want.push(['final:'+side,state.final[side]]);
+  else{
+    const list=finalSplitList(side);
+    if(list) list.forEach(d=>{ if(d.img) want.push(['fl:'+d.id,d]); });
+    else want.push(['final:'+side,state.final[side]]);
+  }
   for(const [key,o] of want){
     const bytes=await artPdfBytes(o);
     if(bytes) out.set(key,{bytes,page:0});
