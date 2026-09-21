@@ -35191,16 +35191,19 @@ async function fieryRunSend(ticked){
     // the copy-to folder: asked first, while the tap is still ours
     const dir=await mcCopyDirReady(true);
     if(!dir){ showMsg(msg,`Nothing sent — pick the copy-to folder (${escapeHtml(MC_COPY_FOLDER_HINT)}).`,false); return; }
-    // anything not copied yet is copied now, the way Copy File would
-    const need=[...new Set(lines.filter(l=>!(l.it.sheet_item&&l.it.sheet_item.copied)).map(l=>l.sku))];
-    const failed=[];
+    // Every SKU is re-verified against the designs folder before a send, the
+    // way Copy File would — "copied" from an earlier session only means it
+    // matched then. Trusting that flag forever let an edited design's old
+    // file sit in the print folder and go to the Fiery unnoticed.
+    const need=[...new Set(lines.map(l=>l.sku))];
+    const failed=[],failedSkus=new Set();
     if(need.length){
       showMsg(msg,`Copying ${need.length} file${need.length===1?'':'s'} first…`,true);
       await mcSrcReady();
       mcLogCopyRun++;
       for(const sku of need){
         const src=mcCopySource(sku);
-        if(!src){ failed.push(`${sku} (no file to copy)`); mcLogCopy(sku,'fail','no file to copy'); continue; }
+        if(!src){ failed.push(`${sku} (no file to copy)`); failedSkus.add(sku); mcLogCopy(sku,'fail','no file to copy'); continue; }
         const its=mcItems.filter(x=>mcRowKey(x)===sku);
         mcCopyingOn(its,true);
         mcLogCopy(sku,'start');
@@ -35208,7 +35211,7 @@ async function fieryRunSend(ticked){
           const r=await mcCopyInto(dir,src);
           if(!r.n){
             const why=r.clash.length?'a different file of that name is already there':'file gone';
-            failed.push(`${sku} (${why})`); mcLogCopy(sku,'fail',why); continue;
+            failed.push(`${sku} (${why})`); failedSkus.add(sku); mcLogCopy(sku,'fail',why); continue;
           }
           await mcMarkCopiedLines(sku,src,src.to);
           mcLogCopy(sku,'done',`${src.name} into ${dir.name}`);
@@ -35217,12 +35220,17 @@ async function fieryRunSend(ticked){
           R.lines.filter(l=>l.sku===sku).forEach(l=>{ l.file=src.name; });
         }catch(err){
           failed.push(`${sku} (${(err&&err.message)||'copy failed'})`);
+          failedSkus.add(sku);
           mcLogCopy(sku,'fail',(err&&err.message)||'copy failed');
         }
         finally{ mcCopyingOn(its,false); }
       }
     }
-    const send=lines.filter(l=>l.file||(l.it.sheet_item&&l.it.sheet_item.copied&&l.it.sheet_item.copied.name));
+    // A SKU that just failed re-verification must not fall back to whatever
+    // name an earlier session left on the line — that stale file is exactly
+    // what this re-check exists to catch.
+    const send=lines.filter(l=>!failedSkus.has(l.sku)&&
+      (l.file||(l.it.sheet_item&&l.it.sheet_item.copied&&l.it.sheet_item.copied.name)));
     if(!send.length){ showMsg(msg,'Nothing sent: '+escapeHtml(failed.join(', ')),false); return; }
     const run=(crypto.randomUUID&&crypto.randomUUID())||String(Date.now());
     const rows=send.map((l,i)=>{
