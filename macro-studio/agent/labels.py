@@ -493,7 +493,18 @@ def print_labels(labels: list[dict], printer: Optional[str] = None, shop: str = 
     cfg = load()
     name = printer or chosen_printer()
     if not name:
-        raise LabelError("No label printer found. Name one in labels.json.")
+        # Say what Windows does have, so whoever is at the machine can copy the
+        # right name into labels.json instead of guessing at it.
+        try:
+            have = [p["name"] for p in list_printers()]
+        except LabelError:
+            have = []
+        saved = (cfg.get("printer") or "").strip()
+        asked = f' labels.json asks for "{saved}", which this PC does not have.' if saved else ""
+        seen = ("This PC has: " + ", ".join(f'"{n}"' for n in have) + "."
+                if have else "Windows lists no printers on this PC -- is it plugged in and its driver installed?")
+        raise LabelError(f"No label printer found.{asked} {seen} "
+                         f'Put the right one in "printer" in {CONFIG_PATH}.')
     width_mm = float(cfg.get("label_width_mm") or 62)
     height_mm = float(cfg.get("label_height_mm") or 15)
     cols = max(1, min(4, int(cfg.get("columns") or 2)))
@@ -645,6 +656,15 @@ def sync_once() -> dict:
     url, anon, email, password = _credentials()
     cloud = shared_cloud(url, anon, email, password)
     device = (platform.node() or "packing PC")[:60]
+
+    # A PC with no label printer must not claim anything. With two agents on
+    # the same queue, the one without a P-touch was winning the race and
+    # failing every label with "no label printer found" while the PC that has
+    # one sat idle. Leave the rows queued for a PC that can print them.
+    if not chosen_printer():
+        _state["last_error"] = "No label printer on this PC -- leaving labels for another PC."
+        _state["last_pass_at"] = _now()
+        return report
 
     rows = _queued(cloud, (cfg.get("store") or "").strip())
     if not rows:
