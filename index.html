@@ -24028,6 +24028,11 @@ async function gtLoadLib(){
   // writes it into the folder over the real one. A connected folder that
   // cannot be read means nothing is loaded and nothing is saved.
   if(gtDir&&!await gtDirOk(gtDir)) return;
+  // A folder named under the shared root but not yet reconnected this session
+  // is the same trap as above, just without gtDir ever being set to catch it:
+  // falling through to the browser's own copy here is exactly what the guard
+  // above exists to prevent.
+  if(gtFolderPending) return;
   if(gtDir){
     // A folder with no library.json yet is a new library and saving into it is
     // right. A folder that has one and would not give it up is the dangerous
@@ -39751,6 +39756,41 @@ function mcScopePickerTo(tpl){
 // its card onto somebody else's sheet. Returns true when something was laid,
 // false when nothing matched, null when it stopped or has already said why.
 let mcAutoRun=0;
+// The line's own artwork, found by SKU/name in the designs folder and put onto
+// whichever sheet is now in the builder — Create's own step, pulled out so a
+// manual template switch can run it too. Without this a corrected template
+// kept the wrong one's layout and lost the line's design entirely.
+async function mcAddPickedDesign(it,pick,sku,opts){
+  const {reset,msg,live}=opts||{};
+  await printArtReady();
+  if(live&&!live()) return null;
+  if(reset) state.designs=[];
+  setArtMode('preset',true);
+  const want=mcQty(it)||1;
+  const mine=(state.designs||[]).find(d=>d.mcLine&&d.mcLine===it.id);
+  const same=mine||(!reset?(state.designs||[]).find(d=>d.source&&d.source.path===pick.path):null);
+  if(mine) mine.qty=want;
+  else if(same) same.qty=Math.max(1,(Number(same.qty)||0)+want);
+  else{
+    let line=null;
+    try{ line=await addDesignLine(pick,want,sku); }
+    catch(err){
+      setArtMode('preset');
+      if(msg&&(!live||live())) showMsg(msg,`Could not load ${escapeHtml(pick.name)}: `
+        +escapeHtml((err&&err.message)||'unknown error')+' — use Front to pick it again.',false);
+      return null;
+    }
+    // another line was opened while the file was read: this card is not its
+    if(live&&!live()){
+      if(line){ state.designs=state.designs.filter(d=>d!==line); renderDesignLines(); drawAll(); }
+      return null;
+    }
+    if(line) line.mcLine=it.id;
+  }
+  if(mine||same){ renderDesignLines(); drawAll(); }
+  setArtMode('preset');
+  return true;
+}
 async function mcAutoLayoutFor(it,sel){
   const run=++mcAutoRun;
   const live=()=>run===mcAutoRun&&mcWinItem===it.id;
@@ -39836,40 +39876,8 @@ async function mcAutoLayoutFor(it,sel){
     // land afterwards, over the top of this line's design: the layout was
     // right, the picture was the template's, and Create looked like it had
     // added nothing at all.
-    await printArtReady();
-    if(!live()) return null;
-    if(!sameSheet){ state.designs=[]; }
-    setArtMode('preset',true);
-    // what this line prints, not what was ordered: extras added on the batch
-    // page are part of the run and the sheet has to be laid out for them
-    const want=mcQty(it)||1;
-    // A line already on this sheet is set rather than added to: opening it a
-    // second time is looking at it again, not ordering it again. Another line
-    // that happens to print the same card is a second order for it, and those
-    // do add up — which is what mcPrintLay does when it lays the whole set.
-    const mine=(state.designs||[]).find(d=>d.mcLine&&d.mcLine===it.id);
-    const same=mine||(sameSheet
-      ?(state.designs||[]).find(d=>d.source&&d.source.path===pick.path):null);
-    if(mine) mine.qty=want;
-    else if(same) same.qty=Math.max(1,(Number(same.qty)||0)+want);
-    else {
-      let line=null;
-      try{ line=await addDesignLine(pick,want,sku); }
-      catch(err){
-        setArtMode('preset');
-        if(msg&&live()) showMsg(msg,`Could not load ${escapeHtml(pick.name)}: `
-          +escapeHtml((err&&err.message)||'unknown error')+' — use Front to pick it again.',false);
-        return null;
-      }
-      // another line was opened while the file was read: this card is not its
-      if(!live()){
-        if(line){ state.designs=state.designs.filter(d=>d!==line); renderDesignLines(); drawAll(); }
-        return null;
-      }
-      if(line) line.mcLine=it.id;
-    }
-    if(mine||same){ renderDesignLines(); drawAll(); }
-    setArtMode('preset');
+    const added=await mcAddPickedDesign(it,pick,sku,{reset:!sameSheet,msg,live});
+    if(added===null) return null;
     mcWinLive=true;
   }
   if(!pick){
@@ -39974,6 +39982,16 @@ function mcCustomWire(it){
     // the words this place card has just been given may name folder typefaces
     if(pc&&typeof pcRegisterFolderFonts==='function') pcRegisterFolderFonts();
     mcWinLive=true;
+    // a template picked by hand is the same as one Create picks for itself —
+    // the line's own artwork belongs on it too, not just whatever Create had
+    // matched before the switch. Without this the line's design vanished the
+    // moment its wrong auto-guess was corrected.
+    if(!pc){
+      let pick=null,sku='';
+      for(const n of mcNamesOf(it)){ const p=designFileForSku(n); if(p){ pick=p; sku=n; break; } }
+      if(pick) await mcAddPickedDesign(it,pick,sku,
+        {reset:true,msg:document.getElementById('mcWinMsg'),live:()=>mcWinItem===it.id});
+    }
     await mcApplyArt(it,()=>mcWinItem===it.id);
     mcLinePreview();
   });
