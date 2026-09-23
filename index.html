@@ -23941,18 +23941,22 @@ async function gtArtURL(blob,name){
 // screen: swapping the visible list must never be able to write a manifest
 // that has lost the folder's real contents.
 let gtOwnDesigns=null;
+// art, bleed and trace go with the design: a scale set on the library's own
+// artwork that came back at 100% next week would be set again every week. A
+// one-off is filtered out of the manifest and keeps none of it, which is what
+// one-off means.
+const gtManDesign=d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.hole,
+  art:d.art,bleed:d.bleed,trace:d.trace});
 function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
   return {version:2,sheet:{...gtSheet},
-    designs:own.filter(d=>!d.adhoc)
-      // art, bleed and trace go with the design: a scale set on the library's
-      // own artwork that came back at 100% next week would be set again every
-      // week. A one-off is filtered out above and keeps none of it, which is
-      // what one-off means.
-      .map(d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.hole,
-                art:d.art,bleed:d.bleed,trace:d.trace})),
+    designs:own.filter(d=>!d.adhoc).map(gtManDesign),
     fonts:gtLib.fonts.map(f=>({id:f.id,name:f.name,file:f.file})),
-    texts:gtLib.texts.map(t=>({id:t.id,name:t.name,text:t.text}))};
+    texts:gtLib.texts.map(t=>({id:t.id,name:t.name,text:t.text})),
+    // the words set on Pigu-folder designs — see gtPiguFields. Kept only in
+    // one browser, a design a colleague put words on came up bare on every
+    // other computer; in the library they go wherever the library goes.
+    piguFields:gtPiguFields||{}};
 }
 async function gtDirWrite(dir,path,blob){
   const [folder,name]=path.includes('/')?path.split('/'):[null,path];
@@ -24099,6 +24103,9 @@ async function gtSaveLib(){
     return;
   }
   try{ await gtPiguFieldsSave(); }catch(e){}
+  // somebody else's computer may have written the library since it was read
+  // here — their work is taken in first, so this write does not put it back
+  try{ await gtMergeFromDisk(); }catch(e){}
   const man=gtManifest();
   if(await gtWouldEmpty(man)){
     const m=document.getElementById('gtLibMsg');
@@ -24121,7 +24128,9 @@ async function gtSaveLib(){
         try{ await gtDirRead(gtDir,file); continue; }catch(e){}
         await gtDirWrite(gtDir,file,blob);
       }
-      await gtDirWrite(gtDir,'library.json',new Blob([JSON.stringify(man,null,2)],{type:'application/json'}));
+      const text=JSON.stringify(man,null,2);
+      await gtDirWrite(gtDir,'library.json',new Blob([text],{type:'application/json'}));
+      gtLibDiskText=text; gtLibBase=gtShapeMan(man);
     }catch(e){
       const m=document.getElementById('gtLibMsg');
       if(m) showMsg(m,'Could not write to the library folder ('+((e&&e.message)||e)
@@ -24140,6 +24149,124 @@ let gtSaveTimer=null;
 function gtSaveSoon(){
   clearTimeout(gtSaveTimer);
   gtSaveTimer=setTimeout(()=>{ gtSaveLib().catch(()=>{}); },600);
+}
+// ---------- more than one computer on one library ----------
+// Every computer reads library.json once and works from its own copy after
+// that. Two people on the same shared folder then each wrote their copy over
+// the other's: a design a colleague added, or the words they put on it, never
+// showed up here — and the next save from here took them off the folder too.
+// So before writing, and whenever the window is picked back up, the file is
+// read again and anything changed there since it was last read here is taken
+// in. What was changed here since then is kept: the file only fills in what
+// this computer has not touched.
+let gtLibDiskText=null;   // library.json as last read or written here
+let gtLibBase=null;       // the same, in the shape compared against
+function gtShapeMan(man){
+  man=man||{};
+  return {sheet:JSON.parse(JSON.stringify(man.sheet||{})),
+    designs:(man.designs||[]).map(x=>gtManDesign(gtNormalizeDesign(x))),
+    fonts:(man.fonts||[]).map(f=>({id:f.id,name:f.name,file:f.file})),
+    texts:(man.texts||[]).map(t=>({id:t.id,name:t.name,text:t.text})),
+    piguFields:JSON.parse(JSON.stringify(man.piguFields||{}))};
+}
+// One list, three ways: as last agreed with the file, as it is here, as the
+// file has it now. Untouched here → the file's version (or gone, if the file
+// dropped it). Changed here → kept. Taken out here → stays out. New on the
+// file → comes in. Returns the entries and which of them came off the file.
+function gtMerge3(base,mine,disk,key){
+  const J=JSON.stringify, B=new Map(), D=new Map();
+  base.forEach(x=>B.set(key(x),x)); disk.forEach(x=>D.set(key(x),x));
+  const out=[], fromDisk=new Set(), have=new Set();
+  mine.forEach(m=>{
+    const k=key(m); have.add(k);
+    if(B.has(k)&&J(B.get(k))===J(m)){
+      if(D.has(k)){ out.push(D.get(k)); if(J(D.get(k))!==J(m)) fromDisk.add(k); }
+      return;                                 // dropped on the file, untouched here
+    }
+    out.push(m);
+  });
+  disk.forEach(d=>{
+    const k=key(d);
+    if(have.has(k)||B.has(k)) return;       // here already, or taken out here
+    out.push(d); fromDisk.add(k);
+  });
+  return {out,fromDisk};
+}
+let gtMerging=null;
+function gtMergeFromDisk(){
+  if(gtMerging) return gtMerging;
+  gtMerging=gtMergeRun().finally(()=>{ gtMerging=null; });
+  return gtMerging;
+}
+async function gtMergeRun(){
+  if(!gtDir||!gtLibLoaded||!gtLibBase||!await gtDirOk(gtDir)) return false;
+  let text; try{ text=await (await gtDirRead(gtDir,'library.json')).text(); }catch(e){ return false; }
+  if(text===gtLibDiskText) return false;
+  let raw; try{ raw=JSON.parse(text); }catch(e){ return false; }
+  await gtPiguFieldsGet();
+  const base=gtLibBase, disk=gtShapeMan(raw), mine=gtShapeMan(gtManifest());
+  const J=JSON.stringify;
+  const grab=async f=>{
+    if(!f||gtAssets.has(f)) return;
+    try{ gtAssets.set(f,await gtDirRead(gtDir,f)); }catch(e){}
+  };
+  // designs — updated in place, so an order line or the design open on the
+  // design screen still holds the same object
+  const ds=gtMerge3(base.designs,mine.designs,disk.designs,x=>x.id);
+  const own=gtOwnDesigns||gtLib.designs.filter(d=>!d.adhoc);
+  const byId=new Map(own.map(d=>[d.id,d]));
+  const keepIds=new Set(ds.out.map(x=>x.id));
+  const gone=new Set(own.filter(d=>!keepIds.has(d.id)).map(d=>d.id));
+  const next=[];
+  for(const x of ds.out){
+    let d=byId.get(x.id);
+    if(ds.fromDisk.has(x.id)){
+      await grab(x.file);
+      const fresh=gtNormalizeDesign(x);
+      if(d){ if(d.file!==fresh.file) gtImgs.delete(d.id); Object.assign(d,fresh); }
+      else d=fresh;
+    }
+    if(d) next.push(d);
+  }
+  if(gtOwnDesigns){
+    gtOwnDesigns=next;
+    gtLib.designs=gtLib.designs.filter(d=>!gone.has(d.id));
+  }else{
+    gtLib.designs=[...next,...gtLib.designs.filter(d=>d.adhoc)];
+  }
+  if(gone.size){
+    gone.forEach(id=>gtImgs.delete(id));
+    gtOrder=gtOrder.filter(l=>!gone.has(l.designId));
+    if(gtCurrentDesign&&gone.has(gtCurrentDesign.id)) gtCurrentDesign=null;
+  }
+  // fonts and saved phrases
+  const fs=gtMerge3(base.fonts,mine.fonts,disk.fonts,x=>x.id);
+  for(const f of fs.out) if(fs.fromDisk.has(f.id)) await grab(f.file);
+  gtLib.fonts=fs.out.map(f=>(!fs.fromDisk.has(f.id)&&gtLib.fonts.find(o=>o.id===f.id))||{...f});
+  gtLib.texts=gtMerge3(base.texts,mine.texts,disk.texts,x=>x.id).out.map(t=>({...t}));
+  // the words on Pigu-folder designs, one design at a time
+  const pk=o=>Object.entries(o).map(([k,v])=>({k,v}));
+  const pf=gtMerge3(pk(base.piguFields),pk(mine.piguFields),pk(disk.piguFields),x=>x.k);
+  const map=await gtPiguFieldsGet();
+  Object.keys(map).forEach(k=>delete map[k]);
+  pf.out.forEach(({k,v})=>{ map[k]=v; });
+  await gtIdbPut('piguFields',Object.assign({},map)).catch(()=>{});
+  pf.fromDisk.forEach(k=>{
+    const d=gtLib.designs.find(x=>x.adhoc&&x.file===k);
+    if(d&&map[k]){ const n=gtNormalizeDesign({...d,...map[k]}); d.fields=n.fields; d.hole=n.hole; }
+  });
+  // the sheet, one setting at a time
+  const keys=new Set([...Object.keys(base.sheet),...Object.keys(mine.sheet),...Object.keys(disk.sheet)]);
+  for(const k of keys){
+    if(J(mine.sheet[k])!==J(base.sheet[k])||!(k in disk.sheet)) continue;
+    if(J(disk.sheet[k])===J(mine.sheet[k])) continue;
+    gtSheet[k]=JSON.parse(J(disk.sheet[k]));
+  }
+  await grab(gtSheet.layoutFile); await grab(gtSheet.baseFile);
+  gtDedupeLib();
+  await gtHydrate();
+  gtLibDiskText=text; gtLibBase=disk;
+  return true;
 }
 async function gtLoadLib(){
   gtLib.designs=[]; gtLib.fonts=[]; gtLib.texts=[];
@@ -24162,6 +24289,7 @@ async function gtLoadLib(){
   gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   let man=null;
   gtLibLoaded=false; gtSaveWarned=false;
+  gtLibDiskText=null; gtLibBase=gtShapeMan({});
   // A folder is connected but will not open — permission not given back after
   // a reload, the NAS asleep. Falling through to the browser's own copy here
   // was the trap: the copy loads, looks like the library, and the next save
@@ -24178,7 +24306,9 @@ async function gtLoadLib(){
     // right. A folder that has one and would not give it up is the dangerous
     // case, and the difference between the two is the error it throws.
     try{
-      man=JSON.parse(await (await gtDirRead(gtDir,'library.json')).text());
+      const text=await (await gtDirRead(gtDir,'library.json')).text();
+      man=JSON.parse(text);
+      gtLibDiskText=text; gtLibBase=gtShapeMan(man);
       gtLibLoaded=true;
     }catch(e){
       man=null;
@@ -24200,6 +24330,16 @@ async function gtLoadLib(){
     gtLibLoaded=true;
   }
   if(!man) return;
+  // what the library holds is the shared word, so it wins over this
+  // browser's copy; words only this browser has go up with the next save
+  if(man.piguFields&&typeof man.piguFields==='object'||gtDir){
+    const local=await gtPiguFieldsGet();
+    const shared=man.piguFields||{};
+    const onlyHere=Object.keys(local).some(k=>!(k in shared));
+    Object.assign(local,shared);
+    await gtIdbPut('piguFields',Object.assign({},local)).catch(()=>{});
+    if(onlyHere&&gtDir&&gtLibLoaded) gtSaveSoon();
+  }
   gtLib.designs=(man.designs||[]).map(gtNormalizeDesign);
   gtLib.fonts=man.fonts||[];
   gtLib.texts=man.texts||[];
@@ -24590,7 +24730,10 @@ let gtModeAsked=false;
 async function gtSetModeNow(m,save){
   const next=gtModeOk(m);
   gtModeAsked=true;
-  if(next===gtMode&&gtLoaded){ await gtApplyMode(); return; }
+  if(next===gtMode&&gtLoaded){
+    if(await gtMergeFromDisk().catch(()=>false)) gtWriteSheetInputs();
+    await gtApplyMode(); return;
+  }
   // the order was built out of the page being left, and belongs to it
   gtOrders[gtMode]=gtOrder;
   gtMode=next;
@@ -24982,8 +25125,13 @@ async function gtPickUpNew(quiet){
     `✓ ${n} file(s) picked up from the shape folder.`,true);
   return n;
 }
-window.addEventListener('focus',()=>{
+window.addEventListener('focus',async()=>{
   if(currentScreen!=='tool-gift-tag'&&currentScreen!=='tool-gift-tag-design') return;
+  // what somebody else saved first, so the scan does not take their new
+  // design for a stranger and add it again with no words on it
+  if(await gtMergeFromDisk().catch(()=>false)){
+    gtWriteSheetInputs(); gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+  }
   gtPickUpNew();
 });
 
