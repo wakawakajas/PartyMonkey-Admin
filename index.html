@@ -5145,7 +5145,7 @@ body.mc-docked .mc-bubble{display:none !important;}
            rather than onto a second half-empty one. -->
       <button class="btn-outline" id="gtJobsBtn" style="width:100%;margin-top:8px;">&#128451; Saved sheets — keep this one for later</button>
       <div id="gtExportMsg"></div>
-      <p class="hint" style="margin:6px 0 0;">The PDF goes to the printer; the .plt beside it goes on the thumb drive. One cut file per sheet, each measured from that sheet's bottom-left dot.</p>
+      <p class="hint" style="margin:6px 0 0;">The PDF goes to the printer; the .plt beside it goes on the thumb drive. One cut file per sheet, each measured from that sheet's bottom-right dot, turned the way the cutter takes it.</p>
     </div>
 
     <!-- 1 CANVAS -->
@@ -5237,7 +5237,7 @@ body.mc-docked .mc-bubble{display:none !important;}
         <!-- Unlike the two above, these are printed: the camera on the cutter
              has to find them on the paper before it drops the blade. -->
         <div class="sect-label">Registration dots &amp; cut file</div>
-        <p class="hint">Four black dots, one inside each corner, printed on the sheet. The cutter's camera finds them and the .plt saved beside the PDF is measured from the bottom-left one — so what is printed and where the blade goes are the same number.</p>
+        <p class="hint">Four black dots, one inside each corner, printed on the sheet. The cutter's camera finds them and the .plt saved beside the PDF is measured from the bottom-right one — so what is printed and where the blade goes are the same number.</p>
         <div class="toggle-row">
           <span style="font-size:13px;color:var(--muted);">Print the four dots</span>
           <label class="switch"><input type="checkbox" id="gtMarksToggle" checked/><span class="slider"></span></label>
@@ -5253,10 +5253,10 @@ body.mc-docked .mc-bubble{display:none !important;}
         <p class="hint" style="margin:6px 0 0;">On, and the two fields above become a search hint rather than a draw instruction: nothing extra is printed, and the sheet looks near each corner, that far in, for a dark dot already in your picture. Needs a base layer uploaded below.</p>
         <p class="hint" id="gtMarksFromBaseStatus" style="margin:4px 0 0;display:none;"></p>
         <div class="toggle-row" style="margin-top:9px;">
-          <span style="font-size:13px;color:var(--muted);">Cut file counts from the bottom-left dot</span>
+          <span style="font-size:13px;color:var(--muted);">Cut file counts from the bottom-right dot</span>
           <label class="switch"><input type="checkbox" id="gtPltFromMark" checked/><span class="slider"></span></label>
         </div>
-        <p class="hint" style="margin:8px 0 0;">Off, and it counts from the bottom-left corner of the paper instead. Try one test sheet before a run — if the cut lands out by the inset, this is the switch.</p>
+        <p class="hint" style="margin:8px 0 0;">Off, and it counts from the bottom-right corner of the paper instead. Try one test sheet before a run — if the cut lands out by the inset, this is the switch.</p>
         <p class="hint">Upload your cutting file and every shape in it becomes a placeholder, where it sits and at the size it is. Designs from the order fill them in turn, each fitted inside its own shape. The outlines are drawn over the artwork so you can see the trim — never printed.</p>
         <div class="upload-slot">
           <div class="thumb" id="gtCutThumb"><span class="ico">＋</span></div>
@@ -25404,7 +25404,7 @@ function gtMarks(){
   if(!S.marksOn) return [];
   const r=Math.max(0.5,(Number(S.markDia)||5)/2);
   const i=Math.max(r+0.5,Number(S.markInset)||10);
-  // bottom left first — it is the origin the cut file counts from — then round
+  // bottom left first, then round — the cut file counts from the second, bottom right
   return [[i,S.paperH-i],[S.paperW-i,S.paperH-i],[S.paperW-i,i],[i,i]]
     .map(([cx,cy])=>({cx,cy,r}));
 }
@@ -25823,16 +25823,19 @@ function gtSlotLoops(slot,opts){
   }
   return out.filter(p=>p&&p.length>1);
 }
-// Where the cut file counts from. The camera lands on the dots, so the first
-// dot is the origin — and the cutter counts up from the bottom where the sheet
-// is measured down from the top, so Y turns over here and nowhere else.
+// Where the cut file counts from, and which way. The cutter takes the sheet
+// turned a quarter: its X runs up the sheet from the bottom, its Y runs leftward
+// from the right, and (0,0) is the bottom-RIGHT dot. That is read off the files
+// CutToolAI writes for the thumb drive (Final.plt against MarkData.tmp) — the
+// first cut file here counted from the bottom-left dot, unturned, and the blade
+// went round the sheet in the wrong place.
 function gtPltFrame(){
   const S=gtSheet, m=gtMarks();
   return (S.pltFromMark!==false&&m.length)
-    ? {ox:m[0].cx,oy:m[0].cy}
-    : {ox:0,oy:S.paperH};
+    ? {ox:m[1].cx,oy:m[1].cy}
+    : {ox:S.paperW,oy:S.paperH};
 }
-const gtPltPt=(F,x,y)=>Math.round((x-F.ox)*GT_PLT_UNIT)+','+Math.round((F.oy-y)*GT_PLT_UNIT);
+const gtPltPt=(F,x,y)=>Math.round((F.oy-y)*GT_PLT_UNIT)+','+Math.round((F.ox-x)*GT_PLT_UNIT);
 // One sheet's worth of cutting, as the text the machine reads.
 function gtPltSheet(at){
   const S=gtSheet;
@@ -25840,7 +25843,15 @@ function gtPltSheet(at){
   const slots=(at&&at.slots)||S.slots;
   const q=(at&&at.queue)||gtQueue();
   const start=at?at.start:0;
-  const out=['IN;PA;'];
+  // CutToolAI's own opening: the dots' span as TB25 (across, then up — the
+  // sheet as printed, before the turn), padded to 1050 characters, then a
+  // half-millimetre stroke at the origin that every one of its files starts
+  // with. Without a dot to count from there is no span to give.
+  const m=gtMarks();
+  const head=(S.pltFromMark!==false&&m.length===4)
+    ? `CR; TB25,${Math.round(Math.abs(m[1].cx-m[0].cx)*GT_PLT_UNIT)},${Math.round(Math.abs(m[1].cy-m[2].cy)*GT_PLT_UNIT)};CT1;`
+    : '';
+  const out=[head?head.padEnd(1050,' '):'','IN;PA;PU-20,20;PD-20,20;PD-20,40;PU-20,40;'];
   const loop=pts=>{
     if(!pts||pts.length<2) return;
     out.push('PU'+gtPltPt(F,pts[0][0],pts[0][1])+';');
@@ -25855,13 +25866,8 @@ function gtPltSheet(at){
     // Whether a design has one at all is the design's own to say.
     gtSlotLoops(slot,{design:gtDesign(line.designId)}).forEach(loop);
   });
-  // The dots' own span, written the way AIDCut writes it beside a job, so the
-  // head knows how far apart to expect them before it goes looking.
-  const m=gtMarks();
-  if(m.length===4){
-    const a=gtPltPt(F,m[0].cx,m[0].cy).split(','), b=gtPltPt(F,m[2].cx,m[2].cy).split(',');
-    out.push(`DB${a[0]},${a[1]},${b[0]},${b[1]};`);
-  }
+  // and the head parked on the top-right dot, as CutToolAI leaves it
+  if(head) out.push('PU'+gtPltPt(F,m[2].cx,m[2].cy)+';');
   out.push('!PG;');
   return out.join('');
 }
@@ -25893,7 +25899,8 @@ async function gtCutFiles(){
 // the daft coordinate instead of quietly drawing what was meant.
 function gtPltParse(text,frame){
   const segs=[]; let cut=0, travel=0, loops=0, pts=0, db=null;
-  const toMm=(u,v)=>[frame.ox+u/GT_PLT_UNIT, frame.oy-v/GT_PLT_UNIT];
+  // turned back the quarter gtPltPt turned it: u runs up the sheet, v leftward
+  const toMm=(u,v)=>[frame.ox-v/GT_PLT_UNIT, frame.oy-u/GT_PLT_UNIT];
   const rx=/(PU|PD|DB)((?:-?\d+,?)*);/g;
   let m, at=null;
   while((m=rx.exec(text))){
