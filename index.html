@@ -24080,8 +24080,12 @@ const GT_BACKUPS_KEPT=24;
 async function gtBackupLib(){
   if(!gtDir) return;
   if(gtLibBackupAt&&Date.now()-gtLibBackupAt<36e5) return;
+  // the whole library, as every computer's file makes it up before this write
   let old=null;
-  try{ old=await gtDirRead(gtDir,'library.json'); }catch(e){ gtLibBackupAt=Date.now(); return; }
+  try{
+    const all=await gtReadAll(gtDir);
+    if(all.man) old=new Blob([JSON.stringify(all.man,null,2)],{type:'application/json'});
+  }catch(e){}
   if(!old||!old.size){ gtLibBackupAt=Date.now(); return; }
   const d=new Date(), z=n=>String(n).padStart(2,'0');
   const stamp=`${d.getFullYear()}${z(d.getMonth()+1)}${z(d.getDate())}`
@@ -24122,9 +24126,7 @@ let gtSaveWarned=false;
 const GT_LIB_LISTS=[['designs','design'],['fonts','font'],['texts','saved phrase']];
 async function gtWouldEmpty(man){
   if(!gtDir) return false;
-  let old=null; try{ old=await gtDirRead(gtDir,'library.json'); }catch(e){ return false; }
-  if(!old) return false;
-  let was=null; try{ was=JSON.parse(await old.text()); }catch(e){ return false; }
+  let was=null; try{ was=(await gtReadAll(gtDir)).man; }catch(e){ return false; }
   if(!was) return false;
   const lost=GT_LIB_LISTS.filter(([k])=>
     !((man[k]||[]).length)&&((was[k]||[]).length>1));
@@ -24155,7 +24157,7 @@ async function gtSaveLib(){
     if(m) showMsg(m,`Not saving: this would take ${escapeHtml(gtWouldEmptyWhat)} off the `
       +'library folder, and what is on screen has not got them. Reload the page — nothing '
       +'on the folder has been touched. If they are still missing after that, the folder '
-      +'holds library.backup-… files: put the newest good one back as library.json.',false);
+      +'holds library.backup-… files, each the whole library as it was then.',false);
     return;
   }
   if(gtDir&&await gtDirOk(gtDir)){
@@ -24171,9 +24173,13 @@ async function gtSaveLib(){
         try{ await gtDirRead(gtDir,file); continue; }catch(e){}
         await gtDirWrite(gtDir,file,blob);
       }
-      const text=JSON.stringify(man,null,2);
-      await gtDirWrite(gtDir,'library.json',new Blob([text],{type:'application/json'}));
-      gtLibDiskText=text; gtLibBase=gtShapeMan(man);
+      // this computer's own file, and only that — see gtReadAll
+      const {stamps,gone}=gtStampForWrite(man);
+      if(!gtBorn) gtBorn=Date.now();
+      const text=JSON.stringify({...man,version:3,pc:gtPcId,born:gtBorn,stamps,gone},null,2);
+      await gtDirWrite(gtDir,await gtPcFile(),new Blob([text],{type:'application/json'}));
+      gtLibBase=gtShapeMan(man); gtStamps=stamps; gtGone=gone;
+      try{ gtLibDiskText=await gtLibSig(gtDir); }catch(e){ gtLibDiskText=null; }
     }catch(e){
       const m=document.getElementById('gtLibMsg');
       if(m) showMsg(m,'Could not write to the library folder ('+((e&&e.message)||e)
@@ -24211,6 +24217,127 @@ function gtShapeMan(man){
     fonts:(man.fonts||[]).map(f=>({id:f.id,name:f.name,file:f.file})),
     texts:(man.texts||[]).map(t=>({id:t.id,name:t.name,text:t.text})),
     piguFields:JSON.parse(JSON.stringify(man.piguFields||{}))};
+}
+// ---------- one file per computer ----------
+// The shared folder is not shared: each computer has its own copy of it, kept
+// in step with the NAS by a sync program, and a sync program cannot put two
+// computers' edits to one file together. Both changed library.json, the NAS
+// turned the second upload away, and the sync stood still — or, later, took
+// one copy over the other, and a morning's words went with it.
+// So no two computers write the same file. Each writes library.pc-<id>.json
+// and nothing else, and every computer reads all of them. Each file holds the
+// whole library as that computer last saw it, with when every entry last
+// changed and what was taken out when: for every design, font, phrase and
+// setting the newest word wins, whichever file it is in. A file gone missing
+// costs only what was in it alone, which is what changed on that computer
+// since the others last read it.
+// library.json is how it was before. A computer reads it until it has written
+// its own file — that is how what is in it comes along — and not after.
+let gtPcId=null;
+async function gtPcFile(){
+  if(!gtPcId){
+    gtPcId=await gtIdbGet('gtPcId').catch(()=>null);
+    if(!gtPcId){
+      gtPcId='pc-'+Math.random().toString(36).slice(2,8);
+      await gtIdbPut('gtPcId',gtPcId).catch(()=>{});
+    }
+  }
+  return `library.${gtPcId}.json`;
+}
+const GT_LIB_FILE=/^library(\.pc-[a-z0-9]+)?\.json$/;
+let gtStamps={}, gtGone={};   // when each entry last changed, and what was taken out
+let gtBorn=0;                 // when this computer first wrote its own file
+// Every library file in the folder, with its date and size, and whether the
+// old shared file still counts here (see above).
+async function gtLibEntries(dir){
+  const own=await gtPcFile();
+  const es=[];
+  for await (const e of dir.values()){
+    if(e.kind!=='file'||!GT_LIB_FILE.test(e.name)) continue;
+    es.push({name:e.name,file:await e.getFile()});
+  }
+  es.sort((a,b)=>a.name.localeCompare(b.name));
+  const useOld=!es.some(e=>e.name===own);
+  return es.filter(e=>useOld||e.name!=='library.json');
+}
+// what has changed is told from names, dates and sizes, without reading any
+const gtSigOf=es=>es.map(e=>e.name+':'+e.file.lastModified+':'+e.file.size).join('|');
+async function gtLibSig(dir){ return gtSigOf(await gtLibEntries(dir)); }
+const gtKeyed=man=>{
+  const out=[];
+  (man.designs||[]).forEach(x=>out.push(['d:'+x.id,x]));
+  (man.fonts||[]).forEach(x=>out.push(['f:'+x.id,x]));
+  (man.texts||[]).forEach(x=>out.push(['x:'+x.id,x]));
+  Object.entries(man.piguFields||{}).forEach(([k,v])=>out.push(['p:'+k,v]));
+  Object.entries(man.sheet||{}).forEach(([k,v])=>out.push(['s:'+k,v]));
+  return out;
+};
+// All of the folder's library files as one. man is null when there are none —
+// a new library; it throws when the folder will not be read, which is not.
+async function gtReadAll(dir){
+  const es=await gtLibEntries(dir);
+  const files=[];
+  for(const e of es){
+    let man; try{ man=JSON.parse(await e.file.text()); }catch(err){ continue; }
+    if(!man||typeof man!=='object') continue;
+    files.push({name:e.name,at:e.file.lastModified,man});
+  }
+  const sig=gtSigOf(es);
+  if(!files.length) return {sig,man:null,stamps:{},gone:{},born:0};
+  // newest file first: it decides the order things are listed in, and a tie
+  // between two entries changed at the same moment
+  files.sort((a,b)=>b.at-a.at);
+  // The old shared file has no dates inside it, so all of it counts as of
+  // when it was last written — but never later than the first computer moving
+  // to its own file. After that it is only ever a sync program handing round
+  // an old copy, and an old copy must not undo anything done since. Half a
+  // millisecond back, so a tie goes to the computers' own files.
+  const born=Math.min(...files.filter(f=>f.name!=='library.json')
+    .map(f=>Number(f.man.born)||f.at));
+  const best=new Map();          // key -> {t, val} or {t, gone:true}
+  const offer=(k,c)=>{ const b=best.get(k); if(!b||c.t>b.t) best.set(k,c); };
+  for(const f of files){
+    const st=f.name==='library.json'?null:(f.man.stamps||{});
+    const t=k=>st?(Number(st[k])||0):Math.min(f.at,born)-0.5;
+    for(const [k,v] of gtKeyed(f.man)) offer(k,{t:t(k),val:v});
+    Object.entries(f.man.gone||{}).forEach(([k,when])=>offer(k,{t:Number(when)||0,gone:true}));
+  }
+  const man={version:3,sheet:{},designs:[],fonts:[],texts:[],piguFields:{}};
+  const stamps={}, gone={};
+  best.forEach((c,k)=>{ if(c.gone) gone[k]=c.t; else stamps[k]=c.t; });
+  const copy=v=>v===undefined?null:JSON.parse(JSON.stringify(v));
+  const seen=new Set();
+  const list=(prop,pre)=>{
+    for(const f of files) for(const x of (f.man[prop]||[])){
+      const k=pre+x.id, c=best.get(k);
+      if(seen.has(k)||!c||c.gone) continue;
+      seen.add(k); man[prop].push(copy(c.val));
+    }
+  };
+  list('designs','d:'); list('fonts','f:'); list('texts','x:');
+  best.forEach((c,k)=>{
+    if(c.gone) return;
+    if(k.startsWith('p:')) man.piguFields[k.slice(2)]=copy(c.val);
+    else if(k.startsWith('s:')) man.sheet[k.slice(2)]=copy(c.val);
+  });
+  const mine=files.find(f=>f.name===`library.${gtPcId}.json`);
+  return {sig,man,stamps,gone,born:mine?(Number(mine.man.born)||mine.at):0};
+}
+// What this computer writes: the library as it stands here, each entry dated.
+// Anything that differs from what was last read off the folder was changed
+// here, just now; anything that was there and is not here was taken out here.
+function gtStampForWrite(man){
+  const now=Date.now(), J=JSON.stringify;
+  const base=new Map(gtKeyed(gtLibBase||{})), mine=gtKeyed(gtShapeMan(man));
+  const stamps={}, gone={...gtGone};
+  const have=new Set();
+  for(const [k,v] of mine){
+    have.add(k);
+    stamps[k]=(base.has(k)&&J(base.get(k))===J(v))?(gtStamps[k]||0):now;
+    delete gone[k];
+  }
+  base.forEach((v,k)=>{ if(!have.has(k)) gone[k]=now; });
+  return {stamps,gone};
 }
 // One list, three ways: as last agreed with the file, as it is here, as the
 // file has it now. Untouched here → the file's version (or gone, if the file
@@ -24254,9 +24381,11 @@ function gtMergeFromDisk(){
 }
 async function gtMergeRun(){
   if(!gtDir||!gtLibLoaded||!gtLibBase||!await gtDirOk(gtDir)) return false;
-  let text; try{ text=await (await gtDirRead(gtDir,'library.json')).text(); }catch(e){ return false; }
-  if(text===gtLibDiskText) return false;
-  let raw; try{ raw=JSON.parse(text); }catch(e){ return false; }
+  let sig; try{ sig=await gtLibSig(gtDir); }catch(e){ return false; }
+  if(sig===gtLibDiskText) return false;
+  let all; try{ all=await gtReadAll(gtDir); }catch(e){ return false; }
+  if(!all.man) return false;
+  const raw=all.man;
   await gtPiguFieldsGet();
   const base=gtLibBase, disk=gtShapeMan(raw), mine=gtShapeMan(gtManifest());
   const J=JSON.stringify;
@@ -24319,7 +24448,7 @@ async function gtMergeRun(){
   await grab(gtSheet.layoutFile); await grab(gtSheet.baseFile);
   gtDedupeLib();
   await gtHydrate();
-  gtLibDiskText=text; gtLibBase=disk;
+  gtLibDiskText=all.sig; gtLibBase=disk; gtStamps=all.stamps; gtGone=all.gone;
   return true;
 }
 async function gtLoadLib(){
@@ -24343,7 +24472,7 @@ async function gtLoadLib(){
   gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   let man=null;
   gtLibLoaded=false; gtSaveWarned=false;
-  gtLibDiskText=null; gtLibBase=gtShapeMan({});
+  gtLibDiskText=null; gtLibBase=gtShapeMan({}); gtStamps={}; gtGone={}; gtBorn=0;
   // A folder is connected but will not open — permission not given back after
   // a reload, the NAS asleep. Falling through to the browser's own copy here
   // was the trap: the copy loads, looks like the library, and the next save
@@ -24359,14 +24488,17 @@ async function gtLoadLib(){
     // A folder with no library.json yet is a new library and saving into it is
     // right. A folder that has one and would not give it up is the dangerous
     // case, and the difference between the two is the error it throws.
+    // Every computer's library file, read as one — see gtReadAll. None at
+    // all is a new library; a folder that will not be listed is the danger.
     try{
-      const text=await (await gtDirRead(gtDir,'library.json')).text();
-      man=JSON.parse(text);
-      gtLibDiskText=text; gtLibBase=gtShapeMan(man);
+      const all=await gtReadAll(gtDir);
+      man=all.man;
+      gtLibDiskText=all.sig; gtLibBase=gtShapeMan(man); gtStamps=all.stamps; gtGone=all.gone;
+      gtBorn=all.born;
       gtLibLoaded=true;
     }catch(e){
       man=null;
-      gtLibLoaded=(e&&e.name==='NotFoundError');
+      gtLibLoaded=false;
     }
     if(man){
       const files=[...(man.designs||[]),...(man.fonts||[])].map(x=>x.file);
@@ -36898,7 +37030,7 @@ async function mcGtReadNames(page){
     const dir=await gtIdbGet(page.dir).catch(()=>null);
     if(dir){
       if(await gtDirOk(dir)){
-        const man=JSON.parse(await (await gtDirRead(dir,'library.json')).text());
+        const man=(await gtReadAll(dir)).man||{};
         return (man.designs||[]).map(d=>({id:d.id,name:d.name}));
       }
       mcGtShut[page.mode]=true;
