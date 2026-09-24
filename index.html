@@ -2144,6 +2144,32 @@ img.mc-shot,img.mc-sum-shot{cursor:zoom-in;}
 .mc-sum-tools{position:sticky;top:0;z-index:3;display:flex;flex-direction:column;
   gap:9px;background:var(--card);margin:-9px -16px 0;padding:9px 16px 8px;
   border-bottom:1px solid var(--paper-line);}
+.mc-steps{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:4px;margin:10px 0 8px;}
+.mc-steps button{height:auto;min-height:0;display:flex;flex-direction:column;align-items:center;gap:3px;
+  padding:2px 0;border:none;background:none;color:var(--ink);text-align:center;line-height:1.2;
+  white-space:normal;overflow-wrap:anywhere;font-size:12.5px;font-weight:700;}
+.mc-steps .dot{display:flex;align-items:center;justify-content:center;width:44px;height:44px;
+  flex:none;border-radius:50%;border:2px solid var(--border);background:var(--card);
+  font-size:17px;font-weight:800;color:var(--ink);}
+.mc-steps .dot.all{font-size:13px;}
+.mc-steps button small{font-size:11px;font-weight:500;color:var(--muted);}
+.mc-steps button.on .dot{background:var(--blueprint);border-color:var(--blueprint);color:var(--lime-ink);}
+.mc-steps button.on .lbl{color:var(--blueprint);}
+.mc-steps button.next .dot{border-color:var(--amber);}
+.mc-steps button.next.on .dot{box-shadow:0 0 0 3px var(--amber);}
+.mc-steps button.next small{color:var(--amber);font-weight:700;}
+.mc-step-guide{border:1px solid var(--border);border-radius:12px;padding:9px 12px;margin:0 0 8px;
+  font-size:13px;line-height:1.45;}
+.mc-step-guide b.t{display:block;font-size:14px;margin-bottom:3px;}
+.mc-step-guide ol{margin:4px 0 0;padding-left:20px;}
+.mc-step-guide li{margin:2px 0;}
+.mc-step-guide .ok{color:var(--blueprint);font-weight:700;margin-top:4px;}
+.mc-papers{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 8px;}
+.mc-papers-lbl{font-size:13px;font-weight:700;margin-right:2px;}
+.mc-papers button{width:auto;flex:none;min-height:36px;padding:0 12px;border:1px solid var(--border);border-radius:999px;
+  background:var(--card);color:var(--ink);font-size:12.5px;}
+.mc-papers button.warn{border-color:var(--amber);color:var(--amber);}
+.mc-papers button.on{background:var(--blueprint);border-color:var(--blueprint);color:var(--lime-ink);font-weight:700;}
 /* the sheet beside the list is sticky too, so it stops below the tools rather
    than under them — how far down is measured, because the tools grow a row
    when SKUs are ticked */
@@ -5084,6 +5110,8 @@ body.mc-docked .mc-bubble{display:none !important;}
         title="See each sheet first, then save it and send it to the Fiery with a server preset, copies and pages">🖨 Download &amp; Print</button>
       <button class="btn-outline" id="mcCopyPrintBtn" style="flex:1 1 200px;height:50px;"
         title="Send every order's Copy File artwork to the Fiery, order by order, each line's qty as its copies and each SKU on its own preset">🖨 Print copied files</button>
+      <button class="btn-danger" id="mcFieryStopBtn" style="flex:1 1 160px;height:50px;"
+        title="Stop every file still waiting or sending to the Fiery. One already printing is not pulled back.">⛔ Stop Fiery</button>
       <button class="btn-outline" id="mcCompleteBtn" style="flex:1 1 160px;height:50px;">Complete batch</button>
     </div>
     <button class="btn-outline" id="mcReopenBtn" style="width:100%;height:46px;margin-top:8px;display:none;">Re-open batch</button>
@@ -6289,6 +6317,15 @@ body.mc-docked .mc-bubble{display:none !important;}
       their folder belongs to. Where the lines say nothing, a file named <strong>&lt;SKU&gt;</strong>
       in the designs folder is a print job and a design of that name is a gift tag; a SKU
       with both is asked about. The sheet opens when they are on it.</p>
+    <!-- The morning's batch in four steps, in the order they are done, and a
+         box saying in plain words what to press for the one that is picked.
+         Written for somebody on their first day: the list below is the same
+         list, cut down to one step at a time. -->
+    <div class="mc-steps" id="mcSummarySteps" role="tablist" aria-label="Steps"></div>
+    <div class="mc-step-guide" id="mcSummaryGuide"></div>
+    <!-- one paper at a time: Copy file by its print preset, the rest by the
+         paper and GSM their lines were given -->
+    <div class="mc-papers" id="mcSummaryPapers" style="display:none;"></div>
     <!-- The search, the buttons and the filter, kept together and kept on
          screen: they act on the list below, and the list is long. -->
     <div class="mc-sum-tools">
@@ -6335,6 +6372,12 @@ body.mc-docked .mc-bubble{display:none !important;}
         <option value="">— leave them to the rules —</option>
       </select>
       <button type="button" class="btn-outline" id="mcSummaryBulkApply">Set for these</button>
+      <!-- the print preset a Copy file SKU goes to the Fiery on — set before
+           it is copied, and kept for the team -->
+      <select id="mcSummaryBulkPreset" aria-label="Print preset" style="display:none;">
+        <option value="">📄 Paper type…</option>
+      </select>
+      <button type="button" class="btn-outline" id="mcSummaryBulkPresetSet" style="display:none;">📄 Set paper type</button>
       <!-- a whole shop's designs often sit in one folder of the library, and
            looking only there settles the names that appear in two of them -->
       <select id="mcSummaryBulkFolder" aria-label="Which folder to map from">
@@ -30837,14 +30880,22 @@ function plCropThumb(canvas,viewport,box){
 // height of the picture would drop that name's last line into the line below.
 // `bottom` is left open on the last band and filled in once the tallest line
 // in the whole document is known.
-function plBands(boxes){
+//
+// It is the picture's slot that sits at the top of the line, not the picture:
+// a photo that is not square is drawn smaller and centred in its slot, so its
+// own top edge is several points lower than its neighbour's. Taken at face
+// value that split one line into two bands and lost both of its items. The
+// slot is the full picture size — `slot`, the tallest picture in the document
+// — centred on the picture as drawn.
+function plBands(boxes,slot){
   const bands=[];
-  boxes.slice().sort((a,b)=>b.y-a.y).forEach(box=>{
+  const topOf=box=>box.y+box.h/2+Math.max(slot||0,box.h)/2;
+  boxes.slice().sort((a,b)=>topOf(b)-topOf(a)).forEach(box=>{
     const band=bands[bands.length-1];
     // Gathered rather than sorted with a "near enough" comparison, which is
     // not an ordering and sorts differently depending on where it starts.
-    if(band&&Math.abs(band.top-(box.y+box.h))<6) band.boxes.push(box);
-    else bands.push({top:box.y+box.h,bottom:null,boxes:[box]});
+    if(band&&Math.abs(band.top-topOf(box))<6) band.boxes.push(box);
+    else bands.push({top:topOf(box),bottom:null,boxes:[box]});
   });
   // across the line and then down, which is the order the sheet is written in
   // — the shelf codes climb that way and jump about read any other way, and
@@ -30859,7 +30910,7 @@ function plBands(boxes){
 async function plParsePdf(file,onProgress){
   const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
   const pages=[];
-  let cols=null, expected=null, tallest=0;
+  let cols=null, expected=null, tallest=0, slot=0;
   // Read every page before rendering any of it. The last line of a page has
   // no line under it to be bounded by, so it is given the height of the
   // tallest line in the document — which is only known once they have all
@@ -30877,12 +30928,17 @@ async function plParsePdf(file,onProgress){
     }
     cols=plColumns(text)||cols;                     // a page may not reprint it
     if(!cols) continue;
-    const bands=plBands(await plPageImages(page));
-    if(!bands.length) continue;
-    bands.forEach(b=>{ if(b.bottom!=null) tallest=Math.max(tallest,b.top-b.bottom); });
-    pages.push({page,text,cols,bands});
+    const boxes=await plPageImages(page);
+    if(!boxes.length) continue;
+    boxes.forEach(b=>{ slot=Math.max(slot,b.h); });
+    pages.push({page,text,cols,boxes});
   }
-  if(!tallest&&pages.length) tallest=pages[0].bands[0].boxes[0].h;
+  // the rows can only be drawn once the full picture size is known
+  pages.forEach(p=>{
+    p.bands=plBands(p.boxes,slot);
+    p.bands.forEach(b=>{ if(b.bottom!=null) tallest=Math.max(tallest,b.top-b.bottom); });
+  });
+  if(!tallest&&pages.length) tallest=slot;
   const rows=[];
   for(let i=0;i<pages.length;i++){
     if(onProgress) onProgress(i+1,pages.length);
@@ -35438,12 +35494,15 @@ function mcIsCopyLine(it){
     ||mcRouteFor({sku:mcRowKey(it),name:(it&&(it.design_name||it.product))||''})==='copy';
 }
 let fieryRun=null;
-async function mcCopyPrintOpen(orderId){
-  const out=document.getElementById('mcBatchMsg');
+// onlySkus: the SKU summary's step 2 sends only what it is showing — one
+// paper at a time — and says what went wrong on its own screen
+async function mcCopyPrintOpen(orderId,onlySkus){
+  const out=document.getElementById(onlySkus?'mcSummaryMsg':'mcBatchMsg');
   if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
   const lines=mcGroups()
     .filter(g=>orderId===undefined||String(g.order_id)===String(orderId))
-    .flatMap(g=>g.items.filter(mcIsCopyLine));
+    .flatMap(g=>g.items.filter(mcIsCopyLine))
+    .filter(it=>!onlySkus||onlySkus.has(String(mcRowKey(it))));
   if(!lines.length){
     showMsg(out,orderId!==undefined?`${escapeHtml(String(orderId))} has no Copy File lines to print.`
       :'Nothing on this batch is set to Copy File.',false);
@@ -35662,6 +35721,24 @@ document.getElementById('fieryRunSheet').addEventListener('click',e=>{
   if(e.target.id==='fieryRunSheet') fieryRunShut();
 });
 document.getElementById('mcCopyPrintBtn').addEventListener('click',()=>mcCopyPrintOpen());
+// Every file not yet with the Fiery is failed where it stands. Macro Studio
+// looks again before each upload and each print, so a batch half sent stops
+// there; what is already uploaded stays held on the Fiery.
+document.getElementById('mcFieryStopBtn').addEventListener('click',async()=>{
+  const msg=document.getElementById('mcBatchMsg');
+  if(!confirm('Stop all pushes to the Fiery?\n\nEverything still queued or sending is cancelled.')) return;
+  try{
+    const {data,error}=await sb.from('fiery_jobs')
+      .update({status:'failed',error:'Stopped in Pigu',sent_at:new Date().toISOString()})
+      .in('status',['queued','sending']).select('id');
+    if(error) throw error;
+    const n=(data||[]).length;
+    showMsg(msg,n?`⛔ Stopped ${n} file${n===1?'':'s'} going to the Fiery.`
+      :'Nothing was waiting to go to the Fiery.',true);
+  }catch(err){
+    showMsg(msg,'Could not stop: '+escapeHtml((err&&err.message)||'unknown error'),false);
+  }
+});
 // Drawn through the same code the export uses, on the builder lent for the
 // length of the look and given straight back. The page count comes back from
 // the drawing rather than being worked out separately: what is being paged
@@ -35845,7 +35922,10 @@ function mcSummaryRows(){
   mcItems.forEach(it=>{
     const key=mcRowKey(it);
     const row=map.get(key)||{sku:key,name:it.design_name||it.product||'',qty:0,img:'',
-      lines:0,done:0,copied:0,copiedTo:'',copiedName:'',tiles:new Set()};
+      lines:0,done:0,copied:0,copiedTo:'',copiedName:'',tiles:new Set(),papers:new Set()};
+    // the stock each line was given, which is what the paper filter sorts by
+    const stock=[it.paper_type,it.gsm].map(v=>String(v||'').trim()).filter(Boolean).join(' · ');
+    if(stock) row.papers.add(stock);
     // how much of this SKU is already ticked off — a row every line of which is
     // done has nothing left to lay onto a sheet
     row.lines++; if(it.status) row.done++;
@@ -35875,6 +35955,7 @@ function mcSummaryRows(){
   // one tile, said by every line that says anything, or none: lines that
   // disagree are not an instruction, they are two jobs sharing a SKU
   map.forEach(r=>{ r.tile=r.tiles.size===1?[...r.tiles][0]:''; delete r.tiles;
+    r.paper=!r.papers.size?'':r.papers.size===1?[...r.papers][0]:'Mixed papers'; delete r.papers;
     r.allDone=r.lines>0&&r.done===r.lines; });
   // What else each SKU is called. A custom tag's SKU is the shop's own
   // — Custom Gift Tag-TD-1 — and the design in the library is filed under the
@@ -35895,13 +35976,198 @@ function mcSumState(r){
   return 'pending';
 }
 let mcSumFilter='all';
+// Which step of the morning a row belongs to, read the same way as the label
+// over its name: what that label says is what the step is. Place Card and
+// "Not added here" are in none of the five, and are seen under Show all.
+function mcSumKind(r){
+  const set=mcRouteFor(r);
+  if(set==='copy') return 'copy';
+  if(set==='print') return 'print';
+  if(set==='sticker') return 'sticker';
+  if(mcIsGtDest(set)) return 'gift';
+  if(set) return 'other';
+  const tool=mcToolFor(r);
+  if(tool==='print') return 'print';
+  if(tool==='gift'){ const hit=mcGiftHit(r.sku); return hit&&hit.mode==='sticker'?'sticker':'gift'; }
+  return 'nothing';
+}
+// The five steps, in the order a batch is worked. Add All is the button for
+// the last four: it copies what is set to Copy file and puts the rest on
+// their sheets, and it only ever acts on what the step has left on screen.
+const MC_PAPER_TIP='Pick a paper under <b>Paper</b> so one run is all one paper — no changing paper halfway. '
+  +'Wrong paper? Tick it, pick in <b>📄 Paper type</b>, press <b>Change paper type</b>.';
+const MC_STEPS=[
+  {v:'nothing',n:1,label:'No File Type',
+   title:'Step 1 · Set the file type and the paper type',
+   how:['Each row here has a grey <b>nothing yet</b> label over its SKU — it does not know what kind of file it is.',
+     '<b>File type:</b> tap that label and pick <b>Copy file</b>, <b>Print sheet</b> (Custom Designs), '
+       +'a <b>gift tag</b> page or <b>Sticker gift tag</b>. Many at once: tick their boxes, pick in the box that '
+       +'appears, press <b>Set for these</b>.',
+     '<b>Paper type:</b> with the boxes still ticked, pick in <b>📄 Paper type</b> and press <b>Set paper type</b>. '
+       +'It is remembered for that SKU from then on. A Copy file SKU with no paper type is not copied.'],
+   done:'Every SKU has a file type — tap Step 2.'},
+  {v:'copy',n:2,label:'Copy & Print',
+   title:'Step 2 · Copy the files, then print them',
+   how:[MC_PAPER_TIP,
+     'Press <b>＋ Add All</b> — every file shown is copied into the copy-to folder. '
+       +'A row with <b>📄 No paper type</b> is skipped until it has one.',
+     'A row showing <b>Map File…</b> does not know its file yet: tap it and pick the file, then Add All again.',
+     'Then press <b>🖨 Print these</b> below — the files shown go to the Fiery on their paper type.'],
+   print:true,
+   done:'All files copied — press 🖨 Print these, then tap Step 3.'},
+  {v:'print',n:3,label:'Custom Designs',
+   title:'Step 3 · Put designs on the print sheet',
+   how:[MC_PAPER_TIP,
+     'Press <b>＋ Add All</b> — they go on the print sheet and the sheet opens.',
+     'Check the sheet, then export and print it as usual.',
+     'A row with only <b>Choose…</b> has no design found: tap it and pick the design.'],
+   done:'Everything is on the print sheet — tap Step 4.'},
+  {v:'gift',n:4,label:'Gift Tags',
+   title:'Step 4 · Put gift tags on their page',
+   how:[MC_PAPER_TIP,
+     'Press <b>＋ Add All</b> — each tag goes on its own gift tag page (Festive or Custom).',
+     'Open that gift tag page, check it, then export and print.',
+     'A row saying <b>Nothing called…</b> has no design on that page: add the design there first.'],
+   done:'All gift tags are on their pages — tap Step 5.'},
+  {v:'sticker',n:5,label:'Stickers',
+   title:'Step 5 · Put stickers on the Sticker page',
+   how:[MC_PAPER_TIP,
+     'Press <b>＋ Add All</b> — they go on the Sticker gift tag page.',
+     'Open the Sticker page, check it, then export and print.',
+     'A row saying <b>Nothing called…</b> has no design on the Sticker page: add the design there first.'],
+   done:'All stickers are on their page — this batch is finished.'}];
+let mcSumStep='all';
+// what is still to do in a step: rows neither on a sheet nor ticked done
+const mcSumKindLeft=(rows,v)=>rows.filter(r=>mcSumKind(r)===v&&mcSumState(r)==='pending').length;
+// the first step with anything left, which is where somebody new should be
+const mcSumNextStep=rows=>{
+  const s=MC_STEPS.find(s=>mcSumKindLeft(rows,s.v)>0); return s?s.v:''; };
+function mcRenderSteps(all){
+  const box=document.getElementById('mcSummarySteps');
+  const guide=document.getElementById('mcSummaryGuide');
+  if(!box) return;
+  const next=mcSumNextStep(all);
+  mcSumPresetOpts();
+  box.innerHTML=MC_STEPS.map(s=>{
+    const n=all.filter(r=>mcSumKind(r)===s.v).length;
+    const left=mcSumKindLeft(all,s.v);
+    const sub=s.v===next?`👉 Now · ${left} left`
+      :left?`${left} left`:(n?'✓ done':'none');
+    return `<button type="button" role="tab" data-mc-step="${s.v}"
+      class="${mcSumStep===s.v?'on':''}${s.v===next?' next':''}"
+      aria-selected="${mcSumStep===s.v}" aria-label="Step ${s.n}: ${s.label}"
+      ><span class="dot">${s.n}</span><span class="lbl">${s.label}</span><small>${sub}</small></button>`;
+  }).join('')+`<button type="button" role="tab" data-mc-step="all"
+      class="${mcSumStep==='all'?'on':''}" aria-selected="${mcSumStep==='all'}"
+       aria-label="Show all"><span class="dot all">All</span><span class="lbl">Show all</span><small>${all.length} SKU${all.length===1?'':'s'}</small></button>`;
+  const s=MC_STEPS.find(s=>s.v===mcSumStep);
+  // copy rows with no print preset are held back, so the step says how many
+  const noPreset=s&&s.v==='copy'
+    ?all.filter(r=>mcSumKind(r)==='copy'&&mcSumState(r)==='pending'&&mcNeedsPreset(r)).length:0;
+  guide.innerHTML=s
+    ? `<b class="t">${s.title}</b><ol>${s.how.map(h=>`<li>${h}</li>`).join('')}</ol>`
+      +(noPreset?`<div style="color:var(--amber);font-weight:700;margin-top:4px;">⚠ ${noPreset} SKU${
+          noPreset===1?' still needs':'s still need'} a paper type before it can be copied.</div>`:'')
+      +(mcSumKindLeft(all,s.v)?'':`<div class="ok">✓ ${s.done}</div>`)
+      +(s.print?`<button type="button" class="btn-primary" id="mcSummaryPrintCopies" style="margin-top:8px;">🖨 Print these${
+          mcSumPaper!=='all'?' ('+escapeHtml(mcSumPaper)+')':''}</button>`:'')
+    : `<b class="t">New here? Do it in 5 steps.</b>Tap <b>1. No File Type</b> and work left to right. `
+      +`The step with 👉 is the one to do now.`;
+}
+// ---------- the print preset a Copy file SKU prints on ----------
+// The same shared table Print copied files keeps (fiery_sku_presets), read on
+// the way into the summary so a copy is never made for a SKU nobody has said
+// how to print. Where the tables are not there, nothing is held back.
+let mcSumPresets=[], mcSumSkuPreset=new Map(), mcSumPresetsOk=false;
+async function mcSumPresetsLoad(){
+  if(!sb) return;
+  try{
+    const [p,s]=await Promise.all([
+      sb.from('fiery_presets').select('id,name').order('name'),
+      sb.from('fiery_sku_presets').select('sku,preset_id')]);
+    if(p.error||s.error) throw (p.error||s.error);
+    mcSumPresets=p.data||[];
+    mcSumSkuPreset=new Map((s.data||[]).map(r=>[String(r.sku),String(r.preset_id)]));
+    mcSumPresetsOk=true;
+  }catch(e){ mcSumPresetsOk=false; }
+  mcSumPresetOpts();
+}
+const mcSumPresetOf=sku=>{
+  const id=mcSumSkuPreset.get(String(sku));
+  return id?mcSumPresets.find(p=>String(p.id)===id)||null:null; };
+// only asked for where there is a list to answer from
+const mcNeedsPreset=r=>mcSumPresetsOk&&mcSumPresets.length>0&&!mcSumPresetOf(r.sku);
+function mcSumPresetOpts(){
+  const sel=document.getElementById('mcSummaryBulkPreset'); if(!sel) return;
+  const keep=sel.value;
+  sel.innerHTML='<option value="">📄 Paper type…</option>'+mcSumPresets.map(p=>
+    `<option value="${escapeHtml(String(p.id))}">${escapeHtml(p.name)}</option>`).join('');
+  sel.value=keep;
+  // set in step 1 with where the SKU goes; every later step only changes it
+  const on=mcSumPresetsOk&&mcSumPresets.length>0;
+  sel.style.display=on?'':'none';
+  const btn=document.getElementById('mcSummaryBulkPresetSet');
+  btn.style.display=on?'':'none';
+  btn.textContent=mcSumStep==='nothing'?'📄 Set paper type':'📄 Change paper type';
+}
+async function mcSumSetPreset(){
+  const out=document.getElementById('mcSummaryMsg');
+  const id=document.getElementById('mcSummaryBulkPreset').value;
+  const p=mcSumPresets.find(x=>String(x.id)===id);
+  if(!p){ showMsg(out,'Pick a paper type in the box first.',false); return; }
+  const skus=mcSelRows().map(r=>String(r.sku));
+  if(!skus.length){ showMsg(out,'Tick the SKUs to set first — or Select All.',false); return; }
+  const {data:{session}}=await sb.auth.getSession();
+  const {error}=await sb.from('fiery_sku_presets').upsert(skus.map(sku=>({sku,
+    preset_id:p.id,preset_name:p.name,updated_by:session&&session.user.id,
+    updated_at:new Date().toISOString()})),{onConflict:'sku'});
+  if(error){ showMsg(out,'Could not save that: '+escapeHtml(error.message),false); return; }
+  skus.forEach(sku=>mcSumSkuPreset.set(sku,String(p.id)));
+  showMsg(out,`✓ ${skus.length===1?escapeHtml(skus[0]):skus.length+' SKUs'} print on ${
+    escapeHtml(p.name)} from now on.`,true);
+  mcRenderSummary();
+}
+// ---------- one paper at a time ----------
+// What a row is printed on: the paper type set for the SKU, and where none
+// is, the paper and GSM its lines were given. Picking one shows only those,
+// so a whole run goes through without the paper being changed.
+function mcSumPaperOf(r){
+  const p=mcSumPresetOf(r.sku);
+  if(p) return p.name;
+  return (mcSumKind(r)!=='copy'&&r.paper)||'No paper type';
+}
+let mcSumPaper='all';
+// search and step, before the paper and the state filter
+function mcSumStepRows(){
+  const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
+  const all=mcSummaryRows();
+  let some=q?all.filter(r=>
+    String(r.sku).toLowerCase().includes(q)||String(r.name||'').toLowerCase().includes(q)):all;
+  if(mcSumStep!=='all') some=some.filter(r=>mcSumKind(r)===mcSumStep);
+  return some;
+}
+function mcRenderPapers(){
+  const box=document.getElementById('mcSummaryPapers'); if(!box) return;
+  // step 1 is deciding where SKUs go, which has nothing to do with paper
+  if(mcSumStep==='nothing'){ box.style.display='none'; mcSumPaper='all'; return; }
+  const rows=mcSumStepRows();
+  const counts=new Map();
+  rows.forEach(r=>{ const p=mcSumPaperOf(r); counts.set(p,(counts.get(p)||0)+1); });
+  if(mcSumPaper!=='all'&&!counts.has(mcSumPaper)) mcSumPaper='all';
+  const names=[...counts.keys()].sort((a,b)=>{
+    const unset=x=>x==='No paper type'||x==='Mixed papers';
+    return unset(a)-unset(b)||a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'}); });
+  box.style.display=rows.length?'':'none';
+  box.innerHTML='<span class="mc-papers-lbl">Paper:</span>'
+    +`<button type="button" data-mc-paper="all" class="${mcSumPaper==='all'?'on':''}">All papers (${rows.length})</button>`
+    +names.map(n=>`<button type="button" data-mc-paper="${escapeHtml(n)}" class="${
+      mcSumPaper===n?'on':''}${/^No |^Mixed/.test(n)?' warn':''}">${escapeHtml(n)} (${counts.get(n)})</button>`).join('');
+}
 // what the search box and the filter are actually showing — every button acts
 // on this, and so does the list itself, so they cannot disagree
 function mcSummaryShownRows(){
-  const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
-  const all=mcSummaryRows();
-  const some=q?all.filter(r=>
-    String(r.sku).toLowerCase().includes(q)||String(r.name||'').toLowerCase().includes(q)):all;
+  let some=mcSumStepRows();
+  if(mcSumStep!=='nothing'&&mcSumPaper!=='all') some=some.filter(r=>mcSumPaperOf(r)===mcSumPaper);
   return mcSumFilter==='all'?some:some.filter(r=>mcSumState(r)===mcSumFilter);
 }
 // A SKU whose every line is ticked done is not added again: the row is work
@@ -36183,6 +36449,8 @@ function mcRenderSummary(){
   const body=document.getElementById('mcSummaryBody');
   const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
   const all=mcSummaryRows();
+  mcRenderSteps(all);
+  mcRenderPapers();   // first: a paper no longer in this step is let go of here
   const rows=mcSummaryShownRows();
   if(!all.length){
     body.innerHTML='<p class="hint" style="margin:4px 0 0;">— no lines on this batch —</p>';
@@ -36190,8 +36458,10 @@ function mcRenderSummary(){
     return;
   }
   if(!rows.length){
-    body.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing here matches “'
-      +escapeHtml(q)+'” —</p>';
+    const step=MC_STEPS.find(s=>s.v===mcSumStep);
+    body.innerHTML=q
+      ? '<p class="hint" style="margin:4px 0 0;">— nothing here matches “'+escapeHtml(q)+'” —</p>'
+      : `<p class="hint" style="margin:4px 0 0;">— nothing in ${step?'this step':'this filter'} —</p>`;
     mcSummaryButtons([]);
     return;
   }
@@ -36322,6 +36592,11 @@ function mcRenderSummary(){
         ${r.name?`<span class="mc-sum-name">${escapeHtml(r.name)}</span>`:''}
         ${badge}
         ${cpBadge}
+        ${mcSumPaperOf(r)!=='No paper type'
+          ?`<span class="mc-sum-on">📄 ${escapeHtml(mcSumPaperOf(r))}</span>`
+          :(mcSumPresetsOk&&mcSumPresets.length
+            ?`<span class="mc-sum-name" style="color:var(--amber);font-weight:700;">📄 No paper type — tick it, then ${
+                mcSumStep==='nothing'?'Set':'Change'} paper type</span>`:'')}
         ${okBadge}
       </span>
       ${copy}
@@ -38596,6 +38871,12 @@ async function mcCopySku(sku,btn){
   await mcSrcReady();
   if(!canPickFolder()){
     showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false); return; }
+  // the print preset comes first: a file copied with none is a file nobody
+  // can send to the Fiery without going back to ask
+  if(mcNeedsPreset({sku})){
+    showMsg(out,`${escapeHtml(String(sku))} has no paper type yet — tick it, pick one in `
+      +'📄 Paper type and press Change paper type, then Copy.',false);
+    return; }
   const src=mcCopySource(sku);
   if(!src){
     mcTold(out,`No design in the folder for ${sku} — use Choose… to say which file.`,false,
@@ -38697,6 +38978,17 @@ async function mcWriteCopyOnce(dir,name,blob){
 async function mcCopyRows(rows){
   const out=document.getElementById('mcSummaryMsg');
   if(!rows||!rows.length){ showMsg(out,'Nothing here is set to copy.',false); return 0; }
+  // the print preset comes first — the ones without are left, and said
+  const noPreset=rows.filter(mcNeedsPreset);
+  if(noPreset.length){
+    rows=rows.filter(r=>!mcNeedsPreset(r));
+    const list=noPreset.slice(0,5).map(r=>r.sku).join(', ')+(noPreset.length>5?'…':'');
+    if(!rows.length){
+      showMsg(out,`Set a paper type first — ${noPreset.length} SKU${noPreset.length===1?' has':'s have'} `
+        +`none: ${escapeHtml(list)}. Tick them, pick one in 📄 Paper type, press Change paper type.`,false);
+      return 0;
+    }
+  }
   if(!canPickFolder()){
     showMsg(out,'This browser cannot copy into a folder — use Chrome or Edge on a PC.',false);
     return 0;
@@ -38739,10 +39031,12 @@ async function mcCopyRows(rows){
     missing.length?`${missing.length} with no file to copy: ${missing.slice(0,3).join(', ')}`
       +(missing.length>3?'…':''):'',
     failed.length?`${failed.length} failed (a different file of that name may already be there): `
-      +`${failed.slice(0,3).join(', ')}`:'']
+      +`${failed.slice(0,3).join(', ')}`:'',
+    noPreset.length?`${noPreset.length} skipped — no paper type yet: `
+      +`${noPreset.slice(0,3).map(r=>r.sku).join(', ')}${noPreset.length>3?'…':''}`:'']
     .filter(Boolean).join(' · ');
   // out loud in the shortest true words: what landed, and what did not
-  mcTold(out,note||'Nothing to copy.',!failed.length&&!missing.length,
+  mcTold(out,note||'Nothing to copy.',!failed.length&&!missing.length&&!noPreset.length,
     [done?mcSaidCount('Copied',done,'one file'):(already?'Already there':'Nothing copied'),
      missing.length?mcSaidCount('no file for',missing.length,'one'):'',
      failed.length?mcSaidCount('failed',failed.length,'one'):''].filter(Boolean).join(', '));
@@ -38813,6 +39107,9 @@ async function mcOpenSummary(){
   mcSumFilter='all';
   document.querySelectorAll('#mcSummaryFilter [data-mc-sum-filter]')
     .forEach(x=>x.classList.toggle('on',x.dataset.mcSumFilter==='all'));
+  // opened on the step there is work in, once routing and the libraries have
+  // been read below — until then every row would say "nothing yet"
+  mcSumStep='all'; mcSumPaper='all';
   document.getElementById('mcSummaryMsg').innerHTML='';
   // the sheet in the margin is what this visit has built; a fresh look starts
   // without one rather than showing whatever was last drawn
@@ -38850,6 +39147,9 @@ async function mcOpenSummary(){
   // rows went on asking to be mapped for the rest of the day
   await mcRoutesLoad(true).catch(()=>{});
   await mcGtIndex().catch(()=>{});
+  await mcSumPresetsLoad();
+  // straight to the step there is work in, unless a step was tapped meanwhile
+  if(mcSumStep==='all') mcSumStep=mcSumNextStep(mcSummaryRows())||'all';
   mcRenderSummary();
   mcSummaryFolderState();
 }
@@ -38903,6 +39203,27 @@ document.getElementById('mcSummaryCopyFolderBtn').addEventListener('click',async
   }catch(e){ /* cancelled */ }
 });
 document.getElementById('mcSummarySearch').addEventListener('input',mcRenderSummary);
+document.getElementById('mcSummarySteps').addEventListener('click',e=>{
+  const b=e.target.closest('[data-mc-step]'); if(!b) return;
+  mcSumStep=b.dataset.mcStep;
+  mcSumPaper='all';
+  // ticks made in another step would be acted on unseen by Add Selected
+  mcSel.clear();
+  mcRenderSummary();
+});
+document.getElementById('mcSummaryPapers').addEventListener('click',e=>{
+  const b=e.target.closest('[data-mc-paper]'); if(!b) return;
+  mcSumPaper=b.dataset.mcPaper;
+  mcSel.clear();
+  mcRenderSummary();
+});
+document.getElementById('mcSummaryBulkPresetSet').addEventListener('click',mcSumSetPreset);
+document.getElementById('mcSummaryGuide').addEventListener('click',e=>{
+  if(!e.target.closest('#mcSummaryPrintCopies')) return;
+  const skus=new Set(mcSummaryShownRows().map(r=>String(r.sku)));
+  if(!skus.size){ showMsg(document.getElementById('mcSummaryMsg'),'Nothing shown to print.',false); return; }
+  mcCopyPrintOpen(undefined,skus);
+});
 document.getElementById('mcSummaryFilter').addEventListener('click',e=>{
   const b=e.target.closest('[data-mc-sum-filter]'); if(!b) return;
   mcSumFilter=b.dataset.mcSumFilter;
