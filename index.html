@@ -7240,9 +7240,71 @@ async function pdfFileToDataURL(file,maxPx,clear){
   if(!clear){ ctx.fillStyle='#fff'; ctx.fillRect(0,0,c.width,c.height); }
   await page.render({canvasContext:ctx,viewport:vp}).promise;
   // the page's own size goes with the picture of it, so Actual size can read
-  // it back off the PNG like any other file's
+  // it back off the PNG like any other file's — and where its trim sits, so a
+  // page drawn with its bleed on fits the card by its trim, not its bleed
+  const trim=await pdfTrimInset(new Uint8Array(buf)).catch(()=>null);
   return pngWithDpi(c.toDataURL('image/png'),
-    c.width/(b.width/72), c.height/(b.height/72));
+    c.width/(b.width/72), c.height/(b.height/72),
+    'pigu-pdf', trim?trim.map(n=>n.toFixed(5)).join(','):'0,0,0,0');
+}
+// How far in the page's TrimBox sits from each edge of the page as drawn, as
+// fractions of its width and height: [left, top, right, bottom], turned the
+// way the page is turned. null for a file that gives no trim of its own.
+async function pdfTrimInset(bytes){
+  const src=new pdfLift.PdfSrc(bytes);
+  if(src.encrypted()) return null;
+  await src.loadObjStms(inflateBytes);
+  const pg=src.page(0);
+  if(!pg) return null;
+  const get=k=>(pg.dict.get(k)!==undefined?pg.dict.get(k):pg.inh[k]);
+  const box=v=>{
+    const a=src.resolve(v);
+    if(!Array.isArray(a)||a.length!==4) return null;
+    const n=a.map(x=>Number(src.resolve(x)));
+    if(n.some(x=>!isFinite(x))) return null;
+    return [Math.min(n[0],n[2]),Math.min(n[1],n[3]),Math.max(n[0],n[2]),Math.max(n[1],n[3])];
+  };
+  const media=box(get('MediaBox'))||[0,0,612,792];
+  const crop=box(get('CropBox'))||media;
+  const v=[Math.max(crop[0],media[0]),Math.max(crop[1],media[1]),Math.min(crop[2],media[2]),Math.min(crop[3],media[3])];
+  const trim=box(get('TrimBox'));
+  const W=v[2]-v[0], H=v[3]-v[1];
+  if(!trim||!(W>0)||!(H>0)) return null;
+  const l=Math.max(0,trim[0]-v[0])/W, b=Math.max(0,trim[1]-v[1])/H;
+  const r=Math.max(0,v[2]-trim[2])/W, t=Math.max(0,v[3]-trim[3])/H;
+  if(l+r>=0.9||t+b>=0.9) return null;
+  const rot=((Number(src.resolve(get('Rotate')))||0)%360+360)%360;
+  return rot===90?[b,l,t,r]:rot===180?[r,b,l,t]:rot===270?[t,r,b,l]:[l,t,r,b];
+}
+// The trim a PDF's picture carries, as the share of its width and height that
+// lies inside the cut: {x,y}, or null for a picture with no bleed of its own.
+// A page with no TrimBox is still taken as bled when it is exactly the card
+// with the same few millimetres all round — a card sent at 94 × 59 for an
+// 89 × 54 placeholder is that card with 2.5 mm of bleed, not a bigger card.
+// cardW/cardH are along the picture's own axes.
+function artTrimFrac(img,cardW,cardH){
+  if(!img||!img.naturalWidth) return null;
+  if(img._pdfTrim===undefined){
+    img._pdfTrim=null;
+    try{
+      const src=img.src, b64=src.slice(src.indexOf(',')+1,src.indexOf(',')+1+400);
+      const bin=atob(b64.slice(0,b64.length-b64.length%4));
+      const at=bin.indexOf('tEXtpigu-pdf\0');
+      if(at>=4){
+        const len=((bin.charCodeAt(at-4)<<24)|(bin.charCodeAt(at-3)<<16)|(bin.charCodeAt(at-2)<<8)|bin.charCodeAt(at-1))>>>0;
+        const n=bin.slice(at+13,at+4+len).trim().split(',').map(Number);
+        if(n.length===4&&n.every(isFinite)) img._pdfTrim=n;
+      }
+    }catch(e){}
+  }
+  const t=img._pdfTrim;
+  if(!t) return null;
+  if(t.some(x=>x>0.0005)) return {x:1-t[0]-t[2], y:1-t[1]-t[3]};
+  const real=artRealMm(img);
+  if(!real||!(cardW>0)||!(cardH>0)) return null;
+  const bx=(real.w-cardW)/2, by=(real.h-cardH)/2;
+  if(bx>=1&&bx<=6&&Math.abs(bx-by)<0.3) return {x:cardW/real.w, y:cardH/real.h};
+  return null;
 }
 // A pHYs chunk slipped in straight after IHDR. The signature and IHDR are 33
 // bytes and the chunk 21, 54 in all — a whole number of base64 groups — so the
@@ -7257,12 +7319,26 @@ function crc32(bytes){
   for(const b of bytes) c=crcTable[(c^b)&0xFF]^(c>>>8);
   return (c^0xFFFFFFFF)>>>0;
 }
-function pngWithDpi(dataURL,dpiX,dpiY){
+// key/text: a tEXt chunk to go in behind it, padded with spaces to a whole
+// number of base64 groups for the same reason.
+function pngWithDpi(dataURL,dpiX,dpiY,key,text){
   const comma=dataURL.indexOf(',');
   const b64=dataURL.slice(comma+1);
   const head=atob(b64.slice(0,44));
   if(head.length!==33||head.charCodeAt(1)!==0x50||head.slice(12,16)!=='IHDR') return dataURL;
-  const out=new Uint8Array(54);
+  let extra=new Uint8Array(0);
+  if(key){
+    let body=key+'\0'+(text||'');
+    while((12+body.length)%3) body+=' ';
+    extra=new Uint8Array(12+body.length);
+    const xv=new DataView(extra.buffer);
+    xv.setUint32(0,body.length);
+    const tb=('tEXt'+body);
+    for(let i=0;i<tb.length;i++) extra[4+i]=tb.charCodeAt(i)&0xFF;
+    xv.setUint32(8+body.length,crc32(extra.subarray(4,8+body.length)));
+  }
+  const out=new Uint8Array(54+extra.length);
+  out.set(extra,54);
   for(let i=0;i<33;i++) out[i]=head.charCodeAt(i);
   const dv=new DataView(out.buffer);
   dv.setUint32(33,9);
@@ -7617,10 +7693,15 @@ function fitArtToCard(side){
   // the box is the footprint on the sheet, so a picture turned a quarter
   // takes its width from its height
   const turned=((state.rotate[side]||0)%180)!==0;
-  const iw=turned?img.naturalHeight:img.naturalWidth, ih=turned?img.naturalWidth:img.naturalHeight;
+  // a PDF with its bleed on is sized by its trim
+  const t0=artTrimFrac(img,turned?L.cardH:L.cardW,turned?L.cardW:L.cardH);
+  const tf=t0&&(turned?{x:t0.y,y:t0.x}:t0);
+  const iw=(turned?img.naturalHeight:img.naturalWidth)*(tf?tf.x:1),
+    ih=(turned?img.naturalWidth:img.naturalHeight)*(tf?tf.y:1);
   const r=state.artFit==='actual'?artRealMm(img):null;
   if(r){
     state.art[side]=turned?{wMm:r.h,hMm:r.w}:{wMm:r.w,hMm:r.h};
+    if(tf){ state.art[side].wMm*=tf.x; state.art[side].hMm*=tf.y; }
   }else if(state.artFit==='original'||state.artFit==='actual'){
     const f=Math.min(L.cardW/iw,L.cardH/ih);
     state.art[side]={wMm:iw*f,hMm:ih*f};
@@ -7894,10 +7975,18 @@ function renderSide(side,canvas,maxDim,opts){
     const real=state.artFit==='actual'?artRealMm(img):null;
     // wMm × hMm is the footprint, after any quarter turn
     const onSide=((((state.rotate[side]||0)+designRotOf(line))%360+360)%180)!==0;
-    const iw=onSide?img.naturalHeight:img.naturalWidth, ih=onSide?img.naturalWidth:img.naturalHeight;
+    // A PDF drawn with its bleed on is sized by its trim, and that bleed is
+    // what prints past the cut: the share of the page inside the trim, turned
+    // to the footprint's axes
+    const Lc=layoutMm(), cw=ph.card?ph.wMm:Lc.cardW, chh=ph.card?ph.hMm:Lc.cardH;
+    const tf0=artTrimFrac(img,onSide?chh:cw,onSide?cw:chh);
+    const tf=tf0&&(onSide?{x:tf0.y,y:tf0.x}:tf0);
+    const iw=(onSide?img.naturalHeight:img.naturalWidth)*(tf?tf.x:1),
+      ih=(onSide?img.naturalWidth:img.naturalHeight)*(tf?tf.y:1);
     if(real&&line){
       ({w:wMm,h:hMm}=real);
       if(onSide) [wMm,hMm]=[hMm,wMm];
+      if(tf){ wMm*=tf.x; hMm*=tf.y; }
     }else if(line&&(state.artFit==='original'||(state.artFit==='actual'&&!real))
       &&img.naturalWidth&&img.naturalHeight){
       // a design with no size of its own fits its card; the box may be another
@@ -7917,10 +8006,12 @@ function renderSide(side,canvas,maxDim,opts){
     // still reaches its bleed past the placeholder, for a design sent at the
     // wrong ratio. Stretching a picture across a gap would squash it out of
     // shape, so a carried bleed is always made up from the edges instead.
-    const fillGap=!!(state.bleed&&state.bleed.fillGap)&&bleedMm>0;
+    // A page with its own bleed makes none up: the whole page is drawn, its
+    // trim on the footprint, and cut back to the bleed the sheet asks for.
+    const fillGap=!tf&&!!(state.bleed&&state.bleed.fillGap)&&bleedMm>0;
     const padX=fillGap?Math.max(0,(ph.wMm-wMm)/2):0;
     const padY=fillGap?Math.max(0,(ph.hMm-hMm)/2):0;
-    const bX=bleedMm+padX, bY=bleedMm+padY;
+    const bX=tf?(wMm/tf.x-wMm)/2:bleedMm+padX, bY=tf?(hMm/tf.y-hMm)/2:bleedMm+padY;
     const effW=wMm+bX*2, effH=hMm+bY*2;
     // Mirror and Extend keep the artwork at its own size and make the bleed up
     // from its edges; Stretch enlarges the picture into it as it always did —
@@ -7928,7 +8019,7 @@ function renderSide(side,canvas,maxDim,opts){
     // shape, so the gap is extended instead
     const padded=padX>0||padY>0;
     const bleedMode=bleedModeNow()==='stretch'?'extend':bleedModeNow();
-    const grow=bleedMm>0&&(bleedModeNow()!=='stretch'||padded);
+    const grow=!tf&&bleedMm>0&&(bleedModeNow()!=='stretch'||padded);
     // the sheet's turn and the design's own, one on top of the other: the
     // sheet turns everything printed on it, and a design that arrived on its
     // side turns again inside its own box
@@ -7948,9 +8039,18 @@ function renderSide(side,canvas,maxDim,opts){
     // Nothing of a picture reaches further than ART_REACH_MM past its own box,
     // however big it is made — on screen, in the PDF and at the printer — so an
     // enlarged picture never lies over the card beside it.
-    const clip={x:ph.xMm-ART_REACH_MM, y:ph.yMm-ART_REACH_MM,
+    let clip={x:ph.xMm-ART_REACH_MM, y:ph.yMm-ART_REACH_MM,
       w:ph.wMm+ART_REACH_MM*2, h:ph.hMm+ART_REACH_MM*2};
-    const reach=(x,y)=>({x:Math.min(ART_REACH_MM,x), y:Math.min(ART_REACH_MM,y)});
+    // a page's own bleed reaches only as far as the sheet's bleed — none at
+    // all with bleed off, so the card is cut at its trim
+    if(tf){
+      const fx=ph.xMm+ph.wMm/2-wMm/2-bleedMm, fy=ph.yMm+ph.hMm/2-hMm/2-bleedMm;
+      const x0=Math.max(clip.x,fx), y0=Math.max(clip.y,fy);
+      const x1=Math.min(clip.x+clip.w,fx+wMm+bleedMm*2), y1=Math.min(clip.y+clip.h,fy+hMm+bleedMm*2);
+      clip={x:x0, y:y0, w:Math.max(0,x1-x0), h:Math.max(0,y1-y0)};
+    }
+    const reach=(x,y)=>({x:Math.min(ART_REACH_MM,tf?Math.min(x,(wMm-ph.wMm)/2+bleedMm):x),
+      y:Math.min(ART_REACH_MM,tf?Math.min(y,(hMm-ph.hMm)/2+bleedMm):y)});
     let ringOnly=false;
     if(opts.vec){
       const vclip={x:clip.x+shift.xMm, y:clip.y+shift.yMm, w:clip.w, h:clip.h};
