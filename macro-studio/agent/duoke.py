@@ -73,6 +73,8 @@ PROBE_DIR = config.RUNS_DIR
 MAX_THREADS_PER_PASS = 10
 # how often the watcher looks for a new DuoKe message
 FAST_CHECK_SECONDS = 2
+# how many of the most recent chats get a draft written before they are opened
+PREDRAFT_RECENT = 20
 # How many messages back to look at in an opened conversation. The buyer's
 # last message is what is being answered; the two before it are context for
 # the draft.
@@ -2617,14 +2619,31 @@ def _draft_now(conv: str) -> Optional[dict]:
     return {"mark": mark, "words": words, "photos": photos, "key": key, "text": text}
 
 
+# conversation id -> the last message id already looked at for a draft
+_checked: dict[str, str] = {}
+_predrafting = threading.Lock()
+
+
+def _predraft() -> None:
+    if _predrafting.acquire(blocking=False):
+        try:
+            draft_new_unread()
+        except Exception:
+            pass
+        finally:
+            _predrafting.release()
+
+
 def draft_new_unread() -> int:
-    """Write drafts for unread chats straight away, from the watcher, so one
-    is ready seconds after the message lands instead of after a full pass."""
+    """Write drafts straight away, from the watcher, for the recent chats where
+    the buyer is waiting -- read or not -- so opening one finds its draft
+    already there instead of waiting on the AI."""
     made = 0
-    for sess in [x for x in duoke_web.all_sessions(1) if x["unread"]][:MAX_THREADS_PER_PASS]:
+    for sess in duoke_web.all_sessions(1)[:PREDRAFT_RECENT]:
         conv = sess["conversation_id"]
-        if conv in _ready:
+        if _checked.get(conv) == sess["last_id"]:
             continue
+        _checked[conv] = sess["last_id"]
         try:
             item = _draft_now(conv)
         except Exception:
@@ -2656,10 +2675,12 @@ def place_ready_draft() -> Optional[str]:
             _ready[conv] = item
         _last_opened[0] = conv
         # let DuoKe finish switching before anything goes in the box
-        time.sleep(1.2)
+        time.sleep(0.4)
         if duoke_web.open_conversation_id() != conv:
             return None
         _ready.pop(conv, None)
+        if item["mark"] in _drafted:
+            return None               # already put in once; not again
         sess = next((x for x in duoke_web.list_sessions()[0]
                      if x["conversation_id"] == conv), None)
         if sess:
@@ -3311,7 +3332,10 @@ class Watcher:
                     sig = duoke_web.signature() if duoke_web.available() else None
                     if sig and last_sig and sig != last_sig:
                         self._wake.set()
-                        draft_new_unread()
+                    # in its own thread: writing drafts takes seconds each,
+                    # and this loop must keep noticing which chat is opened
+                    if sig and sig != last_sig and not _predrafting.locked():
+                        threading.Thread(target=_predraft, daemon=True).start()
                     if sig:
                         last_sig = sig
                 except Exception:
@@ -3325,7 +3349,8 @@ class Watcher:
                     place_ready_draft()
             except Exception:
                 hwnd = 0
-            self._stop.wait(1)
+            # often, so a chat that is opened gets its draft at once
+            self._stop.wait(0.3)
 
     def _run(self) -> None:
         # A first pass straight away would run while the agent is still
