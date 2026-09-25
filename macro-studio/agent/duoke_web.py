@@ -477,7 +477,13 @@ _CLEAR_SLASH = r"""
 })()
 """
 
-_PICK_SHORTCUT = r"""
+_BOX_TEXT = r"""
+(() => {""" + _BOX + r"""
+  return JSON.stringify({ ok: true, text: value() });
+})()
+"""
+
+_PICK_SHORTCUT_UNUSED = r"""
 ((code) => {
   const ul = document.querySelector('ul.el-autocomplete-suggestion__list');
   if (!ul) return 'no quick reply list';
@@ -536,20 +542,10 @@ def list_shortcuts() -> list[dict]:
     return rows
 
 
-def use_shortcut(code: str) -> str:
-    """Put one quick reply, photos and all, in an empty reply box. Not sent.
-
-    'picked', 'busy', or why not."""
-    opened = _json(_run(_OPEN_SHORTCUTS))
-    if not opened.get("ok"):
-        return opened.get("why") or last_error() or "the page did not answer"
-    time.sleep(1.0)
-    got = _run(f"({_PICK_SHORTCUT})({json.dumps(code)})")
-    if got != "picked":
-        _run(_CLEAR_SLASH)
-        return str(got or last_error() or "the page did not answer")
-    time.sleep(1.0)
-    return "picked"
+# use_shortcut() was here. Picking a DuoKe quick reply can SEND it on the
+# spot, and customers got messages nobody pressed Send on (2026-09-25). Only
+# plain words go in the box now, and nothing in this module picks, clicks or
+# presses anything that sends.
 
 
 def put_draft(text: str) -> str:
@@ -669,3 +665,11 @@ def signature() -> str:
     count moves -- a cheap way to know a pass is worth running now."""
     rows = all_sessions(1)
     return "|".join(f"{r['conversation_id']}:{r['last_id']}:{int(r['unread'])}" for r in rows)
+
+
+def reply_box_text() -> Optional[str]:
+    """What is in the open chat's reply box now, or None when it cannot be
+    read. The send guard's question: an Enter with words in this box sends
+    them."""
+    data = _json(_run(_BOX_TEXT))
+    return str(data.get("text") or "") if data.get("ok") else None

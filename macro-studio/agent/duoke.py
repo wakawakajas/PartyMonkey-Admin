@@ -1812,10 +1812,38 @@ def put_draft(tree: list[dict], reader: dict, hwnd: int, text: str) -> tuple[boo
     return True, "draft left in the box"
 
 
+# NOTHING IS SENT WITHOUT A PERSON. The only thing this agent may send is a
+# reply somebody approved in Pigu, and only inside approved_send(). Any other
+# Enter -- a search box, the product search -- is refused unless DuoKe's reply
+# box is provably empty, because an Enter that lands in a box holding a draft
+# sends that draft to the customer.
+_approved = threading.local()
+
+
+class approved_send:
+    """`with approved_send():` around typing a reply a person approved."""
+
+    def __enter__(self):
+        _approved.on = True
+
+    def __exit__(self, *exc):
+        _approved.on = False
+
+
+def _may_press_enter() -> bool:
+    if getattr(_approved, "on", False):
+        return True
+    text = duoke_web.reply_box_text() if duoke_web.available() else None
+    # unreadable counts as not empty: when in doubt, no Enter
+    return text is not None and not text.strip()
+
+
 def _post_key(hwnd: int, node: dict, key: str) -> bool:
     rect = (node or {}).get("rect")
     vk = winapi.vk_for(key)
     if not rect or not vk:
+        return False
+    if key.lower() in ("enter", "return") and not _may_press_enter():
         return False
     child = _post_target(hwnd, (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
     if not child:
@@ -1879,6 +1907,8 @@ def _paste_and_send(box: dict, hwnd: int, verify: bool) -> tuple[bool, str]:
     that a chat box built out of HTML cannot tell from a person, which is also
     why it needs the window in front for the second it takes.
     """
+    if not getattr(_approved, "on", False):
+        return False, "refused: only a reply approved in Pigu is ever sent"
     ctrl, v, enter = winapi.vk_for("ctrl"), winapi.vk_for("v"), winapi.vk_for("enter")
     if not (ctrl and v and enter):
         return False, "this machine reports no Ctrl, V or Enter key"
@@ -1962,6 +1992,8 @@ def send_product(nodes: list[dict], window: tuple[int, int, int, int], reader: d
     and a title that matches nothing is not sent: a wrong product card is
     worse to a buyer than no product card, because it reads as an answer.
     """
+    if not getattr(_approved, "on", False):
+        return False, "refused: only a reply approved in Pigu is ever sent"
     want = (query or "").strip()
     if not want:
         return False, "no product named"
@@ -2982,15 +3014,9 @@ def sync_once() -> dict:
                 return
             # A draft that is really one of the shop's quick replies goes in
             # AS that quick reply, which brings its photos with it.
-            quick = None                  # never a quick reply: picking one can send it
+            # plain words only: a quick reply can send itself when picked
             ok, how = False, ""
-            if quick:
-                got = duoke_web.use_shortcut(quick["code"])
-                ok = got == "picked"
-                how = "draft left in the box" if ok else f"quick reply /{quick['code']}: {got}"
-                if ok and quick.get("photo"):
-                    report["photos"] += 1
-            if not ok and "busy" not in how:
+            if True:
                 ok, how = put_draft(warm_tree(hwnd), reader, hwnd, words)
                 if ok and photos:
                     report["notes"].append(
@@ -3087,7 +3113,8 @@ def sync_once() -> dict:
             except CloudError as exc:
                 report["notes"].append(str(exc))
                 continue
-            ok, how = type_reply(tree, window, reader, hwnd, text)
+            with approved_send():
+                ok, how = type_reply(tree, window, reader, hwnd, text)
             if not ok:
                 report["notes"].append(f"{key[:30]}: {how}")
                 try:
@@ -3107,7 +3134,8 @@ def sync_once() -> dict:
                     if not query:
                         continue
                     fresh = warm_tree(hwnd)
-                    ok_p, why_p = send_product(fresh, window, reader, hwnd, query)
+                    with approved_send():
+                        ok_p, why_p = send_product(fresh, window, reader, hwnd, query)
                     if ok_p:
                         report["products"] += 1
                     else:
@@ -3128,7 +3156,8 @@ def sync_once() -> dict:
                         report["notes"].append(f"{key[:30]}: {exc}")
                         continue
                     fresh = warm_tree(hwnd)
-                    sent, why = paste_photo(fresh, window, reader, hwnd, image)
+                    with approved_send():
+                        sent, why = paste_photo(fresh, window, reader, hwnd, image)
                     if sent:
                         report["photos"] += 1
                     else:
@@ -3345,6 +3374,15 @@ class Watcher:
                     sig = duoke_web.signature() if duoke_web.available() else None
                     if sig and last_sig and sig != last_sig:
                         self._wake.set()
+                    # a reply just approved in Pigu is typed on the next pass,
+                    # so that pass starts now rather than up to a minute later
+                    cfg = load()
+                    if cfg.get("type_back"):
+                        cloud = shared_cloud(cfg.get("supabase_url", ""),
+                                             cfg.get("supabase_anon_key", ""),
+                                             cfg.get("email", ""), cfg.get("password", ""))
+                        if cloud.user_id and cloud.replies_to_type():
+                            self._wake.set()
                     # in its own thread: writing drafts takes seconds each,
                     # and this loop must keep noticing which chat is opened
                     if sig and sig != last_sig and not _predrafting.locked():
