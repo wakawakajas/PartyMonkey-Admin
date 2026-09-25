@@ -16192,7 +16192,7 @@ async function loadShipmentMeta(){
     // unit_price_rmb, the box ids and the allocations come back too, because
     // the list now costs each order as well as counting it — see allInByOrder
     sb.from('shipment_items')
-      .select('id,shipment_id,sku,qty,unit_price_rmb,qty_per_unit,unit_price_base_rmb,photo_path,photo_url,sort_order')
+      .select('id,shipment_id,sku,qty,unit_price_rmb,qty_per_unit,unit_price_base_rmb,photo_path,photo_url,sort_order,carried_from_item_id,carried_unit_rmb')
       .order('sort_order',{ascending:true}).order('created_at',{ascending:true}),
     sb.from('shipment_box_items').select('id,box_id,item_id,shipment_id,qty'),
     sb.from('consolidations').select('id,freight_number,eta').is('deleted_at',null),
@@ -16218,8 +16218,9 @@ async function loadShipmentMeta(){
     // without opening the order to work it out
     m.rmb+=v*(Number(b.cbm_rate_rmb)||0);
   });
-  const arrivedBy={};
-  (al.data||[]).forEach(a=>{ arrivedBy[a.item_id]=(arrivedBy[a.item_id]||0)+(Number(a.qty)||0); });
+  const own={};
+  (al.data||[]).forEach(a=>{ own[a.item_id]=(own[a.item_id]||0)+(Number(a.qty)||0); });
+  const arrivedBy=creditCarried(it.data||[],own);
   out.photo={};
   (it.data||[]).forEach(i=>{
     const m=out.status[i.shipment_id]||(out.status[i.shipment_id]={ordered:0,arrived:0});
@@ -16767,6 +16768,34 @@ function boxUnits(boxId){ return allocRows.filter(a=>a.box_id===boxId).reduce((s
 function totalUnitsAll(){ return itemRows.reduce((s,i)=>s+itemUnits(i),0); }
 function arrivedUnitsAll(){ return itemRows.reduce((s,i)=>s+arrivedUnitsOf(i),0); }
 
+// ---- pieces carried over from another order ----
+// A supplier often packs what was missing from one order in with the next, so
+// the pieces can share that order's freight. On the new order such a line is
+// priced at 0 — its goods and fees were paid on the order it came from — and
+// carries what one piece already cost there. It takes a share of this order's
+// freight like any line, and of nothing else.
+const isCarried=i=>!!i&&i.carried_unit_rmb!=null;
+// The other direction, for the order the pieces were bought on: how many of a
+// line were sent on with later orders and how many have landed there. Loaded
+// with the order (see loadCarried). It decides whether the line is done, and
+// never what it cost — freight there is still shared by what arrived there.
+let carriedOut={};
+function movedQtyOf(item){ const c=carriedOut[item.id]; return c?c.qty:0; }
+function movedArrivedOf(item){ const c=carriedOut[item.id]; return c?c.arrived:0; }
+// what may still be ticked into a box on this order
+const receivableOf=i=>Math.max(0,(Number(i.qty)||0)-movedQtyOf(i));
+// Carried pieces count as arrived on the order they were bought on once they
+// land on the later one — for whether that order is done, never for its costs.
+function creditCarried(items,arrivedBy){
+  const out={...arrivedBy};
+  items.forEach(i=>{
+    if(!i.carried_from_item_id) return;
+    out[i.carried_from_item_id]=(out[i.carried_from_item_id]||0)
+      +Math.min(arrivedBy[i.id]||0,Number(i.qty)||0);
+  });
+  return out;
+}
+
 // China-side domestic delivery: one flat fee for the order. Basis decides
 // whether it spreads over every ordered piece or only the arrived ones —
 // in 'arrived' mode pending lines carry none of it, so the shares still
@@ -16774,10 +16803,14 @@ function arrivedUnitsAll(){ return itemRows.reduce((s,i)=>s+arrivedUnitsOf(i),0)
 function chinaFeeRmb(){ const s=currentShipment(); return s?(Number(s.china_fee_rmb)||0):0; }
 function chinaBasis(){ const s=currentShipment(); return (s&&s.china_basis==='arrived')?'arrived':'ordered'; }
 // in purchased units, for the same reason freight is — see the note above
-function chinaBasisQty(){ return chinaBasis()==='arrived'?arrivedUnitsAll():totalUnitsAll(); }
+// carried lines are left out: their China delivery was paid on their own order
+function chinaBasisQty(){ return itemRows.reduce((s,i)=>s+chinaQtyFor(i),0); }
 function chinaPerUnitRmb(){ const q=chinaBasisQty(); return q>0?chinaFeeRmb()/q:0; }
 // in 'arrived' mode only the pieces that actually landed carry the fee
-function chinaQtyFor(item){ return chinaBasis()==='arrived'?arrivedUnitsOf(item):itemUnits(item); }
+function chinaQtyFor(item){
+  if(isCarried(item)) return 0;
+  return chinaBasis()==='arrived'?arrivedUnitsOf(item):itemUnits(item);
+}
 function itemChinaRmb(item){ return chinaPerUnitRmb()*chinaQtyFor(item); }
 
 // Three charges, and each is charged on what the one before it left. The base
@@ -16791,7 +16824,10 @@ function itemChinaRmb(item){ return chinaPerUnitRmb()*chinaQtyFor(item); }
 function platformPct(){ const sh=currentShipment(); return sh?(Number(sh.platform_fee_pct)||0):0; }
 function servicePct(){ const sh=currentShipment(); return sh?(Number(sh.service_fee_pct)||0):0; }
 function gstPct(){ const sh=currentShipment(); return sh?(Number(sh.gst_pct)||0):0; }
-function itemTaxableRmb(i){ return (Number(i.unit_price_rmb)||0)*(Number(i.qty)||0)+itemChinaRmb(i); }
+function itemTaxableRmb(i){
+  if(isCarried(i)) return 0;   // taxed and paid on the order it came from
+  return (Number(i.unit_price_rmb)||0)*(Number(i.qty)||0)+itemChinaRmb(i);
+}
 function itemPlatformRmb(i){ return itemTaxableRmb(i)*platformPct()/100; }
 function itemServiceRmb(i){ return (itemTaxableRmb(i)+itemPlatformRmb(i))*servicePct()/100; }
 function itemGstRmb(i){
@@ -16857,10 +16893,85 @@ async function loadOrderData(){
     sb.from('shipment_box_items').select('*').eq('shipment_id',currentShipmentId)
   ]);
   itemRows=it.data||[]; boxRows=bx.data||[]; allocRows=al.data||[];
+  await loadCarried();
   itemOriginal=JSON.parse(JSON.stringify(itemRows));
   allocOriginal=JSON.parse(JSON.stringify(allocRows));
   boxOriginal=JSON.parse(JSON.stringify(boxRows));
   dirty.clear();
+}
+// Both directions of carrying for the order just loaded: where this order's
+// missing pieces were sent on to, and — for lines carried in — which order
+// they came from and what a piece of them costs there now. That cost is kept
+// on the line so exports and the order list read it without looking back, and
+// is brought up to date here, since a China fee or a rate is often only
+// filled in on the old order after its pieces were carried on.
+async function loadCarried(){
+  carriedOut={};
+  const sid=currentShipmentId;
+  const ids=itemRows.map(i=>i.id);
+  const inbound=itemRows.filter(i=>isCarried(i)&&i.carried_from_item_id);
+  if(!ids.length) return;
+  const [kidsRes,costs]=await Promise.all([
+    sb.from('shipment_items').select('id,shipment_id,qty,carried_from_item_id').in('carried_from_item_id',ids),
+    Promise.all(inbound.map(i=>carriedCostOf(i.carried_from_item_id).catch(()=>null)))
+  ]);
+  if(sid!==currentShipmentId) return;   // moved on to another order meanwhile
+  inbound.forEach((i,n)=>{
+    const c=costs[n]; if(!c) return;
+    i._fromOrder=c.order_id;
+    if(Math.abs(c.rmb-(Number(i.carried_unit_rmb)||0))>1e-6){
+      i.carried_unit_rmb=c.rmb;
+      sb.from('shipment_items').update({carried_unit_rmb:c.rmb}).eq('id',i.id).then(()=>{});
+    }
+  });
+  const kids=kidsRes.data||[];
+  if(!kids.length) return;
+  const [al,sh]=await Promise.all([
+    sb.from('shipment_box_items').select('item_id,qty').in('item_id',kids.map(k=>k.id)),
+    sb.from('shipments').select('id,order_id').is('deleted_at',null)
+      .in('id',[...new Set(kids.map(k=>k.shipment_id))])
+  ]);
+  if(sid!==currentShipmentId) return;
+  const name={}; (sh.data||[]).forEach(s=>{ name[s.id]=s.order_id; });
+  const got={}; (al.data||[]).forEach(a=>{ got[a.item_id]=(got[a.item_id]||0)+(Number(a.qty)||0); });
+  // a later order sitting in Recently deleted gives its pieces back
+  kids.filter(k=>k.shipment_id in name).forEach(k=>{
+    const c=carriedOut[k.carried_from_item_id]||(carriedOut[k.carried_from_item_id]={qty:0,arrived:0,orders:[]});
+    const q=Number(k.qty)||0;
+    c.qty+=q; c.arrived+=Math.min(got[k.id]||0,q);
+    if(!c.orders.includes(name[k.shipment_id])) c.orders.push(name[k.shipment_id]);
+  });
+}
+// What one piece of a line cost on its own order, freight left out: goods plus
+// its share of the China fee, platform, World First and GST. Worked out with
+// that order made current, the same way the PO export costs another order.
+function paidPerPieceRmb(i){
+  if(isCarried(i)) return Number(i.carried_unit_rmb)||0;
+  const qty=Number(i.qty)||0;
+  if(!qty) return Number(i.unit_price_rmb)||0;
+  return (Number(i.unit_price_rmb)||0)+(itemChinaRmb(i)+itemChargesRmb(i))/qty;
+}
+async function carriedCostOf(itemId){
+  const src=await sb.from('shipment_items').select('shipment_id').eq('id',itemId).maybeSingle();
+  if(!src.data) return null;
+  const id=src.data.shipment_id;
+  const [sh,it,bx,al]=await Promise.all([
+    sb.from('shipments').select('*').eq('id',id).maybeSingle(),
+    sb.from('shipment_items').select('*').eq('shipment_id',id),
+    sb.from('shipment_boxes').select('*').eq('shipment_id',id),
+    sb.from('shipment_box_items').select('*').eq('shipment_id',id)
+  ]);
+  if(!sh.data) return null;
+  const keep={id:currentShipmentId,items:itemRows,boxes:boxRows,allocs:allocRows,ships:shipmentRows};
+  try{
+    shipmentRows=[sh.data,...shipmentRows.filter(r=>r.id!==id)];
+    currentShipmentId=id; itemRows=it.data||[]; boxRows=bx.data||[]; allocRows=al.data||[];
+    const line=itemRows.find(x=>x.id===itemId);
+    return line?{rmb:paidPerPieceRmb(line),order_id:sh.data.order_id,shipment_id:id}:null;
+  }finally{
+    currentShipmentId=keep.id; itemRows=keep.items; boxRows=keep.boxes; allocRows=keep.allocs;
+    shipmentRows=keep.ships;
+  }
 }
 // ---------- multiple qty ----------
 // A line bought by the carton, counted in pieces. qty and unit_price_rmb hold
@@ -16897,29 +17008,90 @@ function mqBlock(r,per,qty,unit){
     </div>`:''}
   </div>`;
 }
+function inBoxesText(r){
+  return allocsForItem(r.id).map(a=>{
+    const b=boxRows.find(x=>x.id===a.box_id);
+    return `${a.qty} pcs in ${escapeHtml(b?(b.label||'box'):'box')}`;
+  }).join(', ');
+}
+// A line carried in from another order. Its price and quantity belong to that
+// order, so neither can be typed over here — deleting the line is how it goes
+// back, and its pieces then show on Not arrived again.
+function carriedCard(r,i){
+  const qty=Number(r.qty)||0, arr=arrivedQtyOf(r), out=Math.max(0,qty-arr);
+  const paid=Number(r.carried_unit_rmb)||0, ship=itemFreightRmb(r);
+  const from=r._fromOrder?escapeHtml(r._fromOrder):'another order';
+  const state=arr===0?['no','PENDING']:(out===0?['yes','ARRIVED']:['short',`${arr}/${qty} ARRIVED`]);
+  const edge=out===0&&arr>0?' line-done':(arr>0?' line-part':'');
+  const hasPhoto=!!(r._pendingPreview||(!r._removePhoto&&(r.photo_path||r.photo_url)));
+  return `<div class="ph-card${edge}${pickClasses(itemSelectMode,pickedItems.has(r.id))}" data-item-id="${r.id}">
+    <div class="ph-card-head">
+      <input type="checkbox" class="pick" data-item-pick ${pickedItems.has(r.id)?'checked':''}
+        title="Select" style="${itemSelectMode?'':'visibility:hidden;width:0;margin:0;'}"/>
+      <span style="flex:1;">Line ${i+1}</span>
+      <span class="tag part" title="Not arrived on ${from}, sent with this order">CARRIED OVER</span>
+      <span class="tag ${state[0]}">${state[1]}</span>
+      <button class="del-btn" data-item-del title="Remove — the pieces go back to Not arrived">×</button>
+    </div>
+    <div class="item-main">
+      <div class="item-photo-wrap">
+        <button class="item-photo${hasPhoto?' has':''}" data-item-photo-slot
+          title="${hasPhoto?'View photo':'Add photo'}">${hasPhoto?'<img data-photo alt="Item photo"/>':'＋'}</button>
+        ${hasPhoto?'<button class="item-photo-x" data-item-photo-del title="Remove photo">×</button>':''}
+      </div>
+      <div class="item-fields">
+        <label class="field"><span>SKU</span>
+          <textarea data-f="sku" data-enter-next rows="1"
+            >${escapeHtml(r.sku||'')}</textarea></label>
+        <div class="field"><span>PAID ON ${from} ¥/PC</span>
+          <div class="mq-val" title="Goods and fees per piece on the order it came from, no freight">${paid.toFixed(4)}</div></div>
+        <div class="field"><span>QTY</span><div class="mq-val">${qty}</div></div>
+      </div>
+    </div>
+    <div class="calc calc-split" style="margin-top:0;">
+      <div class="calc-left">
+        From order ${from} — goods &amp; fees already paid there<br/>
+        ${fmtFromRmb(paid)}/pc × ${qty} = ${fmtFromRmb(paid*qty)}
+        <span style="opacity:.65;">(not in this order's total)</span><br/>
+        Freight ${fmtFromRmb(ship)}
+        <span style="opacity:.65;">(shared with this order)</span>
+      </div>
+      <div class="calc-right">
+        <span class="hint" style="margin:0;">Final price per piece all-in</span><br/>
+        <span class="hint" style="margin:0;opacity:.65;">paid per pc + freight ÷ ${arr||qty} ${arr?'arrived':'pcs'}</span><br/>
+        <strong style="color:var(--blueprint);font-size:15px;">${fmtCeilFromRmb(allInPerUnitRmb(r))}</strong><br/>
+        ${inBoxesText(r)||'not yet in a box'}${out>0?`<br/><strong>${out} not arrived</strong>`:''}
+      </div>
+    </div>
+  </div>`;
+}
 function renderItems(){
   const el=document.getElementById('itemsWrap');
   // the empty case has to update the count too, or it keeps the last one
   if(!itemRows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">No items yet — tap “Add line”.</p>'; renderTotals(); syncItemBulk(); return; }
   el.innerHTML=itemRows.map((r,i)=>{
+    if(isCarried(r)) return carriedCard(r,i);
     const qty=Number(r.qty)||0, unit=Number(r.unit_price_rmb)||0;
     // qty and unit_price are always the FINAL figures — pieces, and the price
     // of a piece. The purchased unit is derived back from the factor, so the
     // row above the breakdown still reads as what was actually bought.
     const per=perUnitOf(r), base=baseOf(r);
-    const arr=arrivedQtyOf(r), out=outstandingOf(r);
+    const arr=arrivedQtyOf(r);
     const goods=unit*qty, ship=itemFreightRmb(r), china=itemChinaRmb(r);
     const plat=itemPlatformRmb(r), svc=itemServiceRmb(r), gst=itemGstRmb(r);
     const lineTotal=goods+china+plat+svc+gst+ship;
-    const inBoxes=allocsForItem(r.id).map(a=>{
-      const b=boxRows.find(x=>x.id===a.box_id);
-      return `${a.qty} pcs in ${escapeHtml(b?(b.label||'box'):'box')}`;
-    }).join(', ');
-    const state=arr===0?['no','PENDING']:(out===0?['yes','ARRIVED']:['short',`${arr}/${qty} ARRIVED`]);
+    const inBoxes=inBoxesText(r);
+    // pieces sent on with a later order: waiting there rather than missing,
+    // and counted as arrived here once they land there
+    const moved=movedQtyOf(r), movedArr=movedArrivedOf(r);
+    const done=arr+movedArr, out=Math.max(0,qty-arr-moved);
+    const movedNote=moved?`<br/><strong>${moved} sent with order ${escapeHtml(carriedOut[r.id].orders.join(', '))}</strong>`
+      +` <span style="opacity:.7">(${movedArr} arrived there)</span>`:'';
+    const state=done===0?['no','PENDING']:(done>=qty?['yes','ARRIVED']:['short',`${done}/${qty} ARRIVED`]);
     const hasPhoto=!!(r._pendingPreview||(!r._removePhoto&&(r.photo_path||r.photo_url)));
     // part arrived carries the same amber edge a part picked line does, and a
     // settled line recedes — one meaning, one look, both screens
-    const edge=out===0&&arr>0?' line-done':(arr>0?' line-part':'');
+    const edge=done>=qty&&done>0?' line-done':(done>0?' line-part':'');
     return `<div class="ph-card${edge}${pickClasses(itemSelectMode,pickedItems.has(r.id))}" data-item-id="${r.id}">
       <div class="ph-card-head">
         <input type="checkbox" class="pick" data-item-pick ${pickedItems.has(r.id)?'checked':''}
@@ -16972,7 +17144,7 @@ function renderItems(){
             ?`goods &amp; fees ÷ ${qty} pcs · freight ÷ ${arr} arrived`
             :`line total ÷ ${qty||0} pcs`}</span><br/>
           <strong style="color:var(--blueprint);font-size:15px;">${fmtCeilFromRmb(allInPerUnitRmb(r))}</strong><br/>
-          ${inBoxes||'not yet in a box'}${out>0?`<br/><strong>${out} not arrived</strong>`:''}
+          ${inBoxes||'not yet in a box'}${out>0?`<br/><strong>${out} not arrived</strong>`:''}${movedNote}
         </div>
       </div>
     </div>`;
@@ -16985,10 +17157,11 @@ function renderItems(){
   syncItemBulk();
 }
 function renderTotals(){
-  let goods=0, ship=0, china=0, plat=0, svc=0, gst=0, pieces=0;
+  let goods=0, ship=0, china=0, plat=0, svc=0, gst=0, pieces=0, carried=0, carriedPcs=0;
   itemRows.forEach(r=>{
     const qty=Number(r.qty)||0;
-    goods+=(Number(r.unit_price_rmb)||0)*qty;
+    if(isCarried(r)){ carried+=(Number(r.carried_unit_rmb)||0)*qty; carriedPcs+=qty; }
+    else goods+=(Number(r.unit_price_rmb)||0)*qty;
     ship+=itemFreightRmb(r);
     china+=itemChinaRmb(r);
     plat+=itemPlatformRmb(r);
@@ -16996,9 +17169,12 @@ function renderTotals(){
     gst+=itemGstRmb(r);
     pieces+=qty;
   });
-  const arrivedPcs=arrivedQtyAll();
+  // pieces sent on with a later order count once they land there
+  const arrivedPcs=arrivedQtyAll()+itemRows.reduce((s,r)=>s+movedArrivedOf(r),0);
   document.getElementById('itemsTotals').innerHTML=
     `${itemRows.length} line(s) · ${pieces} piece(s) · ${arrivedPcs}/${pieces} pcs arrived<br/>`+
+    (carriedPcs?`<span style="opacity:.7">Carried over: ${carriedPcs} pcs already paid on their own orders `+
+      `(${fmtFromRmb(carried)}, not in this total — only their freight is)</span><br/>`:'')+
     `Goods ${fmtFromRmb(goods)} &nbsp;·&nbsp; China Shipping Fee ${fmtFromRmb(china)} &nbsp;·&nbsp; Freight ${fmtFromRmb(ship)}<br/>`+
     `Platform ${platformPct()}% ${fmtFromRmb(plat)} &nbsp;·&nbsp; World First ${servicePct()}% ${fmtFromRmb(svc)} `+
     `&nbsp;·&nbsp; GST ${gstPct()}% ${fmtFromRmb(gst)}<br/>`+
@@ -17802,11 +17978,16 @@ function allInPerUnitRmb(i){
   // over the whole line. Freight was paid for the pieces in the boxes, so it
   // spreads over those — a short delivery costs more per piece to land, and
   // this is the figure that has to say so.
-  const arr=arrivedQtyOf(i)||qty;
-  return (Number(i.unit_price_rmb)||0)
-    + (itemChinaRmb(i)+itemChargesRmb(i))/qty
-    + itemFreightRmb(i)/arr;
+  return paidPerPieceRmb(i)+freightPerPieceRmb(i);
 }
+function freightPerPieceRmb(i){
+  const qty=Number(i.qty)||0;
+  const arr=arrivedQtyOf(i)||qty;
+  return arr?itemFreightRmb(i)/arr:0;
+}
+// What a piece costs THIS order: everything for its own lines, and only the
+// freight for pieces carried in, whose goods were paid on another order.
+function ownPerPieceRmb(i){ return isCarried(i)?freightPerPieceRmb(i):allInPerUnitRmb(i); }
 function buildSkuSheetRows(rows){
   const sh=currentShipment();
   const provisional=sh?(sh.order_id||''):'';   // Provisional No. is the order ID
@@ -18111,7 +18292,8 @@ function orderAllInRounded(){
   const r=rmbRate(), up=v=>Math.ceil(v*100)/100;
   let rmb=0,sgd=0;
   itemRows.forEach(i=>{
-    const qty=Number(i.qty)||0, per=allInPerUnitRmb(i);
+    // pieces carried in from another order add only their freight here
+    const qty=Number(i.qty)||0, per=ownPerPieceRmb(i);
     rmb+=up(per)*qty;
     if(r) sgd+=up(per/r)*qty;
   });
@@ -18158,7 +18340,7 @@ function renderBoxItems(){
   // this box; fully received elsewhere means it is not this box's business.
   const rows=itemRows.filter(r=>{
     const here=allocQty(currentBoxId,r.id);
-    const outstandingElsewhere=(Number(r.qty)||0)-(arrivedQtyOf(r)-here);
+    const outstandingElsewhere=receivableOf(r)-(arrivedQtyOf(r)-here);
     return here>0||outstandingElsewhere>0;
   });
   boxItemsShown=rows.map(r=>r.id);
@@ -18169,10 +18351,10 @@ function renderBoxItems(){
     syncBoxItemBulk(); return;
   }
   el.innerHTML=rows.map(r=>{
-    const ordered=Number(r.qty)||0;
+    const ordered=Number(r.qty)||0, moved=movedQtyOf(r);
     const here=allocQty(currentBoxId,r.id);
     const elsewhere=arrivedQtyOf(r)-here;
-    const max=ordered-elsewhere;   // never book in more than was ordered
+    const max=receivableOf(r)-elsewhere;   // pieces sent on with a later order are ticked there   // never book in more than was ordered
     const on=here>0;               // off unless this SKU is already recorded in this box
     // The picture is how a SKU is told apart with the parcel open in front of
     // you — the code on the line means nothing until it is matched to a thing.
@@ -18189,7 +18371,7 @@ function renderBoxItems(){
           <div class="toggle-row" style="min-height:auto;">
             <span style="font-size:13px;flex:1;min-width:0;">
               ${escapeHtml(r.sku||'(no SKU)')}
-              <br/><span class="hint">ordered ${ordered}${elsewhere?` · ${elsewhere} in other box(es)`:''}${max<=0?' · nothing left to receive':''}</span>
+              <br/><span class="hint">ordered ${ordered}${elsewhere?` · ${elsewhere} in other box(es)`:''}${moved?` · ${moved} sent with a later order`:''}${max<=0?' · nothing left to receive':''}</span>
             </span>
             <label class="switch"><input type="checkbox" data-alloc-on ${on?'checked':''} ${max<=0?'disabled':''}/><span class="slider"></span></label>
           </div>
@@ -18207,7 +18389,7 @@ function renderBoxItems(){
 // unaccounted for, which is what the single switch already does.
 function boxOutstandingFor(id){
   const item=itemRows.find(i=>i.id===id); if(!item) return 0;
-  return (Number(item.qty)||0)-arrivedQtyOf(item)+allocQty(currentBoxId,id);
+  return receivableOf(item)-arrivedQtyOf(item)+allocQty(currentBoxId,id);
 }
 function setBoxItemsEnabled(ids,on){
   ids.forEach(id=>{
@@ -18265,7 +18447,7 @@ document.getElementById('boxItemDisableSel').addEventListener('click',
 // once at the end rather than thirty times over
 function setAllocation(itemId,qty,quiet){
   const item=itemRows.find(i=>i.id===itemId); if(!item) return;
-  const ordered=Number(item.qty)||0;
+  const ordered=receivableOf(item);
   const here=allocQty(currentBoxId,itemId);
   const elsewhere=arrivedQtyOf(item)-here;
   qty=Math.max(0,Math.min(parseInt(qty,10)||0,ordered-elsewhere));
@@ -18302,7 +18484,10 @@ async function submitBoxAllocations(session){
       const ins=await sb.from('shipment_items').insert({
         user_id:session.user.id, shipment_id:currentShipmentId,
         sku:item.sku, qty:w.qty, unit_price_rmb:item.unit_price_rmb,
-        photo_path:item.photo_path||null, sort_order:(Number(item.sort_order)||0)+1
+        photo_path:item.photo_path||null, sort_order:(Number(item.sort_order)||0)+1,
+        // a carried line split across boxes is still carried, from the same line
+        carried_from_item_id:item.carried_from_item_id||null,
+        carried_unit_rmb:item.carried_unit_rmb??null
       }).select().single();
       if(ins.error||!ins.data) continue;
       await sb.from('shipment_items').update({qty:(Number(orderedNow)||0)-w.qty}).eq('id',w.item_id);
@@ -18344,7 +18529,7 @@ document.getElementById('boxItemsList').addEventListener('change',async e=>{
     // switching on books in everything still outstanding by default; you can
     // then edit the qty down if only part of it turned up in this box
     const item=itemRows.find(i=>i.id===id); if(!item) return;
-    const outstanding=(Number(item.qty)||0)-arrivedQtyOf(item)+allocQty(currentBoxId,id);
+    const outstanding=receivableOf(item)-arrivedQtyOf(item)+allocQty(currentBoxId,id);
     setAllocation(id, sw.checked?outstanding:0);
     return;
   }
@@ -18388,8 +18573,8 @@ async function refreshOutstanding(){
   const el=document.getElementById('outstandingList');
   if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
   const [sh,it,al]=await Promise.all([
-    sb.from('shipments').select('id,order_id').is('deleted_at',null),
-    sb.from('shipment_items').select('id,shipment_id,sku,qty,remarks'),
+    sb.from('shipments').select('id,order_id,created_at').is('deleted_at',null).order('created_at',{ascending:false}),
+    sb.from('shipment_items').select('id,shipment_id,sku,qty,remarks,carried_from_item_id'),
     sb.from('shipment_box_items').select('item_id,qty')
   ]);
   if(sh.error||it.error||al.error){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load.</p>'; return; }
@@ -18397,15 +18582,27 @@ async function refreshOutstanding(){
   (al.data||[]).forEach(a=>{ arrivedBy[a.item_id]=(arrivedBy[a.item_id]||0)+(Number(a.qty)||0); });
   const orderName={}; (sh.data||[]).forEach(s=>{ orderName[s.id]=s.order_id; });
   const live=new Set((sh.data||[]).map(s=>s.id));
+  const items=(it.data||[]).filter(i=>live.has(i.shipment_id));
+  // pieces already sent on with a later order are waiting there, not missing
+  const movedBy={};
+  items.forEach(i=>{ if(i.carried_from_item_id) movedBy[i.carried_from_item_id]=(movedBy[i.carried_from_item_id]||0)+(Number(i.qty)||0); });
   // Only short deliveries belong here: some of the line turned up and some
   // did not. A line with nothing received yet has not been shipped short —
   // it simply has not arrived — so it is not something to chase here.
-  const rows=(it.data||[])
-    .filter(i=>live.has(i.shipment_id))
-    .map(i=>({...i, arrived:arrivedBy[i.id]||0, missing:(Number(i.qty)||0)-(arrivedBy[i.id]||0)}))
+  const rows=items
+    .map(i=>({...i, arrived:arrivedBy[i.id]||0,
+              missing:(Number(i.qty)||0)-(arrivedBy[i.id]||0)-(movedBy[i.id]||0)}))
     .filter(i=>i.missing>0&&i.arrived>0);
   if(!rows.length){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">— no short deliveries —</p>'; return; }
-  el.innerHTML=rows.map(r=>`<div class="ph-card" data-item-id="${r.id}" data-shipment-id="${r.shipment_id}">
+  // Orders the missing pieces can be sent on with: any that is not finished,
+  // newest first, since the supplier packs them in with what is going out now
+  const st={}, credited=creditCarried(items,arrivedBy);
+  items.forEach(i=>{
+    const m=st[i.shipment_id]||(st[i.shipment_id]={ordered:0,arrived:0});
+    const q=Number(i.qty)||0; m.ordered+=q; m.arrived+=Math.min(credited[i.id]||0,q);
+  });
+  const open=(sh.data||[]).filter(s=>{ const m=st[s.id]; return !m||m.arrived<m.ordered; });
+  el.innerHTML=rows.map(r=>`<div class="ph-card" data-item-id="${r.id}" data-shipment-id="${r.shipment_id}" data-missing="${r.missing}">
       <div class="ph-card-head">
         <span style="flex:1;min-width:0;">
           <span class="row-link oid-text" data-out-open>${escapeHtml(orderName[r.shipment_id]||'—')}</span>
@@ -18414,10 +18611,58 @@ async function refreshOutstanding(){
         </span>
         <span class="tag short">${r.missing} NOT ARRIVED</span>
       </div>
-      <p class="hint" style="margin:0 0 7px;">${escapeHtml(r.sku||'(no SKU)')} · ordered ${r.qty} · arrived ${arrivedBy[r.id]||0}</p>
+      <p class="hint" style="margin:0 0 7px;">${escapeHtml(r.sku||'(no SKU)')} · ordered ${r.qty} · arrived ${arrivedBy[r.id]||0}${movedBy[r.id]?` · ${movedBy[r.id]} sent with a later order`:''}</p>
       <label class="field"><span>FOLLOW-UP REMARKS</span>
-        <input type="text" data-remark placeholder="e.g. supplier resending 20 Mar" value="${escapeHtml(r.remarks||'')}"/></label>
+        <input type="text" data-remark placeholder="e.g. supplier resending 20 Mar" value="${escapeHtml(outstandingEdits[r.id]??(r.remarks||''))}"/></label>
+      <div class="toggle-row" style="gap:8px;margin-top:8px;min-height:auto;">
+        <select data-carry-to style="flex:1;min-width:0;" title="The order the supplier is sending these pieces with">
+          <option value="">Send with order…</option>
+          ${open.filter(s=>s.id!==r.shipment_id).map(s=>`<option value="${s.id}">${escapeHtml(s.order_id||'—')}</option>`).join('')}
+        </select>
+        <button class="btn-outline btn-sm" data-carry>Add to order</button>
+      </div>
     </div>`).join('');
+}
+// The missing pieces go on as a line of the chosen order. They share that
+// order's freight, but keep the price paid on the order they were bought on —
+// goods and fees per piece, no freight — and add nothing else to it.
+async function carryToOrder(itemId,targetId,msgEl){
+  const session=await requireSession(msgEl); if(!session) return false;
+  const [src,al,kids]=await Promise.all([
+    sb.from('shipment_items').select('*').eq('id',itemId).single(),
+    sb.from('shipment_box_items').select('qty').eq('item_id',itemId),
+    sb.from('shipment_items').select('qty,shipment_id').eq('carried_from_item_id',itemId)
+  ]);
+  if(src.error||!src.data) throw new Error('that line could not be read');
+  const kidOrders=[...new Set((kids.data||[]).map(k=>k.shipment_id))];
+  const liveKids=kidOrders.length
+    ?new Set(((await sb.from('shipments').select('id').is('deleted_at',null).in('id',kidOrders)).data||[]).map(s=>s.id))
+    :new Set();
+  const moved=(kids.data||[]).filter(k=>liveKids.has(k.shipment_id)).reduce((t,k)=>t+(Number(k.qty)||0),0);
+  const arrived=(al.data||[]).reduce((t,a)=>t+(Number(a.qty)||0),0);
+  const missing=(Number(src.data.qty)||0)-arrived-moved;
+  if(missing<=0) throw new Error('nothing is missing on that line any more');
+  const cost=await carriedCostOf(itemId);
+  if(!cost) throw new Error('its price could not be worked out');
+  const last=await sb.from('shipment_items').select('sort_order').eq('shipment_id',targetId)
+    .order('sort_order',{ascending:false}).limit(1);
+  const ins=await sb.from('shipment_items').insert({
+    user_id:session.user.id, shipment_id:targetId,
+    sku:src.data.sku, qty:missing, unit_price_rmb:0,
+    qty_per_unit:src.data.qty_per_unit||1,
+    photo_url:src.data.photo_url||null,
+    sort_order:((last.data&&last.data[0]&&Number(last.data[0].sort_order))||0)+1,
+    carried_from_item_id:itemId, carried_unit_rmb:cost.rmb
+  }).select().single();
+  if(ins.error||!ins.data) throw new Error((ins.error&&ins.error.message)||'the line was not added');
+  // its own copy of the photo, so deleting either line never takes the
+  // other's picture with it
+  if(src.data.photo_path){
+    const path=session.user.id+'/'+ins.data.id+'/'+Date.now()+'.jpg';
+    const cp=await sb.storage.from(PHOTO_BUCKET).copy(src.data.photo_path,path);
+    if(!cp.error) await sb.from('shipment_items').update({photo_path:path}).eq('id',ins.data.id);
+  }
+  return true;
 }
 document.getElementById('outstandingList').addEventListener('input',e=>{
   const inp=e.target.closest('[data-remark]'); if(!inp) return;
@@ -18427,6 +18672,25 @@ document.getElementById('outstandingList').addEventListener('input',e=>{
 });
 // tapping the order ID drills into that order; the remarks field stays editable
 document.getElementById('outstandingList').addEventListener('click',async e=>{
+  const carry=e.target.closest('[data-carry]');
+  if(carry){
+    const card=carry.closest('.ph-card');
+    const sel=card.querySelector('[data-carry-to]');
+    const msg=document.getElementById('outstandingSubmitMsg');
+    if(!sel.value){ showMsg(msg,'Pick the order the supplier is sending them with first.',false); sel.focus(); return; }
+    const to=sel.options[sel.selectedIndex].text;
+    if(!confirm(`Add the ${card.dataset.missing} missing piece(s) to order ${to}?\n\nThey share that order's freight and keep the price paid on this order.`)) return;
+    carry.disabled=true;
+    try{
+      if(await carryToOrder(card.dataset.itemId,sel.value,msg)){
+        showMsg(msg,`✓ Added to order ${to}.`,true);
+        await refreshOutstanding();
+        loadShipmentMetaIntoState();
+      }
+    }catch(err){ showMsg(msg,'Could not add: '+((err&&err.message)||'unknown error'),false); }
+    finally{ carry.disabled=false; }
+    return;
+  }
   if(!e.target.closest('[data-out-open]')) return;
   const card=e.target.closest('.ph-card');
   currentShipmentId=card.dataset.shipmentId;
@@ -18441,11 +18705,12 @@ async function fetchArrivalStatus(){
   const map={};
   if(!sb) return map;
   const [it,al]=await Promise.all([
-    sb.from('shipment_items').select('id,shipment_id,qty'),
+    sb.from('shipment_items').select('id,shipment_id,qty,carried_from_item_id'),
     sb.from('shipment_box_items').select('item_id,qty')
   ]);
-  const arrivedBy={};
-  (al.data||[]).forEach(a=>{ arrivedBy[a.item_id]=(arrivedBy[a.item_id]||0)+(Number(a.qty)||0); });
+  const own={};
+  (al.data||[]).forEach(a=>{ own[a.item_id]=(own[a.item_id]||0)+(Number(a.qty)||0); });
+  const arrivedBy=creditCarried(it.data||[],own);
   (it.data||[]).forEach(i=>{
     const m=map[i.shipment_id]||(map[i.shipment_id]={ordered:0,arrived:0});
     const q=Number(i.qty)||0;
@@ -19462,8 +19727,10 @@ async function exportShipmentWorkbook(){
     const byOrderSeq=(a,b)=>(orderSeq[a.shipment_id]??1e9)-(orderSeq[b.shipment_id]??1e9);
     const boxName={};   boxes.forEach(b=>boxName[b.id]=b.label||'box');
     const freightName={}; freights.forEach(c=>freightName[c.id]=c.freight_number);
-    const arrivedBy={};
-    allocs.forEach(a=>{ arrivedBy[a.item_id]=(arrivedBy[a.item_id]||0)+(Number(a.qty)||0); });
+    const own={};
+    allocs.forEach(a=>{ own[a.item_id]=(own[a.item_id]||0)+(Number(a.qty)||0); });
+    // pieces carried on to a later order count as arrived once they land there
+    const arrivedBy=creditCarried(items,own);
     const rateOf={}; orders.forEach(o=>rateOf[o.id]=Number(o.rmb_rate)||0);
     // Everything bought on the order, plus its China delivery, plus the
     // platform's cut of that, plus World First's cut of the sum with the
@@ -19544,8 +19811,11 @@ async function exportShipmentWorkbook(){
         'Orders arrived':done,'Status':mine.length&&done===mine.length?'COMPLETED':'IN TRANSIT'};
     }));
 
+    // sent on with a later order is waiting there, not missing
+    const movedBy={};
+    items.forEach(i=>{ if(i.carried_from_item_id) movedBy[i.carried_from_item_id]=(movedBy[i.carried_from_item_id]||0)+(Number(i.qty)||0); });
     add('Not arrived',items.filter(i=>liveOrder.has(i.shipment_id))
-      .map(i=>({...i,missing:(Number(i.qty)||0)-Math.min(arrivedBy[i.id]||0,Number(i.qty)||0)}))
+      .map(i=>({...i,missing:Math.max(0,(Number(i.qty)||0)-(own[i.id]||0)-(movedBy[i.id]||0))}))
       .filter(i=>i.missing>0)
       .map(i=>({'Order ID':orderName[i.shipment_id]||'','SKU':i.sku||'',
         'Qty ordered':Number(i.qty)||0,'Qty arrived':Math.min(arrivedBy[i.id]||0,Number(i.qty)||0),
