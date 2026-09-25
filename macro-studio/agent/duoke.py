@@ -461,6 +461,7 @@ class Cloud:
         self.token: Optional[str] = None
         self.refresh_token: Optional[str] = None
         self.user_id: Optional[str] = None
+        self._last_beat: tuple = (None, 0.0)
 
     # -- plumbing
     def _call(self, method: str, path: str, body: Any = None, headers: Optional[dict] = None) -> Any:
@@ -763,6 +764,13 @@ class Cloud:
                   prefer="return=minimal")
 
     def beat(self, device: str, window_found: bool, threads: int, note: str) -> None:
+        # Every Pigu screen hears each heartbeat and redraws for it, and passes
+        # now run within seconds of any DuoKe message -- so the same news is
+        # not sent again inside a minute. Pigu calls a PC live for 120s.
+        same = (device, window_found, threads, note) == self._last_beat[0]
+        if same and time.time() - self._last_beat[1] < 60:
+            return
+        self._last_beat = ((device, window_found, threads, note), time.time())
         self.rest(
             "PATCH",
             "/reply_sync?id=eq.true",
