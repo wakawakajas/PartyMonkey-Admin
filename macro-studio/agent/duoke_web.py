@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Optional
@@ -101,7 +102,9 @@ _READ_OPEN = r"""
   const said = new Set();
   list.el.querySelectorAll('div,p,span').forEach(el => {
     const r = el.getBoundingClientRect();
-    if (r.width < 60 || r.height < 18) return;
+    // narrow is fine: "Ok" and "Thanks!" are whole messages, and a 60px
+    // floor dropped them, so the newest line in a thread went unread
+    if (r.width < 16 || r.height < 18) return;
     const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
     // A clock on its own is the divider DuoKe draws between runs of messages.
     // Dropped even when it wraps a picture, because the picture is reported
@@ -143,6 +146,13 @@ def _pages() -> list[dict]:
         return json.loads(raw)
     except (urllib.error.URLError, OSError, json.JSONDecodeError):
         return []
+
+
+def on_chat_page() -> bool:
+    """Whether DuoKe is showing its chat page, by the page's own address --
+    true even when the list is filtered down to nothing."""
+    return any(p.get("type") == "page" and "/main/chat" in str(p.get("url") or "")
+               for p in _pages())
 
 
 def available() -> bool:
@@ -231,8 +241,9 @@ _READ_LIST = r"""
     .map(el => ({ el, r: el.getBoundingClientRect() }))
     .filter(b => b.r.width > 300)
     .sort((a, b) => b.r.width - a.r.width);
-  if (!boxes.length) return JSON.stringify({ ok: false, why: 'no reply box' });
-  const box = boxes[0].r;
+  // No conversation open yet (DuoKe just started) means no reply box:
+  // the list still sits in the left third, so that is the edge used.
+  const box = boxes.length ? boxes[0].r : { left: window.innerWidth / 3 };
 
   // THE ROWS ARE THE CHILDREN OF WHATEVER HOLDS MOST OF THEM.
   //
@@ -246,8 +257,15 @@ _READ_LIST = r"""
     const r = el.getBoundingClientRect();
     if (r.right > box.left - 4 || r.height < 150 || r.width < 120) return;
     const kids = [...el.children].filter(k => k.getBoundingClientRect().height > 28);
-    if (kids.length < 3) return;
-    if (!rows || kids.length > rows.kids.length) rows = { el, r, kids };
+    // A row says when: a clock or a date. Counting only those lets a list
+    // filtered down to one conversation (Pending, say) still be found -- a
+    // bare "three children or more" read that as no list at all.
+    const timed = kids.filter(k => (k.innerText || '').split('\n')
+      .some(t => /^(\d{1,2}:\d{2}|\d{1,2}\/\d{1,2})$/.test(t.trim())));
+    if (!timed.length) return;
+    // most rows wins; on a tie the innermost, which is the one whose
+    // children ARE the rows rather than a wrapper around them
+    if (!rows || timed.length >= rows.kids.length) rows = { el, r, kids: timed };
   });
   if (!rows) return JSON.stringify({ ok: false, why: 'no conversation list' });
 
@@ -318,8 +336,9 @@ _OPEN_CHAT = r"""
     .map(el => ({ el, r: el.getBoundingClientRect() }))
     .filter(b => b.r.width > 300)
     .sort((a, b) => b.r.width - a.r.width);
-  if (!boxes.length) return 'no reply box';
-  const box = boxes[0].r;
+  // No conversation open yet (DuoKe just started) means no reply box:
+  // the list still sits in the left third, so that is the edge used.
+  const box = boxes.length ? boxes[0].r : { left: window.innerWidth / 3 };
 
   let best = null;
   document.querySelectorAll('div,li').forEach(el => {
@@ -350,3 +369,191 @@ def open_chat(name: str) -> bool:
     """Click a conversation open. False when it is not in the list."""
     raw = _run(f"({_OPEN_CHAT})({json.dumps(str(name or ''))})")
     return raw == "clicked"
+
+
+# A draft left in the reply box, NOT sent.
+#
+# execCommand('insertText') is what a person typing produces as far as the
+# page can tell -- input events and all, so the app's own state holds the
+# words -- and it types no key at all, so there is no Enter that could send
+# it. A box that already has something in it is left alone: that is somebody
+# half-way through their own reply.
+_PUT_DRAFT = r"""
+((text) => {
+  const boxes = [...document.querySelectorAll('textarea,[contenteditable="true"]')]
+    .map(el => ({ el, r: el.getBoundingClientRect() }))
+    .filter(b => b.r.width > 300)
+    .sort((a, b) => b.r.width - a.r.width);
+  if (!boxes.length) return 'no reply box';
+  const el = boxes[0].el;
+  const now = el.tagName === 'TEXTAREA' ? el.value : el.innerText;
+  if ((now || '').trim()) return 'busy';
+  el.focus();
+  document.execCommand('insertText', false, text);
+  const after = el.tagName === 'TEXTAREA' ? el.value : el.innerText;
+  return (after || '').includes(text.slice(0, 30)) ? 'typed' : 'did not land';
+})
+"""
+
+
+_SCROLL_LATEST = r"""
+(() => {
+  const boxes = [...document.querySelectorAll('textarea,[contenteditable="true"]')]
+    .map(el => el.getBoundingClientRect()).filter(r => r.width > 300)
+    .sort((a, b) => b.width - a.width);
+  if (!boxes.length) return 'no reply box';
+  const box = boxes[0];
+  let moved = 0;
+  document.querySelectorAll('div,ul,section').forEach(el => {
+    const r = el.getBoundingClientRect();
+    if (r.bottom > box.top + 16 || r.height < 120) return;
+    if (Math.abs(r.width - box.width) > 240) return;
+    if (el.scrollHeight <= el.clientHeight + 40) return;
+    el.scrollTop = el.scrollHeight;
+    moved++;
+  });
+  return 'scrolled ' + moved;
+})()
+"""
+
+
+def scroll_to_latest() -> None:
+    """Bring the open conversation down to its newest message. A thread that
+    was left scrolled up otherwise reads as whatever was on screen then, and
+    the message actually waiting is never seen."""
+    _run(_SCROLL_LATEST)
+
+
+# THE SHOP'S OWN QUICK REPLIES ("/" in the reply box).
+#
+# A quick reply picked from that list goes into the composer with its photos
+# attached -- the pickup map, the printing guide -- and is not sent: DuoKe
+# sends one only on Alt+Enter, which nothing here presses. So when a draft is
+# really one of these, the quick reply goes in instead of the written words,
+# photos and all.
+_BOX = r"""
+  const boxes = [...document.querySelectorAll('textarea,[contenteditable="true"]')]
+    .map(el => ({ el, r: el.getBoundingClientRect() }))
+    .filter(b => b.r.width > 300)
+    .sort((a, b) => b.r.width - a.r.width);
+  if (!boxes.length) return JSON.stringify({ ok: false, why: 'no reply box' });
+  const el = boxes[0].el;
+  const value = () => (el.tagName === 'TEXTAREA' ? el.value : el.innerText) || '';
+"""
+
+_OPEN_SHORTCUTS = r"""
+(() => {""" + _BOX + r"""
+  if (value().trim()) return JSON.stringify({ ok: false, why: 'busy' });
+  el.focus();
+  document.execCommand('insertText', false, '/');
+  return JSON.stringify({ ok: true });
+})()
+"""
+
+_READ_SHORTCUTS = r"""
+(() => {
+  const ul = document.querySelector('ul.el-autocomplete-suggestion__list');
+  if (!ul) return JSON.stringify({ ok: false, why: 'no quick reply list' });
+  const rows = [...ul.children].map(li => ({
+    code: ((li.querySelector('.container_text_instruction') || {}).textContent || '').trim(),
+    text: (li.innerText || '').replace(/\s+/g, ' ').trim(),
+    // the picture is shown as an icon, not an <img>
+    photo: li.querySelectorAll('img,svg,[class*=pic],[class*=img],[class*=image]').length > 0,
+  })).filter(r => r.code);
+  // the code and its list number lead the row's text; the reply is the rest
+  rows.forEach(r => { r.text = r.text.slice(r.text.indexOf(r.code) + r.code.length).trim(); });
+  return JSON.stringify({ ok: true, rows });
+})()
+"""
+
+_CLEAR_SLASH = r"""
+(() => {""" + _BOX + r"""
+  if (value().trim() !== '/') return JSON.stringify({ ok: false, why: 'not ours to clear' });
+  el.focus();
+  if (el.select) el.select(); else document.execCommand('selectAll');
+  document.execCommand('delete');
+  return JSON.stringify({ ok: true });
+})()
+"""
+
+_PICK_SHORTCUT = r"""
+((code) => {
+  const ul = document.querySelector('ul.el-autocomplete-suggestion__list');
+  if (!ul) return 'no quick reply list';
+  const li = [...ul.children].find(li =>
+    ((li.querySelector('.container_text_instruction') || {}).textContent || '').trim() === code);
+  if (!li) return 'no such quick reply';
+  li.click();
+  return 'picked';
+})
+"""
+
+
+_CLEAR_BOX = r"""
+(() => {""" + _BOX + r"""
+  // A draft left here (words, and the photos a quick reply attaches) is
+  // replaced by the reply somebody approved in Pigu, so it goes first. The
+  // words can be deleted; an attached photo is only counted, and the caller
+  // does not type over one.
+  const box = boxes[0].r;
+  const photos = [...document.querySelectorAll('img')].filter(i => {
+    const q = i.getBoundingClientRect();
+    return q.width > 8 && q.top >= box.top - 4 && q.top <= box.bottom + 160
+      && q.left >= box.left - 4 && q.right <= box.right + 4;
+  }).length;
+  if (value().trim()) {
+    el.focus();
+    if (el.select) el.select(); else document.execCommand('selectAll');
+    document.execCommand('delete');
+  }
+  return JSON.stringify({ ok: !value().trim(), photos });
+})()
+"""
+
+
+def clear_box() -> dict:
+    """Empty the reply box of a left draft. {ok, photos}: ok when no words are
+    left, photos the number of attached pictures still sitting under it."""
+    return _json(_run(_CLEAR_BOX))
+
+
+def _json(raw: Any) -> dict:
+    try:
+        return json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def list_shortcuts() -> list[dict]:
+    """The quick replies as [{code, text, photo}]. Opens the "/" list in an
+    EMPTY reply box, reads it, and takes the "/" back out."""
+    if not _json(_run(_OPEN_SHORTCUTS)).get("ok"):
+        return []
+    time.sleep(1.0)
+    rows = _json(_run(_READ_SHORTCUTS)).get("rows") or []
+    _run(_CLEAR_SLASH)
+    return rows
+
+
+def use_shortcut(code: str) -> str:
+    """Put one quick reply, photos and all, in an empty reply box. Not sent.
+
+    'picked', 'busy', or why not."""
+    opened = _json(_run(_OPEN_SHORTCUTS))
+    if not opened.get("ok"):
+        return opened.get("why") or last_error() or "the page did not answer"
+    time.sleep(1.0)
+    got = _run(f"({_PICK_SHORTCUT})({json.dumps(code)})")
+    if got != "picked":
+        _run(_CLEAR_SLASH)
+        return str(got or last_error() or "the page did not answer")
+    time.sleep(1.0)
+    return "picked"
+
+
+def put_draft(text: str) -> str:
+    """Leave `text` in the open conversation's reply box without sending it.
+
+    'typed', 'busy' (the box already holds something), or why not."""
+    raw = _run(f"({_PUT_DRAFT})({json.dumps(str(text or ''))})")
+    return str(raw) if raw else (last_error() or "the page did not answer")

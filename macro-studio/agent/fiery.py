@@ -695,10 +695,21 @@ def _age_minutes(row: dict) -> float:
 
 
 def _finish(cloud: Cloud, row_id: str, ok: bool, note: str = "", job_id: str = "") -> None:
-    cloud.rest("PATCH", f"/fiery_jobs?id=eq.{row_id}",
+    # a job stopped from Pigu is already failed and keeps saying so
+    cloud.rest("PATCH", f"/fiery_jobs?id=eq.{row_id}&status=in.(queued,sending)",
                {"status": "sent" if ok else "failed", "sent_at": _now(),
                 "error": note[:300], "fiery_job_id": job_id},
                prefer="return=minimal")
+
+
+def _stopped(cloud: Cloud, row: dict) -> bool:
+    """Pigu's Stop button fails every queued and sending job; one this pass
+    has claimed is looked at again just before it goes."""
+    try:
+        got = cloud.rest("GET", f"/fiery_jobs?select=status&id=eq.{row['id']}") or []
+    except CloudError:
+        return False
+    return bool(got) and got[0].get("status") != "sending"
 
 
 def sync_presets(cloud: Optional[Cloud] = None) -> dict:
@@ -885,6 +896,8 @@ def sync_once() -> dict:
             for group in groups:
                 first = group[0]
                 if not (first.get("run_id") and first.get("action") == "print"):
+                    if _stopped(cloud, first):
+                        continue
                     try:
                         sent(first, send_one(fiery, first))
                     except Exception as exc:     # one bad file must not stop the rest
@@ -892,6 +905,8 @@ def sync_once() -> dict:
                     continue
                 ready: list[tuple[dict, str, int]] = []
                 for row in group:
+                    if _stopped(cloud, row):
+                        continue
                     try:
                         job_id, size = upload_one(fiery, row)
                         cloud.rest("PATCH", f"/fiery_jobs?id=eq.{row['id']}",
@@ -905,6 +920,8 @@ def sync_once() -> dict:
                     except FieryError:
                         pass                 # it is processed when printed instead
                 for row, job_id, size in ready:
+                    if _stopped(cloud, row):
+                        continue             # left held on the Fiery, not printed
                     try:
                         print_in_turn(fiery, row, job_id, size)
                         sent(row, job_id)

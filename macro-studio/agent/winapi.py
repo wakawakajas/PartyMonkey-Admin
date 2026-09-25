@@ -165,6 +165,18 @@ def get_foreground_window() -> int:
     return user32.GetForegroundWindow()
 
 
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+
+def idle_seconds() -> float:
+    """How long since anybody last touched the keyboard or mouse."""
+    info = _LASTINPUTINFO(ctypes.sizeof(_LASTINPUTINFO), 0)
+    if not user32.GetLastInputInfo(ctypes.byref(info)):
+        return 0.0
+    return ((ctypes.windll.kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0
+
+
 SW_SHOWNOACTIVATE = 4
 HWND_BOTTOM = 1
 SWP_NOACTIVATE = 0x0010
