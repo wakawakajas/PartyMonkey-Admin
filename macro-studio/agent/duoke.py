@@ -874,6 +874,10 @@ def _show_for_reading(hwnd: int) -> bool:
         return False
     if not load().get("restore_if_minimized"):
         return False
+    # Read through the debugging port, a minimised DuoKe is as readable as an
+    # open one -- so it is left minimised rather than popped back up.
+    if duoke_web.available():
+        return False
     winapi.restore_without_focus(hwnd)
     # Layout first, then the accessibility tree on top of it. Restoring and
     # walking in the same breath reads a window that has not been laid out.
