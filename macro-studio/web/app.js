@@ -3175,3 +3175,48 @@ document.addEventListener("keydown", (event) => {
   if (schedOverlay.style.display === "flex") closeScheduleEditor();
   if (queuePickOverlay.style.display === "flex") queuePickOverlay.style.display = "none";
 });
+
+
+// -- the Update button ----------------------------------------------
+// Says "Update available" when GitHub has something newer; clicking pulls it
+// and restarts the agent, then this page reloads onto the new version.
+(function setupUpdateButton() {
+  const btn = document.getElementById("updateBtn");
+  if (!btn) return;
+  async function check() {
+    try {
+      const r = await (await fetch("/api/update")).json();
+      if (r.ok && r.behind) {
+        btn.textContent = "Update available";
+        btn.classList.add("btn-primary");
+      } else {
+        btn.textContent = "Update";
+        btn.classList.remove("btn-primary");
+      }
+    } catch { /* agent restarting */ }
+  }
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "Updating...";
+    try {
+      const res = await fetch("/api/update", { method: "POST" });
+      const r = await res.json();
+      if (!r.ok) {
+        alert(r.error || "The update did not work.");
+      } else if (!r.updated) {
+        btn.textContent = "Up to date";
+        setTimeout(check, 3000);
+      } else {
+        btn.textContent = "Restarting...";
+        setTimeout(() => location.reload(), 9000);
+        return;
+      }
+    } catch (err) {
+      alert("Could not reach the agent: " + err.message);
+    }
+    btn.disabled = false;
+    if (btn.textContent === "Updating...") btn.textContent = "Update";
+  });
+  check();
+  setInterval(check, 30 * 60 * 1000);
+})();

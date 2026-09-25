@@ -179,6 +179,78 @@ async def _on_startup() -> None:
         fiery.watcher.start()
 
 
+# ---- the Update button
+#
+# Pulls the latest program files from GitHub when somebody clicks Update in
+# the web UI -- never by itself. Fast-forward only, so a PC whose code was
+# edited by hand is left alone; macros, schedules and settings are git-ignored
+# and never touched. Then a fresh copy of the agent starts in a new "Macro
+# Studio Agent" window and this one exits.
+REPO_DIR = Path(__file__).resolve().parents[2]
+
+
+def _git(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(REPO_DIR), *args], capture_output=True, text=True,
+                          timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def _macro_busy() -> bool:
+    from agent import replay as _replay
+    return (_replay._replay_lock.locked()
+            or getattr(recorder, "state", "idle") in ("recording", "paused")
+            or getattr(web_recorder, "state", "idle") == "recording")
+
+
+@app.get("/api/update")
+def update_check() -> dict:
+    """How many updates GitHub has that this PC has not."""
+    if not (REPO_DIR / ".git").exists():
+        return {"ok": False, "error": "This copy was not downloaded from GitHub, so it cannot update itself."}
+    try:
+        if _git("fetch", "-q").returncode != 0:
+            return {"ok": False, "error": "Could not reach GitHub."}
+        behind = _git("rev-list", "--count", "HEAD..@{u}").stdout.strip()
+        return {"ok": True, "behind": int(behind) if behind.isdigit() else 0}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "error": f"git is not available: {exc}"}
+
+
+@app.post("/api/update")
+def update_now() -> JSONResponse:
+    check = update_check()
+    if not check.get("ok"):
+        return JSONResponse(status_code=400, content=check)
+    if not check.get("behind"):
+        return JSONResponse(content={"ok": True, "updated": False})
+    if _macro_busy():
+        return JSONResponse(status_code=409, content={
+            "ok": False, "error": "A macro is running or recording -- update once it has finished."})
+    before = _git("rev-parse", "HEAD").stdout.strip()
+    merged = _git("merge", "--ff-only", "-q", "@{u}")
+    if merged.returncode != 0:
+        return JSONResponse(status_code=409, content={
+            "ok": False, "error": "This PC's code was changed by hand, so the update was not applied."})
+    changed = _git("diff", "--name-only", before, "HEAD").stdout
+    if "macro-studio/requirements.txt" in changed:
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+                        "--disable-pip-version-check", "-r",
+                        str(REPO_DIR / "macro-studio" / "requirements.txt")], timeout=600)
+    # the answer goes back first, then the restart
+    threading.Thread(target=_restart_agent, daemon=True).start()
+    return JSONResponse(content={"ok": True, "updated": True, "count": check["behind"]})
+
+
+def _restart_agent() -> None:
+    time.sleep(1.0)
+    macro_dir = Path(__file__).resolve().parents[1]
+    # the new copy waits for this one to let go of the port
+    cmd = f'timeout /t 4 /nobreak >nul & start "Macro Studio Agent" "{sys.executable}" -m agent.main'
+    subprocess.Popen(["cmd", "/c", cmd], cwd=str(macro_dir),
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    os._exit(0)
+
+
 @app.get("/api/status")
 def get_status() -> dict:
     """Basic liveness + environment info the web UI polls on load."""
