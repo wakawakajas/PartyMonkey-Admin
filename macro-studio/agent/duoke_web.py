@@ -662,3 +662,10 @@ def all_sessions(pages: int = 3) -> list[dict]:
     loaded. Same row shape as list_sessions. Opens nothing."""
     data = _json(_run(f"({_ALL})({int(pages)})"))
     return data.get("rows") or [] if data.get("ok") else []
+
+
+def signature() -> str:
+    """Changes whenever a recent conversation gets a new message or its unread
+    count moves -- a cheap way to know a pass is worth running now."""
+    rows = all_sessions(1)
+    return "|".join(f"{r['conversation_id']}:{r['last_id']}:{int(r['unread'])}" for r in rows)

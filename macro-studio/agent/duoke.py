@@ -71,6 +71,8 @@ PROBE_DIR = config.RUNS_DIR
 # morning's unread and keeps one slow pass from holding the window for a
 # minute while somebody is trying to use it.
 MAX_THREADS_PER_PASS = 10
+# how often the watcher looks for a new DuoKe message
+FAST_CHECK_SECONDS = 2
 # How many messages back to look at in an opened conversation. The buyer's
 # last message is what is being answered; the two before it are context for
 # the draft.
@@ -2615,6 +2617,24 @@ def _draft_now(conv: str) -> Optional[dict]:
     return {"mark": mark, "words": words, "photos": photos, "key": key, "text": text}
 
 
+def draft_new_unread() -> int:
+    """Write drafts for unread chats straight away, from the watcher, so one
+    is ready seconds after the message lands instead of after a full pass."""
+    made = 0
+    for sess in [x for x in duoke_web.all_sessions(1) if x["unread"]][:MAX_THREADS_PER_PASS]:
+        conv = sess["conversation_id"]
+        if conv in _ready:
+            continue
+        try:
+            item = _draft_now(conv)
+        except Exception:
+            item = None
+        if item:
+            _ready[conv] = item
+            made += 1
+    return made
+
+
 def place_ready_draft() -> Optional[str]:
     """If the chat the person just opened has a draft waiting, put it in the
     box. Never sends. Called every second by the watcher; cheap when nothing
@@ -3260,6 +3280,9 @@ class Watcher:
     def __init__(self) -> None:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # set by the watcher when DuoKe has something new: the pass runs now
+        # instead of at the end of its minute
+        self._wake = threading.Event()
 
     def start(self) -> bool:
         if self._thread and self._thread.is_alive():
@@ -3273,11 +3296,26 @@ class Watcher:
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         _state["running"] = False
 
     def _watch_front(self) -> None:
         hwnd = 0
+        last_sig, last_check = None, 0.0
         while not self._stop.is_set():
+            # Every few seconds: a new message in DuoKe wakes the pass now, so
+            # its draft is ready in seconds rather than at the next minute.
+            if time.time() - last_check >= FAST_CHECK_SECONDS:
+                last_check = time.time()
+                try:
+                    sig = duoke_web.signature() if duoke_web.available() else None
+                    if sig and last_sig and sig != last_sig:
+                        self._wake.set()
+                        draft_new_unread()
+                    if sig:
+                        last_sig = sig
+                except Exception:
+                    pass
             try:
                 hwnd = hwnd or find_window() or 0
                 if hwnd and _duoke_looked_at(hwnd) and winapi.idle_seconds() < \
@@ -3300,7 +3338,10 @@ class Watcher:
                     sync_once()
                 except Exception as exc:  # a pass must never kill the loop
                     _state["last_error"] = f"{type(exc).__name__}: {exc}"
-            self._stop.wait(max(5, int(cfg.get("poll_seconds") or 20)))
+            self._wake.wait(max(5, int(cfg.get("poll_seconds") or 20)))
+            self._wake.clear()
+            if self._stop.is_set():
+                break
         _state["running"] = False
 
 
