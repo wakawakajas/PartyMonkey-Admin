@@ -170,7 +170,8 @@ async def _evaluate(expression: str) -> Any:
         await ws.recv()
         await ws.send(json.dumps({
             "id": 2, "method": "Runtime.evaluate",
-            "params": {"expression": expression, "returnByValue": True},
+            "params": {"expression": expression, "returnByValue": True,
+                       "awaitPromise": True},
         }))
         while True:
             msg = json.loads(await ws.recv())
@@ -557,3 +558,107 @@ def put_draft(text: str) -> str:
     'typed', 'busy' (the box already holds something), or why not."""
     raw = _run(f"({_PUT_DRAFT})({json.dumps(str(text or ''))})")
     return str(raw) if raw else (last_error() or "the page did not answer")
+
+
+# ---- reading WITHOUT opening anything
+#
+# DuoKe keeps its conversation list in its own store and fetches a
+# conversation's messages from its own API. Both are read here straight from
+# the page, so nothing on screen changes: no chat is opened, nothing is marked
+# read, and whoever is working in DuoKe never sees a thing. This is what lets
+# a draft be written in the background and only put in the box once the
+# person opens that chat themselves.
+_SESSIONS = r"""
+(() => {
+  const vm = document.querySelector('#app') && document.querySelector('#app').__vue__;
+  const chat = vm && vm.$store && vm.$store.state.Chat;
+  if (!chat || !Array.isArray(chat.sessions)) return JSON.stringify({ ok: false });
+  return JSON.stringify({ ok: true, open: String(chat.conversationId || ''),
+    rows: chat.sessions.map(s => ({
+      conversation_id: String(s.conversationId), shop_id: String(s.shopId),
+      name: s.buyerNick || '', shop: s.shopName || '',
+      unread: (s.unReadCount || s.unreadCount || 0) > 0,
+      last_id: String(s.lastMessageId || s.latestMessageId || '') })) });
+})()
+"""
+
+_MESSAGES = r"""
+(async (shopId, conversationId) => {
+  const vm = document.querySelector('#app').__vue__;
+  const r = await vm.$http.getImMessageList({ shopId, conversationId, pageSize: 40 });
+  const out = [];
+  for (const m of (r && r.list) || []) {
+    // 1 is the buyer, 2 the shop, 3 DuoKe's own notices
+    if (m.fromAccountType !== 1 && m.fromAccountType !== 2) continue;
+    // Shopee's away message and DuoKe's welcome/follow rules are not people
+    if (m.fromAccountType === 2 && (m.platformReplyType === 1 || m.dkReplyType === 2)) continue;
+    let c = m.messageContent;
+    try { c = JSON.parse(c); } catch (e) { c = {}; }
+    c = c || {};
+    let text = c.text || '';
+    const imgs = c.imageUrl ? [c.imageUrl] : [];
+    if (!text && m.messageType === 'item' && c.title) text = '[product] ' + c.title;
+    if (!text && m.messageType === 'order') text = '[order]';
+    if (!text && !imgs.length) continue;
+    out.push({ inbound: m.fromAccountType === 1, text: String(text).slice(0, 1200), imgs,
+               ts: m.createdTimestamp || 0 });
+  }
+  out.sort((a, b) => a.ts - b.ts);   // the API gives newest first
+  return JSON.stringify({ ok: true, lines: out });
+})
+"""
+
+
+def list_sessions() -> tuple[list[dict], str]:
+    """DuoKe's loaded conversations as [{conversation_id, shop_id, name, shop,
+    unread, last_id}], plus the id of the one open on screen. Opens nothing."""
+    data = _json(_run(_SESSIONS))
+    if not data.get("ok"):
+        return [], ""
+    return data.get("rows") or [], str(data.get("open") or "")
+
+
+def open_conversation_id() -> str:
+    """Which conversation the person has open, or ''."""
+    return list_sessions()[1]
+
+
+def read_conversation(shop_id: str, conversation_id: str) -> list[dict]:
+    """One conversation as [{inbound, text, imgs}], oldest first, fetched from
+    DuoKe's API -- the chat is not opened and stays unread."""
+    data = _json(_run(f"({_MESSAGES})({json.dumps(str(shop_id))}, {json.dumps(str(conversation_id))})"))
+    if not data.get("ok"):
+        return []
+    return [{"inbound": bool(l.get("inbound")), "text": str(l.get("text") or "").strip(),
+             "imgs": [str(u) for u in (l.get("imgs") or []) if str(u).startswith("http")]}
+            for l in data.get("lines") or []]
+
+
+_ALL = r"""
+(async (pages) => {
+  const vm = document.querySelector('#app').__vue__;
+  const chat = vm.$store.state.Chat;
+  const rows = [];
+  let offset = 0;
+  for (let i = 0; i < pages; i++) {
+    const r = await vm.$http.queryConversationList({ shopIdList: chat.allowShopIds,
+      size: 100, offset, filterGroups: [] });
+    for (const s of (r && r.list) || []) rows.push({
+      conversation_id: String(s.conversationId), shop_id: String(s.shopId),
+      name: s.buyerNick || '', shop: s.shopName || '',
+      unread: (s.unReadCount || s.unreadCount || 0) > 0,
+      last_id: String(s.lastMessageId || s.latestMessageId || '') });
+    if (!r || !r.hasMore) break;
+    offset = r.nextOffset;
+  }
+  return JSON.stringify({ ok: true, rows });
+})
+"""
+
+
+def all_sessions(pages: int = 3) -> list[dict]:
+    """Every conversation across all shops and tabs (newest first, up to
+    100 x pages), from DuoKe's API -- not just the ones the list on screen has
+    loaded. Same row shape as list_sessions. Opens nothing."""
+    data = _json(_run(f"({_ALL})({int(pages)})"))
+    return data.get("rows") or [] if data.get("ok") else []

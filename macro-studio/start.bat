@@ -33,6 +33,28 @@ if not errorlevel 1 (
 )
 
 rem ---------------------------------------------------------------------
+rem Step 0c: pick up the latest program files from GitHub, so every shop PC
+rem runs the same version. Only tracked code changes: macros, schedules,
+rem settings and duoke.json are git-ignored and never touched. --ff-only
+rem means a PC whose code was edited by hand is left alone rather than
+rem merged. It is all one block because cmd reads a .bat as it runs: if the
+rem pull rewrote this file, the rest is run from a fresh copy instead.
+rem ---------------------------------------------------------------------
+where git >nul 2>&1
+if not errorlevel 1 if exist "%~dp0..\.git" (
+    for /f %%h in ('git -C "%~dp0.." rev-parse HEAD 2^>nul') do set "OLD_HEAD=%%h"
+    echo Checking for updates...
+    set "GIT_TERMINAL_PROMPT=0"
+    git -C "%~dp0.." pull --ff-only -q >nul 2>&1
+    for /f %%h in ('git -C "%~dp0.." rev-parse HEAD 2^>nul') do set "NEW_HEAD=%%h"
+    if not "!OLD_HEAD!"=="!NEW_HEAD!" (
+        echo Updated -- restarting with the new version.
+        start "" "%~f0" %*
+        exit /b 0
+    )
+)
+
+rem ---------------------------------------------------------------------
 rem Step 1: find a usable Python (3.9+). Installs it via winget if needed.
 rem ---------------------------------------------------------------------
 call :find_python

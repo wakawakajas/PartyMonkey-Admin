@@ -736,6 +736,21 @@ class Cloud:
             prefer="return=minimal",
         )
 
+    def claim_typed(self, row_id: str) -> bool:
+        """Stamp an approved reply as taken, only if no other PC has. True
+        means this PC won it and should send; with two shop PCs running, the
+        loser skips it instead of sending the buyer the same words twice."""
+        out = self.rest("PATCH", f"/reply_messages?id=eq.{urllib.parse.quote(row_id)}"
+                        "&typed_at=is.null",
+                        {"typed_at": datetime.now(timezone.utc).isoformat()},
+                        prefer="return=representation")
+        return bool(out)
+
+    def unclaim_typed(self, row_id: str) -> None:
+        """Give an approved reply back when sending it failed."""
+        self.rest("PATCH", f"/reply_messages?id=eq.{urllib.parse.quote(row_id)}",
+                  {"typed_at": None}, prefer="return=minimal")
+
     def mark_typed(self, row_id: str, note: str = "") -> None:
         body: dict[str, Any] = {"typed_at": datetime.now(timezone.utc).isoformat()}
         if note:
@@ -2233,6 +2248,30 @@ def clear_answered_by_hand(cloud: "Cloud", hwnd: int, window: tuple[int, int, in
     if not chats:
         _last_hand_check[0] = time.time()
         return
+    if duoke_web.available():
+        # Through DuoKe's API: nothing opens, so every waiting chat can be
+        # judged each look rather than one a minute -- and the lookup covers
+        # every conversation, not only the few the list on screen has loaded.
+        _last_hand_check[0] = time.time()
+        everyone = {_chat_key(x["name"]).lower(): x for x in reversed(duoke_web.all_sessions())}
+        for chat in chats:
+            sess = everyone.get(chat["chat_key"].lower())
+            if not sess:
+                continue
+            lines = duoke_web.read_conversation(sess["shop_id"], sess["conversation_id"])
+            if not lines or lines[-1]["inbound"]:
+                continue                  # still theirs; still waiting
+            try:
+                cloud.save_history(chat["ids"][-1],
+                                   [{"inbound": bool(l["inbound"]),
+                                     "text": str(l.get("text") or "")[:400],
+                                     "imgs": [u for u in (l.get("imgs") or []) if u][:4]}
+                                    for l in lines[-HISTORY_TAIL:]])
+                cloud.answered_by_hand(chat["ids"])
+                report["by_hand"] = report.get("by_hand", 0) + len(chat["ids"])
+            except CloudError as exc:
+                report["notes"].append(f"by hand: {exc}")
+        return
 
     wait = float(cfg.get("hand_check_after") or 45)
     most = max(1, int(cfg.get("hand_check_tries") or 3))
@@ -2307,6 +2346,7 @@ def status() -> dict:
         "window_title": cfg.get("window_title"),
         "window_process": cfg.get("window_process"),
         "window_found": find_window() is not None,
+        "drafts_waiting": [v.get("key") for v in list(_ready.values())],
         "last_pass_at": _state["last_pass_at"],
         "last_error": _state["last_error"],
         "last_report": _state["last_report"],
@@ -2391,7 +2431,7 @@ def _learned() -> dict:
 
 
 def learn_some(cloud: "Cloud", threads: list[dict], cfg: dict, report: dict,
-               hwnd: int = 0) -> None:
+               hwnd: int = 0, sessions: Optional[list[dict]] = None) -> None:
     """Go through a few conversations that changed since last time and save
     the replies sent in them as examples for the drafts."""
     state = _learned()
@@ -2406,19 +2446,30 @@ def learn_some(cloud: "Cloud", threads: list[dict], cfg: dict, report: dict,
             report["notes"].append(f"learning: {exc}")
             return
         state["primed"] = True
-    todo = [t for t in threads if not t["unread"]
-            and looked.get(_chat_key(t["name"])) != t.get("preview")]
+    if sessions:
+        # read through DuoKe's API: nothing on screen moves
+        todo = [{"name": x["name"], "preview": x["last_id"], "sess": x}
+                for x in sessions if not x["unread"]
+                and looked.get(_chat_key(x["name"])) != x["last_id"]]
+    else:
+        todo = [t for t in threads if not t["unread"]
+                and looked.get(_chat_key(t["name"])) != t.get("preview")]
     for thread in todo[:int(cfg.get("learn_per_pass") or 3)]:
-        if hwnd and in_use(hwnd, cfg):
-            break
         key = _chat_key(thread["name"])
-        if not duoke_web.open_chat(key):
-            continue
-        time.sleep(0.8)
-        duoke_web.scroll_to_latest()
-        time.sleep(0.8)
+        if thread.get("sess"):
+            said = duoke_web.read_conversation(thread["sess"]["shop_id"],
+                                               thread["sess"]["conversation_id"])
+        else:
+            if hwnd and in_use(hwnd, cfg):
+                break
+            if not duoke_web.open_chat(key):
+                continue
+            time.sleep(0.8)
+            duoke_web.scroll_to_latest()
+            time.sleep(0.8)
+            said = duoke_web.read_open_conversation()
         rows = []
-        for buyer, reply in reply_pairs(duoke_web.read_open_conversation()):
+        for buyer, reply in reply_pairs(said):
             mark = _fingerprint(buyer, reply)
             if mark in have:
                 continue
@@ -2451,15 +2502,30 @@ _shortcuts: dict[str, Any] = {"rows": [], "at": 0.0}
 _duoke_front_at = [0.0]
 
 
-def in_use(hwnd: int, cfg: dict) -> bool:
-    """Somebody is working in DuoKe: it was in front in the last few minutes
-    and the keyboard or mouse has been used in that time. Asked again before
-    every conversation a pass opens, since a pass can take a while."""
-    window = float(cfg.get("in_use_seconds") or 180)
+def _duoke_looked_at(hwnd: int) -> bool:
+    """DuoKe is in front, or the pointer is over it. The pointer counts too:
+    somebody reading DuoKe on one screen while the keyboard is in another
+    window (Pigu, a chat) is using it just the same, and had chats switched
+    under them while DuoKe was never the window in front."""
     if winapi.get_foreground_window() == hwnd:
+        return True
+    try:
+        x, y = winapi.get_cursor_pos()
+        return winapi.root_window(winapi.window_from_point(x, y)) == hwnd
+    except Exception:
+        return False
+
+
+def in_use(hwnd: int, cfg: dict) -> bool:
+    """Somebody is working in DuoKe: the pointer was on it (or it was in front)
+    while the keyboard or mouse was being used, within the last
+    `in_use_seconds` (20 -- the user's choice: start 20s after the cursor
+    leaves DuoKe). A pointer left resting on DuoKe by somebody who walked away
+    does not count. Asked again before every conversation a pass opens."""
+    window = float(cfg.get("in_use_seconds") or 20)
+    if _duoke_looked_at(hwnd) and winapi.idle_seconds() < window:
         _duoke_front_at[0] = time.time()
-    recent = time.time() - _duoke_front_at[0] < window
-    return recent and winapi.idle_seconds() < window
+    return time.time() - _duoke_front_at[0] < window
 
 
 # chat key -> when an approved reply may look for that conversation again
@@ -2504,6 +2570,92 @@ def pick_shortcut(draft: str, wants_photo: bool) -> Optional[dict]:
 # Messages a draft has been left for, this run of the agent. In memory on
 # purpose: after a restart the worst case is one box found non-empty and left.
 _drafted: set[str] = set()
+# conversation id -> a draft written in the background, waiting for the person
+# to open that chat: {mark, words, photos, key, text}
+_ready: dict[str, dict] = {}
+_placing = threading.Lock()
+# the conversation last looked at for an on-the-spot draft, so one open chat
+# is drafted once rather than every second it stays open
+_last_opened = [""]
+
+
+def _draft_now(conv: str) -> Optional[dict]:
+    """A draft for a chat the person just opened that had none waiting --
+    one they had read already, say. Only when the buyer is the one waiting:
+    a chat the shop answered last needs nothing."""
+    cfg = load()
+    if not cfg.get("draft_in_duoke"):
+        return None
+    sess = next((x for x in duoke_web.list_sessions()[0]
+                 if x["conversation_id"] == conv), None) or \
+        next((x for x in duoke_web.all_sessions(1) if x["conversation_id"] == conv), None)
+    if not sess:
+        return None
+    lines = duoke_web.read_conversation(sess["shop_id"], conv)
+    said = [l for l in lines if not _is_auto_line(l)]
+    if not said or not said[-1]["inbound"]:
+        return None
+    last = said[-1]
+    text = (last.get("text") or "").strip() or ("[photo]" if last.get("imgs") else "")
+    key = _chat_key(sess["name"])
+    mark = _fingerprint(key, text)
+    if not text or mark in _drafted:
+        return None
+    cloud = shared_cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
+                         cfg.get("email", ""), cfg.get("password", ""))
+    if not cloud.user_id:
+        cloud.sign_in()
+    history = [{"inbound": bool(l["inbound"]), "text": str(l.get("text") or "")[:400]}
+               for l in lines[-MESSAGE_TAIL:]]
+    words, photos = cloud.draft(text, history[:-1])
+    return {"mark": mark, "words": words, "photos": photos, "key": key, "text": text}
+
+
+def place_ready_draft() -> Optional[str]:
+    """If the chat the person just opened has a draft waiting, put it in the
+    box. Never sends. Called every second by the watcher; cheap when nothing
+    is waiting."""
+    if not _placing.acquire(blocking=False):
+        return None
+    try:
+        conv = duoke_web.open_conversation_id()
+        item = _ready.get(conv)
+        if not item:
+            # Every chat gets one: a chat opened with no draft waiting has
+            # one written now, once per opening.
+            if not conv or conv == _last_opened[0]:
+                return None
+            _last_opened[0] = conv
+            item = _draft_now(conv)
+            if not item:
+                return None
+            _ready[conv] = item
+        _last_opened[0] = conv
+        # let DuoKe finish switching before anything goes in the box
+        time.sleep(1.2)
+        if duoke_web.open_conversation_id() != conv:
+            return None
+        _ready.pop(conv, None)
+        sess = next((x for x in duoke_web.list_sessions()[0]
+                     if x["conversation_id"] == conv), None)
+        if sess:
+            # still the same question, and nobody has answered it meanwhile
+            lines = duoke_web.read_conversation(sess["shop_id"], conv)
+            inbound = [l for l in lines if l["inbound"]]
+            last = (inbound[-1].get("text") or "").strip() if inbound else ""
+            if not last and inbound and inbound[-1].get("imgs"):
+                last = "[photo]"
+            if not lines or not lines[-1]["inbound"] or last != item["text"]:
+                return None
+        _drafted.add(item["mark"])
+        quick = pick_shortcut(item["words"], bool(item["photos"]))
+        if quick and duoke_web.use_shortcut(quick["code"]) == "picked":
+            return "quick reply"
+        return duoke_web.put_draft(" ".join(str(item["words"] or "").split()))
+    except Exception:
+        return None
+    finally:
+        _placing.release()
 
 
 def sync_once() -> dict:
@@ -2538,6 +2690,21 @@ def sync_once() -> dict:
 
     hwnd = find_window()
     restored = False
+    if hwnd and not duoke_web.available():
+        # DuoKe opened from its ordinary shortcut: nothing can be read in the
+        # background, and the old screen way clicks and restores the window
+        # under whoever is using it (a colleague's PC, 2026-09-25). So this PC
+        # does nothing at all until DuoKe is reopened the right way.
+        note = ("DuoKe was not opened with the \"DuoKe (readable)\" shortcut, so this PC "
+                "leaves it alone -- close DuoKe and open it from that shortcut to draft.")
+        report["notes"].append(note)
+        try:
+            cloud.beat(device, True, 0, note)
+        except CloudError:
+            pass
+        _state["last_report"] = report
+        _state["last_pass_at"] = datetime.now(timezone.utc).isoformat()
+        return report
     if hwnd:
         restored = _show_for_reading(hwnd)
     if not hwnd:
@@ -2664,9 +2831,13 @@ def sync_once() -> dict:
     seen = _seen()
     fresh: set[str] = set()
 
-    def harvest(chat_name: str, tree: list[dict], shop: str = "", draft: bool = False) -> None:
+    def harvest(chat_name: str, tree: list[dict], shop: str = "", draft: bool = False,
+                lines: Optional[list[dict]] = None, conv: str = "") -> None:
+        # With `lines` and `conv` the conversation was read from DuoKe's API
+        # without opening it: the draft is kept ready for when the person
+        # opens that chat, instead of being typed now.
         key = _chat_key(chat_name)
-        if draft and drafting:
+        if draft and drafting and lines is None:
             # a thread left scrolled up reads as old lines; the message
             # waiting for an answer is at the bottom
             duoke_web.scroll_to_latest()
@@ -2676,8 +2847,9 @@ def sync_once() -> dict:
         # picture in them. A customer's photo is hosted by Shopee already, so
         # what travels to Pigu is the link -- a hundred bytes rather than a
         # megabyte of the shop's storage for a second copy of their file.
-        lines = clean_lines(duoke_web.read_open_conversation(), reader) or \
-            read_open_conversation(tree, window, reader)
+        if lines is None:
+            lines = clean_lines(duoke_web.read_open_conversation(), reader) or \
+                read_open_conversation(tree, window, reader)
         inbound = [l for l in lines if l["inbound"]]
         if not inbound:
             return
@@ -2701,7 +2873,7 @@ def sync_once() -> dict:
         # welcome and follow-invite DuoKe sends by itself come after the
         # buyer's first message and would otherwise look like a reply.
         said = [l for l in lines if not _is_auto_line(l)]
-        want_draft = draft and drafting and mark not in _drafted             and bool(said) and bool(said[-1]["inbound"])
+        want_draft = draft and drafting and mark not in _drafted             and bool(said) and bool(said[-1]["inbound"])             and not (conv and (_ready.get(conv) or {}).get("mark") == mark)
         already = mark in seen or mark in fresh
         if already:
             report["skipped"] += 1
@@ -2744,6 +2916,11 @@ def sync_once() -> dict:
                 words, photos = cloud.draft(text, row["history"][:-1])
             except CloudError as exc:
                 report["notes"].append(f"{key[:30]}: {exc}")
+                return
+            if conv:
+                _ready[conv] = {"mark": mark, "words": words, "photos": photos,
+                                "key": key, "text": text}
+                report["drafted"] += 1
                 return
             # A draft that is really one of the shop's quick replies goes in
             # AS that quick reply, which brings its photos with it.
@@ -2846,9 +3023,19 @@ def sync_once() -> dict:
                     report["notes"].append(f"{key[:30]}: the DuoKe box would not clear")
                     continue
                 tree = warm_tree(hwnd)
+            try:
+                if not cloud.claim_typed(str(row.get("id"))):
+                    continue              # another shop PC is sending this one
+            except CloudError as exc:
+                report["notes"].append(str(exc))
+                continue
             ok, how = type_reply(tree, window, reader, hwnd, text)
             if not ok:
                 report["notes"].append(f"{key[:30]}: {how}")
+                try:
+                    cloud.unclaim_typed(str(row.get("id")))
+                except CloudError:
+                    pass
                 continue
             report["typed"] += 1
             # The words have gone. A photo that will not paste must not undo
@@ -2922,7 +3109,18 @@ def sync_once() -> dict:
     # a click and a tree walk per thread. A buyer whose message arrives in Pigu
     # four seconds later has lost nothing; a seller watching a reply they have
     # already approved has.
-    if busy:
+    sessions: list[dict] = []
+    if drafting and duoke_web.available():
+        sessions = duoke_web.all_sessions(1) or duoke_web.list_sessions()[0]
+    if sessions:
+        # Nothing is opened: read through DuoKe's own API, the draft kept
+        # ready and put in the box only when the person opens that chat.
+        for sess in [x for x in sessions if x["unread"]][:MAX_THREADS_PER_PASS]:
+            got = duoke_web.read_conversation(sess["shop_id"], sess["conversation_id"])
+            if got:
+                harvest(sess["name"], [], sess.get("shop", ""), draft=True,
+                        lines=got, conv=sess["conversation_id"])
+    elif busy:
         report["notes"].append("DuoKe is in use, so opening chats waits for the next pass")
     elif cfg.get("open_unread") or drafting:
         for thread in [t for t in threads if t["unread"]][:MAX_THREADS_PER_PASS]:
@@ -2934,9 +3132,11 @@ def sync_once() -> dict:
             harvest(thread["name"], warm_tree(hwnd), thread.get("shop", ""), draft=True)
 
     # Nothing waiting and nobody at DuoKe: time to learn from what was sent.
-    idle_enough = winapi.get_foreground_window() != hwnd         or winapi.idle_seconds() >= float(cfg.get("learn_idle_seconds") or 120)
-    if drafting and cfg.get("learn_from_chats") and idle_enough and not busy             and not any(t["unread"] for t in threads) and duoke_web.available():
-        learn_some(cloud, threads, cfg, report, hwnd)
+    # Read through the API when sessions came back, so it needs nobody to be
+    # away: nothing on screen moves.
+    idle_enough = bool(sessions) or winapi.get_foreground_window() != hwnd         or winapi.idle_seconds() >= float(cfg.get("learn_idle_seconds") or 120)
+    if drafting and cfg.get("learn_from_chats") and idle_enough and (sessions or not busy)             and not any(t["unread"] for t in threads) and duoke_web.available():
+        learn_some(cloud, threads, cfg, report, hwnd, sessions)
 
     # Replies switched off in Pigu and only drafting on: nothing else here is
     # wanted -- no catalogue, no history, no clearing rows in Pigu.
@@ -3076,8 +3276,11 @@ class Watcher:
         while not self._stop.is_set():
             try:
                 hwnd = hwnd or find_window() or 0
-                if hwnd and winapi.get_foreground_window() == hwnd:
+                if hwnd and _duoke_looked_at(hwnd) and winapi.idle_seconds() < \
+                        float(load().get("in_use_seconds") or 20):
                     _duoke_front_at[0] = time.time()
+                if duoke_web.available():
+                    place_ready_draft()
             except Exception:
                 hwnd = 0
             self._stop.wait(1)
