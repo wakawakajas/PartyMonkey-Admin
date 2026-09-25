@@ -2291,7 +2291,9 @@ def clear_answered_by_hand(cloud: "Cloud", hwnd: int, window: tuple[int, int, in
     row vanish with no explanation.
     """
     every = float(cfg.get("hand_check_seconds") or 60)
-    if time.time() - _last_hand_check[0] < every:
+    # Through the API it costs no clicks, so it runs every pass -- and a pass
+    # starts within seconds of any DuoKe message, the shop's own reply included.
+    if not duoke_web.available() and time.time() - _last_hand_check[0] < every:
         return
     try:
         chats = cloud.pending_chats()
@@ -3256,6 +3258,12 @@ def sync_once() -> dict:
     if drafting and cfg.get("learn_from_chats") and idle_enough and (sessions or not busy)             and not any(t["unread"] for t in threads) and duoke_web.available():
         learn_some(cloud, threads, cfg, report, hwnd, sessions)
 
+    # A reply typed in DuoKe by hand takes its chat off Pigu at once. Read
+    # through the API, so it runs even while somebody is working in DuoKe --
+    # which is exactly when they are answering by hand.
+    if upload and duoke_web.available():
+        clear_answered_by_hand(cloud, hwnd, window, reader, cfg, report)
+
     # Replies switched off in Pigu and only drafting on: nothing else here is
     # wanted -- no catalogue, no history, no clearing rows in Pigu.
     if not upload or busy:
@@ -3284,7 +3292,7 @@ def sync_once() -> dict:
     # which meant a shop with anything unread never cleared a manual reply at
     # all -- exactly when somebody is most likely to be answering by hand. It
     # is throttled by its own clock instead: one conversation a minute.
-    if not in_use(hwnd, cfg):
+    if not duoke_web.available() and not in_use(hwnd, cfg):
         clear_answered_by_hand(cloud, hwnd, window, reader, cfg, report)
     try:
         if not cfg.get("catalog_when_quiet") or quiet:
