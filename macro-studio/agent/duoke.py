@@ -55,7 +55,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -580,9 +580,14 @@ class Cloud:
         return str(out.get("draft") or "").strip(), [p for p in photos if p]
 
     def replies_to_type(self) -> list[dict]:
+        # Only replies approved in the last hour. One approved on 12 Sep and
+        # never typed went out on 25 Sep, two weeks late, and nobody had
+        # pressed anything that day.
+        since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         query = (
             "/reply_messages?select=id,chat_key,reply,store,photos,products"
             "&status=eq.answered&typed_at=is.null&reply=neq."
+            f"&answered_at=gte.{urllib.parse.quote(since)}"
             "&order=answered_at.asc&limit=20"
         )
         out = self.rest("GET", query)
@@ -2701,9 +2706,9 @@ def place_ready_draft() -> Optional[str]:
             if not lines or not lines[-1]["inbound"] or last != item["text"]:
                 return None
         _drafted.add(item["mark"])
-        quick = pick_shortcut(item["words"], bool(item["photos"]))
-        if quick and duoke_web.use_shortcut(quick["code"]) == "picked":
-            return "quick reply"
+        # Plain words only. Picking one of DuoKe's quick replies can send it
+        # (and its photos) the moment it is picked -- customers got messages
+        # nobody pressed Send on (2026-09-25).
         return duoke_web.put_draft(" ".join(str(item["words"] or "").split()))
     except Exception:
         return None
@@ -2977,7 +2982,7 @@ def sync_once() -> dict:
                 return
             # A draft that is really one of the shop's quick replies goes in
             # AS that quick reply, which brings its photos with it.
-            quick = pick_shortcut(words, bool(photos))
+            quick = None                  # never a quick reply: picking one can send it
             ok, how = False, ""
             if quick:
                 got = duoke_web.use_shortcut(quick["code"])
