@@ -3049,18 +3049,49 @@ def sync_once() -> dict:
     # A reply approved in Pigu is sent, drafting or not: approving it IS
     # somebody deciding to send it. Only the drafts this PC writes itself wait
     # in the box for a person.
-    if cfg.get("type_back") and upload and not busy:
+    if cfg.get("type_back") and upload:
         try:
             pending = cloud.replies_to_type()
         except CloudError as exc:
             pending = []
             report["notes"].append(str(exc))
+        everyone = {}
+        if pending and duoke_web.available():
+            everyone = {_chat_key(x["name"]).lower(): x for x in reversed(duoke_web.all_sessions())}
         for row in pending:
-            if in_use(hwnd, cfg):
-                break
             key = (row.get("chat_key") or "").strip()
             text = (row.get("reply") or "").strip()
             if not text:
+                continue
+            # IN THE BACKGROUND: a reply a person pressed Send on in Pigu goes
+            # out through DuoKe's own send -- no chat opened, the screen
+            # untouched, works with DuoKe minimised. Claimed first, so two PCs
+            # never send it twice. Words only; a product card or a photo still
+            # needs the screen way below.
+            wants_more = (cfg.get("send_products") and row.get("products")) or \
+                (cfg.get("send_photos") and row.get("photos"))
+            sess = everyone.get(key.lower())
+            if sess and not wants_more:
+                try:
+                    if not cloud.claim_typed(str(row.get("id"))):
+                        continue          # another shop PC is sending this one
+                except CloudError as exc:
+                    report["notes"].append(str(exc))
+                    continue
+                with approved_send():
+                    got = duoke_web.send_text(sess["shop_id"], sess["conversation_id"],
+                                              " ".join(text.split()))
+                if got.startswith("sent"):
+                    report["typed"] += 1
+                    _ready.pop(sess["conversation_id"], None)
+                else:
+                    report["notes"].append(f"{key[:30]}: {got}")
+                    try:
+                        cloud.unclaim_typed(str(row.get("id")))
+                    except CloudError:
+                        pass
+                continue
+            if busy or in_use(hwnd, cfg):
                 continue
             # A conversation that could not be found is not searched for again
             # every pass: that search is typing and clicking in DuoKe.

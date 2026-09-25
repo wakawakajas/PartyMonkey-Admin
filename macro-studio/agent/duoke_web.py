@@ -673,3 +673,40 @@ def reply_box_text() -> Optional[str]:
     them."""
     data = _json(_run(_BOX_TEXT))
     return str(data.get("text") or "") if data.get("ok") else None
+
+
+# Sending WITHOUT opening the chat: DuoKe's own send, the one its reply box
+# calls. Used for exactly one thing -- a reply a person pressed Send on in
+# Pigu -- and only from inside duoke.approved_send() (the caller checks).
+_SEND = r"""
+(async (shopId, conversationId, text) => {
+  const vm = document.querySelector('#app').__vue__;
+  const st = vm.$store;
+  const r = await vm.$http.queryConversationList({ shopIdList: st.state.Chat.allowShopIds,
+    size: 100, offset: 0, filterGroups: [] });
+  const s = ((r && r.list) || []).find(x => String(x.conversationId) === conversationId
+                                          && String(x.shopId) === shopId)
+         || st.state.Chat.sessions.find(x => String(x.conversationId) === conversationId);
+  if (!s) return 'conversation not found';
+  await st.dispatch('Chat/send-message', { msg: {
+    shopId: s.shopId, platform: s.platform, groupId: s.groupId,
+    conversationId: s.conversationId, content: { text }, contentType: 'text' } });
+  return 'dispatched';
+})
+"""
+
+
+def send_text(shop_id: str, conversation_id: str, text: str) -> str:
+    """Send `text` into a conversation without opening it. 'sent' once DuoKe's
+    API shows it as the shop's newest line, otherwise why not."""
+    got = _run(f"({_SEND})({json.dumps(str(shop_id))}, {json.dumps(str(conversation_id))}, "
+               f"{json.dumps(str(text))})")
+    if got != "dispatched":
+        return str(got or last_error() or "the page did not answer")
+    want = " ".join(str(text).split())
+    for _ in range(10):
+        time.sleep(1.0)
+        mine = [l for l in read_conversation(shop_id, conversation_id) if not l["inbound"]]
+        if mine and " ".join(mine[-1]["text"].split()) == want:
+            return "sent"
+    return "sent, but DuoKe has not shown it yet"
