@@ -2105,6 +2105,7 @@ img.mc-shot,img.mc-sum-shot{cursor:zoom-in;}
 .mc-merge input{margin:0;width:18px;height:18px;cursor:pointer;}
 .mc-merge.no{opacity:.5;cursor:not-allowed;}
 .mc-merge.no input{cursor:not-allowed;}
+.mc-merge-row{gap:12px;align-items:center;}
 .mc-merge-why{display:block;font-size:10.5px;color:#e0864e;margin-top:2px;}
 /* A line that has been through the machine says so with the time on it: on a
    batch two people are working, "has this one been done?" is a question about
@@ -5129,7 +5130,15 @@ body.mc-docked .mc-bubble{display:none !important;}
       <p class="hint" style="margin:4px 0 0;">Loading…</p>
     </div>
 
-    <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;">
+    <!-- Custom Template orders on one layout and one paper, printed together -->
+    <div class="toggle-row mc-merge-row" style="margin-top:16px;">
+      <span style="font-size:14px;"><b>Merge same layout &amp; paper</b>
+        <span class="hint" style="display:block;margin:2px 0 0;">Download All puts Custom Template
+        orders with the same layout, paper and GSM on one sheet — each with its own artwork,
+        bleed and quantity. Backs merge when they are the same artwork.</span></span>
+      <label class="switch"><input type="checkbox" id="mcMergeSameToggle"/><span class="slider"></span></label>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
       <button class="btn-primary" id="mcDownloadAllBtn" style="flex:1 1 200px;height:50px;">Download All</button>
       <button class="btn-outline" id="mcPrintBtn" style="flex:1 1 200px;height:50px;"
         title="See each sheet first, then save it and send it to the Fiery with a server preset, copies and pages">🖨 Download &amp; Print</button>
@@ -34255,8 +34264,10 @@ const MC_TILES={
     body:mcSheetPrintBody,
     wire:mcSheetPrintWire,
     bundles:mcPrintBundles,
-    make:e=>mcPrintBundle(e.set,e.meta&&e.meta.template),
-    preview:(e,c,dim,page)=>mcPrintPreview(e.set,e.meta&&e.meta.template,c,dim,page)
+    make:e=>e.meta&&e.meta.mergeCustom?mcMergeCustomBundle(e)
+      :mcPrintBundle(e.set,e.meta&&e.meta.template),
+    preview:(e,c,dim,page)=>e.meta&&e.meta.mergeCustom?mcMergeCustomPreview(e,c,dim,page)
+      :mcPrintPreview(e.set,e.meta&&e.meta.template,c,dim,page)
   }
 };
 // Spares, a reprint, one that came out of the machine wrong. What the customer
@@ -34735,6 +34746,8 @@ function mcGroups(){
 }
 function mcRenderItems(){
   const el=document.getElementById('mcItems');
+  // the switch is this batch's, so it follows whichever batch is open
+  if(typeof mcMergeSameSync==='function') mcMergeSameSync();
   // A redraw is not a journey. Every row is written again — a tick, a copy, a
   // colleague's edit arriving down the channel — and the list emptying for the
   // instant between the two innerHTMLs is enough for the browser to clamp the
@@ -34869,7 +34882,9 @@ function mcLineHtml(it){
     ? `<span class="mc-dl-tag${stage.bad?' bad':''}"${stage.title?` title="${escapeHtml(stage.title)}"`:''}>${
         escapeHtml(stage.label)}</span>`
     : '';
-  const mg=mcMergeInfo(it);
+  // Merging is the batch's switch now. The box is kept only on a line merged
+  // one at a time before, so it can be taken off that way.
+  const mg0=mcMergeInfo(it), mg=mg0&&mg0.on?mg0:null;
   // the reason in full is the box's title; the row says it in a few words
   const mergeOff=!!(mg&&(mg.why||mg.locked||mg.busy));
   const mergeTag=mg
@@ -35874,10 +35889,14 @@ function mcPlanDlTag(e){
       escapeHtml(mcWhenWord(d.at))}</span>`:'';
   }
   const set=(e&&e.set)||[];
-  const out=set.filter(it=>it&&it.exported_at);
+  // a merged sheet is one side of each of its lines, and says only that side
+  const side=e&&e.meta&&e.meta.mergeCustom?e.side:null;
+  const dls=set.map(it=>side?mcSideDl(it,side)
+    :(it&&it.exported_at?{at:it.exported_at,n:Math.round(Number(it.export_count)||0)}:null));
+  const out=set.filter((it,i)=>dls[i]);
   if(!out.length) return '';
-  const last=out.map(it=>it.exported_at).sort().slice(-1)[0];
-  const times=Math.max(1,...out.map(it=>Math.round(Number(it.export_count)||0)));
+  const last=dls.filter(Boolean).map(d=>d.at).sort().slice(-1)[0];
+  const times=Math.max(1,...dls.filter(Boolean).map(d=>Math.round(Number(d.n)||0)));
   const what=out.length<set.length
     ? `${out.length} of ${set.length} lines downloaded`
     : `Downloaded ${times} time${times===1?'':'s'}`;
@@ -36007,6 +36026,21 @@ async function mcPlanEdit(i){
       await mcGtOpenFull((e.meta&&e.meta.mode)||'',(e.meta&&e.meta.finish)||'');
       if(currentScreen!=='tool-gift-tag') return;    // it said why itself
       shut();
+      return;
+    }
+    if(e.tile==='sheetPrint'&&e.meta&&e.meta.mergeCustom){
+      await mcCommit();
+      const {missing,pcWas}=await mcMergeCustomLay(e.set);
+      pcMode=pcWas;
+      mcWinLive=false; mcWiredLine=null;
+      mcFromBatch={summary:true};
+      shut();
+      pcSetMode('custom');
+      showScreen('tool-custom');
+      drawAll();
+      if(missing&&missing.length) showMsg(exportMsgEl('front'),
+        `${missing.length} order${missing.length===1?'':'s'} on this sheet had no artwork that `
+        +'could be loaded, so it is laid out without them.',false);
       return;
     }
     if(e.tile==='sheetPrint'){
@@ -43624,7 +43658,29 @@ async function mcExportPlan(){
     const lines=(tile.mode==='per-order'?ready:pool).filter(i=>i.tile===key);
     if(!lines.length) continue;
     if(tile.mode==='per-order'){
-      lines.forEach(it=>mcSides(it).forEach(side=>{
+      // Merge same layout & paper: Custom Template lines sharing a layout,
+      // paper, weight and back come out as one sheet a side instead of a file
+      // each. The rest are left as they always were.
+      const merged=new Set(), seen=new Map();
+      if(key==='custom'&&mcMergeSameOn()) mcMergeSameGroups(lines).forEach(g=>{
+        const base=g.key.slice(0,g.key.lastIndexOf('|'));
+        const num=(seen.get(base)||0)+1; seen.set(base,num);
+        g.set.forEach(it=>merged.add(it.id));
+        const ids=g.set.map(it=>String(it.order_id||'—'));
+        // a line laid out with several designs prints their own counts
+        const pcs=g.set.reduce((n,it)=>{
+          const ds=it.design&&it.design.artMode==='preset'&&Array.isArray(it.design.designs)?it.design.designs:null;
+          return n+(ds&&ds.length?ds.reduce((m,d)=>m+Math.max(0,Math.round(Number(d.qty)||0)),0)
+            :Math.max(1,mcQty(it)));
+        },0);
+        const sides=g.set[0].art&&g.set[0].art.back?['front','back']:['front'];
+        sides.forEach(side=>plan.push({kind:'bundle',tile:'sheetPrint',side,set:g.set,
+          meta:{mergeCustom:true,template:String(g.set[0].design.template||'')},
+          name:mcMergeSameName(g.set,side,num),
+          what:`Merged · ${side} · ${g.set.length} orders, ${pcs} pcs: `
+            +`${ids.slice(0,6).join(', ')}${ids.length>6?'…':''}`}));
+      });
+      lines.filter(it=>!merged.has(it.id)).forEach(it=>mcSides(it).forEach(side=>{
         plan.push({kind:'line',tile:key,it,side,set:[it],
           name:mcFilename(it,side),what:`${it.order_id||'—'} · ${side}`});
       }));
@@ -43691,7 +43747,7 @@ async function mcDownloadAll(){
             ? await mcRenderLine(e.it,e.side)
             : await MC_TILES[e.tile].make(e);
         }catch(err){
-          if(e.kind!=='line') throw err;
+          if(e.kind!=='line'&&!(e.meta&&e.meta.mergeCustom)) throw err;
           failed.push(`${e.name} (${(err&&err.message)||'unknown error'})`);
           (e.set||[]).forEach(it=>bad.add(it.id));
           continue;
@@ -43981,6 +44037,11 @@ let mcBundleSkipped=new Set();
 async function mcMarkMade(e,run,failed){
   for(const it of e.set){
     if(mcBundleSkipped.has(it.id)){
+      if(it.tile==='custom'){
+        const msg=`${it.order_id||it.sku||'a line'} (its artwork could not be loaded, so it is not on the merged sheet)`;
+        if(!failed.includes(msg)) failed.push(msg);
+        continue;
+      }
       failed.push(`${it.order_id||it.sku||'a line'} (`+(it.tile==='sheetPrint'
         ?'its design could not be found — not in the designs folder, nor as artwork uploaded to the line'
         :`no design found for ${it.sku||'it'}`)+')');
@@ -43988,6 +44049,140 @@ async function mcMarkMade(e,run,failed){
     }
     await mcMarkExported(it,run,e.side);
   }
+}
+// ---------- Merge same layout & paper ----------
+// The batch's own switch, kept per batch on this device.
+const mcMergeSameKey=()=>'pigu.mcMergeSame.'+String((mcBatch&&mcBatch.id)||'');
+function mcMergeSameOn(){
+  try{ return localStorage.getItem(mcMergeSameKey())==='1'; }catch(e){ return false; }
+}
+function mcMergeSameSync(){
+  const t=document.getElementById('mcMergeSameToggle');
+  if(t){ t.checked=mcMergeSameOn(); t.disabled=!!(mcBatch&&mcBatch.status!=='open'); }
+}
+document.getElementById('mcMergeSameToggle').addEventListener('change',e=>{
+  try{ localStorage.setItem(mcMergeSameKey(),e.target.checked?'1':'0'); }catch(err){}
+  showMsg(document.getElementById('mcBatchMsg'),e.target.checked
+    ?'Merge on — Download All puts Custom Template orders with the same layout, paper and GSM on one sheet.'
+    :'Merge off — every Custom Template order is a file of its own.',true);
+});
+// Which merged sheet a Custom Template line goes on: its saved layout, its
+// paper and weight, and its back — a back is one picture repeated behind every
+// card, so only lines with the very same back (or none) can share a sheet.
+// "Same layout" is the layout itself — the paper and where every card sits —
+// so two lines saved off one template merge whether or not the line remembers
+// the template's name, and a line whose cards were moved does not.
+// '' for a line that cannot be merged: not Custom Template, or not ready.
+function mcLayoutSig(d){
+  if(!d) return '';
+  const r=v=>Math.round((Number(v)||0)*10)/10;
+  const pp=d.paper||{};
+  const phs=(d.placeholders||[]).map(ph=>[r(ph.xMm),r(ph.yMm),r(ph.wMm),r(ph.hMm)].join(','));
+  if(!phs.length) return '';
+  const lay=d.layout||{};
+  return [r(pp.wMm!=null?pp.wMm:pp.w),r(pp.hMm!=null?pp.hMm:pp.h),pp.unit||'',
+    phs.join(';'),JSON.stringify(lay),JSON.stringify(d.refMark||null),
+    JSON.stringify(d.foldLine||null)].join('/');
+}
+function mcMergeSameKeyOf(it){
+  if(!it||it.tile!=='custom'||!mcReady(it)) return '';
+  const sig=mcLayoutSig(it.design);
+  if(!sig) return '';
+  const n=v=>String(v||'').trim().toLowerCase();
+  return [sig,n(it.paper_type),n(it.gsm),String((it.art&&it.art.back)||'')].join('|');
+}
+// The groups worth merging: two or more lines on one key. A line alone on its
+// key is left to come out as its own file, the way it always did.
+function mcMergeSameGroups(lines){
+  const by=new Map();
+  lines.forEach(it=>{ const k=mcMergeSameKeyOf(it); if(k) (by.get(k)||by.set(k,[]).get(k)).push(it); });
+  return [...by.entries()].filter(([,set])=>set.length>1).map(([key,set])=>({key,set}));
+}
+function mcMergeSameName(set,side,n){
+  const it=set[0], tpl=mcTemplateById(it.design&&it.design.template);
+  const bits=['Merged',(tpl&&tpl.name)||'Custom',it.paper_type,it.gsm].filter(Boolean);
+  // a second merged sheet on the same layout and paper (another back) is
+  // numbered, so its front and back files still pair up by name
+  return `${bits.join('_')}${n>1?'_'+n:''}_${mcBatchDate()}_${side==='back'?'Back':'Front'}.pdf`
+    .replace(/[\\/:*?"<>|]/g,'-');
+}
+// Lays a merged group into the builder. Each line is put up exactly as its own
+// file would be — its saved layout, its uploaded artwork or its designs — and
+// what that put on the sheet is taken off it as designs of the shared one, each
+// carrying the way its own line drew it: bleed, fit, size, turn. The sheet is
+// then the first line's layout with all of them on it, in order.
+async function mcMergeCustomLay(set){
+  const pcWas=pcMode;
+  pcMode='custom';
+  try{
+    await mcDesignsReady();
+    const got=[], missing=[];
+    let back=null, backBox=null;
+    mcBundleSkipped=new Set();
+    for(const it of set){
+      // each line starts from nothing: whatever the line before put up — or the
+      // operator's own artwork, for the first — is never taken as this one's
+      state.designs=[];
+      state.final.front={data:null,img:null,name:''};
+      state.final.back={data:null,img:null,name:''};
+      applyPrintState(it.design);
+      await printArtReady().catch(()=>{});
+      try{ await mcApplyArt(it); }catch(e){}
+      const look={bleed:{...state.bleed},artFit:state.artFit,
+        art:{...state.art.front},rotate:Number(state.rotate.front)||0};
+      const bleedAll=state.bleed.enabled?Math.max(0,Number(state.bleed.mm)||0):0;
+      const qty=Math.max(1,mcQty(it));
+      const before=got.length;
+      if(usingPreset()&&(state.designs||[]).length){
+        // the designs this line prints, at the counts its own layout gives them
+        state.designs.forEach(d=>{ if(!d.img||!(Number(d.qty)>0)) return;
+          got.push({...d,id:uid(),mcKey:'m:'+it.id,look,
+            bleedOn:true,bleedMm:d.bleedOn&&isFinite(Number(d.bleedMm))?Number(d.bleedMm):bleedAll}); });
+      }else if(!usingPreset()&&state.final.front&&state.final.front.img){
+        // one picture, drawn the way the single artwork is: at its box, as sized
+        const f=state.final.front;
+        got.push({id:uid(),name:it.design_name||it.sku||f.name||'Artwork',qty,
+          data:f.data,img:f.img,file:f.file||null,source:f.source||null,sku:'',
+          mcKey:'m:'+it.id,look:{...look,artFit:'card'},bleedOn:true,bleedMm:bleedAll,rotate:0});
+      }
+      if(got.length===before){ missing.push(it.order_id||it.sku||''); mcBundleSkipped.add(it.id); }
+      if(!back&&state.final.back&&state.final.back.img){
+        back=state.final.back; backBox={...state.art.back}; }
+    }
+    // the first line's layout is the sheet's: every line on it shares it
+    const lead=set.find(it=>!mcBundleSkipped.has(it.id))||set[0];
+    applyPrintState(lead.design);
+    await printArtReady().catch(()=>{});
+    state.designs=got; state.page=0;
+    state.final.front={data:null,img:null,name:'',source:null};
+    state.final.back=back||{data:null,img:null,name:''};
+    setArtMode('preset',true);
+    if(!(state.art.front&&state.art.front.wMm&&state.art.front.hMm)) fitArtToCard('front');
+    // the back as each line's own file sizes it: its saved box, or fitted
+    if(back&&backBox&&backBox.wMm&&backBox.hMm) state.art.back=backBox;
+    if(back&&!(state.art.back&&state.art.back.wMm&&state.art.back.hMm)) fitArtToCard('back');
+    mcSetOrderId('');
+    state.paperType=lead.paper_type||''; state.gsm=lead.gsm||'';
+    mcLaidTemplate=null; mcLaidShared=true;
+    if(!got.length) throw new Error('none of these orders had artwork that could be loaded');
+    return {pages:sheetCount(),missing,pcWas};
+  }catch(err){ pcMode=pcWas; throw err; }
+}
+async function mcMergeCustomBundle(e){
+  const {pages,pcWas}=await mcMergeCustomLay(e.set);
+  try{
+    if(e.side==='back'&&!(state.final.back&&state.final.back.img))
+      throw new Error('the back artwork could not be loaded');
+    return await renderSidePdfAll(e.side||'front',pages);
+  }
+  finally{ pcMode=pcWas; }
+}
+async function mcMergeCustomPreview(e,canvas,dim,page){
+  const {pages,pcWas}=await mcMergeCustomLay(e.set);
+  try{
+    renderSide(e.side||'front',canvas,dim,{page:Math.max(0,Math.min(pages-1,Number(page)||0))});
+  }finally{ pcMode=pcWas; }
+  return pages;
 }
 async function mcPrintBundle(lines,template){
   const {pages}=await mcPrintLay(lines,template);
