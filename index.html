@@ -1398,6 +1398,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* Split's page picker: a tile per uploaded page, ticked and counted */
 /* wider than the other sheets, so it would reach under the side menu */
 #splitPickSheet{z-index:75;}
+/* the proof of what Download All makes is read close up, and was cut into by
+   the side menu at laptop widths; the Fiery sheet (80) still opens over it */
+#mcPlanSheet{z-index:75;}
 .split-pick-same{display:flex;gap:9px;align-items:flex-end;}
 .split-pick-same button{width:auto;flex:0 0 90px;height:44px;}
 .split-pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:9px;
@@ -8385,7 +8388,10 @@ function renderSide(side,canvas,maxDim,opts){
     ctx.rotate(rotDeg*Math.PI/180);
     // the bleed along the picture's own axes, which a quarter turn swaps
     ctx.drawImage(grow?bleedArt(img,trimW,trimH,swapped?bY:bX,bleedMode,swapped?bX:bY,bleedTrimPx())
-      :bleedTrimPx()>0&&Math.min(img.naturalWidth||img.width,img.naturalHeight||img.height)>bleedTrimPx()*2+2
+      // the edge trim is part of making a bleed: with no bleed on this card, or
+      // a page that brings its own, the picture prints whole as it always did
+      :!tf&&bleedMm>0&&bleedTrimPx()>0
+        &&Math.min(img.naturalWidth||img.width,img.naturalHeight||img.height)>bleedTrimPx()*2+2
         ?bleedTrimmed(img,bleedTrimPx()):img,
       -srcW/2,-srcH/2,srcW,srcH);
     // a pixel short of the trim, so the ring overlaps the placed page rather
@@ -10091,6 +10097,9 @@ const BLEED_WANTED_MAX=3;
 function bleedWant(img,k){
   let s=bleedJobWanted.get(img);
   if(!s){ s=new Set(); bleedJobWanted.set(img,s); }
+  // on screen only the figure asked for last is wanted, so one typed through
+  // on the way is dropped; an export keeps every one its sheets ask for
+  if(!bleedAsked) s.clear();
   s.delete(k); s.add(k);
   while(s.size>BLEED_WANTED_MAX) s.delete(s.values().next().value);
 }
@@ -10105,6 +10114,9 @@ function bleedJob(img,bx,by,mode){
   const k=mode+'|'+bx+'|'+by;
   bleedWant(img,k);
   let job=memo.get(k);
+  // an export asks again for a fill that failed before, rather than stopping
+  // on the old failure until the page is reloaded
+  if(job&&job.error&&bleedAsked){ memo.delete(k); job=null; }
   if(job&&!job.dropped){ if(bleedAsked) bleedAsked.add(job); return job; }
   if(memo.size>=4) for(const [key,j] of memo) if(j.canvas||j.dropped) memo.delete(key);
   job={canvas:null,error:null,dropped:false};
@@ -22829,6 +22841,7 @@ async function pcSaveTemplate(){
   }finally{ btn.disabled=false;btn.textContent='Save template'; }
 }
 async function pcLoadTemplate(id){
+  try{ mcLaidShared=false; }catch(e){}
   const msg=pcMsg();
   if(!sb||!id) return;
   const row=pcTemplateById(id); const name=row?row.name:'';
@@ -34884,7 +34897,7 @@ function mcLineHtml(it){
     : '';
   // Merging is the batch's switch now. The box is kept only on a line merged
   // one at a time before, so it can be taken off that way.
-  const mg0=mcMergeInfo(it), mg=mg0&&mg0.on?mg0:null;
+  const mg0=mcMergeInfo(it), mg=mg0&&mg0.on&&mcMergedKey(it)?mg0:null;
   // the reason in full is the box's title; the row says it in a few words
   const mergeOff=!!(mg&&(mg.why||mg.locked||mg.busy));
   const mergeTag=mg
@@ -35801,6 +35814,7 @@ async function mcToggleDone(id,quiet){
 
 // ---------- completing, and re-opening ----------
 function mcSyncBatchButtons(){
+  if(typeof mcMergeSameSync==='function') mcMergeSameSync();
   const open=!mcBatch||mcBatch.status==='open';
   const all=mcItems.length&&mcItems.every(i=>i.status);
   const done=document.getElementById('mcCompleteBtn');
@@ -36030,8 +36044,24 @@ async function mcPlanEdit(i){
     }
     if(e.tile==='sheetPrint'&&e.meta&&e.meta.mergeCustom){
       await mcCommit();
-      const {missing,pcWas}=await mcMergeCustomLay(e.set);
+      // the operator's own work, put back if the sheet cannot be laid
+      const keep={meta:mcSnapshot(),designs:state.designs,final:{...state.final},
+        artMode:state.artMode,page:state.page,laidShared:mcLaidShared,laidTpl:mcLaidTemplate};
+      let laid;
+      try{ laid=await mcMergeCustomLay(e.set); }
+      catch(err){
+        applyPrintState(keep.meta);
+        await printArtReady().catch(()=>{});
+        state.designs=keep.designs; state.final.front=keep.final.front; state.final.back=keep.final.back;
+        state.page=keep.page; setArtMode(keep.artMode,true);
+        mcLaidShared=keep.laidShared; mcLaidTemplate=keep.laidTpl;
+        refreshSlots(); renderDesignLines(); refreshArtInputs(); drawAll();
+        throw err;
+      }
+      const {missing,pcWas}=laid;
       pcMode=pcWas;
+      refreshSlots(); renderDesignLines(); refreshArtInputs();
+      if(typeof ppFillSelects==='function') ppFillSelects();
       mcWinLive=false; mcWiredLine=null;
       mcFromBatch={summary:true};
       shut();
@@ -36040,7 +36070,7 @@ async function mcPlanEdit(i){
       drawAll();
       if(missing&&missing.length) showMsg(exportMsgEl('front'),
         `${missing.length} order${missing.length===1?'':'s'} on this sheet had no artwork that `
-        +'could be loaded, so it is laid out without them.',false);
+        +`could be loaded, so it is laid out without them: ${missing.join(', ')}.`,false);
       return;
     }
     if(e.tile==='sheetPrint'){
@@ -36909,11 +36939,13 @@ async function mcShowPlanEntry(i,page){
         if(mcPlanPage>=mcPlanPages) mcPlanPage=mcPlanPages-1;
         renderSide(e.side,c,dim,{page:mcPlanPage});
       }else{
+        mcMergeNote='';
         mcPlanPages=Math.max(1,await MC_TILES[e.tile].preview(e,c,dim,mcPlanPage)||1);
         if(mcPlanPage>=mcPlanPages) mcPlanPage=mcPlanPages-1;
       }
     });
     msg.innerHTML='';
+    if(mcMergeNote){ showMsg(msg,escapeHtml(mcMergeNote),false); mcMergeNote=''; }
   }catch(err){
     stage.style.display='none';
     mcPlanPages=1;
@@ -41138,7 +41170,10 @@ async function mcSplitFollow(it){
     if(currentScreen!=='tool-gift-tag') mcSplitEnd();   // it said why itself
     return;
   }
-  if(it.tile==='sheetPrint'&&await mcPrintOpenFull(it)) return;
+  if(it.tile==='sheetPrint'){
+    mcPrintOpening=true;
+    try{ if(await mcPrintOpenFull(it)) return; }finally{ mcPrintOpening=false; }
+  }
   pcSetMode(mcPcOf(it));
   // the builder beside the list is this line's, so it is stamped with this
   // line's order — including a line that has not been told what it is yet,
@@ -41198,7 +41233,11 @@ async function mcPrintOpenFull(it){
   showScreen('tool-custom');
   return true;
 }
+// a print sheet being laid for one line: another opened meanwhile would have
+// its own layout laid over by that sheet as it lands
+let mcPrintOpening=false;
 async function mcWinOpen(id){
+  if(mcPrintOpening) return;
   const it=mcItem(id); if(!it) return;
   // A line that is ticked done is finished with, and the builder is how a line
   // gets laid onto the sheet — opening it here is how a card already through
@@ -41282,6 +41321,17 @@ async function mcWinOpen(id){
     template:typeof selectedTemplate!=='undefined'?selectedTemplate:null,
     search:(document.getElementById('templateSearch')||{}).value||''};
   mcWinItem=id;
+  // A line with no kind yet has no wire to empty the builder for it; opened
+  // over a shared print sheet it was shown that sheet with no Save beside it.
+  // Emptied here — after the operator's own place is written down above.
+  if(!it.tile&&!it.design&&mcLaidShared){
+    state.designs=[]; state.page=0;
+    state.final.front={data:null,img:null,name:''};
+    state.final.back={data:null,img:null,name:''};
+    mcLaidTemplate=null; mcLaidShared=false;
+    if(typeof refreshSlots==='function') refreshSlots();
+    renderDesignLines(); refreshArtInputs(); drawAll();
+  }
   // A line on a shared sheet, or on no builder at all, has no layout of its own
   // in the builder — so nothing that is there is its to save
   { const tt=mcTile(it); if(!(tt&&tt.mode==='per-order')) mcWinLive=false; }
@@ -42060,6 +42110,7 @@ function mcCustomWire(it){
     mcLaidTemplate=null; mcLaidShared=false;
     if(typeof refreshSlots==='function') refreshSlots();
     renderDesignLines(); refreshArtInputs(); drawAll();
+    if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync();
   }
   const pc=mcPcOf(it)==='placecard';
   // Which face the builder is wearing, before anything is put into it: the
@@ -43663,14 +43714,17 @@ async function mcExportPlan(){
       // each. The rest are left as they always were.
       const merged=new Set(), seen=new Map();
       if(key==='custom'&&mcMergeSameOn()) mcMergeSameGroups(lines).forEach(g=>{
-        const base=g.key.slice(0,g.key.lastIndexOf('|'));
+        // layout, paper and weight: the back is what tells two of these apart
+        const base=g.key.split('|').slice(0,3).join('|');
         const num=(seen.get(base)||0)+1; seen.set(base,num);
         g.set.forEach(it=>merged.add(it.id));
         const ids=g.set.map(it=>String(it.order_id||'—'));
         // a line laid out with several designs prints their own counts
         const pcs=g.set.reduce((n,it)=>{
-          const ds=it.design&&it.design.artMode==='preset'&&Array.isArray(it.design.designs)?it.design.designs:null;
-          return n+(ds&&ds.length?ds.reduce((m,d)=>m+Math.max(0,Math.round(Number(d.qty)||0)),0)
+          // an upload on the line replaces its layout's designs, as it does in its own file
+          const ds=!(it.art&&it.art.front)&&it.design&&it.design.artMode==='preset'
+            &&Array.isArray(it.design.designs)?it.design.designs:null;
+          return n+(ds&&ds.length?ds.reduce((m,d)=>m+Math.max(1,Math.round(Number(d.qty)||1)),0)
             :Math.max(1,mcQty(it)));
         },0);
         const sides=g.set[0].art&&g.set[0].art.back?['front','back']:['front'];
@@ -43741,6 +43795,8 @@ async function mcDownloadAll(){
         let bytes;
         // One line whose artwork will not load is that line's problem: it is
         // left unmarked and named at the end, and the rest still come out.
+        // a merged sheet's back is not written when its front could not be made
+        if(e.meta&&e.meta.mergeCustom&&e.set.every(it=>bad.has(it.id))) continue;
         try{
           mcBundleSkipped=new Set();
           bytes=e.kind==='line'
@@ -44038,7 +44094,7 @@ async function mcMarkMade(e,run,failed){
   for(const it of e.set){
     if(mcBundleSkipped.has(it.id)){
       if(it.tile==='custom'){
-        const msg=`${it.order_id||it.sku||'a line'} (its artwork could not be loaded, so it is not on the merged sheet)`;
+        const msg=`${it.order_id||it.sku||'a line'} (its artwork could not be loaded${mcMergeWhy(it)}, so it is not on the merged sheet)`;
         if(!failed.includes(msg)) failed.push(msg);
         continue;
       }
@@ -44058,7 +44114,8 @@ function mcMergeSameOn(){
 }
 function mcMergeSameSync(){
   const t=document.getElementById('mcMergeSameToggle');
-  if(t){ t.checked=mcMergeSameOn(); t.disabled=!!(mcBatch&&mcBatch.status!=='open'); }
+  // only how this device downloads the batch, so it is never locked
+  if(t) t.checked=mcMergeSameOn();
 }
 document.getElementById('mcMergeSameToggle').addEventListener('change',e=>{
   try{ localStorage.setItem(mcMergeSameKey(),e.target.checked?'1':'0'); }catch(err){}
@@ -44089,7 +44146,13 @@ function mcMergeSameKeyOf(it){
   const sig=mcLayoutSig(it.design);
   if(!sig) return '';
   const n=v=>String(v||'').trim().toLowerCase();
-  return [sig,n(it.paper_type),n(it.gsm),String((it.art&&it.art.back)||'')].join('|');
+  const bk=(it.art&&it.art.back)||'';
+  // one back is drawn behind every card, so it has to be the same picture
+  // turned and sized the same way
+  const d=it.design||{}, ab=(d.art&&d.art.back)||{};
+  const bkHow=bk?[Number(d.rotate&&d.rotate.back)||0,Math.round((Number(ab.wMm)||0)*10),
+    Math.round((Number(ab.hMm)||0)*10)].join(','):'';
+  return [sig,n(it.paper_type),n(it.gsm),bkHow,String(bk)].join('|');
 }
 // The groups worth merging: two or more lines on one key. A line alone on its
 // key is left to come out as its own file, the way it always did.
@@ -44111,15 +44174,29 @@ function mcMergeSameName(set,side,n){
 // what that put on the sheet is taken off it as designs of the shared one, each
 // carrying the way its own line drew it: bleed, fit, size, turn. The sheet is
 // then the first line's layout with all of them on it, in order.
+// What a merged group's lines put up, kept while none of them has changed, so
+// turning the proof's pages or saving it after a Look does not read every
+// design off the NAS again.
+const mcMergeCache=new Map();
+const mcMergeCacheKey=set=>set.map(it=>`${it.id}:${it.updated_at||''}:${mcQty(it)}`).join(',');
+// why a line put nothing up, as far as can be told
+// — an upload is the line's own; only a design off the folder needs the folder
+const mcMergeWhy=it=>(it&&it.art&&it.art.front)||(loadDesignFiles&&loadDesignFiles.length)?''
+  :' (the designs folder is not connected — open Load design once)';
 async function mcMergeCustomLay(set){
   const pcWas=pcMode;
   pcMode='custom';
   try{
     await mcDesignsReady();
-    const got=[], missing=[];
-    let back=null, backBox=null;
+    const ck=mcMergeCacheKey(set);
+    const hit=mcMergeCache.get(ck);
+    let got=[], missing=[], back=null, backBox=null;
     mcBundleSkipped=new Set();
-    for(const it of set){
+    if(hit){
+      got=hit.got.map(d=>({...d})); missing=hit.missing.slice();
+      back=hit.back; backBox=hit.backBox&&{...hit.backBox};
+      hit.skipped.forEach(id=>mcBundleSkipped.add(id));
+    }else for(const it of set){
       // each line starts from nothing: whatever the line before put up — or the
       // operator's own artwork, for the first — is never taken as this one's
       state.designs=[];
@@ -44145,13 +44222,20 @@ async function mcMergeCustomLay(set){
           data:f.data,img:f.img,file:f.file||null,source:f.source||null,sku:'',
           mcKey:'m:'+it.id,look:{...look,artFit:'card'},bleedOn:true,bleedMm:bleedAll,rotate:0});
       }
-      if(got.length===before){ missing.push(it.order_id||it.sku||''); mcBundleSkipped.add(it.id); }
+      if(got.length===before){ missing.push((it.order_id||it.sku||'')+mcMergeWhy(it)); mcBundleSkipped.add(it.id); }
       if(!back&&state.final.back&&state.final.back.img){
         back=state.final.back; backBox={...state.art.back}; }
     }
-    // the first line's layout is the sheet's: every line on it shares it
+    if(!hit){
+      if(mcMergeCache.size>12) mcMergeCache.delete(mcMergeCache.keys().next().value);
+      // only a complete answer is kept: a line that failed may load next time
+      if(!missing.length) mcMergeCache.set(ck,{got:got.map(d=>({...d})),missing:missing.slice(),
+        back,backBox:backBox&&{...backBox},skipped:[...mcBundleSkipped]});
+    }
+    // the first line's layout is the sheet's: every line on it shares it —
+    // its geometry only, without reading its own designs again to throw away
     const lead=set.find(it=>!mcBundleSkipped.has(it.id))||set[0];
-    applyPrintState(lead.design);
+    applyPrintState({...lead.design,designs:[],design:null});
     await printArtReady().catch(()=>{});
     state.designs=got; state.page=0;
     state.final.front={data:null,img:null,name:'',source:null};
@@ -44164,7 +44248,7 @@ async function mcMergeCustomLay(set){
     mcSetOrderId('');
     state.paperType=lead.paper_type||''; state.gsm=lead.gsm||'';
     mcLaidTemplate=null; mcLaidShared=true;
-    if(!got.length) throw new Error('none of these orders had artwork that could be loaded');
+    if(!got.length) throw new Error('none of these orders had artwork that could be loaded: '+missing.join(', '));
     return {pages:sheetCount(),missing,pcWas};
   }catch(err){ pcMode=pcWas; throw err; }
 }
@@ -44177,8 +44261,11 @@ async function mcMergeCustomBundle(e){
   }
   finally{ pcMode=pcWas; }
 }
+let mcMergeNote='';
 async function mcMergeCustomPreview(e,canvas,dim,page){
-  const {pages,pcWas}=await mcMergeCustomLay(e.set);
+  const {pages,pcWas,missing}=await mcMergeCustomLay(e.set);
+  mcMergeNote=missing&&missing.length
+    ?`Not on this sheet — artwork could not be loaded: ${missing.join(', ')}`:'';
   try{
     renderSide(e.side||'front',canvas,dim,{page:Math.max(0,Math.min(pages-1,Number(page)||0))});
   }finally{ pcMode=pcWas; }
@@ -44398,6 +44485,7 @@ const PJ_KINDS={
         if(meta.template&&typeof setSelectedTemplate==='function')
           setSelectedTemplate(meta.template);
       }
+      try{ mcLaidShared=false; }catch(e){}
       return '';
     },
     screen:'tool-custom'
