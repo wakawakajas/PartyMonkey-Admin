@@ -5940,6 +5940,8 @@ body.mc-docked .mc-bubble{display:none !important;}
         <button type="button" class="chip chip-state" data-bleedmode="ai">AI fill</button>
       </div>
       <p class="hint" style="margin-top:7px;margin-bottom:0;"><b>Stretch</b> enlarges the artwork into the bleed, so its edges are trimmed off. Every other style keeps the artwork at its size and makes up only what lies past the cut. <b>Mirror</b> suits photos and patterns, <b>Extend edges</b> flat colours and gradients. <b>Content-aware</b> fills the bleed with texture matched from the artwork, like Photoshop's Content-Aware Fill — a few seconds, works offline. <b>AI fill</b> paints it in with the free LaMa model on this computer — it can continue shapes and scenery a patch cannot, but it is softer, takes about 15 seconds on most cards, and the first use downloads about 200 MB once.</p>
+      <label class="field" style="margin-top:10px;"><span>TRIM EDGE FIRST (PX)</span><input type="number" step="1" min="0" max="50" id="bleedTrimPx" value="0"/></label>
+      <p class="hint" style="margin-top:7px;margin-bottom:0;">Shaves this many pixels off every edge of the design before the bleed is made, so a thin white or dark line round the file is cut away instead of smeared into the bleed. Works with every style except <b>Stretch</b>, which trims the edge already. 0 leaves the design whole.</p>
       <div id="bleedFillMsg"></div>
 
       <div class="sect-label">Client file fix</div>
@@ -7164,7 +7166,7 @@ const state={
   // 'card' — every design stretched to the placeholder, which is what gets
   // trimmed; 'original' — the file's own proportions, fitted inside it
   artFit:'actual',
-  bleed:{enabled:true,mm:2.5,mode:'stretch',fillGap:false},
+  bleed:{enabled:true,mm:2.5,mode:'stretch',fillGap:false,trimPx:0},
   rotate:{front:0,back:0},
   // names the exported files, and saved with the template: a template is now
   // a job that comes back — the same order id every time it is reprinted —
@@ -8075,7 +8077,7 @@ function renderSide(side,canvas,maxDim,opts){
     ctx.translate(cx,cy);
     ctx.rotate(rotDeg*Math.PI/180);
     // the bleed along the picture's own axes, which a quarter turn swaps
-    ctx.drawImage(grow?bleedArt(img,trimW,trimH,swapped?bY:bX,bleedMode,swapped?bX:bY):img,
+    ctx.drawImage(grow?bleedArt(img,trimW,trimH,swapped?bY:bX,bleedMode,swapped?bX:bY,bleedTrimPx()):img,
       -srcW/2,-srcH/2,srcW,srcH);
     // a pixel short of the trim, so the ring overlaps the placed page rather
     // than leaving a hairline of paper between them
@@ -9514,6 +9516,7 @@ function refreshArtInputs(){
   document.getElementById('bleedAmount').value=round(fromMm(state.bleed.mm,state.paper.unit));
   document.getElementById('bleedToggle').checked=!!state.bleed.enabled;
   document.getElementById('bleedFillGap').checked=!!state.bleed.fillGap;
+  document.getElementById('bleedTrimPx').value=bleedTrimPx();
   document.getElementById('refMarkOffset').value=round(fromMm(state.refMark.offsetMm,state.paper.unit));
   document.getElementById('refMarkLen').value=round(fromMm(state.refMark.lenMm,state.paper.unit));
   document.getElementById('shiftFrontX').value=round(fromMm(state.shift.front.xMm,state.paper.unit));
@@ -9587,6 +9590,10 @@ document.getElementById('bleedToggle').addEventListener('change',e=>{
 document.getElementById('bleedFillGap').addEventListener('change',e=>{
   state.bleed.fillGap=e.target.checked;drawAll();
 });
+document.getElementById('bleedTrimPx').addEventListener('input',e=>{
+  const v=parseInt(e.target.value,10);
+  state.bleed.trimPx=isFinite(v)&&v>0?Math.min(50,v):0; drawAll();
+});
 document.getElementById('bleedAmount').addEventListener('input',e=>{
   const v=parseFloat(e.target.value);
   if(!isNaN(v)&&v>=0){ state.bleed.mm=toMm(v,state.paper.unit); syncBleedChips(); drawAll(); }
@@ -9626,12 +9633,16 @@ document.getElementById('bleedModeSeg').addEventListener('click',async e=>{
 var bleedArtMemo=new WeakMap();
 // mmY is the bleed top and bottom where it differs from the sides — artwork
 // that is not the placeholder's shape has further to reach one way than the other
-function bleedArt(img,trimW,trimH,mm,mode,mmY){
+// trim is pixels shaved off every edge first, so a thin white or dark line
+// round the client's file is cut away and the bleed is made from inside it
+function bleedArt(img,trimW,trimH,mm,mode,mmY,trim){
   const nW=img.naturalWidth||img.width, nH=img.naturalHeight||img.height;
   if(!nW||!nH||!(trimW>0)||!(trimH>0)) return img;
   if(mmY===undefined) mmY=mm;
-  const bx=Math.max(1,Math.round(mm*nW/trimW));
-  const by=Math.max(1,Math.round(mmY*nH/trimH));
+  let bx=Math.max(1,Math.round(mm*nW/trimW));
+  let by=Math.max(1,Math.round(mmY*nH/trimH));
+  const t=Math.min(trim|0,Math.floor((Math.min(nW,nH)-2)/2));
+  if(t>0){ img=bleedTrimmed(img,t); bx+=t; by+=t; }
   // One mirrored copy is as far as a mirror can honestly reach. Capping the
   // bleed there instead squeezed the picture when it was drawn into its box,
   // so a gap wider than the picture is extended rather than mirrored.
@@ -9641,6 +9652,22 @@ function bleedArt(img,trimW,trimH,mm,mode,mmY){
     return job.canvas||bleedArtPx(img,bx,by,'extend');
   }
   return bleedArtPx(img,bx,by,mode);
+}
+function bleedTrimPx(){
+  const v=Number(state.bleed&&state.bleed.trimPx);
+  return isFinite(v)&&v>0?Math.round(v):0;
+}
+// the picture less t pixels a side, kept so the bleed memo keyed on it holds
+var bleedTrimMemo=new WeakMap();
+function bleedTrimmed(img,t){
+  let m=bleedTrimMemo.get(img);
+  if(m&&m.t===t) return m.c;
+  const nW=img.naturalWidth||img.width, nH=img.naturalHeight||img.height;
+  const c=document.createElement('canvas');
+  c.width=nW-t*2; c.height=nH-t*2;
+  c.getContext('2d').drawImage(img,t,t,c.width,c.height,0,0,c.width,c.height);
+  bleedTrimMemo.set(img,{t,c});
+  return c;
 }
 // the same, with the bleed already in the picture's own pixels
 function bleedArtPx(img,bx,by,mode){
@@ -22224,6 +22251,8 @@ function applyPrintState(meta,name){
   // the panel were both right and only the switch was lying.
   document.getElementById('bleedToggle').checked=!!state.bleed.enabled;
   document.getElementById('bleedFillGap').checked=!!state.bleed.fillGap;
+  if(!(meta.bleed&&meta.bleed.trimPx)) state.bleed.trimPx=0;
+  document.getElementById('bleedTrimPx').value=bleedTrimPx();
   if(meta.shift){ state.shift.front=Object.assign(state.shift.front,meta.shift.front); state.shift.back=Object.assign(state.shift.back,meta.shift.back); }
   if(meta.rotate){ state.rotate.front=meta.rotate.front||0; state.rotate.back=meta.rotate.back||0; }
   // Templates saved while the size chips still existed carry a presetSize.
