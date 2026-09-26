@@ -6472,6 +6472,16 @@ body.mc-docked .mc-bubble{display:none !important;}
       alone, so nobody else's screen changes.</p>
     <div id="mcShareMsg"></div>
     <div id="mcShareBody"></div>
+
+    <!-- A gift tag sheet kept for later on the Gift Tag screen, brought onto
+         this batch: its tags become lines here and print with the batch's own. -->
+    <div class="sheet-title" style="margin-top:16px;">Saved gift tag sheets</div>
+    <p class="hint" style="margin:0 0 8px;">A sheet kept for later on the Gift Tag
+      screen. <b>Put on this batch</b> adds its tags here as lines of their own, so they
+      go onto this batch's gift tag sheets and into <b>Download All</b>. The saved sheet is
+      then marked Printed, so it is not run twice.</p>
+    <div id="mcPjMsg"></div>
+    <div id="mcPjBody"></div>
   </div>
 </div>
 
@@ -34692,6 +34702,7 @@ async function mcOpenShare(){
   sheet.classList.add('open');
   await mcRefreshBatches().catch(()=>{});
   mcRenderShare();
+  await mcPjRender();
 }
 function mcRenderShare(){
   const body=document.getElementById('mcShareBody'); if(!body) return;
@@ -34741,6 +34752,111 @@ document.getElementById('mcShareBody').addEventListener('click',async e=>{
   showMsg(msg,off?`${mcShareName(id)} is off these sheets.`
     :`${mcShareName(id)} shares these sheets — ${mine} line${mine===1?'':'s'} of theirs `
      +'on a sheet.',true);
+});
+
+// ---------- a saved gift tag sheet, onto this batch ----------
+// Tags kept for later on the Gift Tag screen are a half-empty sheet waiting for
+// company, and a batch's gift tags are that company. Its tags are written in as
+// lines of this batch — laid out, on their page, ready — so the batch's sheets
+// and Download All carry them with nothing special about them. The saved sheet
+// is marked Printed on the way, or it would be waiting to be run a second time.
+let mcPjRows=[];
+async function mcPjRender(){
+  const body=document.getElementById('mcPjBody'); if(!body) return;
+  body.innerHTML='<p class="hint" style="margin:4px 0 0;">Looking for saved sheets…</p>';
+  mcPjRows=[];
+  if(sb){
+    const {data,error}=await sb.from('print_jobs').select('*')
+      .eq('kind','giftTag').eq('status','open').order('updated_at',{ascending:false});
+    if(error){
+      body.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not read the saved sheets: '
+        +escapeHtml(error.message||'')+'</p>';
+      return;
+    }
+    mcPjRows=data||[];
+  }
+  if(!mcPjRows.length){
+    body.innerHTML='<p class="hint" style="margin:4px 0 0;">'
+      +'— no gift tag sheet is waiting —</p>';
+    return;
+  }
+  body.innerHTML=mcPjRows.map(r=>{
+    const when=r.updated_at?new Date(r.updated_at).toLocaleDateString():'';
+    const page=r.page?` · ${mcGtPage(r.page).name}`:'';
+    return `<div class="mc-sum-row">
+      <span class="mc-sum-shot blank" aria-hidden="true">&#128451;</span>
+      <span class="mc-sum-main">
+        <span class="mc-sum-sku">${escapeHtml(r.name||'Untitled sheet')}</span>
+        <span class="mc-sum-name">${r.items} tag${r.items===1?'':'s'}${page} · ${escapeHtml(when)}</span>
+      </span>
+      <button type="button" class="btn-outline" data-mc-pj="${escapeHtml(String(r.id))}"
+        title="Add this sheet's tags to this batch as lines of their own">Put on this batch</button>
+    </div>`;
+  }).join('');
+}
+// the name a saved tag's line goes by: its SKU if it was put on for one, and
+// otherwise the design's own name off that page's library
+async function mcPjSkuOf(l,page){
+  if(l.sku) return String(l.sku);
+  if(!Object.keys(mcGtNames||{}).length) await mcGtIndex().catch(()=>{});
+  const d=((mcGtNames&&mcGtNames[page])||[]).find(x=>x.id===l.designId);
+  return (d&&d.name)||'Gift tag';
+}
+async function mcPjPut(id,btn){
+  const msg=document.getElementById('mcPjMsg');
+  const row=mcPjRows.find(r=>String(r.id)===String(id)); if(!row) return;
+  if(!sb||!mcBatch) return;
+  if(mcBatch.status!=='open'){ showMsg(msg,'This batch is completed — re-open it first.',false); return; }
+  if(mcBusy){ showMsg(msg,'An export is running — wait for it to finish.',false); return; }
+  const order=((row.data&&row.data.order)||[]).filter(l=>l&&l.designId);
+  if(!order.length){ showMsg(msg,'That saved sheet has no tags on it.',false); return; }
+  const name=row.name||'Saved sheet';
+  if(!confirm(`Put “${name}” on this batch?\n\nIts ${row.items} tag${row.items===1?'':'s'} `
+    +'become lines here and print with this batch. The saved sheet is marked Printed.')) return;
+  const who=await requireSession(msg); if(!who) return;
+  await mcWhoAmI();
+  btn.disabled=true; btn.textContent='Adding…';
+  try{
+    const page=String(row.page||(row.data&&row.data.mode)||gtMode||'');
+    const finish=(row.data&&row.data.finish)||'Matte';
+    let sort=Math.max(0,...mcItems.map(i=>Number(i.sort_order)||0));
+    const now=new Date().toISOString();
+    const rows=[];
+    for(const l of order){
+      const sku=await mcPjSkuOf(l,page);
+      const cut=sku.indexOf('-');
+      const qty=Math.max(1,Math.round(Number(l.qty)||1));
+      rows.push({
+        user_id:who.user.id, batch_id:mcBatch.id, sort_order:++sort,
+        order_id:'Saved sheet — '+name, buyer:'', sku,
+        product:cut<0?sku:sku.slice(0,cut), design_name:cut<0?'':sku.slice(cut+1),
+        qty, message:'', note:`From the saved gift tag sheet “${name}”`, image_url:'', raw:{},
+        tile:'giftTag',
+        sheet_item:{designId:l.designId,qty,extra_qty:0,vals:l.vals||{},
+          extra:(l.extra||[]).map(f=>({...f})),shape:l.shape||'',page,finish},
+        status:'done', acted_by:mcMyId, acted_at:now
+      });
+    }
+    const {data,error}=await sb.from('magic_items').insert(rows).select();
+    if(error) throw error;
+    // the live channel can deliver the new rows before this insert returns
+    (data||[]).forEach(d=>{ if(!mcItems.some(x=>x.id===d.id)) mcItems.push(d); });
+    const {error:je}=await sb.from('print_jobs')
+      .update({status:'done',updated_at:now}).eq('id',row.id);
+    mcRenderItems(); mcSyncBatchButtons();
+    if(typeof mcRenderSummary==='function') mcRenderSummary();
+    await mcPjRender();
+    showMsg(msg,`✓ “${escapeHtml(name)}” is on this batch — ${rows.length} line`
+      +`${rows.length===1?'':'s'}, ${row.items} tag${row.items===1?'':'s'}.`
+      +(je?' It could not be marked Printed — tick it off on the Gift Tag screen.':''),!je);
+  }catch(err){
+    btn.disabled=false; btn.textContent='Put on this batch';
+    showMsg(msg,'Could not add it: '+((err&&err.message)||'unknown error'),false);
+  }
+}
+document.getElementById('mcPjBody').addEventListener('click',e=>{
+  const b=e.target.closest('[data-mc-pj]'); if(!b||b.disabled) return;
+  mcPjPut(b.dataset.mcPj,b);
 });
 // The order's own picture, opened. A thumbnail says which card this is and
 // nothing more: the wording, the spelling of the name on it, and whether the
