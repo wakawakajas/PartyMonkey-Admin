@@ -7892,7 +7892,7 @@ async function clearArtSide(side,it){
   const line=it||((typeof mcWinItem!=='undefined'&&mcWinItem&&typeof mcItem==='function')
     ?mcItem(mcWinItem):null);
   if(!(line&&line.art&&line.art[side])) return;
-  const art={...line.art}; delete art[side];
+  const art={...line.art}; delete art[side]; delete art[side+'Split'];
   const was=line.art;
   line.art=art;
   if(typeof mcSave==='function'&&!await mcSave(line,{art})){ line.art=was; return; }
@@ -42359,15 +42359,45 @@ async function mcPutArt(it,side,file,dataURL,img){
 async function mcKeepBuilderArt(it){
   const failed=[];
   if(!sb||!it||!state.final) return {patch:null,failed};
-  // a line keeps one picture a side; several split designs are not something
-  // it can hold, and saving would quietly keep only the first
-  if(finalSplitList('front')||finalSplitList('back'))
-    alert('Split designs are not kept on a Magic Create line — only the first ticked '
-      +'design is saved, repeated. For several designs on one line, use Preset design lines, '
-      +'or give each design a line of its own.');
   const art=Object.assign({},it.art||{});
   let changed=false;
+  const fileOf=async o=>o.file||new File([await (await fetch(o.data)).blob()],
+    (o.name||'design').replace(/(\.[^.]+)?$/,'.png'),{type:'image/png'});
   for(const side of ['front','back']){
+    // Split pages: every page kept on the line with its tick and its count,
+    // so the line prints them all and the picker opens on them again. The
+    // side's own picture is the first ticked page, which is what anything
+    // that only knows one picture a side reads.
+    const key=side+'Split';
+    if(finalSplitList(side)){
+      const list=state.finalList[side], was=Array.isArray(art[key])?art[key]:[];
+      const out=[];
+      try{
+        for(let i=0;i<list.length;i++){
+          const d=list[i];
+          let path=d.mcPath&&was.some(w=>w.path===d.mcPath)?d.mcPath:'';
+          if(!path){
+            const f=await fileOf(d);
+            try{ path=await mcPutArt(it,`${side}-s${i}-${Date.now().toString(36)}`,f,d.data,d.img); }
+            catch(e){
+              const mb=f&&f.size?f.size/1048576:0;
+              throw new Error(mb>50?`${f.name||'a page'} is ${Math.round(mb)} MB — `
+                +'the most the storage takes is 50 MB':((e&&e.message)||'upload failed'));
+            }
+            d.mcPath=path;
+          }
+          out.push({path,name:d.name||'',qty:splitQty(d.qty),on:d.on!==false});
+        }
+        const first=out.find(x=>x.on)||out[0];
+        const same=JSON.stringify(out)===JSON.stringify(was)&&art[side]===first.path;
+        if(!same){ art[key]=out; art[side]=first.path; changed=true; }
+        if(state.final[side]) state.final[side].mcPath=first.path;
+      }catch(e){ failed.push(side+' ('+((e&&e.message)||'upload failed')+')'); }
+      continue;
+    }
+    // no split on this side now: pages kept from before are not this line's any more
+    if(art[key]){ delete art[key]; changed=true;
+      if(state.final[side]&&state.final[side].mcPath===art[side]) state.final[side].mcPath=''; }
     const o=state.final[side];
     if(!o||!o.data) continue;
     // the front the layout names is kept by its path; a back has no path in a
@@ -42515,6 +42545,33 @@ async function mcApplyArt(it,live){
       const a=state.art[side];
       if(!(a&&a.wMm&&a.hMm)) fitArtToCard(side);
     }catch(e){ state.final[side]={data:null,img:null,name:''}; }
+  }
+  let split=false;
+  for(const side of ['front','back']){
+    const pages=Array.isArray(art[side+'Split'])?art[side+'Split']:null;
+    if(!pages||!pages.length) continue;
+    const list=[];
+    for(const pg of pages){
+      try{
+        const got=await mcArtDataURL(pg.path);
+        if(gone()) return;
+        list.push({id:'fl'+(++finalListSeq),data:got.data,img:got.img,name:pg.name||'',
+          source:null,file:got.file||null,mcPath:pg.path,on:pg.on!==false,qty:splitQty(pg.qty)});
+      }catch(e){ /* a page that will not load is left out, the rest still print */ }
+    }
+    const first=list.find(d=>d.on);
+    if(!first) continue;
+    state.finalList[side]=list;
+    state.final[side]={...first};
+    const a=state.art[side];
+    if(!(a&&a.wMm&&a.hMm)) fitArtToCard(side);
+    split=true;
+  }
+  if(split){
+    state.finalSplit=true;
+    const tg=document.getElementById('finalSplitToggle'); if(tg) tg.checked=true;
+    const off=document.getElementById('finalSplitHintOff'), on=document.getElementById('finalSplitHintOn');
+    if(off) off.hidden=true; if(on) on.hidden=false;
   }
   refreshSlots(); refreshArtInputs(); drawAll();
 }
@@ -43724,6 +43781,8 @@ async function mcExportPlan(){
           // an upload on the line replaces its layout's designs, as it does in its own file
           const ds=!(it.art&&it.art.front)&&it.design&&it.design.artMode==='preset'
             &&Array.isArray(it.design.designs)?it.design.designs:null;
+          const sp=it.art&&Array.isArray(it.art.frontSplit)?it.art.frontSplit.filter(x=>x.on!==false):null;
+          if(sp&&sp.length) return n+sp.reduce((m,x)=>m+Math.max(1,Math.round(Number(x.qty)||1)),0);
           return n+(ds&&ds.length?ds.reduce((m,d)=>m+Math.max(1,Math.round(Number(d.qty)||1)),0)
             :Math.max(1,mcQty(it)));
         },0);
@@ -44215,6 +44274,13 @@ async function mcMergeCustomLay(set){
         state.designs.forEach(d=>{ if(!d.img||!(Number(d.qty)>0)) return;
           got.push({...d,id:uid(),mcKey:'m:'+it.id,look,
             bleedOn:true,bleedMm:d.bleedOn&&isFinite(Number(d.bleedMm))?Number(d.bleedMm):bleedAll}); });
+      }else if(!usingPreset()&&finalSplitList('front')){
+        // Split pages, each at the count it was given, drawn as the line draws them
+        const seen=new Set();
+        finalSplitList('front').forEach(d=>{ if(seen.has(d)||!d.img) return; seen.add(d);
+          got.push({id:uid(),name:d.name||it.design_name||'Page',qty:splitQty(d.qty),
+            data:d.data,img:d.img,file:d.file||null,source:null,sku:'',
+            mcKey:'m:'+it.id,look:{...look,artFit:'card'},bleedOn:true,bleedMm:bleedAll,rotate:0}); });
       }else if(!usingPreset()&&state.final.front&&state.final.front.img){
         // one picture, drawn the way the single artwork is: at its box, as sized
         const f=state.final.front;
