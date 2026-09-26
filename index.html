@@ -8249,6 +8249,8 @@ function renderSide(side,canvas,maxDim,opts){
   // drift — everything below this point is drawn relative to the shift
   ctx.save();
   const shift=state.shift[side]||{xMm:0,yMm:0};
+  // the shift artwork is placed with: the sheet's, or a merged design's own
+  let artShift=shift;
   ctx.translate(shift.xMm*sc,shift.yMm*sc);
 
   // bottom layer: auto-generated cutting reference marks, fixed to the placeholder
@@ -8272,6 +8274,10 @@ function renderSide(side,canvas,maxDim,opts){
     const lk=line&&line.look;
     if(!lk) return oneDraw(img,ph,line,key);
     const was={bleed:state.bleed,fit:state.artFit,art:state.art[side],rot:state.rotate[side]};
+    // its own shift, as the difference from the sheet's the canvas already has
+    const sh=lk.shift&&side==='front'?lk.shift:null;
+    const dx=sh?(Number(sh.xMm)||0)-shift.xMm:0, dy=sh?(Number(sh.yMm)||0)-shift.yMm:0;
+    if(dx||dy){ ctx.save(); ctx.translate(dx*sc,dy*sc); artShift={xMm:shift.xMm+dx,yMm:shift.yMm+dy}; }
     try{
       state.bleed={...state.bleed,...lk.bleed};
       state.artFit=lk.artFit||state.artFit;
@@ -8280,6 +8286,7 @@ function renderSide(side,canvas,maxDim,opts){
       return oneDraw(img,ph,line,key);
     }finally{
       state.bleed=was.bleed; state.artFit=was.fit; state.art[side]=was.art; state.rotate[side]=was.rot;
+      if(dx||dy){ ctx.restore(); artShift=shift; }
     }
   };
   const oneDraw=(img,ph,line,key)=>{
@@ -8369,14 +8376,14 @@ function renderSide(side,canvas,maxDim,opts){
       y:Math.min(ART_REACH_MM,tf?Math.min(y,(hMm-ph.hMm)/2+bleedMm):y)});
     let ringOnly=false;
     if(opts.vec){
-      const vclip={x:clip.x+shift.xMm, y:clip.y+shift.yMm, w:clip.w, h:clip.h};
+      const vclip={x:clip.x+artShift.xMm, y:clip.y+artShift.yMm, w:clip.w, h:clip.h};
       if(grow){
         ringOnly=opts.vec.take(key,
-          {x:ph.xMm+ph.wMm/2-trimW/2+shift.xMm, y:ph.yMm+ph.hMm/2-trimH/2+shift.yMm,
+          {x:ph.xMm+ph.wMm/2-trimW/2+artShift.xMm, y:ph.yMm+ph.hMm/2-trimH/2+artShift.yMm,
            w:trimW, h:trimH, rot:rotDeg},
           reach((wMm-ph.wMm)/2, (hMm-ph.hMm)/2), vclip);
       }else if(opts.vec.take(key,
-        {x:ph.xMm+ph.wMm/2-boxW/2+shift.xMm, y:ph.yMm+ph.hMm/2-boxH/2+shift.yMm,
+        {x:ph.xMm+ph.wMm/2-boxW/2+artShift.xMm, y:ph.yMm+ph.hMm/2-boxH/2+artShift.yMm,
          w:boxW, h:boxH, rot:rotDeg},
         reach((effW-ph.wMm)/2, (effH-ph.hMm)/2), vclip)) return;
     }
@@ -44265,7 +44272,8 @@ async function mcMergeCustomLay(set){
       await printArtReady().catch(()=>{});
       try{ await mcApplyArt(it); }catch(e){}
       const look={bleed:{...state.bleed},artFit:state.artFit,
-        art:{...state.art.front},rotate:Number(state.rotate.front)||0};
+        art:{...state.art.front},rotate:Number(state.rotate.front)||0,
+        shift:{...(state.shift&&state.shift.front||{xMm:0,yMm:0})}};
       const bleedAll=state.bleed.enabled?Math.max(0,Number(state.bleed.mm)||0):0;
       const qty=Math.max(1,mcQty(it));
       const before=got.length;
@@ -44280,7 +44288,7 @@ async function mcMergeCustomLay(set){
         finalSplitList('front').forEach(d=>{ if(seen.has(d)||!d.img) return; seen.add(d);
           got.push({id:uid(),name:d.name||it.design_name||'Page',qty:splitQty(d.qty),
             data:d.data,img:d.img,file:d.file||null,source:null,sku:'',
-            mcKey:'m:'+it.id,look:{...look,artFit:'card'},bleedOn:true,bleedMm:bleedAll,rotate:0}); });
+            mcKey:'m:'+it.id,look,bleedOn:true,bleedMm:bleedAll,rotate:designRotOf(d)}); });
       }else if(!usingPreset()&&state.final.front&&state.final.front.img){
         // one picture, drawn the way the single artwork is: at its box, as sized
         const f=state.final.front;
