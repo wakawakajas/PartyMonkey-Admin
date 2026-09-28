@@ -24273,7 +24273,7 @@ function exportFolderLbl(){
 // click, before the minute of rendering that would otherwise spend the gesture.
 async function exportFolderReady(ask){
   if(ask&&typeof gtPltRun!=='undefined'){
-    gtPltRun={at:0,n:0};
+    gtPltRun={at:0,used:new Set()};
   }
   if(!canPickFolder()) return null;
   const dir=await exportDirGet();
@@ -27487,7 +27487,7 @@ async function gtCutFiles(){
     if(at.shape!==S.layoutFile) await gtShowShape(at.shape);
     // the paper and the dots are caught per sheet: two shapes on one order can
     // be two different sheet sizes, and the file is measured off its own
-    out.push({text:gtPltSheet(at),paperW:S.paperW,paperH:S.paperH,
+    out.push({text:gtPltSheet(at),name:gtPltSheetName(at),paperW:S.paperW,paperH:S.paperH,
               marks:gtMarks(),frame:gtPltFrame(),shape:at.shape});
   }
   if(S.layoutFile!==wasShape) await gtShowShape(wasShape);
@@ -31324,29 +31324,65 @@ async function gtThumbSync(){
   const el=document.getElementById('gtThumbState'); if(!el) return;
   const d=await gtThumbGet();
   el.textContent=d
-    ? `Cut files go onto ${d.name} as GT1.plt, GT2.plt … (Downloads if it is not plugged in).`
-    : 'No thumb drive chosen — cut files download as GT1.plt, GT2.plt …';
+    ? `Cut files go onto ${d.name}, named by the last 4 of the order ID (Downloads if it is not plugged in).`
+    : 'No thumb drive chosen — cut files download, named by the last 4 of the order ID.';
 }
-// numbered from 1 each export; a Magic Create run of several sheets carries on
-let gtPltRun={at:0,n:0};
-function gtPltName(fresh){
-  if(fresh||Date.now()-gtPltRun.at>120000) gtPltRun.n=0;
+// A cut file is named for the order it cuts: the last four characters of the
+// order ID, the codes of every order on the sheet joined where there are
+// several. A tag with no order ID has nothing to be named by, and the cut file
+// is not made. Names already used in this export (or this Magic Create run)
+// take -2, -3 … so one sheet never writes over another.
+let gtPltRun={at:0,used:new Set()};
+function gtLineOrderId(l){
+  if(!l) return '';
+  if(typeof mcGtLent==='function'&&mcGtLent(l)){
+    const it=(typeof mcItem==='function')?mcItem(String(l.id).slice(3)):null;
+    return it?String(it.order_id||'').trim():'';
+  }
+  return String(l.orderId||l.order_id||'').trim();
+}
+// the lines a sheet cuts, the way gtPltSheet reads them
+function gtSheetLines(at){
+  const S=gtSheet, slots=(at&&at.slots)||S.slots;
+  const q=(at&&at.queue)||gtQueue(), start=at?at.start:0;
+  return slots.map((_,i)=>q[start+i]).filter(Boolean);
+}
+// the lines on these sheets with no order ID, by name, for saying so
+function gtPltUnnamed(plan){
+  const miss=new Set();
+  (plan||[]).forEach(at=>gtSheetLines(at).forEach(l=>{
+    if(!gtLineOrderId(l)){ const d=gtDesign(l.designId); miss.add((d&&d.name)||l.sku||'a tag'); }
+  }));
+  return [...miss];
+}
+function gtPltSheetName(at){
+  const ids=[...new Set(gtSheetLines(at).map(gtLineOrderId))];
+  if(!ids.length||ids.some(x=>!x)) return null;
+  const base=ids.map(x=>x.slice(-4)).join('_').replace(/[\\/:*?"<>|\s]/g,'')||null;
+  return base;
+}
+function gtPltUnique(base,fresh){
+  if(fresh||Date.now()-gtPltRun.at>120000) gtPltRun.used=new Set();
   gtPltRun.at=Date.now();
-  return 'GT'+(++gtPltRun.n)+'.plt';
+  let nm=base, k=1;
+  while(gtPltRun.used.has(nm.toLowerCase())) nm=base+'-'+(++k);
+  gtPltRun.used.add(nm.toLowerCase());
+  return nm+'.plt';
 }
-async function gtSavePlts(texts,fresh){
+// items: [{text,name}] — name without .plt
+async function gtSavePlts(items,fresh){
   const dir=await gtThumbReady(false);
   const names=[]; let onDrive=0;
-  for(let i=0;i<texts.length;i++){
-    const nm=gtPltName(fresh&&i===0);
-    const b=new Blob([texts[i]],{type:'application/vnd.hp-HPGL'});
+  for(let i=0;i<items.length;i++){
+    const nm=gtPltUnique(items[i].name,fresh&&i===0);
+    const b=new Blob([items[i].text],{type:'application/vnd.hp-HPGL'});
     let ok=false;
     if(dir){ try{ await writeIntoFolder(dir,nm,b); ok=true; onDrive++; }catch(e){} }
     // spaced out a little: browsers drop the later files of a burst
     if(!ok) await new Promise(r=>setTimeout(()=>{ downloadBlob(b,nm); r(); },i?400:0));
     names.push(nm);
   }
-  return {names,drive:onDrive?dir.name:'',all:onDrive===texts.length};
+  return {names,drive:onDrive?dir.name:'',all:onDrive===items.length};
 }
 document.getElementById('gtThumbPickBtn').addEventListener('click',async()=>{
   if(!canPickFolder()){ alert('This browser cannot write onto a drive — use Chrome or Edge on a PC.'); return; }
@@ -31364,8 +31400,9 @@ document.getElementById('gtThumbForgetBtn').addEventListener('click',async()=>{
 gtThumbSync();
 document.getElementById('gtPltSaveBtn').addEventListener('click',async()=>{
   const S=gtPltView.sheets[gtPltView.at]; if(!S) return;
+  if(!S.name){ alert('A tag on this sheet has no order ID, so its cut file cannot be named or saved.'); return; }
   await gtThumbReady(true);
-  const nm='GT'+(gtPltView.at+1)+'.plt';
+  const nm=S.name+'.plt';
   const b=new Blob([S.text],{type:'application/vnd.hp-HPGL'});
   const dir=await gtThumbReady(false);
   try{ if(dir){ await writeIntoFolder(dir,nm,b); return; } }catch(e){}
@@ -31400,6 +31437,15 @@ async function gtExport(print){
   try{ await gtShapesInHand(); gtDraw(); }catch(e){}
   const pages=gtPageCount();
   if(!pages||!gtQueue().length){ showMsg(out,'Nothing to print — add a design and a quantity first.',false); return; }
+  // the cut file is named for its order: a tag with none cannot be downloaded
+  if(gtSheet.pltOn!==false){
+    const miss=gtPltUnnamed(gtPagePlan());
+    if(miss.length){
+      showMsg(out,'Cannot download — no order ID on: '+escapeHtml(miss.slice(0,5).join(', '))
+        +(miss.length>5?'…':'')+'. The cut file is named by the order ID. Add these from a Magic Create batch, or turn off "Save the cut file".',false);
+      return;
+    }
+  }
   const noAge=gtAgeLeft();
   if(noAge.length&&!confirm('No age filled in:\n\n'+noAge.join('\n')
       +'\n\nDownload the PDF anyway?')){
@@ -31445,7 +31491,7 @@ async function gtExport(print){
     const bytes=await gtBuildPdf(pages,async(i,forms)=>{
       const at=plan[i];
       if(at&&at.shape!==S.layoutFile) await gtShowShape(at.shape);
-      if(S.pltOn!==false){ try{ cuts.push(gtPltSheet(at)); }catch(e){ cuts.push(null); } }
+      if(S.pltOn!==false){ try{ cuts.push({text:gtPltSheet(at),name:gtPltSheetName(at)||'GT'}); }catch(e){ cuts.push(null); } }
       const px=Math.min(6000,Math.round(Math.max(S.paperW,S.paperH)/25.4*300));
       const c=document.createElement('canvas');
       const place=[];
@@ -45748,8 +45794,13 @@ async function mcGiftBundle(lines,mode){
       // size is read after the swap: another die is often another paper.
       const at=plan[i];
       if(at&&at.shape&&at.shape!==gtSheet.layoutFile) await gtShowShape(at.shape);
-      if(cuts){ try{ cuts.push(gtPltSheet(at||{slots:gtSheet.slots,queue:gtQueue(),
-        start:i*gtSheet.slots.length})); }catch(e){ cuts.push(null); } }
+      if(cuts){
+        const a=at||{slots:gtSheet.slots,queue:gtQueue(),start:i*gtSheet.slots.length};
+        const name=gtPltSheetName(a);
+        // named by the order it cuts; a tag with none cannot be downloaded
+        if(!name) throw new Error('a tag on this sheet has no order ID — the cut file cannot be named');
+        try{ cuts.push({text:gtPltSheet(a),name}); }catch(e){ cuts.push(null); }
+      }
       const px=Math.min(6000,Math.round(Math.max(gtSheet.paperW,gtSheet.paperH)/25.4*300));
       const c=document.createElement('canvas');
       const place=[];
