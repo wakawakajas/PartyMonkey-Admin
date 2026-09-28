@@ -5516,6 +5516,11 @@ body.mc-docked .mc-bubble{display:none !important;}
             <label class="field"><span>GUTTER SLITS (COL GAP)</span><input type="number" step="0.1" min="0" id="gtGap" value="3"/></label>
             <label class="field"><span>GUTTER CUTS (ROW GAP)</span><input type="number" step="0.1" min="0" id="gtGapY" value="3"/></label>
           </div>
+          <div class="sect-label">Round corners</div>
+          <div class="grid2">
+            <label class="field"><span>CORNER RADIUS (mm)</span><input type="number" step="0.1" min="0" id="gtSlotRadius" value="0"/></label>
+            <span></span>
+          </div>
           <div class="calc" id="gtGridCalc" style="margin-top:9px;"></div>
           <button class="btn-primary" id="gtGenGridBtn" style="width:100%;margin-top:12px;">Generate placeholder grid</button>
           <button class="btn-outline" id="gtDistributeBtn" style="width:100%;margin-top:8px;"
@@ -5578,6 +5583,9 @@ body.mc-docked .mc-bubble{display:none !important;}
           <label class="field"><span>Y</span><input type="number" step="0.1" id="gtBulkY" placeholder="—"/></label>
           <label class="field"><span>W</span><input type="number" step="0.1" min="1" id="gtBulkW" placeholder="—"/></label>
           <label class="field"><span>H</span><input type="number" step="0.1" min="1" id="gtBulkH" placeholder="—"/></label>
+        </div>
+        <div class="grid4" style="margin-bottom:9px;">
+          <label class="field"><span>CORNER R</span><input type="number" step="0.1" min="0" id="gtBulkR" placeholder="—"/></label>
         </div>
         <div class="grid2">
           <button class="btn-outline btn-sm" id="gtBulkAllBtn">Apply to all</button>
@@ -24987,7 +24995,7 @@ let gtCurrentDesign=null;          // the design open in the editor
 let gtSlotEdit=false, gtSelSlot=null;   // Contours on, and the placeholder in hand
 const gtShapeSig=new Map();          // see gtKeepShape
 const gtSelSet=new Set();          // every placeholder picked, gtSelSlot among them
-const GT_SHEET_NEW={gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{}};
+const GT_SHEET_NEW={slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{}};
 const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
   // null rather than a number: the layout centres itself until it is told
@@ -26801,7 +26809,38 @@ function gtTagBox(){
 }
 // The shape stretched onto its placeholder, so moving or resizing the
 // placeholder takes the outline with it.
+// Round corners on a plain rectangle placeholder: its own figure where one was
+// set on it (Fine tune), the sheet's otherwise, and never more than half the
+// shorter side. A placeholder cut from a file keeps the file's own shape.
+function gtSlotR(slot){
+  if(!slot||slot.shape!=null&&gtLayout&&gtLayout.shapes[slot.shape]) return 0;
+  const r=slot.r!=null&&slot.r!==''?Number(slot.r):Number(gtSheet.slotRadius)||0;
+  return Math.max(0,Math.min(isFinite(r)?r:0,slot.w/2,slot.h/2));
+}
+// the rounded rectangle as points, for the blade — arcs taken every GT_PLT_STEP
+function gtRoundRectLoop(x,y,w,h,r){
+  if(!(r>0)) return [[x,y],[x+w,y],[x+w,y+h],[x,y+h],[x,y]];
+  const pts=[], n=Math.max(4,Math.ceil((Math.PI*r/2)/GT_PLT_STEP));
+  const arc=(cx,cy,a0)=>{ for(let i=0;i<=n;i++){ const a=a0+i/n*Math.PI/2;
+    pts.push([cx+Math.cos(a)*r,cy+Math.sin(a)*r]); } };
+  arc(x+w-r,y+r,-Math.PI/2);     // top right
+  arc(x+w-r,y+h-r,0);            // bottom right
+  arc(x+r,y+h-r,Math.PI/2);      // bottom left
+  arc(x+r,y+r,Math.PI);          // top left
+  pts.push(pts[0]);
+  return pts;
+}
 function gtStrokeSlot(ctx,slot,sc){
+  const rr=gtSlotR(slot);
+  if(rr>0){
+    ctx.save();
+    ctx.strokeStyle='#B24C25'; ctx.lineWidth=1;
+    ctx.beginPath();
+    gtRoundRectLoop(slot.x,slot.y,slot.w,slot.h,rr)
+      .forEach(([x,y],k)=>k?ctx.lineTo(x*sc,y*sc):ctx.moveTo(x*sc,y*sc));
+    ctx.stroke(); ctx.restore();
+    return true;
+  }
   if(slot.shape==null||!gtLayout||!gtLayout.shapes[slot.shape]) return false;
   const sh=gtLayout.shapes[slot.shape];
   const sx=slot.w/sh.bbox.w, sy=slot.h/sh.bbox.h;
@@ -27227,8 +27266,7 @@ function gtSlotLoops(slot,opts){
   else{
     const sh=(slot.shape!=null&&gtLayout&&gtLayout.shapes[slot.shape])||null;
     if(!sh){
-      out.push([[slot.x,slot.y],[slot.x+slot.w,slot.y],
-                [slot.x+slot.w,slot.y+slot.h],[slot.x,slot.y+slot.h],[slot.x,slot.y]]);
+      out.push(gtRoundRectLoop(slot.x,slot.y,slot.w,slot.h,gtSlotR(slot)));
     }else{
       const sx=slot.w/sh.bbox.w, sy=slot.h/sh.bbox.h;
       const stepVb=GT_PLT_STEP/Math.max(1e-6,Math.max(sx,sy));
@@ -29029,6 +29067,8 @@ function gtWriteSheetInputs(){
   gtSyncBleedChips();
   gtSlotToolFieldsWrite();
   gtGridCalcSync();
+  { const el=document.getElementById('gtSlotRadius');
+    if(el&&document.activeElement!==el) el.value=Number(gtSheet.slotRadius)||0; }
   gtSyncPltToggle();
   gtSyncShapeSlots();
 }
@@ -29196,6 +29236,14 @@ document.getElementById('gtAddSlotBtn').addEventListener('click',()=>{
 // Rows from the bottom left, in the order the run fills them, this far apart,
 // the whole block centred on the sheet. Each cell is the biggest of the ones
 // being laid out, so mixed sizes still line up.
+document.getElementById('gtSlotRadius').addEventListener('input',e=>{
+  const v=parseFloat(e.target.value);
+  gtSheet.slotRadius=isFinite(v)&&v>0?v:0;
+  // the sheet's figure is for every rectangle: one set on a placeholder by
+  // hand gives way to it, so typing here is seen on all of them
+  gtSheet.slots.forEach(s=>{ delete s.r; });
+  gtDraw(); gtSaveSoon();
+});
 document.getElementById('gtGridModeSeg').addEventListener('click',e=>{
   const b=e.target.closest('[data-gt-grid-mode]'); if(!b) return;
   gtSheet.gridMode=b.dataset.gtGridMode;
@@ -29261,12 +29309,13 @@ document.getElementById('gtDistributeBtn').addEventListener('click',()=>{
 // selected ones. Blank leaves that one alone.
 function gtBulkApply(list){
   const v=id=>{ const t=document.getElementById(id).value; const x=parseFloat(t); return t!==''&&isFinite(x)?x:null; };
-  const X=v('gtBulkX'), Y=v('gtBulkY'), W=v('gtBulkW'), H=v('gtBulkH');
-  if(X==null&&Y==null&&W==null&&H==null) return gtSlotToolMsg('Type at least one of X, Y, W, H.',false);
+  const X=v('gtBulkX'), Y=v('gtBulkY'), W=v('gtBulkW'), H=v('gtBulkH'), R=v('gtBulkR');
+  if(X==null&&Y==null&&W==null&&H==null&&R==null) return gtSlotToolMsg('Type at least one of X, Y, W, H, corner R.',false);
   if(!list.length) return gtSlotToolMsg('Nothing selected — tick some placeholders first.',false);
   list.forEach(s=>{
     if(X!=null) s.x=X; if(Y!=null) s.y=Y;
     if(W!=null) s.w=Math.max(1,W); if(H!=null) s.h=Math.max(1,H);
+    if(R!=null) s.r=Math.max(0,R);
   });
   gtSlotsChanged();
   const S=gtSheet, off=list.filter(s=>s.x<0||s.y<0||s.x+s.w>S.paperW||s.y+s.h>S.paperH).length;
