@@ -25737,6 +25737,10 @@ async function gtLoadLib(){
   else if(gtLayout&&(gtSheet.slots.filter(s=>!s.added).length>gtLayout.shapes.length
     ||gtSheet.slots.some(s=>s.shape!=null&&!gtLayout.shapes[s.shape]))) gtRebuildSlots();
   gtShapeLoaded();
+  // The sheet opens on the preset: the cutting file, as drawn, at its own
+  // sizes — never a grid generated last time or placeholders left edited.
+  // Changes made after this last until the library is next read.
+  try{ await gtUsePreset(); }catch(e){}
   // The library was just emptied and read again, and a one-off lives in no
   // folder: one put back for a batch line a moment earlier — the page opening
   // after a refresh, the batch lending its sheet — was wiped by this load and
@@ -27626,6 +27630,28 @@ function gtBaseShape(){
 // every line went on planning onto the old shape, so gtDraw turned the sheet
 // straight back to it and the shape just chosen never came up at all.
 function gtSetBaseShape(path){ gtDefaultShape=path||''; }
+// The preset cutting file put on the sheet fresh: the one the sheet is on, or
+// the order's default shape, or failing both the first SVG in the shape folder.
+async function gtUsePreset(){
+  let path=gtSheet.layoutFile||gtDefaultShape||'';
+  if(!path){
+    const list=await gtShapeList().catch(()=>[]);
+    const c=(list||[]).find(f=>f.kind==='cut');
+    path=c?c.path:'';
+  }
+  if(!path) return false;
+  const file=await gtShapeFile(path);
+  if(!file) return false;
+  let text=''; try{ text=await file.text(); }catch(e){ return false; }
+  gtShapeSlots.delete(path);
+  if(!gtApplyCut(file,path,text,true)) return false;
+  if(!gtDefaultShape) gtSetBaseShape(path);
+  gtShapeSlots.set(path,{slots:gtSheet.slots,layout:gtLayout,
+    paperW:gtSheet.paperW,paperH:gtSheet.paperH,
+    layoutW:gtSheet.layoutW,layoutH:gtSheet.layoutH,
+    layoutX:gtSheet.layoutX,layoutY:gtSheet.layoutY});
+  return true;
+}
 // the shape a line is cut to: the one its design's folder names, or the
 // order's own where the design names none
 function gtShapeOfLine(l){
@@ -35598,6 +35624,36 @@ function mcRollHoldStop(){
     if(e.target.closest('[data-mc-open]')) e.preventDefault();
   });
 })();
+// A one-time gift tag design lives as long as its batch is being worked and no
+// longer: never in the designs folder, and gone from storage and from its lines
+// when the batch is completed. (Deleting the batch takes it with the artwork.)
+async function mcDropOneOffs(batchId){
+  if(!sb||!batchId) return;
+  let rows=[];
+  try{
+    const {data}=await sb.from('magic_items').select('id,sheet_item').eq('batch_id',batchId);
+    rows=(data||[]).filter(r=>r.sheet_item&&r.sheet_item.oneOff);
+  }catch(e){ return; }
+  if(!rows.length) return;
+  const paths=rows.map(r=>r.sheet_item.oneOff.path).filter(Boolean);
+  if(paths.length){ try{ await sb.storage.from(PHOTO_BUCKET).remove(paths); }catch(e){} }
+  for(const r of rows){
+    const one=r.sheet_item.oneOff;
+    const si={...r.sheet_item,oneOff:null};
+    try{ await sb.from('magic_items').update({sheet_item:si}).eq('id',r.id); }catch(e){}
+    const it=(typeof mcItem==='function')?mcItem(r.id):null;
+    if(it&&it.sheet_item) it.sheet_item.oneOff=null;
+    // and out of this session's library, where it was put back for the sheet
+    if(typeof gtLib!=='undefined'&&one&&one.id){
+      const d=gtLib.designs.find(x=>x.id===one.id&&x.adhoc);
+      if(d){
+        gtLib.designs=gtLib.designs.filter(x=>x!==d);
+        if(typeof gtAssets!=='undefined') gtAssets.delete(d.file);
+        if(typeof gtImgs!=='undefined') gtImgs.delete(d.id);
+      }
+    }
+  }
+}
 // The batch, its lines, and the artwork uploaded to them. The rows go on the
 // cascade, but a deleted row is not a deleted file — the paths are read first
 // and taken to storage afterwards, which is what the three-day purge does too.
@@ -35612,8 +35668,13 @@ async function mcDeleteBatch(id){
     +'again either.\n\nThis cannot be undone.')) return;
   let paths=[];
   try{
-    const {data}=await sb.from('magic_items').select('art').eq('batch_id',id);
-    (data||[]).forEach(r=>Object.values(r.art||{}).forEach(v=>{ if(v) paths.push(v); }));
+    const {data}=await sb.from('magic_items').select('art,sheet_item').eq('batch_id',id);
+    (data||[]).forEach(r=>{
+      Object.values(r.art||{}).forEach(v=>{ if(v) paths.push(v); });
+      // and the copy of a one-off gift tag design the line was carrying
+      const one=r.sheet_item&&r.sheet_item.oneOff;
+      if(one&&one.path) paths.push(one.path);
+    });
   }catch(e){ /* a stranded file is not worth stopping the delete for */ }
   const {error}=await sb.from('magic_batches').delete().eq('id',id);
   if(error){ showMsg(out,'Could not delete that: '+error.message,false); return; }
@@ -42001,13 +42062,15 @@ document.getElementById('mcSummarySheet').addEventListener('click',e=>{
 document.getElementById('mcCompleteBtn').addEventListener('click',async()=>{
   if(!sb||!mcBatch) return;
   if(!confirm('Complete this batch?\n\nIt moves to Completed, becomes read only, '
-    +'and it and its artwork are permanently deleted three days from now.')) return;
+    +'and it and its artwork are permanently deleted three days from now. '
+    +'One-time gift tag designs on it are thrown away now.')) return;
   const at=new Date().toISOString();
   const {error}=await sb.from('magic_batches')
     .update({status:'completed',completed_at:at,completed_by:mcMyId}).eq('id',mcBatch.id);
   const out=document.getElementById('mcBatchMsg');
   if(error){ showMsg(out,'Could not complete it: '+error.message,false); return; }
   mcBatch.status='completed'; mcBatch.completed_at=at;
+  await mcDropOneOffs(mcBatch.id);
   mcWinClose();
   mcSyncBatchButtons();
   showMsg(out,'✓ Completed — it is in the Completed tab now.',true);
