@@ -6681,6 +6681,9 @@ body.mc-docked .mc-bubble{display:none !important;}
       <label class="field" style="flex:1 1 0;margin-bottom:10px;"><span>PAGES</span>
         <input type="text" id="mcFieryPages" placeholder="All — or e.g. 1-3,5" autocomplete="off"/></label>
     </div>
+    <!-- several files at once: each can take its own pages; left empty it
+         takes the PAGES above -->
+    <div id="mcFieryPerFile" style="display:none;margin:-4px 0 10px;"></div>
     <div class="sect-label">THEN</div>
     <div class="chips" id="mcFieryAction">
       <button type="button" class="btn-outline" data-mc-fiery-action="print">Print it</button>
@@ -36387,6 +36390,21 @@ async function fieryAsk(entries,count){
   copies.value='1';
   pages.value='';
   pages.placeholder=count>1?`All ${count} — or e.g. 1-2`:'All — or e.g. 1-3,5';
+  // one PAGES box per design when several go together, so each can be cut
+  // down on its own — the one above stays the default for the empty ones
+  const perFile=document.getElementById('mcFieryPerFile');
+  const many=entries.length>1;
+  perFile.style.display=many?'':'none';
+  pages.closest('.field').querySelector('span').textContent=many?'PAGES — ALL FILES':'PAGES';
+  perFile.innerHTML=many
+    ? '<div class="sect-label">PAGES FOR EACH DESIGN</div>'+entries.map((e,i)=>
+      `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="flex:1 1 auto;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+          title="${escapeHtml(e.name)}">${escapeHtml(e.name)}</span>
+        <label class="field" style="flex:0 0 140px;margin:0;"><input type="text"
+          data-mc-fiery-file-pages="${i}" placeholder="Same as above" autocomplete="off"/></label>
+      </div>`).join('')
+    : '';
   list.innerHTML='<span class="hint" style="margin:0;">Reading the presets…</span>';
   go.disabled=true;
   sheet.classList.add('open');
@@ -36451,6 +36469,20 @@ async function fieryAsk(entries,count){
           :'Pages are written like 1-3,5 — or left empty for all of them.',false);
         pages.focus(); return;
       }
+      const tidy=v=>/^all$/i.test(v)?'':v.replace(/\s/g,'');
+      const own=[...perFile.querySelectorAll('[data-mc-fiery-file-pages]')];
+      const wrong=own.find(b=>!mcFieryPagesOk(b.value.trim(),0));
+      if(wrong){
+        showMsg(msg,`Pages for ${escapeHtml(entries[Number(wrong.dataset.mcFieryFilePages)].name)} `
+          +'are written like 1-3,5 — or left empty to take the PAGES above.',false);
+        wrong.focus(); return;
+      }
+      // by file name, since that is what the queue is written with
+      const pagesFor={};
+      own.forEach(b=>{
+        const v=b.value.trim();
+        if(v) pagesFor[entries[Number(b.dataset.mcFieryFilePages)].name]=tidy(v);
+      });
       try{
         const mem=mcFieryMemory();
         entries.forEach(e=>{ mem[mcFieryKey(e)]=preset.id; });
@@ -36458,12 +36490,13 @@ async function fieryAsk(entries,count){
         localStorage.setItem('mcFieryAction',action);
       }catch(e){}
       done({preset_id:preset.id,preset_name:preset.name,copies:n,
-        pages:/^all$/i.test(spec)?'':spec.replace(/\s/g,''),action});
+        pages:tidy(spec),pagesFor,action});
     };
     go.onclick=take;
     // Enter walks copies → pages (the global rule); on the last box it sends
     sheet.onkeydown=e=>{
-      if(e.key!=='Enter'||e.defaultPrevented||e.target!==pages) return;
+      const boxes=[pages,...perFile.querySelectorAll('[data-mc-fiery-file-pages]')];
+      if(e.key!=='Enter'||e.defaultPrevented||e.target!==boxes[boxes.length-1]) return;
       e.preventDefault(); take();
     };
     document.getElementById('mcFieryCancel').onclick=()=>done(null);
@@ -36546,7 +36579,9 @@ async function fieryQueue(session,dir,names,ans,say,skipped){
       typeof name==='object'?name:({
       user_id:session.user.id,file_name:name,folder:dir.name,
       preset_id:ans.preset_id,preset_name:ans.preset_name,
-      copies:ans.copies,pages:ans.pages,action:ans.action}));
+      copies:ans.copies,
+      pages:(ans.pagesFor&&ans.pagesFor[name]!=null)?ans.pagesFor[name]:ans.pages,
+      action:ans.action}));
     let {data,error}=await sb.from('fiery_jobs').insert(rows).select('id');
     // supabase-migration-FIERY-LINES.sql not run yet: the job still goes,
     // it just cannot say which line it was
@@ -36573,8 +36608,9 @@ function fieryWatch(ids,ans,n,skipped,where){
   const say=(html,ok)=>where.forEach(id=>{
     const el=document.getElementById(id); if(el) showMsg(el,html,ok);
   });
+  const own=ans.pagesFor&&Object.keys(ans.pagesFor).length;
   const what=`${n} file${n===1?'':'s'} · ${escapeHtml(ans.preset_name)} · ${ans.copies} cop${
-    ans.copies===1?'y':'ies'}${ans.pages?' · pages '+escapeHtml(ans.pages):''}`;
+    ans.copies===1?'y':'ies'}${own?' · pages set per design':ans.pages?' · pages '+escapeHtml(ans.pages):''}`;
   const left=skipped&&skipped.length
     ?` · ${skipped.length} left out: ${escapeHtml(skipped.slice(0,3).join(', '))}`:'';
   say(`→ Queued for the Fiery — ${what}${left}`,!left);
