@@ -5447,6 +5447,12 @@ body.mc-docked .mc-bubble{display:none !important;}
           <label class="field"><span>UP, DOT TO DOT (mm)</span><input type="number" step="0.001" min="1" id="gtMarkSpanY" value="432.9"/></label>
         </div>
         <p class="hint" id="gtMarkSpanStatus" style="margin:4px 0 0;"></p>
+        <div class="sect-label">Cut file</div>
+        <div class="grid2">
+          <label class="field"><span>OVERCUT (mm)</span><input type="number" step="0.1" min="0" max="5" id="gtPltOvercut" value="0.5"/></label>
+          <span></span>
+        </div>
+        <p class="hint" style="margin:4px 0 0;">Each cut runs this far past where it started, so the curve is finished. 0 = none. 0.5 mm is what your cutter's own files use most (PkemonHBD.plt).</p>
         <div class="toggle-row" style="margin-top:9px;">
           <span style="font-size:13px;color:var(--muted);">My base layer picture already has the dots — find them there instead</span>
           <label class="switch"><input type="checkbox" id="gtMarksFromBase"/><span class="slider"></span></label>
@@ -25009,7 +25015,7 @@ let gtCurrentDesign=null;          // the design open in the editor
 let gtSlotEdit=false, gtSelSlot=null;   // Contours on, and the placeholder in hand
 const gtShapeSig=new Map();          // see gtKeepShape
 const gtSelSet=new Set();          // every placeholder picked, gtSelSlot among them
-const GT_SHEET_NEW={markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{}};
+const GT_SHEET_NEW={pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{}};
 const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
   // null rather than a number: the layout centres itself until it is told
@@ -25017,7 +25023,8 @@ const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   layoutX:null,layoutY:null,bleedOn:false,bleed:2.5,
   // the bleed's trim and gap carry, the Distribute spacing and the placeholders'
   // punch hole — see GT_SHEET_NEW for why they are put back per library
-  pltOn:true,bleedTrimPx:0,bleedFillGap:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,
+  pltOn:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,
+  bleedTrimPx:0,bleedFillGap:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,
   // The four dots the cutter's camera registers on, and the cut file that is
   // measured from them. These print — they are not preview furniture like the
   // cut lines are — so they live with the sheet rather than with the view.
@@ -27381,8 +27388,24 @@ function gtPltSheet(at){
   // and pen up again on the last point before travelling on — the machine would
   // not read a file whose loops ran straight into the next PU. Points on a
   // straight run are dropped, as its files do, rather than one every 0.25 mm.
-  const loop=pts=>{
-    if(!pts||pts.length<2) return;
+  const loop=raw=>{
+    if(!raw||raw.length<2) return;
+    // Closed, whatever the file drew: an outline left open by a hair is a tag
+    // left hanging by that hair.
+    const pts=raw.slice();
+    const [fx,fy]=pts[0], [lx,ly]=pts[pts.length-1];
+    if(Math.hypot(lx-fx,ly-fy)>0.01) pts.push([fx,fy]);
+    // And carried on past where it started, as the cutter's own files do: a
+    // drag blade trails its tip, so a cut that stops exactly on its start
+    // leaves the last of the curve uncut. The overcut follows the outline.
+    let need=Math.max(0,Number(S.pltOvercut));
+    if(!isFinite(need)) need=0;
+    for(let k=1;k<pts.length&&need>1e-6;k++){
+      const [ax,ay]=pts[k-1], [bx,by]=pts[k], seg=Math.hypot(bx-ax,by-ay);
+      if(!seg) continue;
+      if(seg<=need){ pts.push([bx,by]); need-=seg; }
+      else{ const t=need/seg; pts.push([ax+(bx-ax)*t,ay+(by-ay)*t]); need=0; }
+    }
     const P=[];
     pts.forEach(([x,y])=>{
       const s=gtPltPt(F,x,y);
@@ -29111,6 +29134,8 @@ function gtWriteSheetInputs(){
   document.getElementById('gtMarkDia').value=gtSheet.markDia;
   document.getElementById('gtMarkInset').value=gtSheet.markInset;
   gtMarkSpanSync();
+  { const oc=document.getElementById('gtPltOvercut');
+    if(oc&&document.activeElement!==oc) oc.value=gtSheet.pltOvercut==null?0.5:gtSheet.pltOvercut; }
   gtSyncBleedChips();
   gtSlotToolFieldsWrite();
   gtGridCalcSync();
@@ -29140,6 +29165,11 @@ document.getElementById('gtVectorToggle').addEventListener('change',e=>{
   if(other) other.checked=e.target.checked;
 });
 document.getElementById('gtPltFromMark').addEventListener('change',e=>{ gtSheet.pltFromMark=e.target.checked; gtSaveSoon(); });
+document.getElementById('gtPltOvercut').addEventListener('input',e=>{
+  const v=parseFloat(e.target.value);
+  gtSheet.pltOvercut=isFinite(v)&&v>=0?Math.min(5,v):0;
+  gtSaveSoon();
+});
 document.getElementById('gtMarkSpanOn').addEventListener('change',e=>{
   gtSheet.markSpanOn=e.target.checked; gtBaseDotsCache=null;
   gtMarkSpanSync(); gtDraw(); gtSyncShapeSlots(); gtSaveSoon();
