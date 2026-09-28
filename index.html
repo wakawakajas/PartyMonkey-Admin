@@ -5433,6 +5433,20 @@ body.mc-docked .mc-bubble{display:none !important;}
           <label class="field"><span>DOT ⌀ (mm)</span><input type="number" step="0.5" min="1" id="gtMarkDia" value="5"/></label>
           <label class="field"><span>INSET FROM EDGE (mm)</span><input type="number" step="0.5" min="1" id="gtMarkInset" value="10"/></label>
         </div>
+        <!-- The spacing the cutter's own jobs use (PkemonHBD.plt and most of the
+             thumb drive: TB25,12079,17316 — 301.975 × 432.9 mm between dot
+             centres, 5 mm dots). On, the dots are set that far apart and
+             centred on the sheet, whatever the paper; the inset is used only
+             where the paper is too small for it. -->
+        <div class="toggle-row" style="margin-top:9px;">
+          <span style="font-size:13px;color:var(--muted);">Dot spacing as my cut files</span>
+          <label class="switch"><input type="checkbox" id="gtMarkSpanOn" checked/><span class="slider"></span></label>
+        </div>
+        <div class="grid2" style="margin-top:9px;">
+          <label class="field"><span>ACROSS, DOT TO DOT (mm)</span><input type="number" step="0.001" min="1" id="gtMarkSpanX" value="301.975"/></label>
+          <label class="field"><span>UP, DOT TO DOT (mm)</span><input type="number" step="0.001" min="1" id="gtMarkSpanY" value="432.9"/></label>
+        </div>
+        <p class="hint" id="gtMarkSpanStatus" style="margin:4px 0 0;"></p>
         <div class="toggle-row" style="margin-top:9px;">
           <span style="font-size:13px;color:var(--muted);">My base layer picture already has the dots — find them there instead</span>
           <label class="switch"><input type="checkbox" id="gtMarksFromBase"/><span class="slider"></span></label>
@@ -24995,7 +25009,7 @@ let gtCurrentDesign=null;          // the design open in the editor
 let gtSlotEdit=false, gtSelSlot=null;   // Contours on, and the placeholder in hand
 const gtShapeSig=new Map();          // see gtKeepShape
 const gtSelSet=new Set();          // every placeholder picked, gtSelSlot among them
-const GT_SHEET_NEW={slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{}};
+const GT_SHEET_NEW={markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{}};
 const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
   // null rather than a number: the layout centres itself until it is told
@@ -26776,6 +26790,7 @@ function gtGridCalcSync(){
     b.classList.toggle('on',b.dataset.gtGridMode===(gtSheet.gridMode==='manual'?'manual':'center')));
   ['gtLeadTrim','gtSideTrim'].forEach(id=>{ const i=document.getElementById(id); if(i) i.disabled=gtSheet.gridMode!=='manual'; });
   const lf=document.getElementById('gtLayoutFields'); if(lf) lf.style.display=gtLayout?'':'none';
+  gtMarkSpanSync();                    // the paper decides whether the spacing fits
 }
 function gtRebuildSlotsFresh(){
   const S=gtSheet;
@@ -26867,11 +26882,42 @@ function gtStrokeSlot(ctx,slot,sc){
 // Circles of 5mm, which is what the job cache in C:\ProgramData\AIDCutData
 // shows this cutter has been fed for years: r=100 HPGL units at 40 units to
 // the millimetre.
+// The dot spacing the cutter's jobs use, when it is switched on and the paper
+// is big enough to carry it with the dots whole and a millimetre to spare.
+function gtMarkSpan(){
+  const S=gtSheet;
+  if(S.markSpanOn===false) return null;
+  const x=Number(S.markSpanX)||301.975, y=Number(S.markSpanY)||432.9;
+  const d=(Number(S.markDia)||5)+2;
+  return (x+d<=S.paperW&&y+d<=S.paperH)?{x,y}:null;
+}
+function gtMarkSpanSync(){
+  const S=gtSheet, on=S.markSpanOn!==false;
+  const t=document.getElementById('gtMarkSpanOn'); if(t) t.checked=on;
+  [['gtMarkSpanX','markSpanX',301.975],['gtMarkSpanY','markSpanY',432.9]].forEach(([id,k,d])=>{
+    const el=document.getElementById(id); if(!el) return;
+    el.disabled=!on;
+    if(document.activeElement!==el) el.value=S[k]==null?d:S[k];
+  });
+  const ins=document.getElementById('gtMarkInset'); if(ins) ins.disabled=on&&!!gtMarkSpan();
+  const st=document.getElementById('gtMarkSpanStatus'); if(!st) return;
+  if(!on||S.marksFromBase){ st.textContent=''; return; }
+  const sp=gtMarkSpan();
+  st.textContent=sp
+    ? `✓ Cut file header TB25,${Math.round(sp.x*40)},${Math.round(sp.y*40)} — the same as your cutter's jobs.`
+    : `⚠ The paper (${round(S.paperW)} × ${round(S.paperH)} mm) is too small for that spacing — the inset is used instead.`;
+}
 function gtMarks(){
   const S=gtSheet;
   if(S.marksFromBase) return gtBaseDots();
   if(!S.marksOn) return [];
   const r=Math.max(0.5,(Number(S.markDia)||5)/2);
+  // the cutter's own spacing, centred on the sheet, where the paper takes it
+  const sp=gtMarkSpan();
+  if(sp){
+    const x0=(S.paperW-sp.x)/2, y0=(S.paperH-sp.y)/2;
+    return [[x0,y0+sp.y],[x0+sp.x,y0+sp.y],[x0+sp.x,y0],[x0,y0]].map(([cx,cy])=>({cx,cy,r}));
+  }
   const i=Math.max(r+0.5,Number(S.markInset)||10);
   // bottom left first, then round — the cut file counts from the second, bottom right
   return [[i,S.paperH-i],[S.paperW-i,S.paperH-i],[S.paperW-i,i],[i,i]]
@@ -29064,6 +29110,7 @@ function gtWriteSheetInputs(){
   document.getElementById('gtPltFromMark').checked=gtSheet.pltFromMark!==false;
   document.getElementById('gtMarkDia').value=gtSheet.markDia;
   document.getElementById('gtMarkInset').value=gtSheet.markInset;
+  gtMarkSpanSync();
   gtSyncBleedChips();
   gtSlotToolFieldsWrite();
   gtGridCalcSync();
@@ -29093,6 +29140,17 @@ document.getElementById('gtVectorToggle').addEventListener('change',e=>{
   if(other) other.checked=e.target.checked;
 });
 document.getElementById('gtPltFromMark').addEventListener('change',e=>{ gtSheet.pltFromMark=e.target.checked; gtSaveSoon(); });
+document.getElementById('gtMarkSpanOn').addEventListener('change',e=>{
+  gtSheet.markSpanOn=e.target.checked; gtBaseDotsCache=null;
+  gtMarkSpanSync(); gtDraw(); gtSyncShapeSlots(); gtSaveSoon();
+});
+[['gtMarkSpanX','markSpanX'],['gtMarkSpanY','markSpanY']].forEach(([id,key])=>{
+  document.getElementById(id).addEventListener('input',e=>{
+    const v=parseFloat(e.target.value);
+    if(isFinite(v)&&v>0) gtSheet[key]=v;
+    gtMarkSpanSync(); gtDraw(); gtSaveSoon();
+  });
+});
 [['gtMarkDia','markDia'],['gtMarkInset','markInset']].forEach(([id,key])=>{
   document.getElementById(id).addEventListener('input',e=>{
     const v=parseFloat(e.target.value);
