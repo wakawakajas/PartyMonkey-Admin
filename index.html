@@ -5447,6 +5447,11 @@ body.mc-docked .mc-bubble{display:none !important;}
           <label class="field"><span>OVERCUT (mm)</span><input type="number" step="0.1" min="0" max="5" id="gtPltOvercut" value="0.5"/></label>
           <span></span>
         </div>
+        <div class="calc" id="gtThumbState" style="margin-top:9px;"></div>
+        <div class="grid2" style="margin-top:7px;">
+          <button type="button" class="btn-outline btn-sm" id="gtThumbPickBtn">💾 Choose thumb drive</button>
+          <button type="button" class="btn-outline btn-sm" id="gtThumbForgetBtn">Forget</button>
+        </div>
         <div class="toggle-row" style="margin-top:9px;">
           <span style="font-size:13px;color:var(--muted);">Cut inside first (holes before the outline)</span>
           <label class="switch"><input type="checkbox" id="gtPltInnerFirst" checked/><span class="slider"></span></label>
@@ -24267,6 +24272,9 @@ function exportFolderLbl(){
 // Asking for permission has to come off a tap, so this runs first thing in the
 // click, before the minute of rendering that would otherwise spend the gesture.
 async function exportFolderReady(ask){
+  if(ask&&typeof gtPltRun!=='undefined'){
+    gtPltRun={at:0,n:0};
+  }
   if(!canPickFolder()) return null;
   const dir=await exportDirGet();
   if(await gtDirOk(dir,ask)) return dir;
@@ -31302,12 +31310,66 @@ document.getElementById('gtPltRawBtn').addEventListener('click',()=>{
 document.getElementById('gtPltTravelBtn').addEventListener('click',()=>{
   gtPltView.travel=!gtPltView.travel; gtPltSyncChrome(); gtPltDrawPreview();
 });
-document.getElementById('gtPltSaveBtn').addEventListener('click',()=>{
+// ---------- the thumb drive the cutter reads ----------
+// Chosen once and remembered. Every cut file goes straight onto it as GT1.plt,
+// GT2.plt … one per sheet, numbered afresh each export; a drive not plugged in
+// or not allowed yet gets the same names in Downloads instead.
+const GT_THUMB_KEY='pltThumbDir';
+async function gtThumbGet(){ try{ return await gtIdbGet(GT_THUMB_KEY)||null; }catch(e){ return null; } }
+async function gtThumbReady(ask){
+  const d=await gtThumbGet(); if(!d) return null;
+  try{ return await gtDirOk(d,ask)?d:null; }catch(e){ return null; }
+}
+async function gtThumbSync(){
+  const el=document.getElementById('gtThumbState'); if(!el) return;
+  const d=await gtThumbGet();
+  el.textContent=d
+    ? `Cut files go onto ${d.name} as GT1.plt, GT2.plt … (Downloads if it is not plugged in).`
+    : 'No thumb drive chosen — cut files download as GT1.plt, GT2.plt …';
+}
+// numbered from 1 each export; a Magic Create run of several sheets carries on
+let gtPltRun={at:0,n:0};
+function gtPltName(fresh){
+  if(fresh||Date.now()-gtPltRun.at>120000) gtPltRun.n=0;
+  gtPltRun.at=Date.now();
+  return 'GT'+(++gtPltRun.n)+'.plt';
+}
+async function gtSavePlts(texts,fresh){
+  const dir=await gtThumbReady(false);
+  const names=[]; let onDrive=0;
+  for(let i=0;i<texts.length;i++){
+    const nm=gtPltName(fresh&&i===0);
+    const b=new Blob([texts[i]],{type:'application/vnd.hp-HPGL'});
+    let ok=false;
+    if(dir){ try{ await writeIntoFolder(dir,nm,b); ok=true; onDrive++; }catch(e){} }
+    // spaced out a little: browsers drop the later files of a burst
+    if(!ok) await new Promise(r=>setTimeout(()=>{ downloadBlob(b,nm); r(); },i?400:0));
+    names.push(nm);
+  }
+  return {names,drive:onDrive?dir.name:'',all:onDrive===texts.length};
+}
+document.getElementById('gtThumbPickBtn').addEventListener('click',async()=>{
+  if(!canPickFolder()){ alert('This browser cannot write onto a drive — use Chrome or Edge on a PC.'); return; }
+  try{
+    const d=await window.showDirectoryPicker({mode:'readwrite'});
+    if(!await gtDirOk(d,true)) return;
+    await gtIdbPut(GT_THUMB_KEY,d);
+    gtThumbSync();
+  }catch(e){ /* cancelled */ }
+});
+document.getElementById('gtThumbForgetBtn').addEventListener('click',async()=>{
+  try{ await gtIdbPut(GT_THUMB_KEY,null); }catch(e){}
+  gtThumbSync();
+});
+gtThumbSync();
+document.getElementById('gtPltSaveBtn').addEventListener('click',async()=>{
   const S=gtPltView.sheets[gtPltView.at]; if(!S) return;
-  const n=gtPltView.sheets.length>1?'_sheet'+(gtPltView.at+1):'';
-  const d=new Date(), p2=x=>String(x).padStart(2,'0');
-  downloadBlob(new Blob([S.text],{type:'application/vnd.hp-HPGL'}),
-    `Gift Tag_${gtFinish}_${p2(d.getMonth()+1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}${n}.plt`);
+  await gtThumbReady(true);
+  const nm='GT'+(gtPltView.at+1)+'.plt';
+  const b=new Blob([S.text],{type:'application/vnd.hp-HPGL'});
+  const dir=await gtThumbReady(false);
+  try{ if(dir){ await writeIntoFolder(dir,nm,b); return; } }catch(e){}
+  downloadBlob(b,nm);
 });
 
 // Matte or gloss. It changes nothing that is drawn — the designs and the
@@ -31356,6 +31418,9 @@ async function gtExport(print){
     dir=await exportFolderReady(true);
     if(!dir){ fieryNoFolder(out); return; }
   }
+  // the thumb drive asked for before the render, while the tap still counts —
+  // after a minute of rendering the browser would no longer let it be asked
+  if(gtSheet.pltOn!==false) await gtThumbReady(true);
   btn.disabled=true; pbtn.disabled=true;
   showMsg(out,`Rendering ${pages} sheet(s) at print resolution…`,true);
   try{
@@ -31404,13 +31469,9 @@ async function gtExport(print){
     // laid on the bed, the camera finds its dots, and that sheet is cut. A
     // single file holding several pages would have to be split at the machine.
     const cut=cuts.filter(Boolean);
-    cut.forEach((text,i)=>{
-      const nm=`${base}${cut.length>1?'_sheet'+(i+1):''}.plt`;
-      // spaced out a little: browsers drop the later files of a burst
-      setTimeout(()=>downloadBlob(new Blob([text],{type:'application/vnd.hp-HPGL'}),nm),i*400);
-    });
+    const sv=cut.length?await gtSavePlts(cut,true):null;
     showMsg(out,`✓ ${filename} — ${pages} sheet(s)`
-      +(cut.length?` · ${cut.length} cut file(s) (.plt) alongside it`:'')
+      +(sv?` · ${sv.names.join(', ')} ${sv.all?'on '+escapeHtml(sv.drive):sv.drive?'(some on '+escapeHtml(sv.drive)+', the rest in Downloads)':'in Downloads — no thumb drive'}`:'')
       +(placed?` · ${placed} tag(s) went in as their own PDF, colours untouched`:''),true);
     if(print) await fieryQueue(session,dir,[filename],ans,['gtExportMsg']);
   }catch(err){
@@ -44763,14 +44824,8 @@ async function mcPut(dir,name,bytes){
   if(dir) await writeIntoFolder(dir,name,blob);
   else downloadBlob(blob,name);
   if(!cuts||!cuts.length) return;
-  const base=String(name).replace(/[.]pdf$/i,'');
-  for(let i=0;i<cuts.length;i++){
-    const nm=`${base}${cuts.length>1?'_sheet'+(i+1):''}.plt`;
-    const b=new Blob([cuts[i]],{type:'application/vnd.hp-HPGL'});
-    if(dir) await writeIntoFolder(dir,nm,b);
-    // spaced out a little: browsers drop the later files of a burst
-    else await new Promise(r=>setTimeout(()=>{ downloadBlob(b,nm); r(); },400));
-  }
+  // onto the thumb drive as GT1.plt, GT2.plt …, carrying on through the run
+  await gtSavePlts(cuts,false);
 }
 // Around anything that renders: the builder is one global object, and a batch
 // that borrows it has to hand it back the way it was found.
