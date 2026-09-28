@@ -7261,7 +7261,7 @@ const state={
   // it belongs to in its `cat`; nothing per-card is stored, every card's words
   // are worked out at draw time from the count, the pattern or the pasted list,
   // and which sheet is being drawn. Each:
-  //   {id,name,count,start,pattern,lines[],font,cjk,sizeMm,color,align,rot,padMm,gapMm}
+  //   {id,name,count,start,pattern,lines[],font,cjk,sizeMm,color,align,rot,padMm,gapMm,cjkSizeMm}
   // Only drawn / editable / persisted in pcMode==='placecard'; applyPrintState
   // resets this to [] for every print template and Magic Create snapshot.
   cats:[],
@@ -8609,33 +8609,61 @@ function pcDrawWords(ctx,sc,c,words,bx,by,bw,bh,fam,align){
       }
       ctx.fillStyle=c.color||'#232323';
       ctx.textBaseline='alphabetic';
-      // a gap asked for between the Chinese and the English: the spaces typed
-      // at each change-over are dropped and a mark put there instead, which the
-      // measuring and the drawing below both read as that many millimetres
+      // the Chinese can be given its own gap from the English and its own
+      // size. A gap drops the spaces typed at each change-over and puts a mark
+      // there instead; the size is kept as a ratio to SIZE so it shrinks with
+      // the English when a long name has to come down to fit.
       const gap=c.gapMm==null||c.gapMm===''?null:Math.max(0,Number(c.gapMm)||0);
       if(gap!=null) words=pcMarkCjkGaps(words);
       const gapPx=gap==null?0:gap*sc;
+      const base=Math.max(0.8,Number(c.sizeMm)||6);
+      const ratio=Number(c.cjkSizeMm)>0?Number(c.cjkSizeMm)/base:1;
+      const runsOn=gap!=null||ratio!==1;
       const plain=ctx.measureText.bind(ctx);
-      const gapped=s=>{
-        const parts=String(s).split(PC_GAP_MARK);
-        const w=parts.reduce((t,p)=>t+plain(p).width,0)+(parts.length-1)*gapPx;
-        return {width:w};
+      // a line cut where it changes between Chinese and English, and at marks
+      const runs=s=>{
+        const out=[]; let cur=null;
+        for(const ch of Array.from(String(s))){
+          if(ch===PC_GAP_MARK){ if(cur) out.push(cur); cur=null; if(out.length) out[out.length-1].gap=true; continue; }
+          const k=PC_CJK_RE.test(ch)||(cur&&cur.cjk&&/\s/.test(ch));
+          if(!cur||cur.cjk!==!!k){ if(cur) out.push(cur); cur={t:'',cjk:!!k}; }
+          cur.t+=ch;
+        }
+        if(cur) out.push(cur);
+        return out;
       };
-      if(gap!=null) ctx.measureText=gapped;
+      const fontAt=(cjk)=>{
+        const m=String(ctx.font).match(/^(.*?)([\d.]+)px(.*)$/);
+        return {m,big:m&&cjk&&ratio!==1?m[1]+(Number(m[2])*ratio)+'px'+m[3]:null};
+      };
+      const each=(s,fn)=>{
+        let x=0;
+        runs(s).forEach(r=>{
+          const f=fontAt(r.cjk), was=ctx.font;
+          if(f.big) ctx.font=f.big;
+          const w=plain(r.t).width;
+          fn(r,x,w);
+          if(f.big) ctx.font=was;
+          x+=w+(r.gap?gapPx:0);
+        });
+        return x;
+      };
+      const measured=s=>({width:each(s,()=>{})});
+      if(runsOn) ctx.measureText=measured;
       try{
-        const fit=gtFitText(ctx,words,fam,Math.max(0.8,Number(c.sizeMm)||6),sc,bw,bh);
-        const lines=fit.lines, lh=fit.size*1.25;
+        const fit=gtFitText(ctx,words,fam,base,sc,bw,bh/Math.max(1,ratio));
+        const lines=fit.lines, lh=fit.size*1.25*Math.max(1,ratio);
         const tx=align==='left'?bx:align==='right'?bx+bw:bx+bw/2;
         let ty=by+(bh-lines.length*lh)/2+lh*0.8;
         lines.forEach(ln=>{
-          if(gap==null||!ln.includes(PC_GAP_MARK)){
-            ctx.textAlign=align; ctx.fillText(ln.split(PC_GAP_MARK).join(''),tx*sc,ty*sc);
+          if(!runsOn){
+            ctx.textAlign=align; ctx.fillText(ln,tx*sc,ty*sc);
           } else {
             // run by run from the left edge the alignment puts the line at
-            const w=gapped(ln).width;
-            let x=tx*sc-(align==='left'?0:align==='right'?w:w/2);
+            const w=measured(ln).width;
+            const x0=tx*sc-(align==='left'?0:align==='right'?w:w/2);
             ctx.textAlign='left';
-            ln.split(PC_GAP_MARK).forEach(p=>{ ctx.fillText(p,x,ty*sc); x+=plain(p).width+gapPx; });
+            each(ln,(r,x)=>ctx.fillText(r.t,x0+x,ty*sc));
           }
           ty+=lh;
         });
@@ -9264,7 +9292,7 @@ function pcFontNote(){
 function pcNewCat(){
   return {id:uid(),name:'Cards '+((state.cats||[]).length+1),
     count:10,start:1,pattern:'{n}',lines:[],
-    font:'plex',cjk:'yahei',sizeMm:6,color:'#232323',align:'center',rot:0,padMm:2,gapMm:null};
+    font:'plex',cjk:'yahei',sizeMm:6,color:'#232323',align:'center',rot:0,padMm:2,gapMm:null,cjkSizeMm:null};
 }
 function pcAddCat(){
   const first=!(state.cats||[]).length;
@@ -9351,6 +9379,9 @@ function pcRenderCats(){
         <label class="field" title="Space between the Chinese and the English in a name. Blank keeps the spaces as typed."><span>中/EN GAP <span class="unitHint">mm</span></span>
           <input type="number" step="0.1" min="0" data-cf="gapMm" placeholder="as typed"
             value="${c.gapMm==null?'':Number(c.gapMm)}"/></label>
+        <label class="field" title="How big the Chinese is drawn. Blank = the same as SIZE."><span>中文 SIZE <span class="unitHint">mm</span></span>
+          <input type="number" step="0.5" min="0" data-cf="cjkSizeMm" placeholder="same"
+            value="${Number(c.cjkSizeMm)>0?Number(c.cjkSizeMm):''}"/></label>
         <label class="field"><span>SIZE <span class="unitHint">mm</span></span>
           <input type="number" step="0.5" min="0.5" data-cf="sizeMm" value="${Number(c.sizeMm)||6}"/></label>
         <label class="field"><span>COLOUR</span>
@@ -9395,6 +9426,7 @@ document.getElementById('pcCatList').addEventListener('input',e=>{
   else if(f==='sizeMm') c.sizeMm=Math.max(0.5,n||6);
   else if(f==='rot') c.rot=isFinite(n)?n:0;
   else if(f==='padMm') c.padMm=Math.max(0,n||0);
+  else if(f==='cjkSizeMm') c.cjkSizeMm=n>0?n:null;
   else if(f==='gapMm') c.gapMm=(el.value===''||!isFinite(n))?null:Math.max(0,n);
   drawAll();
 });
