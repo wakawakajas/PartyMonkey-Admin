@@ -147,11 +147,12 @@ def pickup_orders(port: int) -> list[dict]:
 
 
 def ship(port: int, bs_id: str) -> tuple[bool, str]:
-    """The Ship button: POST /v1/order/ship.json with the order's BigSeller id."""
+    """The order's Pack button, NOT Ship -- the user packs pick ups and never
+    wants them shipped from here: POST /v1/order/pack.json, flag 0 = single."""
     page = _bigseller_page(port)
-    js = ("(async () => { const r = await fetch('/api/v1/order/ship.json', {method: 'POST', "
+    js = ("(async () => { const r = await fetch('/api/v1/order/pack.json', {method: 'POST', "
           "credentials: 'include', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, "
-          f"body: 'orderIds=' + encodeURIComponent({json.dumps(bs_id)})}}); "
+          f"body: 'orderId=' + encodeURIComponent({json.dumps(bs_id)}) + '&flag=0'}}); "
           "return await r.text(); })()")
     raw = cdp.evaluate(page, js, timeout=60)
     try:
@@ -159,7 +160,7 @@ def ship(port: int, bs_id: str) -> tuple[bool, str]:
     except (TypeError, json.JSONDecodeError):
         return False, "BigSeller gave no answer"
     if j.get("code") == 0:
-        return True, str(j.get("singleWarningMsg") or j.get("msg") or "shipped")
+        return True, "packed"
     return False, str(j.get("msg") or j.get("errorMsg") or f"code {j.get('code')}")
 
 
