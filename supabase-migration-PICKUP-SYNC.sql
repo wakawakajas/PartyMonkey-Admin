@@ -50,3 +50,12 @@ create policy "team_update" on public.pickup_sync_jobs
   for update using (public.on_pickup_team(auth.uid()) or public.on_team(auth.uid()));
 create policy "team_delete" on public.pickup_sync_jobs
   for delete using (public.on_pickup_team(auth.uid()));
+
+-- ---------- Send the pick up photo to the buyer (2026-09-29) ----------
+-- kind 'pull' is the button above; kind 'photo' is a card's "Send to buyer":
+-- payload holds the buyer, the words and a short-lived link to the photo
+-- (the sync account cannot read pick up photos itself). queued -> sending ->
+-- done | failed. photo_sent_at on the pick up is what the card shows.
+alter table public.pickup_sync_jobs add column if not exists kind text not null default 'pull';
+alter table public.pickup_sync_jobs add column if not exists payload jsonb not null default '{}'::jsonb;
+alter table public.pickups add column if not exists photo_sent_at timestamptz;

@@ -232,6 +232,34 @@ def ship_job(cloud: Cloud, job: dict, port: int) -> None:
     _patch(cloud, job["id"], "sending", {"status": "done", "result": result})
 
 
+def photo_job(cloud: Cloud, job: dict, port: int) -> None:
+    """A card's "Send to buyer": the words, then the photo, into the buyer's
+    DuoKe chat in the background. Somebody pressed Send in Pigu for exactly
+    this, which is what approved_send() is for."""
+    p = job.get("payload") or {}
+    buyer, text, url = str(p.get("buyer") or ""), str(p.get("text") or ""), str(p.get("photo_url") or "")
+    if not buyer or not url:
+        raise RuntimeError("no buyer or no photo on this pick up")
+    if not duoke_web.available():
+        raise RuntimeError("DuoKe is not open on the shop PC")
+    sess = next((s for s in duoke_web.all_sessions(5) if s["name"].lower() == buyer.lower()), None)
+    if not sess:
+        raise RuntimeError(f"no DuoKe chat with {buyer}")
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=30) as res:
+        image = res.read()
+    with duoke.approved_send():
+        said = duoke_web.send_text(sess["shop_id"], sess["conversation_id"], " ".join(text.split())) \
+            if text.strip() else "sent"
+        if not said.startswith("sent"):
+            raise RuntimeError("message: " + said)
+        got = duoke_web.send_image(sess["shop_id"], sess["conversation_id"], image,
+                                   f"pickup-{p.get('order_id') or 'photo'}.jpg")
+    if not got.startswith("sent"):
+        raise RuntimeError("photo: " + got)
+    _patch(cloud, job["id"], "sending", {"status": "done", "result": [{"ok": True, "note": got}]})
+
+
 def sync_once() -> None:
     cfg = load()
     port = int(cfg.get("cdp_port") or cdp.DEFAULT_PORT)
@@ -241,7 +269,12 @@ def sync_once() -> None:
     jobs = cloud.rest("GET", "/pickup_sync_jobs?select=*&status=in.(queued,shipping)"
                              f"&created_at=gte.{since.replace('+', '%2B')}&order=created_at") or []
     for job in jobs:
-        step = (read_job, "reading") if job["status"] == "queued" else (ship_job, "sending")
+        if job.get("kind") == "photo":
+            if job["status"] != "queued":
+                continue
+            step = (photo_job, "sending")
+        else:
+            step = (read_job, "reading") if job["status"] == "queued" else (ship_job, "sending")
         if not _patch(cloud, job["id"], job["status"], {"status": step[1]}):
             continue  # another PC took it
         try:

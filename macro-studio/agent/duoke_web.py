@@ -189,7 +189,7 @@ async def _evaluate(expression: str) -> Any:
             return result.get("value")
 
 
-def _run(expression: str) -> Any:
+def _run(expression: str, timeout: float = TIMEOUT) -> Any:
     """The async client, called from the agent's ordinary threads.
 
     A new loop each time rather than one kept open: a pass happens every few
@@ -199,7 +199,7 @@ def _run(expression: str) -> Any:
     if websockets is None:
         return None
     try:
-        return asyncio.run(asyncio.wait_for(_evaluate(expression), TIMEOUT))
+        return asyncio.run(asyncio.wait_for(_evaluate(expression), timeout))
     except Exception:
         # Deliberately broad: this is an optional source of a better answer,
         # and nothing here is worth failing a pass over.
@@ -708,5 +708,48 @@ def send_text(shop_id: str, conversation_id: str, text: str) -> str:
         time.sleep(1.0)
         mine = [l for l in read_conversation(shop_id, conversation_id) if not l["inbound"]]
         if mine and " ".join(mine[-1]["text"].split()) == want:
+            return "sent"
+    return "sent, but DuoKe has not shown it yet"
+
+
+# A photo the same way: uploaded through DuoKe's own uploader (the one its
+# screenshot button uses), then sent as an image message. Same rule as
+# _SEND -- only for something a person pressed Send on in Pigu, inside
+# duoke.approved_send().
+_SEND_IMAGE = r"""
+(async (shopId, conversationId, b64, name) => {
+  const vm = document.querySelector('#app').__vue__;
+  const st = vm.$store;
+  const r = await vm.$http.queryConversationList({ shopIdList: st.state.Chat.allowShopIds,
+    size: 100, offset: 0, filterGroups: [] });
+  const s = ((r && r.list) || []).find(x => String(x.conversationId) === conversationId
+                                          && String(x.shopId) === shopId)
+         || st.state.Chat.sessions.find(x => String(x.conversationId) === conversationId);
+  if (!s) return 'conversation not found';
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const file = new File([bytes], name, { type: 'image/jpeg' });
+  const url = await vm.$commFn.uploadFile({ file });
+  if (!url) return 'DuoKe would not take the photo';
+  await st.dispatch('Chat/send-message', { msg: {
+    shopId: s.shopId, platform: s.platform, groupId: s.groupId,
+    conversationId: s.conversationId, content: { imageUrl: url }, contentType: 'image' } });
+  return 'dispatched';
+})
+"""
+
+
+def send_image(shop_id: str, conversation_id: str, image: bytes, name: str = "photo.jpg") -> str:
+    """Send a JPEG into a conversation without opening it. 'sent' once DuoKe's
+    API shows a picture as the shop's newest line."""
+    import base64
+    got = _run(f"({_SEND_IMAGE})({json.dumps(str(shop_id))}, {json.dumps(str(conversation_id))}, "
+               f"{json.dumps(base64.b64encode(image).decode('ascii'))}, {json.dumps(name)})",
+               timeout=60)
+    if got != "dispatched":
+        return str(got or last_error() or "the page did not answer")
+    for _ in range(15):
+        time.sleep(1.0)
+        mine = [l for l in read_conversation(shop_id, conversation_id) if not l["inbound"]]
+        if mine and mine[-1]["imgs"]:
             return "sent"
     return "sent, but DuoKe has not shown it yet"

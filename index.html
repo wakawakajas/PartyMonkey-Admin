@@ -21218,6 +21218,9 @@ function renderPickups(){
               ? `<img alt="" data-pk-thumb="${escapeHtml(p.photo_path)}"/><span class="pk-photo-x" data-pk-photo-del title="Remove photo">×</span>`
               : '<span class="pk-photo-ico">📷</span><span class="pk-photo-lbl">Photo</span>'}
           </button>
+          ${p.photo_path&&pickupBuyer(p)?`<button class="pk-state${p.photo_sent_at?' on':''}" data-pk-send
+              title="Send this photo to ${escapeHtml(pickupBuyer(p))} in DuoKe"
+              style="min-height:40px;font-size:12px;">${p.photo_sent_at?'✓ Sent':'📨 Send to buyer'}</button>`:''}
         </div>
       </div>
       <p class="hint" style="margin:8px 0 0;">
@@ -21388,6 +21391,54 @@ function togglePickupAdd(open){
 }
 document.getElementById('pickupAddOpen').addEventListener('click',()=>togglePickupAdd());
 document.getElementById('pickupAddLbl').addEventListener('click',()=>togglePickupAdd());
+// ---- Send the pick up photo to the buyer ----
+// The Shopee username is what DuoKe knows the buyer by. Pull from BigSeller
+// names a pick up "Name (username)". Without the brackets there is no
+// username to go on, and a guessed one could be a stranger, so no button.
+function pickupBuyer(p){
+  const m=String(p.name||'').trim().match(/\(([^()\s]+)\)\s*$/);
+  return m?m[1]:'';
+}
+const PICKUP_PHOTO_TEXT="hihi ur order is ready for collection! i left it outside the door, here's the photo ^^";
+// Nothing goes to the buyer until this is pressed and confirmed. Macro Studio
+// on the shop PC sends it through DuoKe (pickup_sync.py photo_job); the sync
+// account cannot read pick up photos, so a 15-minute link goes with the job.
+async function sendPickupPhoto(p){
+  const msg=document.getElementById('pickupMsg');
+  const buyer=pickupBuyer(p);
+  if(!p.photo_path||!buyer) return;
+  if(!confirm(`Send to ${buyer} in DuoKe?\n\n"${PICKUP_PHOTO_TEXT}"\n+ the photo`
+    +(p.photo_sent_at?'\n\n(Already sent once — this sends it again.)':''))) return;
+  const session=await requireSession(msg); if(!session) return;
+  try{
+    showMsg(msg,'Sending to '+escapeHtml(buyer)+'…',true);
+    const {data:signed,error:se}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(p.photo_path,900);
+    if(se||!signed) throw se||new Error('no photo link');
+    const {data:job,error}=await sb.from('pickup_sync_jobs').insert({user_id:session.user.id,kind:'photo',
+      payload:{buyer,text:PICKUP_PHOTO_TEXT,photo_url:signed.signedUrl,order_id:p.order_id,pickup_id:p.id}})
+      .select().single();
+    if(error) throw error;
+    const end=Date.now()+120000;
+    let row=null;
+    while(Date.now()<end){
+      await new Promise(r=>setTimeout(r,2000));
+      const {data}=await sb.from('pickup_sync_jobs').select('status,error').eq('id',job.id).maybeSingle();
+      if(data&&(data.status==='done'||data.status==='failed')){ row=data; break; }
+      if(data&&data.status==='queued') showMsg(msg,'Waiting for Macro Studio…',true);
+    }
+    if(!row){
+      await sb.from('pickup_sync_jobs').update({status:'failed',error:'no answer'}).eq('id',job.id).eq('status','queued');
+      showMsg(msg,'Macro Studio did not answer. Is it running on the shop PC?',false); return;
+    }
+    if(row.status==='failed'){ showMsg(msg,'Not sent: '+escapeHtml(row.error||'unknown'),false); return; }
+    const now=new Date().toISOString();
+    await sb.from('pickups').update({photo_sent_at:now}).eq('id',p.id);
+    p.photo_sent_at=now; renderPickups();
+    showMsg(msg,'📨 Photo sent to '+escapeHtml(buyer)+'.',true);
+  }catch(err){
+    showMsg(msg,'Not sent: '+escapeHtml((err&&err.message)||'unknown error'),false);
+  }
+}
 // ---- Pull from BigSeller ----
 // A row in pickup_sync_jobs is the hand-off to Macro Studio on the shop PC
 // (pickup_sync.py): it reads BigSeller's New pick up orders and each buyer's
@@ -21503,6 +21554,7 @@ document.getElementById('pickupList').addEventListener('click',async e=>{
     p.photo_path=null; renderPickups();
     return;
   }
+  if(e.target.closest('[data-pk-send]')){ sendPickupPhoto(p); return; }
   if(e.target.closest('[data-pk-photo]')){
     if(p.photo_path) openPhotoModal(p.photo_path,p.order_id);
     else pickPickupPhoto(p);
