@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import cdp, config, duoke, fiery, labels, library, macro_store, run_reports, scheduler as scheduler_mod, settings, video
+from agent import cdp, config, duoke, fiery, labels, library, macro_store, pickup_sync, run_reports, scheduler as scheduler_mod, settings, video
 from agent.macro_store import MacroNotFoundError
 from agent.panic import PanicWatcher
 from agent.recorder import Recorder
@@ -177,6 +177,12 @@ async def _on_startup() -> None:
         fiery.save({})
     if fiery.load().get("enabled"):
         fiery.watcher.start()
+    # Store Pick Up's "From BigSeller" button: Pigu queues the press, this
+    # reads BigSeller + DuoKe and ships. The loop always runs but does nothing
+    # unless pickup-sync.json says enabled, so switching it on needs no restart.
+    if not pickup_sync.CONFIG_PATH.exists():
+        pickup_sync.save({})
+    pickup_sync.watcher.start()
 
 
 # ---- the Update button
@@ -1087,6 +1093,11 @@ class FieryConfig(BaseModel):
 @app.get("/api/fiery/status")
 def fiery_status() -> dict:
     return fiery.status()
+
+
+@app.get("/api/pickup-sync/status")
+def pickup_sync_status() -> dict:
+    return pickup_sync.status()
 
 
 @app.put("/api/fiery/config")

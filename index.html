@@ -4680,6 +4680,12 @@ body.mc-docked .mc-bubble{display:none !important;}
       <button type="button" class="chip" data-filter-open="pickup">Filter</button>
       <button type="button" class="chip chip-xs" id="pickupSelectOne">Select</button>
       <button type="button" class="chip chip-xs" id="pickupSelectAll">Select all</button>
+      <!-- BigSeller's New orders that are Seller Store Pick Up: added here with
+           the collection time from the buyer's DuoKe chat, then shipped in
+           BigSeller. Pigu cannot reach either, so Macro Studio on the shop PC
+           does the reading and the shipping (pickup_sync.py). -->
+      <button type="button" class="chip" id="pickupFromBs"
+              title="Add Seller Store Pick Up orders from BigSeller, then ship them">⇣ Pull from BigSeller</button>
     </div>
     <div class="bulkbar" id="pickupBulkBar" style="display:none;">
       <span class="n" id="pickupBulkCount"></span>
@@ -21380,6 +21386,77 @@ function togglePickupAdd(open){
 }
 document.getElementById('pickupAddOpen').addEventListener('click',()=>togglePickupAdd());
 document.getElementById('pickupAddLbl').addEventListener('click',()=>togglePickupAdd());
+// ---- Pull from BigSeller ----
+// A row in pickup_sync_jobs is the hand-off to Macro Studio on the shop PC
+// (pickup_sync.py): it reads BigSeller's New pick up orders and each buyer's
+// DuoKe chat, this adds them as the person who pressed, then it ships the ones
+// that are now here. Statuses: queued → reading → found → shipping → sending
+// → done, or failed.
+let pickupSyncBusy=false;
+document.getElementById('pickupFromBs').addEventListener('click',async()=>{
+  if(pickupSyncBusy) return;
+  unlockAudio();
+  const msg=document.getElementById('pickupMsg');
+  const btn=document.getElementById('pickupFromBs');
+  const session=await requireSession(msg); if(!session) return;
+  pickupSyncBusy=true; btn.disabled=true;
+  const say=(t,ok=true)=>showMsg(msg,t,ok);
+  const wait=async(id,until,label,limitS)=>{
+    const end=Date.now()+limitS*1000;
+    while(Date.now()<end){
+      const {data}=await sb.from('pickup_sync_jobs').select('*').eq('id',id).maybeSingle();
+      if(data&&(until.includes(data.status)||data.status==='failed')) return data;
+      say(label+(data&&data.status==='queued'?' (waiting for Macro Studio…)':''));
+      await new Promise(r=>setTimeout(r,2000));
+    }
+    return null;
+  };
+  try{
+    say('Asking Macro Studio to read BigSeller…');
+    const {data:job,error}=await sb.from('pickup_sync_jobs')
+      .insert({user_id:session.user.id}).select().single();
+    if(error) throw error;
+    const got=await wait(job.id,['found'],'Reading BigSeller and DuoKe…',180);
+    if(!got){
+      await sb.from('pickup_sync_jobs').update({status:'failed',error:'no answer'}).eq('id',job.id);
+      say('Macro Studio did not answer. Is it running on the shop PC, with pick up sync on?',false); return;
+    }
+    if(got.status==='failed'){ say('Could not read BigSeller: '+escapeHtml(got.error||'unknown'),false); return; }
+    const found=Array.isArray(got.found)?got.found:[];
+    if(!found.length){
+      await sb.from('pickup_sync_jobs').update({status:'done'}).eq('id',job.id);
+      say('No Seller Store Pick Up orders in BigSeller New orders.'); return;
+    }
+    await refreshPickups();
+    const have=new Set(pickupRows.map(p=>String(p.order_id).trim()));
+    let topSort=pickupRows.length?Math.min(...pickupRows.map(p=>Number(p.sort_order)||0))-1:0;
+    const added=[],ship=[],failed=[];
+    for(const f of found){
+      if(!have.has(f.order_id)){
+        const {error:e}=await sb.from('pickups').insert({user_id:session.user.id,order_id:f.order_id,
+          name:f.name||'',remarks:f.remarks||'',sort_order:topSort--});
+        if(e){ failed.push(f.order_id+': '+e.message); continue; }
+        added.push(f); have.add(f.order_id);
+      }
+      ship.push(String(f.bs_id));   // in Pick Up now, whether just added or already there
+    }
+    await refreshPickups();
+    added.forEach(f=>pickupNotify('added',f.order_id,true,f.name));
+    await sb.from('pickup_sync_jobs').update({status:'shipping',ship_ids:ship}).eq('id',job.id);
+    const done=await wait(job.id,['done'],`Added ${added.length}. Shipping ${ship.length} in BigSeller…`,120);
+    const res=(done&&Array.isArray(done.result))?done.result:[];
+    const bad=res.filter(r=>!r.ok);
+    say(`Added ${added.length} pick up${added.length===1?'':'s'}, shipped ${res.length-bad.length} of ${ship.length}.`
+      +(bad.length?'<br/>Not shipped: '+bad.map(r=>escapeHtml(r.order_id+' ('+r.note+')')).join(', '):'')
+      +(failed.length?'<br/>Not added: '+failed.map(escapeHtml).join(', '):'')
+      +(!done?'<br/>Macro Studio did not confirm the shipping — check BigSeller.':(done.status==='failed'?'<br/>'+escapeHtml(done.error):'')),
+      !bad.length&&!failed.length&&!!done&&done.status==='done');
+  }catch(err){
+    say('Pull from BigSeller failed: '+escapeHtml((err&&err.message)||'unknown error'),false);
+  }finally{
+    pickupSyncBusy=false; btn.disabled=false;
+  }
+});
 document.getElementById('pickupList').addEventListener('click',async e=>{
   const card=e.target.closest('.ph-card'); if(!card) return;
   const p=pickupRows.find(x=>x.id===card.dataset.id); if(!p) return;

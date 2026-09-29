@@ -489,7 +489,8 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const message = String(body?.message ?? "").trim();
     const distil = body?.distil === true;
-    if (!distil && !message) return json({ error: "nothing to reply to" }, 400);
+    const pickupWhen = body?.pickup_when === true;
+    if (!distil && !pickupWhen && !message) return json({ error: "nothing to reply to" }, 400);
     if (message.length > 4000) return json({ error: "that message is too long to draft from" }, 400);
 
     const url = Deno.env.get("SUPABASE_URL")!;
@@ -503,6 +504,48 @@ Deno.serve(async (req) => {
     const asUser = createClient(url, anon, { global: { headers: { Authorization: auth } } });
     const { data: me } = await asUser.auth.getUser();
     if (!me?.user) return json({ error: "sign in first" }, 401);
+
+    // Store Pick Up's "From BigSeller": when is this buyer coming? Read off
+    // their chat by Macro Studio, written into the pick up's remarks. Nothing
+    // goes to the buyer — this is a note for whoever prepares the bag.
+    if (pickupWhen) {
+      const lines = (Array.isArray(body?.history) ? body.history : [])
+        .slice(-30)
+        .map((l: Line & { when?: string }) => ({
+          who: l?.inbound === true ? "Buyer" : "Shop",
+          when: String(l?.when ?? "").slice(0, 20),
+          text: String(l?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 300),
+        }))
+        .filter((l: { text: string }) => l.text)
+        .map((l: { who: string; when: string; text: string }) => `[${l.when}] ${l.who}: ${l.text}`);
+      if (!lines.length) return json({ remarks: "" });
+      const text = await ask({
+        systemInstruction: {
+          parts: [{
+            text:
+              "You read a Shopee chat between a Singapore party shop and a buyer whose order is " +
+              "Seller Store Pick Up (self collect). Write ONE short note for the shop staff saying " +
+              "when the buyer plans to collect.\n" +
+              "- Turn 'today', 'tmr', 'later' into real dates as d/m, using each line's timestamp " +
+              "(Singapore time).\n" +
+              "- Include the time of day if said (e.g. after work, 3pm, night).\n" +
+              "- If the buyer asked something about collecting that the shop never answered, " +
+              "add it briefly, e.g. (asked 'can come today?' - not replied).\n" +
+              "- Under 120 characters, plain text, no quotes.\n" +
+              "- If the chat never says when they will collect, answer with nothing at all.",
+          }],
+        },
+        contents: [{
+          role: "user",
+          parts: [{
+            text: `Now (Singapore): ${String(body?.now ?? "").slice(0, 30)}\n` +
+              `Order: ${String(body?.order ?? "").slice(0, 40)}\n\n` + lines.join("\n"),
+          }],
+        }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 200 },
+      });
+      return json({ remarks: text.replace(/^["'“”]+|["'“”]+$/g, "").trim().slice(0, 200) });
+    }
 
     // select * rather than naming the columns, so a fact still loads on a
     // project where the photo migration has not been run yet
