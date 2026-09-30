@@ -59,3 +59,19 @@ create policy "team_delete" on public.pickup_sync_jobs
 alter table public.pickup_sync_jobs add column if not exists kind text not null default 'pull';
 alter table public.pickup_sync_jobs add column if not exists payload jsonb not null default '{}'::jsonb;
 alter table public.pickups add column if not exists photo_sent_at timestamptz;
+
+-- ---------- The Send to buyer message, editable in Pigu (2026-09-30) ----------
+-- One row for the whole team, so everyone sends the same words.
+create table if not exists public.pickup_settings (
+  id boolean primary key default true check (id),
+  photo_text text not null default 'hihi ur order is ready for collection! i left it outside the door, here''s the photo ^^',
+  updated_at timestamptz not null default now()
+);
+insert into public.pickup_settings (id) values (true) on conflict (id) do nothing;
+alter table public.pickup_settings enable row level security;
+drop policy if exists "team_select" on public.pickup_settings;
+drop policy if exists "team_update" on public.pickup_settings;
+create policy "team_select" on public.pickup_settings
+  for select using (public.on_pickup_team(auth.uid()));
+create policy "team_update" on public.pickup_settings
+  for update using (public.on_pickup_team(auth.uid()));

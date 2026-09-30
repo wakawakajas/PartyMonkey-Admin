@@ -4709,6 +4709,15 @@ body.mc-docked .mc-bubble{display:none !important;}
     <div class="chips chips-left" style="margin-top:12px;">
       <button type="button" class="chip chip-xs" id="pickupPush" data-push-chip>🔕 Notify this phone</button>
       <button type="button" class="chip chip-xs" id="pickupTestSound">🔔 Test sound</button>
+      <button type="button" class="chip chip-xs" id="pickupTextOpen">✏️ Photo message</button>
+    </div>
+    <!-- The words "Send to buyer" puts before the photo. One for the whole team
+         (pickup_settings), so everyone's buyers hear the same thing. -->
+    <div id="pickupTextBox" style="display:none;margin-top:10px;">
+      <label class="field" style="margin-bottom:8px;"><span>MESSAGE SENT WITH THE PHOTO</span>
+        <textarea id="pickupTextInput" rows="3"></textarea>
+      </label>
+      <button type="button" class="btn-primary" id="pickupTextSave" style="width:100%;">Save message</button>
     </div>
     <div id="pickupMsg"></div>
   </div>
@@ -21790,6 +21799,31 @@ function pickupBuyer(p){
   return m?m[1]:'';
 }
 const PICKUP_PHOTO_TEXT="hihi ur order is ready for collection! i left it outside the door, here's the photo ^^";
+// the team's saved wording, read fresh each time so an edit on one phone is
+// what the next press on any phone sends
+async function pickupPhotoText(){
+  const {data}=await sb.from('pickup_settings').select('photo_text').eq('id',true).maybeSingle();
+  return ((data&&data.photo_text)||'').trim()||PICKUP_PHOTO_TEXT;
+}
+document.getElementById('pickupTextOpen').addEventListener('click',async()=>{
+  const box=document.getElementById('pickupTextBox');
+  const open=box.style.display==='none';
+  box.style.display=open?'':'none';
+  if(!open||!sb) return;
+  const t=document.getElementById('pickupTextInput');
+  t.value=await pickupPhotoText();
+  t.focus();
+});
+document.getElementById('pickupTextSave').addEventListener('click',async()=>{
+  const msg=document.getElementById('pickupMsg');
+  const text=document.getElementById('pickupTextInput').value.trim();
+  if(!text){ showMsg(msg,'The message cannot be empty.',false); return; }
+  const {error}=await sb.from('pickup_settings')
+    .update({photo_text:text,updated_at:new Date().toISOString()}).eq('id',true);
+  if(error){ showMsg(msg,'Could not save: '+escapeHtml(error.message),false); return; }
+  document.getElementById('pickupTextBox').style.display='none';
+  showMsg(msg,'✏️ Photo message saved.',true);
+});
 // Nothing goes to the buyer until this is pressed and confirmed. Macro Studio
 // on the shop PC sends it through DuoKe (pickup_sync.py photo_job); the sync
 // account cannot read pick up photos, so a 15-minute link goes with the job.
@@ -21797,7 +21831,8 @@ async function sendPickupPhoto(p){
   const msg=document.getElementById('pickupMsg');
   const buyer=pickupBuyer(p);
   if(!p.photo_path||!buyer) return;
-  if(!confirm(`Send to ${buyer} in DuoKe?\n\n"${PICKUP_PHOTO_TEXT}"\n+ the photo`
+  const text=await pickupPhotoText();
+  if(!confirm(`Send to ${buyer} in DuoKe?\n\n"${text}"\n+ the photo`
     +(p.photo_sent_at?'\n\n(Already sent once — this sends it again.)':''))) return;
   const session=await requireSession(msg); if(!session) return;
   try{
@@ -21805,7 +21840,7 @@ async function sendPickupPhoto(p){
     const {data:signed,error:se}=await sb.storage.from(PHOTO_BUCKET).createSignedUrl(p.photo_path,900);
     if(se||!signed) throw se||new Error('no photo link');
     const {data:job,error}=await sb.from('pickup_sync_jobs').insert({user_id:session.user.id,kind:'photo',
-      payload:{buyer,text:PICKUP_PHOTO_TEXT,photo_url:signed.signedUrl,order_id:p.order_id,pickup_id:p.id}})
+      payload:{buyer,text,photo_url:signed.signedUrl,order_id:p.order_id,pickup_id:p.id}})
       .select().single();
     if(error) throw error;
     const end=Date.now()+120000;
