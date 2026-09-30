@@ -2220,6 +2220,20 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 :is(#giftTagScreen,#giftTagDesignScreen,#giftTagSettingsScreen) :is(.combo-opt:hover,.combo-opt.active){background:var(--blueprint-soft);}
 :is(#giftTagScreen,#giftTagDesignScreen,#giftTagSettingsScreen) .combo-opt.kb{background:var(--blueprint-soft);outline-color:#185FA5;}
 :is(#giftTagScreen,#giftTagDesignScreen,#giftTagSettingsScreen) .card-head .num{background:#0C447C;color:#B5D4F4;}
+/* Send to Fiery: the presets two to a row as short buttons, not nine bars
+   down the page; what is picked is blue, and the one button to press is light */
+#mcFierySheet > .sheet{max-width:520px;}
+#mcFierySheet .field > span{font-family:inherit;font-size:12px;letter-spacing:0;text-transform:lowercase;color:var(--muted);}
+#mcFierySheet .field > span::first-letter{text-transform:uppercase;}
+#mcFieryPresets,#mcFieryAction{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:6px;}
+#mcFieryPresets button,#mcFieryAction button{height:38px;min-height:38px;font-size:13px;padding:0 10px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+#mcFieryPresets .btn-primary,#mcFieryAction .btn-primary{background:#0C447C;border:1px solid #185FA5;color:#B5D4F4;font-weight:500;}
+#mcFierySheet :is(#mcFieryCopies,#mcFieryPages,[data-mc-fiery-file-pages]){height:36px;min-height:36px;font-size:14px;}
+#mcFieryGo{height:44px;}
+#mcFieryCancel{height:40px;}
+#mcFieryPaper{font-size:13px;color:var(--ink);}
+#mcFieryPaper b{font-size:15px;}
 /* a hairline under each setting, as a settings panel reads */
 :is(#appScreen,#giftTagScreen) > [data-card] label.field:has(> input[type=number]):not(#gtOrderList label,#gtFieldList label){
   border-bottom:1px solid var(--border);padding:5px 0;}
@@ -7842,6 +7856,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
     <!-- several files at once: each can take its own pages; left empty it
          takes the PAGES above -->
     <div id="mcFieryPerFile" style="display:none;margin:-4px 0 10px;"></div>
+    <!-- how many sheets of paper to put in the tray before pressing send -->
+    <div class="calc" id="mcFieryPaper" style="margin:0 0 4px;"></div>
     <div class="sect-label">THEN</div>
     <div class="chips" id="mcFieryAction">
       <button type="button" class="btn-outline" data-mc-fiery-action="print">Print it</button>
@@ -39780,10 +39796,24 @@ function mcFieryPagesOk(spec,count){
     return lo>=1&&hi<=count&&lo<=hi;
   });
 }
+// how many of a file's `count` sheets a PAGES answer prints; null if unreadable
+function mcFieryPagesCount(spec,count){
+  const t=String(spec||'').replace(/\s/g,'');
+  if(!t||/^all$/i.test(t)) return count;
+  if(!mcFieryPagesOk(t,0)) return null;
+  const on=new Set();
+  t.split(',').forEach(part=>{
+    const [a,b]=part.split('-');
+    const lo=Number(a), hi=part.includes('-')?(b?Number(b):count):lo;
+    for(let i=Math.max(1,lo);i<=Math.min(count,hi);i++) on.add(i);
+  });
+  return on.size;
+}
 // The Command WorkStation settings, asked. Answers {preset_id, preset_name,
 // copies, pages, action} or null. `count` is how many sheets the file has
 // when that is known — only when the one file sent is the one on screen.
-async function fieryAsk(entries,count){
+// `counts` is each file's sheet count, or a promise of them, for the paper line.
+async function fieryAsk(entries,count,counts){
   const sheet=document.getElementById('mcFierySheet');
   const msg=document.getElementById('mcFieryMsg');
   const list=document.getElementById('mcFieryPresets');
@@ -39850,11 +39880,45 @@ async function fieryAsk(entries,count){
       +'fiery.json is filled in there. Nothing has been read yet.';
   }
   paint();
+  // How much paper to put in: every file's sheets as its PAGES leaves them,
+  // times the copies. A back goes through on the same paper as its front, so
+  // it only counts when its front is not in this send.
+  const paperEl=document.getElementById('mcFieryPaper');
+  let known=Array.isArray(counts)?counts:(count&&entries.length===1?[count]:null);
+  const isBack=e=>(e&&e.side==='back')||/_back\.pdf$/i.test((e&&e.name)||'');
+  const frontName=n=>String(n||'').replace(/_back(\.pdf)$/i,'_Front$1').toLowerCase();
+  const paper=()=>{
+    if(!known){ paperEl.innerHTML='Paper to prepare: counting the sheets…'; return; }
+    const n=Math.round(Number(copies.value));
+    const names=new Set(entries.filter(e=>!isBack(e)).map(e=>String(e.name||'').toLowerCase()));
+    let total=0, backs=0, unknown=false;
+    entries.forEach((e,i)=>{
+      const c=known[i];
+      const own=perFile.querySelector(`[data-mc-fiery-file-pages="${i}"]`);
+      const spec=((own&&own.value.trim())||pages.value.trim());
+      if(!(c>0)){ unknown=true; return; }
+      const got=mcFieryPagesCount(spec,c);
+      if(got==null){ unknown=true; return; }
+      if(isBack(e)&&names.has(frontName(e.name))){ backs++; return; }
+      total+=got;
+    });
+    if(!(n>=1)){ paperEl.innerHTML='Paper to prepare: —'; return; }
+    paperEl.innerHTML=`Paper to prepare: <b>${total*n} sheet${total*n===1?'':'s'}</b>`
+      +(n>1?` · ${total} × ${n} copies`:'')
+      +(backs?' · backs print on the same sheets':'')
+      +(unknown?' · some pages could not be counted':'');
+  };
+  paper();
+  if(counts&&typeof counts.then==='function')
+    counts.then(v=>{ known=v; paper(); }).catch(()=>{ known=entries.map(()=>0); paper(); });
+  copies.oninput=pages.oninput=paper;
+  perFile.oninput=paper;
   setTimeout(()=>copies.focus(),0);
   return new Promise(res=>{
     const done=v=>{
       sheet.classList.remove('open');
       list.onclick=acts.onclick=sheet.onkeydown=null;
+      copies.oninput=pages.oninput=perFile.oninput=null;
       go.onclick=null;
       document.getElementById('mcFieryCancel').onclick=null;
       document.getElementById('mcFieryClose').onclick=null;
@@ -39923,7 +39987,7 @@ async function mcFieryPrint(idx){
   const session=await fieryReady(msg); if(!session) return;
   const entries=idx.map(i=>mcPlan[i]);
   const count=(idx.length===1&&idx[0]===mcPlanAt)?mcPlanPages:0;
-  const ans=await fieryAsk(entries,count);
+  const ans=await fieryAsk(entries,count,mcFieryCountSheets(entries));
   if(!ans) return;
   mcBusy=true; mcSyncBatchButtons(); mcRenderPlan(); mcPlanZoomApply();
   let dir=null;
@@ -39960,6 +40024,29 @@ async function mcFieryPrint(idx){
   }catch(err){
     showMsg(msg,'Not sent: '+escapeHtml((err&&err.message)||'unknown error'),false);
   }finally{ mcBusy=false; mcSyncBatchButtons(); mcExportFolderLbl(); mcRenderPlan(); mcPlanZoomApply(); }
+}
+// Each file's sheet count, laid out the way its proof is, for the paper line.
+async function mcFieryCountSheets(entries){
+  const out=[];
+  const c=document.createElement('canvas');
+  await mcBorrowBuilder(async()=>{
+    for(const e of entries){
+      try{
+        if(e.kind==='line'){
+          pcMode=mcPcOf(e.it);
+          applyPrintState(e.it.design);
+          state.orderId=e.it.order_id;
+          await mcApplyArt(e.it);
+          out.push(Math.max(1,sheetCount()));
+        }else{
+          mcMergeNote='';
+          out.push(Math.max(1,await MC_TILES[e.tile].preview(e,c,60,0)||1));
+        }
+      }catch(err){ out.push(0); }
+    }
+  });
+  mcMergeNote='';
+  return out;
 }
 // The rows just queued, watched until the shop PC has dealt with them. Said
 // under the proof and under the batch both, since the proof may be shut by the
