@@ -75,3 +75,9 @@ create policy "team_select" on public.pickup_settings
   for select using (public.on_pickup_team(auth.uid()));
 create policy "team_update" on public.pickup_settings
   for update using (public.on_pickup_team(auth.uid()));
+
+-- only an admin changes the team's wording (2026-09-30)
+drop policy if exists "team_update" on public.pickup_settings;
+drop policy if exists "admin_update" on public.pickup_settings;
+create policy "admin_update" on public.pickup_settings
+  for update using (public.is_admin(auth.uid()));
