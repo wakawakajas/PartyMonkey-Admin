@@ -2220,6 +2220,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 :is(#giftTagScreen,#giftTagDesignScreen,#giftTagSettingsScreen) :is(.combo-opt:hover,.combo-opt.active){background:var(--blueprint-soft);}
 :is(#giftTagScreen,#giftTagDesignScreen,#giftTagSettingsScreen) .combo-opt.kb{background:var(--blueprint-soft);outline-color:#185FA5;}
 :is(#giftTagScreen,#giftTagDesignScreen,#giftTagSettingsScreen) .card-head .num{background:#0C447C;color:#B5D4F4;}
+.mc-sheets-tag{display:block;font-size:11.5px;color:var(--muted);margin-top:2px;}
+#mcPlanPaper b{font-size:14px;}
 /* Send to Fiery: the presets two to a row as short buttons, not nine bars
    down the page; what is picked is blue, and the one button to press is light */
 #mcFierySheet > .sheet{max-width:520px;}
@@ -7733,6 +7735,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         <button type="button" class="btn-outline btn-sm" id="mcPlanPrintSel" disabled>🖨 Ticked</button>
       </span>
     </div>
+    <div class="calc" id="mcPlanPaper" style="margin:0 0 6px;font-size:13px;color:var(--ink);"></div>
     <div id="mcPlanList"></div>
     <div class="mc-made-stage mc-plan-stage" id="mcPlanStage" style="display:none;">
       <canvas id="mcPlanCanvas"></canvas>
@@ -13354,6 +13357,12 @@ function pcShowSide(which,draw){
   });
   // asking to see a sheet that was folded away means seeing it
   if(which!=='both') pcFoldSheet(which,false);
+  // the sheet pager goes with the sheet on show: Back on its own hides the
+  // front card, and the pager with it, so more back designs than placeholders
+  // looked like one sheet with nowhere to turn to the next
+  const nav=document.getElementById('sheetNav');
+  const host=document.querySelector(`.preview-card[data-side="${which==='back'?'back':'front'}"] .top-row > div`);
+  if(nav&&host&&nav.parentNode!==host) host.insertBefore(nav,host.firstChild);
   try{ localStorage.setItem('pcShowSide',which); }catch(e){}
   if(draw) drawAll();
 }
@@ -39456,6 +39465,7 @@ async function mcOpenPlan(){
   catch(err){ mcPlan=[]; showMsg(document.getElementById('mcPlanMsg'),
     'Could not work that out: '+((err&&err.message)||'unknown error'),false); }
   mcRenderPlan();
+  mcPlanCountAll();
 }
 // What has already gone out, said on the list of what is about to. A file
 // fetched on its own and then forgotten looks exactly like one nobody has
@@ -39502,6 +39512,8 @@ function mcRenderPlan(){
       <span class="mc-sum-main">
         <span class="mc-sum-sku">${escapeHtml(e.name)}</span>
         <span class="mc-sum-name">${escapeHtml(e.what)}</span>
+        <span class="mc-sheets-tag">${e.sheets>0?`📄 ${e.sheets} sheet${e.sheets===1?'':'s'}`
+          :e.sheets===0?'📄 sheets not counted':'📄 counting…'}</span>
         ${mcPlanDlTag(e)}
       </span>
       ${mcForceMergeable(e)?`<button type="button" class="btn-outline" data-mc-force="${i}"${
@@ -39538,6 +39550,15 @@ function mcPlanTallySync(){
   const n=mcPlanSel.size;
   txt.textContent=`${files} file${files===1?'':'s'} from ${lines.size} line${lines.size===1?'':'s'}`
     +(n?` · ${n} ticked`:'');
+  // the paper to get out: the ticked files, or all of them
+  const pp=document.getElementById('mcPlanPaper');
+  if(pp){
+    const pf=mcPaperFor(n?mcPlan.filter((e,i)=>mcPlanSel.has(i)):mcPlan);
+    pp.innerHTML=`Paper to prepare${n?' (ticked)':''}: `
+      +(pf.parts.length?`<b>${escapeHtml(pf.parts.join(' · '))}</b>`:'')
+      +(pf.pending?(pf.parts.length?' · still counting…':'counting…'):'')
+      +' <span class="hint" style="margin:0;">per copy · a back prints on its front’s sheets</span>';
+  }
   btn.disabled=mcBusy||!n;
   btn.textContent=n?`⬇ Ticked (${n})`:'⬇ Ticked';
   const pr=document.getElementById('mcPlanPrintSel');
@@ -40026,27 +40047,73 @@ async function mcFieryPrint(idx){
   }finally{ mcBusy=false; mcSyncBatchButtons(); mcExportFolderLbl(); mcRenderPlan(); mcPlanZoomApply(); }
 }
 // Each file's sheet count, laid out the way its proof is, for the paper line.
+// Inside a borrowed builder: one file's sheet count, laid out as its proof is.
+async function mcCountEntrySheets(e,c){
+  try{
+    if(e.kind==='line'){
+      pcMode=mcPcOf(e.it);
+      applyPrintState(e.it.design);
+      state.orderId=e.it.order_id;
+      await mcApplyArt(e.it);
+      return Math.max(1,sheetCount());
+    }
+    mcMergeNote='';
+    const n=Math.max(1,await MC_TILES[e.tile].preview(e,c,60,0)||1);
+    mcMergeNote='';
+    return n;
+  }catch(err){ return 0; }
+}
 async function mcFieryCountSheets(entries){
+  // already counted on the Ready to download list, most of the time
+  if(entries.every(e=>e.sheets>0)) return entries.map(e=>e.sheets);
   const out=[];
   const c=document.createElement('canvas');
+  while(mcPlanCountStep) await mcPlanCountStep;
   await mcBorrowBuilder(async()=>{
-    for(const e of entries){
-      try{
-        if(e.kind==='line'){
-          pcMode=mcPcOf(e.it);
-          applyPrintState(e.it.design);
-          state.orderId=e.it.order_id;
-          await mcApplyArt(e.it);
-          out.push(Math.max(1,sheetCount()));
-        }else{
-          mcMergeNote='';
-          out.push(Math.max(1,await MC_TILES[e.tile].preview(e,c,60,0)||1));
-        }
-      }catch(err){ out.push(0); }
-    }
+    for(const e of entries) out.push(e.sheets>0?e.sheets:(e.sheets=await mcCountEntrySheets(e,c)));
   });
-  mcMergeNote='';
   return out;
+}
+// The Ready to download list counts every file's sheets in the background, one
+// at a time between proofs, so each row can say how many sheets it is and the
+// head of the list how much paper of each kind to get out.
+let mcPlanCountStep=null, mcPlanCountRun=0;
+async function mcPlanCountAll(){
+  const run=++mcPlanCountRun, plan=mcPlan;
+  const c=document.createElement('canvas');
+  for(const e of plan){
+    if(run!==mcPlanCountRun||plan!==mcPlan) return;
+    if(e.sheets>0) continue;
+    // a proof being drawn or a download running has the builder; wait for it
+    while(mcPlanDrawing||mcBusy){
+      await new Promise(r=>setTimeout(r,200));
+      if(run!==mcPlanCountRun||plan!==mcPlan) return;
+    }
+    mcPlanCountStep=(async()=>{
+      mcPlanDrawing=true;
+      try{ await mcBorrowBuilder(async()=>{ e.sheets=await mcCountEntrySheets(e,c); }); }
+      catch(err){ e.sheets=0; }
+      finally{ mcPlanDrawing=false; }
+    })();
+    await mcPlanCountStep; mcPlanCountStep=null;
+    if(run===mcPlanCountRun&&plan===mcPlan) mcRenderPlan();
+    await new Promise(r=>setTimeout(r,30));
+  }
+}
+// Paper to get out for a set of files: each stock's sheets, a back riding on
+// its front's sheets when its front is among them. Null while any is uncounted.
+function mcPaperFor(list){
+  const isBack=e=>(e&&e.side==='back')||/_back\.pdf$/i.test((e&&e.name)||'');
+  const fronts=new Set(list.filter(e=>!isBack(e)).map(e=>String(e.name||'').toLowerCase()));
+  const by=new Map(); let pending=false;
+  list.forEach(e=>{
+    if(!(e.sheets>0)){ if(e.sheets!==0) pending=true; return; }
+    if(isBack(e)&&fronts.has(String(e.name||'').replace(/_back(\.pdf)$/i,'_Front$1').toLowerCase())) return;
+    const st=mcFieryStockOf(e);
+    const k=[st.paper,st.gsm&&(/gsm/i.test(st.gsm)?st.gsm:st.gsm+'gsm')].filter(Boolean).join(' ')||'paper not set';
+    by.set(k,(by.get(k)||0)+e.sheets);
+  });
+  return {pending,parts:[...by.entries()].map(([k,n])=>`${n} × ${k}`)};
 }
 // The rows just queued, watched until the shop PC has dealt with them. Said
 // under the proof and under the batch both, since the proof may be shut by the
@@ -40612,6 +40679,7 @@ document.getElementById('mcFieryStopBtn').addEventListener('click',async()=>{
 let mcPlanPage=0, mcPlanPages=1, mcPlanDrawing=false;
 async function mcShowPlanEntry(i,page){
   // the builder is borrowed by a download; drawing a proof swaps it mid-file
+  while(mcPlanCountStep) await mcPlanCountStep;
   const e=mcPlan[i]; if(!e||mcPlanDrawing||mcBusy) return;
   const msg=document.getElementById('mcPlanMsg');
   const stage=document.getElementById('mcPlanStage');
@@ -40645,6 +40713,7 @@ async function mcShowPlanEntry(i,page){
         mcPlanPages=Math.max(1,await MC_TILES[e.tile].preview(e,c,dim,mcPlanPage)||1);
         if(mcPlanPage>=mcPlanPages) mcPlanPage=mcPlanPages-1;
       }
+      e.sheets=mcPlanPages;
     });
     msg.innerHTML='';
     if(mcMergeNote){ showMsg(msg,escapeHtml(mcMergeNote),false); mcMergeNote=''; }
