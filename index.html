@@ -4034,6 +4034,12 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
        the top or the foot of a list that can be two hundred lines long, which
        on a long batch is nowhere near the hand that wants them. -->
   <div class="mc-dock" id="mcDock">
+    <button type="button" class="mc-dock-btn" id="mcPaperBtn"
+            title="How much paper this batch has sent to the Fiery, and what is still to print"
+            aria-label="Paper summary">
+      <span class="ic" aria-hidden="true">📄</span>
+      <span class="t">Paper</span>
+    </button>
     <button type="button" class="mc-dock-btn mc-log-btn" id="mcLogBtn" hidden
             title="What has happened on this batch — copies, prints, what is still queued, what went wrong"
             aria-label="Batch log">
@@ -7857,6 +7863,17 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
     <p class="hint" style="margin:0;">Newest first. Kept until the page is reloaded.</p>
     <div class="mc-log-list" id="mcLogList"></div>
     <button class="btn-outline" id="mcLogClear">Clear the log</button>
+  </div>
+</div>
+
+<!-- ---- Magic Create: the paper a batch has been through. Asked after the
+     Print was pressed, when the pop-up that said it is long shut. ---- -->
+<div class="sheet-bg" id="mcPaperSheet">
+  <div class="sheet" style="max-width:520px;">
+    <button class="req-x" id="mcPaperClose" title="Close" aria-label="Close">×</button>
+    <div class="sheet-title">Paper</div>
+    <div id="mcPaperBody"></div>
+    <button class="btn-outline" id="mcPaperClear">Clear what was sent</button>
   </div>
 </div>
 
@@ -40136,8 +40153,10 @@ async function mcFieryPrint(idx){
     });
     mcRenderItems();
     if(!saved.length) throw new Error(failed.slice(0,3).join(', ')||'nothing was saved');
-    if(await fieryQueue(session,dir,saved,ans,['mcPlanMsg','mcBatchMsg'],failed)
-      &&idx.length>1) mcPlanSel.clear();
+    if(await fieryQueue(session,dir,saved,ans,['mcPlanMsg','mcBatchMsg'],failed)){
+      mcPaperRecordFiles(entries.filter(e=>saved.includes(e.name)),ans,count);
+      if(idx.length>1) mcPlanSel.clear();
+    }
   }catch(err){
     showMsg(msg,'Not sent: '+escapeHtml((err&&err.message)||'unknown error'),false);
   }finally{ mcBusy=false; mcSyncBatchButtons(); mcExportFolderLbl(); mcRenderPlan(); mcPlanZoomApply(); }
@@ -40392,6 +40411,106 @@ document.getElementById('mcLogSheet').addEventListener('click',e=>{
 });
 document.getElementById('mcLogClear').addEventListener('click',()=>{
   mcLog=[]; mcLogUnseen=0; mcLogUnseenBad=false; mcLogList(); mcLogPaint(); mcLogShut();
+});
+// ---------- the paper this batch has been through ----------
+// "How many sheets was that?" is asked after Print, when the pop-up that said
+// it is shut. Every send to the Fiery is written down here, per batch, on this
+// PC — kept through a reload — added up by the preset it went on.
+const mcPaperKey=()=>mcBatch?'mcPaperSent:'+mcBatch.id:'';
+function mcPaperSent(){
+  const k=mcPaperKey(); if(!k) return [];
+  try{ return JSON.parse(localStorage.getItem(k)||'[]')||[]; }catch(e){ return []; }
+}
+function mcPaperRecord(rows){
+  const k=mcPaperKey(); if(!k||!rows.length) return;
+  const at=Date.now();
+  try{ localStorage.setItem(k,JSON.stringify(mcPaperSent().concat(rows.map(r=>({...r,at}))))); }catch(e){}
+  if(mcPaperOpen()) mcPaperPaint();
+}
+// Magic Create files: each file's sheets as its pages leave them, times the
+// copies; a back rides on its front's sheets when its front went too.
+function mcPaperRecordFiles(entries,ans,count){
+  const isBack=e=>(e&&e.side==='back')||/_back\.pdf$/i.test((e&&e.name)||'');
+  const fronts=new Set(entries.filter(e=>!isBack(e)).map(e=>String(e.name||'').toLowerCase()));
+  let sheets=0, unsure=false;
+  entries.forEach(e=>{
+    if(isBack(e)&&fronts.has(String(e.name||'').replace(/_back(\.pdf)$/i,'_Front$1').toLowerCase())) return;
+    const spec=(ans.pagesFor&&ans.pagesFor[e.name]!=null)?ans.pagesFor[e.name]:ans.pages;
+    const c=e.sheets>0?e.sheets:(entries.length===1?count:0);
+    const got=c>0?mcFieryPagesCount(spec,c):null;
+    if(got==null) unsure=true; else sheets+=got;
+  });
+  const copies=Math.max(1,Number(ans.copies)||1);
+  mcPaperRecord([{paper:ans.preset_name||'no preset',sheets:sheets*copies,unsure,action:ans.action,
+    what:(entries.length===1?entries[0].name:`${entries.length} files`)
+      +` · ${copies} cop${copies===1?'y':'ies'}`}]);
+}
+const mcPaperOpen=()=>document.getElementById('mcPaperSheet').classList.contains('open');
+// which preset each Copy File SKU prints on, read when the sheet is opened
+let mcPaperPresets=null;
+async function mcPaperLoadPresets(){
+  if(!sb) return;
+  try{
+    const [p,s]=await Promise.all([sb.from('fiery_presets').select('id,name'),
+      sb.from('fiery_sku_presets').select('sku,preset_id')]);
+    if(p.error||s.error) return;
+    const name=new Map((p.data||[]).map(r=>[String(r.id),r.name]));
+    mcPaperPresets=new Map((s.data||[]).map(r=>[String(r.sku),name.get(String(r.preset_id))||'']));
+  }catch(e){}
+}
+function mcPaperPaint(){
+  const box=document.getElementById('mcPaperBody'); if(!box) return;
+  const plural=n=>`${n} sheet${n===1?'':'s'}`;
+  const sent=mcPaperSent();
+  const tot=new Map(); let unsure=false;
+  sent.forEach(r=>{ tot.set(r.paper,(tot.get(r.paper)||0)+(Number(r.sheets)||0)); if(r.unsure) unsure=true; });
+  let html='<div class="sheet-sub" style="margin:4px 0 6px;font-weight:600;">Sent to the Fiery on this batch</div>';
+  html+=sent.length
+    ? [...tot].map(([k,n])=>`<div>📄 <b>${plural(n)}</b> of ${escapeHtml(k)}</div>`).join('')
+      +(unsure?'<div class="hint" style="margin:2px 0 0;">Some pages could not be counted — the real number is higher.</div>':'')
+      +'<div class="mc-log-list" style="max-height:30vh;">'+sent.slice().reverse().map(r=>
+        `<div class="mc-log-row"><span class="when">${escapeHtml(new Date(r.at)
+          .toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}))}${
+          r.action==='hold'?' · held in Fiery':''}</span>${escapeHtml(r.what||'')} — <b>${
+          plural(Number(r.sheets)||0)}${r.unsure?'+':''}</b> of ${escapeHtml(r.paper)}</div>`).join('')+'</div>'
+    : '<p class="hint" style="margin:0 0 8px;">Nothing sent from this PC yet.</p>';
+  // Copy File lines not printed or ticked yet: one sheet a copy, by preset
+  const left=mcItems.filter(mcIsCopyLine)
+    .filter(it=>!(it.status||(it.sheet_item&&it.sheet_item.printed)));
+  if(left.length){
+    const by=new Map();
+    left.forEach(it=>{
+      const k=(mcPaperPresets&&mcPaperPresets.get(String(mcRowKey(it))))||'no preset yet';
+      by.set(k,(by.get(k)||0)+Math.max(1,mcQty(it)||1));
+    });
+    html+='<div class="sheet-sub" style="margin:10px 0 6px;font-weight:600;">Copy File lines still to print</div>'
+      +[...by].map(([k,n])=>`<div>📄 <b>${plural(n)}</b> of ${escapeHtml(k)}</div>`).join('');
+  }
+  // the Ready to download list, when it has been opened on this batch
+  if(typeof mcPlan!=='undefined'&&mcPlan&&mcPlan.length){
+    const pf=mcPaperFor(mcPlan);
+    html+='<div class="sheet-sub" style="margin:10px 0 6px;font-weight:600;">Ready to download list (per copy)</div>'
+      +(pf.parts.length?`<div><b>${escapeHtml(pf.parts.join(' · '))}</b></div>`:'')
+      +(pf.pending?'<div class="hint" style="margin:0;">still counting…</div>':'');
+  }
+  box.innerHTML=html;
+  document.getElementById('mcPaperClear').style.display=sent.length?'':'none';
+}
+document.getElementById('mcPaperBtn').addEventListener('click',async()=>{
+  mcPaperPaint();
+  document.getElementById('mcPaperSheet').classList.add('open');
+  await mcPaperLoadPresets();
+  if(mcPaperOpen()) mcPaperPaint();
+});
+const mcPaperShut=()=>document.getElementById('mcPaperSheet').classList.remove('open');
+document.getElementById('mcPaperClose').addEventListener('click',mcPaperShut);
+document.getElementById('mcPaperSheet').addEventListener('click',e=>{
+  if(e.target.id==='mcPaperSheet') mcPaperShut();
+});
+document.getElementById('mcPaperClear').addEventListener('click',()=>{
+  if(!confirm('Clear what this batch has sent? The Fiery is not touched — only this tally.')) return;
+  try{ localStorage.removeItem(mcPaperKey()); }catch(e){}
+  mcPaperPaint();
 });
 // One file's copy, said in the log as it happens: Copying… and then what came
 // of it, on the same entry. Keyed by the press as well as the SKU, so copying
@@ -40700,7 +40819,14 @@ async function fieryRunSend(ticked){
     const names=[...new Set(rows.map(r=>r.preset_name))];
     const summary={preset_name:names.slice(0,2).join(', ')+(names.length>2?` +${names.length-2}`:''),
       copies:rows.reduce((a,r)=>a+r.copies,0),pages:'',action:R.action};
-    await fieryQueue(R.session,dir,rows,summary,['mcBatchMsg'],failed);
+    if(await fieryQueue(R.session,dir,rows,summary,['mcBatchMsg'],failed)){
+      // a copied file is one sheet a copy — what the pop-up said to prepare
+      const by=new Map();
+      rows.forEach(r=>{ const b=by.get(r.preset_name)||{sheets:0,files:0};
+        b.sheets+=r.copies; b.files++; by.set(r.preset_name,b); });
+      mcPaperRecord([...by].map(([paper,b])=>({paper,sheets:b.sheets,action:R.action,
+        what:(R.orderId!==undefined?`Order ${R.orderId} · `:'')+`${b.files} copied file${b.files===1?'':'s'}`})));
+    }
     if(fieryRun===R) fieryRun=null;
     mcFieryStateLoad();
   }catch(err){
