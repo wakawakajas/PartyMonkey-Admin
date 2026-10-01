@@ -506,6 +506,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .oo-pill.done b{color:var(--ps-ok);}
 .oo-filter{display:flex;gap:8px;}
 .oo-card.wa-form{--st:var(--blueprint);}
+.wa-pills{grid-template-columns:repeat(2,minmax(0,1fr));}
+.ps-skin .wa-row .wa-pos{height:30px;font-size:12.5px;padding:0 8px;margin:4px 0 0;width:100%;max-width:150px;}
+.wa-row.done{border-left-color:var(--ps-ok);}
 .wa-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 10px;}
 .wa-f{display:flex;flex-direction:column;gap:3px;min-width:0;}
 .wa-f>span{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);}
@@ -5346,6 +5349,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         <button type="button" class="btn-primary" id="waAdd" style="padding:0 22px;">+ Add wastage</button></div>
     </div>
     <div id="waMsg"></div>
+    <div class="oo-pills wa-pills" id="waPills"></div>
     <div class="ps-filter oo-filter"><input type="text" id="waSearch" class="ps-search" style="margin:0;"
       placeholder="Paper, reason, POS ID or name" aria-label="Search wastage"/>
       <select id="waMonth" aria-label="Month"></select></div>
@@ -51470,7 +51474,8 @@ function ooSavePos(o,items){ ooSave(o,{pos_items:items,pos_price:+ooPosPrice({po
 // Rows in wastage (supabase-migration-WASTAGE.sql); the papers and the reasons
 // to pick from come from finance_settings. Cost is worked out when a line is
 // added and kept, so a later price change does not rewrite past months.
-let waRows=[];
+let waRows=[], waTab='open';
+// a line is finished once it has its POS ID; until then it waits on Open
 const WA_SIDE={single:'Single side',double:'Double side',blank:'Not printed'};
 async function openWastage(){
   const msg=document.getElementById('waMsg');
@@ -51509,16 +51514,22 @@ function renderWastage(){
   mSel.innerHTML='<option value="">All months</option>'+months.map(m=>
     `<option value="${m}">${new Date(m+'-01T00:00').toLocaleDateString('en-GB',{month:'long',year:'numeric'})}</option>`).join('');
   mSel.value=months.includes(mWas)?mWas:'';
-  const list=waRows.filter(w=>!mSel.value||(w.wasted_on||'').startsWith(mSel.value))
+  const isDone=w=>!!(w.pos_id||'').trim();
+  document.getElementById('waPills').innerHTML=[['open','Open — no POS ID yet'],['completed','Completed']].map(([k,l])=>{
+    const n=waRows.filter(w=>isDone(w)===(k==='completed')).length;
+    return `<button type="button" class="oo-pill${k==='completed'?' done':n?' warn':''}${waTab===k?' on':''}" data-wa-tab="${k}"><b>${n}</b>${l}</button>`;
+  }).join('');
+  const list=waRows.filter(w=>isDone(w)===(waTab==='completed')).filter(w=>!mSel.value||(w.wasted_on||'').startsWith(mSel.value))
     .filter(w=>!q||[w.paper,w.reason,w.pos_id,w.by_who].join(' ').toLowerCase().includes(q));
   const box=(l,v)=>`<div><span>${l}</span><b>${v}</b></div>`;
   document.getElementById('waSum').innerHTML=!list.length?'':
     box(`${list.length} entr${list.length>1?'ies':'y'} · sheets`,list.reduce((t,w)=>t+finNum(w.sheets),0))
     +box('Wasted cost',ooMoney(list.reduce((t,w)=>t+finNum(w.cost),0)));
-  document.getElementById('waList').innerHTML=list.length?list.map(w=>`<div class="wa-row" data-wa="${w.id}">
+  document.getElementById('waList').innerHTML=list.length?list.map(w=>`<div class="wa-row${isDone(w)?' done':''}" data-wa="${w.id}">
       <span class="dt">${ooShowDate(w.wasted_on)}</span>
       <span class="pp"><b>${escapeHtml(w.paper||'—')}</b><span>${finNum(w.sheets)} sheet${finNum(w.sheets)===1?'':'s'} · ${WA_SIDE[w.side]||''}</span></span>
-      <span class="mt">${escapeHtml(w.reason||'—')}${w.pos_id?`<span>POS ${escapeHtml(w.pos_id)}</span>`:''}</span>
+      <span class="mt">${escapeHtml(w.reason||'—')}${isDone(w)?`<span>POS ${escapeHtml(w.pos_id)}</span>`
+        :`<input type="text" class="wa-pos" data-wa-pos data-enter-own placeholder="Add POS ID ↵"/>`}</span>
       <span class="mt">${escapeHtml(w.by_who||'')}</span>
       <span class="c">${ooMoney(w.cost)}</span>
       <button type="button" class="del-btn" data-wa-del title="Delete">✕</button></div>`).join('')
@@ -51559,7 +51570,22 @@ async function waAdd(btn){
     if(error||!data||!data.length){ showMsg(document.getElementById('waMsg'),'Could not add the reason'+(error?': '+error.message:''),false); sel.value=''; return; }
     finSettings.wastage_reasons=list; waReasons(name);
   });
+  // a POS ID typed on an open line saves it, and the line moves to Completed
+  const savePos=async el=>{
+    const v=el.value.trim(); if(!v) return;
+    const w=waRows.find(x=>x.id===el.closest('[data-wa]').dataset.wa); if(!w) return;
+    el.disabled=true;
+    const {error}=await sb.from('wastage').update({pos_id:v}).eq('id',w.id);
+    if(error){ el.disabled=false; return showMsg(document.getElementById('waMsg'),'Could not save: '+error.message,false); }
+    w.pos_id=v; renderWastage();
+    showMsg(document.getElementById('waMsg'),`✓ POS ${escapeHtml(v)} saved — moved to Completed.`,true);
+  };
+  scr.addEventListener('keydown',e=>{
+    if(e.key==='Enter'&&e.target.dataset.waPos!==undefined){ e.preventDefault(); savePos(e.target); } });
+  scr.addEventListener('change',e=>{ if(e.target.dataset.waPos!==undefined) savePos(e.target); });
   scr.addEventListener('click',e=>{
+    const t=e.target.closest('[data-wa-tab]');
+    if(t){ waTab=t.dataset.waTab; renderWastage(); return; }
     const b=e.target.closest('[data-wa-del]'); if(!b) return;
     const w=waRows.find(x=>x.id===b.closest('[data-wa]').dataset.wa); if(!w) return;
     if(!confirm(`Delete ${finNum(w.sheets)} sheets of ${w.paper||'paper'} (${ooShowDate(w.wasted_on)})?`)) return;
