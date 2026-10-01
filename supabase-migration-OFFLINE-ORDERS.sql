@@ -37,6 +37,11 @@ create table if not exists public.offline_orders (
 -- [{"by": "jasmine", "at": "2026-10-01T10:00:00Z", "text": "…"}]
 alter table public.offline_orders add column if not exists comments jsonb not null default '[]'::jsonb;
 
+-- who ticked Done (typed in) and when; when all three ticks were last true
+alter table public.offline_orders add column if not exists done_by text;
+alter table public.offline_orders add column if not exists done_at timestamptz;
+alter table public.offline_orders add column if not exists completed_at timestamptz;
+
 alter table public.offline_orders enable row level security;
 
 drop policy if exists "offline_orders_all" on public.offline_orders;

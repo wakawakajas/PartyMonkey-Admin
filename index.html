@@ -502,7 +502,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   font-size:13px;cursor:pointer;margin:0 0 12px;transition:border-color .15s,background .15s;}
 .oo-drop u{color:var(--blueprint);}
 #financeOfflineScreen.oo-over .oo-drop{border-color:var(--blueprint);background:var(--blueprint-soft);color:var(--ink);}
-.oo-pills{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 0 12px;}
+.oo-pills{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:0 0 12px;}
+.oo-pill.done b{color:var(--ps-ok);}
+.oo-filter{display:flex;gap:8px;}
+.oo-filter .ps-search{flex:1;}
+.ps-skin .oo-filter select{width:auto;flex:none;margin:0;}
+.oo-flag:disabled{opacity:.4;cursor:not-allowed;}
+.oo-doneby{font-size:12px;color:var(--muted);align-self:center;}
+.oo-doneby b{color:var(--ink);font-weight:600;}
 .oo-pill{display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:10px 14px;border-radius:10px;height:auto;
   border:2px solid transparent;background:var(--soft);color:var(--muted);font-size:12.5px;cursor:pointer;text-align:left;}
 .oo-pill b{font-size:24px;font-weight:650;line-height:1;color:var(--ink);}
@@ -531,7 +538,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .oo-items tr:last-child td{border-bottom:0;}
 .oo-items .d{white-space:pre-line;}
 .oo-items .d::first-line{font-weight:600;}
-.oo-items .q{color:var(--muted);text-align:right;padding:3px 10px;white-space:nowrap;}
+.oo-items .q{color:var(--muted);text-align:center;padding:3px 10px;white-space:nowrap;width:22%;}
 .oo-items .a{text-align:right;white-space:nowrap;}
 .oo-ful{font-size:12px;color:var(--muted);margin-top:4px;}
 .oo-ours{border-top:1px dashed var(--border);margin-top:12px;padding-top:10px;display:grid;gap:8px;}
@@ -551,6 +558,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .oo-meta{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:8px;}
 @media (max-width:700px){
   .oo-pills{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .oo-pill:first-child{grid-column:1/-1;}
   .oo-grid,.oo-meta{grid-template-columns:1fr;}
   .oo-pos{grid-template-columns:minmax(0,1fr) 64px 100px 22px;}
 }
@@ -5270,9 +5278,21 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
     <div class="oo-drop" id="ooDrop">Drag &amp; drop invoice PDFs here, or <u>browse</u></div>
     <div id="ooMsg"></div>
     <div class="oo-pills" id="ooPills"></div>
-    <div class="ps-filter"><input type="text" id="ooSearch" class="ps-search" style="margin:0;"
-      placeholder="Invoice no., client, contact, item or tracking" aria-label="Search offline orders"/></div>
+    <div class="ps-filter oo-filter"><input type="text" id="ooSearch" class="ps-search" style="margin:0;"
+      placeholder="Invoice no., client, contact, item or tracking" aria-label="Search offline orders"/>
+      <select id="ooMonth" aria-label="Completed in month" hidden></select></div>
     <div id="ooList"><p class="hint">— no orders yet —</p></div>
+    <div class="sheet-bg" id="ooDoneSheet">
+      <div class="sheet">
+        <div class="sheet-title">Done by who?</div>
+        <p class="hint" id="ooDoneFor" style="margin:0 0 8px;"></p>
+        <input type="text" id="ooDoneName" placeholder="Your name" autocomplete="off"/>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button type="button" class="btn-outline" id="ooDoneCancel" style="flex:1;">Cancel</button>
+          <button type="button" class="btn-primary" id="ooDoneOk" style="flex:1;">Mark done</button>
+        </div>
+      </div>
+    </div>
   </div>
   <div class="home-wrap" id="financePrintCalcScreen" style="display:none;">
     <h1>Print Calculator</h1>
@@ -51277,8 +51297,15 @@ async function ooAddFiles(files){
   await openOfflineOrders();
   showMsg(msg,(ok?`✓ ${ok} invoice${ok>1?'s':''} read in.`:'')+(bad.length?' Could not read — '+bad.map(escapeHtml).join('; '):''),!bad.length);
 }
-const OO_PILLS=[['all','All'],['unpaid','Not paid'],['todo','Not done'],['tosend','To collect / send']];
-const ooMatch={all:()=>true,unpaid:o=>!o.paid,todo:o=>!o.done,tosend:o=>!o.sent};
+// an order with all three ticked is finished and moves to Completed; the other
+// tabs are only the open ones
+const ooClosed=o=>!!(o.paid&&o.done&&o.sent);
+const OO_PILLS=[['all','Open'],['unpaid','Not paid'],['todo','Not done'],['tosend','To collect / send'],['completed','Completed']];
+const ooMatch={all:o=>!ooClosed(o),unpaid:o=>!ooClosed(o)&&!o.paid,todo:o=>!ooClosed(o)&&!o.done,
+  tosend:o=>!ooClosed(o)&&!o.sent,completed:ooClosed};
+const ooMonthOf=o=>(o.completed_at||o.done_at||o.invoice_date||'').slice(0,7);
+// Done needs at least one paper on the POS lines, with sheets
+const ooHasPaper=o=>(o.pos_items||[]).some(p=>p.paper!==''&&p.paper!=null&&finNum(p.sheets)>0);
 const ooPaperName=r=>{ const c=(r&&r.cells)||[]; return [c[0],c[1]?c[1]+'gsm':''].filter(Boolean).join(' '); };
 // what one sheet of a paper costs printed on one side, both, or neither (paper alone)
 function ooSheetPrice(pi,side){
@@ -51292,14 +51319,22 @@ function renderOfflineOrders(){
   const q=(document.getElementById('ooSearch').value||'').trim().toLowerCase();
   document.getElementById('ooPills').innerHTML=OO_PILLS.map(([k,l])=>{
     const n=ooOrders.filter(ooMatch[k]).length;
-    return `<button type="button" class="oo-pill${k!=='all'&&n?' warn':''}${ooFilter===k?' on':''}" data-oo-pill="${k}"><b>${n}</b>${l}</button>`;
+    return `<button type="button" class="oo-pill${k==='completed'?' done':k!=='all'&&n?' warn':''}${ooFilter===k?' on':''}" data-oo-pill="${k}"><b>${n}</b>${l}</button>`;
   }).join('');
+  // the month picker, only on Completed, listing the months that have any
+  const mSel=document.getElementById('ooMonth'), mWas=mSel.value;
+  mSel.hidden=ooFilter!=='completed';
+  const months=[...new Set(ooOrders.filter(ooClosed).map(ooMonthOf).filter(Boolean))].sort().reverse();
+  mSel.innerHTML='<option value="">All months</option>'+months.map(m=>
+    `<option value="${m}">${new Date(m+'-01T00:00').toLocaleDateString('en-GB',{month:'long',year:'numeric'})}</option>`).join('');
+  mSel.value=months.includes(mWas)?mWas:'';
+  const month=ooFilter==='completed'?mSel.value:'';
   const papers=finSettings.papers.map((r,i)=>[i,ooPaperName(r)]);
-  const list=ooOrders.filter(ooMatch[ooFilter]).filter(o=>!q||[o.invoice_no,o.client_name,o.client_contact,o.delivery_address,
+  const list=ooOrders.filter(ooMatch[ooFilter]).filter(o=>!month||ooMonthOf(o)===month).filter(o=>!q||[o.invoice_no,o.client_name,o.client_contact,o.delivery_address,
     o.client_remarks,o.tracking,o.our_remarks,...(o.items||[]).map(i=>i.desc)].join(' ').toLowerCase().includes(q));
   document.getElementById('ooList').innerHTML=list.length?list.map(o=>{
     const st=o.paid&&o.done&&o.sent?'st-closed':o.done?'st-done':'';
-    const flag=(f,l)=>`<button type="button" class="oo-flag${o[f]?' on':''}" data-oo-flag="${f}">${l}</button>`;
+    const flag=(f,l,off)=>`<button type="button" class="oo-flag${o[f]?' on':''}" data-oo-flag="${f}"${off?` disabled title="${off}"`:''}>${l}</button>`;
     const pos=(o.pos_items||[]).map((p,i)=>`<div class="oo-pos" data-oo-pos="${i}">
         <select data-oo-pf="paper"><option value="">Paper…</option>${papers.map(([v,l])=>
           `<option value="${v}"${p.paper!==''&&p.paper!=null&&+p.paper===v?' selected':''}>${escapeHtml(l)}</option>`).join('')}</select>
@@ -51312,7 +51347,9 @@ function renderOfflineOrders(){
         <span class="oo-date">${ooShowDate(o.invoice_date)}${o.due_date?' · due '+ooShowDate(o.due_date):''}</span>
         <span class="oo-total">${ooMoney(o.total)}</span>
         <button type="button" class="del-btn" data-oo-del title="Delete order">✕</button></div>
-      <div class="oo-flags">${flag('paid','Paid')}${flag('done','Done')}${flag('sent','Collected / sent')}</div>
+      <div class="oo-flags">${flag('paid','Paid')}${flag('done','Done',!o.done&&!ooHasPaper(o)?'Add the paper used (POS items) first':'')}${flag('sent','Collected / sent')}
+        ${o.done&&(o.done_by||o.done_at)?`<span class="oo-doneby">Done${o.done_by?` by <b>${escapeHtml(o.done_by)}</b>`:''}${o.done_at?' · '+ooShowDate(o.done_at.slice(0,10)):''}</span>`:''}
+        ${ooClosed(o)&&o.completed_at?`<span class="oo-doneby">· Completed ${ooShowDate(o.completed_at.slice(0,10))}</span>`:''}</div>
       <div class="oo-grid">
         <div><div class="oo-lbl">Client</div><div class="oo-client">
           ${o.client_name?`<div class="nm">${escapeHtml(o.client_name)}</div>`:''}
@@ -51343,12 +51380,25 @@ function renderOfflineOrders(){
   }).join(''):`<p class="hint">— ${ooOrders.length?'nothing matches':'no orders yet — drop an invoice above'} —</p>`;
 }
 async function ooSave(o,patch,redraw){
+  if(['paid','done','sent'].some(f=>f in patch)){
+    const closed=ooClosed({...o,...patch});
+    if(closed&&!o.completed_at) patch.completed_at=new Date().toISOString();
+    else if(!closed&&o.completed_at) patch.completed_at=null;
+  }
   Object.assign(o,patch);
   if(redraw) renderOfflineOrders();
   const {error}=await sb.from('offline_orders').update({...patch,updated_at:new Date().toISOString()}).eq('id',o.id);
   if(error) showMsg(document.getElementById('ooMsg'),'Could not save: '+error.message,false);
 }
 const ooOf=el=>{ const c=el.closest('[data-oo]'); return c&&ooOrders.find(o=>o.id===c.dataset.oo); };
+let ooDoneFor=null;
+function ooAskDone(o){
+  ooDoneFor=o;
+  document.getElementById('ooDoneFor').textContent=`#${o.invoice_no} — type the name of who did it.`;
+  const nm=document.getElementById('ooDoneName'); nm.value='';
+  document.getElementById('ooDoneSheet').classList.add('open');
+  setTimeout(()=>nm.focus(),30);
+}
 function ooPostComment(o,input){
   const text=(input.value||'').trim(); if(!text) return;
   ooSave(o,{comments:[...(o.comments||[]),{by:myName(),at:new Date().toISOString(),text}]},true);
@@ -51370,11 +51420,32 @@ function ooSavePos(o,items){ ooSave(o,{pos_items:items,pos_price:+ooPosPrice({po
     e.preventDefault(); depth=0; scr.classList.remove('oo-over'); ooAddFiles(e.dataTransfer.files);
   });
   document.getElementById('ooSearch').addEventListener('input',renderOfflineOrders);
+  document.getElementById('ooMonth').addEventListener('change',renderOfflineOrders);
+  const sh=document.getElementById('ooDoneSheet'), nm=document.getElementById('ooDoneName');
+  const close=()=>{ sh.classList.remove('open'); ooDoneFor=null; };
+  const ok=()=>{
+    const who=nm.value.trim(); if(!who){ nm.focus(); return; }
+    const o=ooDoneFor; close();
+    if(o) ooSave(o,{done:true,done_by:who,done_at:new Date().toISOString()},true);
+  };
+  document.getElementById('ooDoneCancel').addEventListener('click',close);
+  document.getElementById('ooDoneOk').addEventListener('click',ok);
+  sh.addEventListener('click',e=>{ if(e.target===sh) close(); });
+  nm.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){ e.preventDefault(); e.stopPropagation(); ok(); }
+    else if(e.key==='Escape') close();
+  },true);
   scr.addEventListener('click',e=>{
     const b=e.target.closest('button'); if(!b) return;
     if(b.dataset.ooPill){ ooFilter=b.dataset.ooPill; renderOfflineOrders(); return; }
     const o=ooOf(b); if(!o) return;
-    if(b.dataset.ooFlag){ ooSave(o,{[b.dataset.ooFlag]:!o[b.dataset.ooFlag]},true); }
+    if(b.dataset.ooFlag==='done'){
+      if(o.done){ if(confirm(`Untick Done on ${o.invoice_no}? Who did it and when is cleared.`))
+        ooSave(o,{done:false,done_by:null,done_at:null},true); }
+      else if(!ooHasPaper(o)) showMsg(document.getElementById('ooMsg'),'Add the paper used (POS items, with sheets) before marking it done.',false);
+      else ooAskDone(o);
+    }
+    else if(b.dataset.ooFlag){ ooSave(o,{[b.dataset.ooFlag]:!o[b.dataset.ooFlag]},true); }
     else if(b.dataset.ooPosadd!==undefined){ ooSavePos(o,[...(o.pos_items||[]),{paper:'',sheets:'',side:'single'}]); }
     else if(b.dataset.ooPosdel!==undefined){ ooSavePos(o,(o.pos_items||[]).filter((_,i)=>i!==+b.dataset.ooPosdel)); }
     else if(b.dataset.ooCmtpost!==undefined) ooPostComment(o,b.closest('.oo-cmtadd').querySelector('input'));
