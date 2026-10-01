@@ -25,11 +25,13 @@ RECONNECT_SECONDS = 50 * 60
 
 class Listener:
     def __init__(self, cloud_factory: Callable[[], object], tables: list[str],
-                 on_change: Callable[[], None], name: str = "realtime"):
+                 on_change: Callable[[], None], name: str = "realtime",
+                 statuses: tuple = ("queued",)):
         self._cloud_factory = cloud_factory
         self._tables = tables
         self._on_change = on_change
         self._name = name
+        self._statuses = statuses       # which row states are worth waking for
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.connected = False
@@ -121,5 +123,5 @@ class Listener:
                     if data.get("type") == "DELETE":
                         continue
                     record = data.get("record") or {}
-                    if record.get("status") in (None, "queued"):
+                    if record.get("status") is None or record.get("status") in self._statuses:
                         self._on_change()

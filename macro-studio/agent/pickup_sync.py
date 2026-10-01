@@ -26,7 +26,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from agent import cdp, config, duoke, duoke_web
+from agent import cdp, config, duoke, duoke_web, realtime
 from agent.duoke import Cloud, CloudError, shared_cloud
 
 CONFIG_PATH = config.ROOT_DIR / "pickup-sync.json"
@@ -296,7 +296,13 @@ def status() -> dict:
 class Watcher:
     def __init__(self) -> None:
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # queued = a press of From BigSeller; shipping = Pigu has the list and
+        # wants those orders shipped. Both are somebody pressing a button.
+        self._listener = realtime.Listener(
+            lambda: _cloud(), ["pickup_sync_jobs"], self._wake.set,
+            name="pickup-sync-jobs", statuses=("queued", "shipping"))
 
     def start(self) -> bool:
         if self._thread and self._thread.is_alive():
@@ -304,25 +310,41 @@ class Watcher:
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="pickup-sync", daemon=True)
         self._thread.start()
+        self._listener.start()
         _state["running"] = True
         return True
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
+        self._listener.stop()
         _state["running"] = False
 
     def _run(self) -> None:
+        """Runs when Supabase says a button was pressed, not on a timer. One
+        catch-up pass when the socket (re)connects; slow polling only if the
+        socket is down."""
         self._stop.wait(3)
         while not self._stop.is_set():
             cfg = load()
+            retry = 0.0
             if cfg.get("enabled"):
                 try:
                     sync_once()
                 except Exception as exc:  # a pass must never kill the loop
                     _state["last_error"] = f"{type(exc).__name__}: {exc}"
                     if isinstance(exc, CloudError):
-                        self._stop.wait(10)
-            self._stop.wait(max(2, int(cfg.get("poll_seconds") or 4)))
+                        retry = 10.0
+            if not cfg.get("enabled"):
+                timeout = 30                    # local config check, no network
+            elif retry:
+                timeout = retry
+            elif self._listener.connected:
+                timeout = None                  # nothing to do until pushed
+            else:
+                timeout = max(2, int(cfg.get("poll_seconds") or 4)) * 4
+            self._wake.wait(timeout)
+            self._wake.clear()
         _state["running"] = False
 
 
