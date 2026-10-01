@@ -769,6 +769,8 @@ class Cloud:
                   prefer="return=minimal")
 
     def beat(self, device: str, window_found: bool, threads: int, note: str) -> None:
+        if not load().get("pigu_replies"):
+            return                      # nobody is looking at the heartbeat
         # Every Pigu screen hears each heartbeat and redraws for it, and passes
         # now run within seconds of any DuoKe message -- so the same news is
         # not sent again inside two minutes. Pigu calls a PC live for 300s.
@@ -2768,7 +2770,10 @@ def sync_once() -> dict:
     # Drafting in DuoKe is its own switch: with it on, the pass still reads
     # and drafts, and "off" only keeps the messages from going up to Pigu.
     drafting = bool(cfg.get("draft_in_duoke"))
-    upload = not cloud.switched_off()
+    # Pigu Replies is retired (config pigu_replies, off unless set): messages
+    # are not sent up, nothing is asked of Supabase about a queue, and only the
+    # drafting in DuoKe itself runs.
+    upload = bool(cfg.get("pigu_replies")) and not cloud.switched_off()
     if not upload and not drafting:
         report["notes"].append("Replies are switched off in Pigu")
         report["off"] = True
@@ -3033,7 +3038,8 @@ def sync_once() -> dict:
                 _drafted.add(mark)
 
     try:
-        cloud.sign_in()
+        if not cloud.user_id:           # signed in once; rest() re-signs on a 401
+            cloud.sign_in()
     except CloudError as exc:
         _state["last_error"] = str(exc)
         report["notes"].append(str(exc))
@@ -3416,7 +3422,7 @@ class Watcher:
                     # a reply just approved in Pigu is typed on the next pass,
                     # so that pass starts now rather than up to a minute later
                     cfg = load()
-                    if cfg.get("type_back"):
+                    if cfg.get("type_back") and cfg.get("pigu_replies"):
                         cloud = shared_cloud(cfg.get("supabase_url", ""),
                                              cfg.get("supabase_anon_key", ""),
                                              cfg.get("email", ""), cfg.get("password", ""))
