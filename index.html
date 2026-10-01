@@ -497,6 +497,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .fin-table .fin-sel{width:24px;text-align:center;}
 .fin-table .fin-sel input{width:auto;min-width:0;cursor:pointer;}
 .fin-bar{display:flex;gap:8px;margin-top:8px;}
+#finPaperTable input{min-width:0;}
+#finPaperTable th{position:relative;padding-right:8px;}
+.fin-colbar{display:flex;gap:1px;opacity:.35;margin-top:1px;}
+#finPaperTable th:hover .fin-colbar{opacity:1;}
+.fin-colbar button{border:0;background:transparent;cursor:pointer;font-size:11px;padding:0 4px;color:inherit;border-radius:3px;}
+.fin-colbar button:hover{background:var(--nest);}
+.fin-grip{position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize;}
+.fin-grip:hover,.fin-grip.on{background:var(--blueprint);opacity:.4;}
 /* ---- mobile-app-style nav drawer ---- */
 .nav-backdrop{display:none;position:fixed;inset:0;background:rgba(35,35,35,.42);z-index:65;}
 .nav-backdrop.open{display:block;}
@@ -5165,7 +5173,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
   <div class="home-wrap" id="financeSettingsScreen" style="display:none;">
     <h1>Finance Settings</h1>
     <p class="sub">What a sheet costs: the paper, the print, and the laminate by the cm.
-      Shared by every PC. Click a heading to rename it.</p>
+      Shared by every PC. Click a heading to rename it; ‹ › move a column, + adds one to its right,
+      ✕ removes it, and drag a heading's right edge to make it wider or narrower.</p>
 
     <div class="sect-label">Paper</div>
     <div class="card"><div class="card-body" style="padding:10px;">
@@ -50895,7 +50904,9 @@ document.addEventListener('paste',e=>{
 // One shared row in finance_settings (supabase-migration-FINANCE-COSTS.sql).
 // Edited in place and saved as a whole; nothing reaches other PCs until Save.
 let finSettings={paper_columns:['Paper','GSM','Size','Paper Cost','Print Cost','Notes',''],
-  papers:[],laminates:[]};
+  paper_col_widths:[],papers:[],laminates:[]};
+// a column's width in px: what was dragged, else wide for the paper name and size
+const finColW=i=>finNum(finSettings.paper_col_widths[i])||(i===0?300:i===2?130:80);
 // rows ticked for "Delete selected", by index; cleared on every redraw
 const finSel={paper:new Set(),lam:new Set()};
 async function openFinanceSettings(){
@@ -50916,10 +50927,15 @@ function renderFinTables(){
   const tickAll=k=>`<th class="fin-sel"><input type="checkbox" data-fin-sel-all="${k}" title="Select all"/></th>`;
   const cell=(v,attrs,cls)=>`<td${cls?` class="${cls}"`:''}><input ${attrs} value="${escapeHtml(String(v??''))}"/></td>`;
   document.getElementById('finPaperTable').innerHTML=
-    '<thead><tr>'+tickAll('paper')+cols.map((c,i)=>`<th><input data-fin-col="${i}" value="${escapeHtml(c)}"/></th>`).join('')
+    '<thead><tr>'+tickAll('paper')+cols.map((c,i)=>`<th><input data-fin-col="${i}" style="width:${finColW(i)}px" value="${escapeHtml(c)}"/>`
+      +`<div class="fin-colbar"><button type="button" data-fin-colact="left" data-i="${i}" title="Move left">‹</button>`
+      +`<button type="button" data-fin-colact="right" data-i="${i}" title="Move right">›</button>`
+      +`<button type="button" data-fin-colact="add" data-i="${i}" title="Add a column to the right">+</button>`
+      +`<button type="button" data-fin-colact="del" data-i="${i}" title="Delete this column">✕</button></div>`
+      +`<span class="fin-grip" data-fin-grip="${i}" title="Drag to resize"></span></th>`).join('')
     +'<th class="fin-del"></th></tr></thead><tbody>'
     +finSettings.papers.map((r,ri)=>'<tr>'+tick('paper',ri)+cols.map((_,ci)=>
-        cell((r.cells||[])[ci],`data-fin-paper="${ri}" data-fin-cell="${ci}"`,ci===0?'fin-name':ci===2?'fin-size':'')).join('')
+        cell((r.cells||[])[ci],`data-fin-paper="${ri}" data-fin-cell="${ci}" style="width:${finColW(ci)}px"`)).join('')
       +`<td class="fin-del"><button type="button" class="icon-btn" data-fin-del-paper="${ri}" title="Delete row">✕</button></td></tr>`).join('')
     +'</tbody>';
   document.getElementById('finLamTable').innerHTML=
@@ -50991,7 +51007,40 @@ document.getElementById('financeSettingsScreen').addEventListener('click',e=>{
       const keep=list.filter((_,i)=>!finSel[k].has(i));
       if(k==='paper') finSettings.papers=keep; else finSettings.laminates=keep;
       renderFinTables(); } }
+  else if(b.dataset.finColact){ finColAction(b.dataset.finColact,+b.dataset.i); }
   else if(b.id==='finSave') saveFinanceSettings(b);
+});
+// move / add / delete a paper column — the heading, its width and every row's cell together
+function finColAction(act,i){
+  const cols=finSettings.paper_columns, n=cols.length;
+  const w=finSettings.paper_col_widths=cols.map((_,k)=>finColW(k));
+  const rows=finSettings.papers.map(r=>{ r.cells=cols.map((_,k)=>(r.cells||[])[k]??''); return r.cells; });
+  const all=[cols,w,...rows];
+  if(act==='left'||act==='right'){
+    const j=act==='left'?i-1:i+1; if(j<0||j>=n) return;
+    all.forEach(a=>{ [a[i],a[j]]=[a[j],a[i]]; });
+  }else if(act==='add'){
+    cols.splice(i+1,0,''); w.splice(i+1,0,80); rows.forEach(c=>c.splice(i+1,0,''));
+  }else if(act==='del'){
+    if(n<=1||!confirm(`Delete the column "${cols[i]||'(no name)'}" and everything in it?`)) return;
+    all.forEach(a=>a.splice(i,1));
+  }
+  renderFinTables();
+  if(act==='add') document.querySelector(`#finPaperTable [data-fin-col="${i+1}"]`)?.focus();
+}
+// drag a heading's right edge to resize that column
+document.getElementById('finPaperTable').addEventListener('pointerdown',e=>{
+  const g=e.target.closest('[data-fin-grip]'); if(!g) return;
+  e.preventDefault();
+  const i=+g.dataset.finGrip, x0=e.clientX, w0=finColW(i);
+  const ins=[...document.querySelectorAll(`#finPaperTable [data-fin-col="${i}"],#finPaperTable [data-fin-cell="${i}"]`)];
+  g.classList.add('on'); g.setPointerCapture(e.pointerId);
+  const move=ev=>{
+    const w=Math.max(40,Math.round(w0+ev.clientX-x0));
+    finSettings.paper_col_widths[i]=w; ins.forEach(el=>el.style.width=w+'px');
+  };
+  const up=()=>{ g.classList.remove('on'); g.removeEventListener('pointermove',move); g.removeEventListener('pointerup',up); };
+  g.addEventListener('pointermove',move); g.addEventListener('pointerup',up);
 });
 async function saveFinanceSettings(btn){
   const msg=document.getElementById('finMsg');
@@ -51000,7 +51049,7 @@ async function saveFinanceSettings(btn){
   try{
     const {data:{session}}=await sb.auth.getSession();
     const {data,error}=await sb.from('finance_settings').update({
-      paper_columns:finSettings.paper_columns,papers:finSettings.papers,laminates:finSettings.laminates,
+      paper_columns:finSettings.paper_columns,paper_col_widths:finSettings.paper_col_widths,papers:finSettings.papers,laminates:finSettings.laminates,
       updated_at:new Date().toISOString(),updated_by:session?session.user.id:null}).eq('id',true).select('id');
     if(error) throw error;
     if(!data||!data.length) throw new Error('no permission to change these — ask an admin for Finance access');

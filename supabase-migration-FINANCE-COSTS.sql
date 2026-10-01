@@ -62,6 +62,9 @@ insert into public.finance_settings(id, papers, laminates) values (true,
 ]'::jsonb)
 on conflict (id) do nothing;
 
+-- width in px of each paper column, dragged in the app; [] = the defaults
+alter table public.finance_settings add column if not exists paper_col_widths jsonb not null default '[]'::jsonb;
+
 alter table public.finance_settings enable row level security;
 
 drop policy if exists "finance_settings_read"  on public.finance_settings;
