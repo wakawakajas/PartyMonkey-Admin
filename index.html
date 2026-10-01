@@ -5286,7 +5286,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
       <div class="sheet">
         <div class="sheet-title">Done by who?</div>
         <p class="hint" id="ooDoneFor" style="margin:0 0 8px;"></p>
-        <input type="text" id="ooDoneName" placeholder="Your name" autocomplete="off"/>
+        <input type="text" id="ooDoneName" data-enter-own placeholder="Your name" autocomplete="off"/>
         <div style="display:flex;gap:8px;margin-top:10px;">
           <button type="button" class="btn-outline" id="ooDoneCancel" style="flex:1;">Cancel</button>
           <button type="button" class="btn-primary" id="ooDoneOk" style="flex:1;">Mark done</button>
@@ -14377,6 +14377,8 @@ document.addEventListener('keydown',e=>{
   // it is long — it opts in, and behaves like the input it stands in for.
   const wrapped=el instanceof HTMLTextAreaElement&&el.hasAttribute('data-enter-next');
   if(!wrapped&&(!(el instanceof HTMLInputElement)||NON_TEXT.includes(el.type))) return;
+  // a field whose Enter does its own thing (post a comment, confirm a name)
+  if(el.hasAttribute('data-enter-own')) return;
   // fields that say what Enter does in them keep it (the page picker)
   if(el.closest('#splitPickSheet')&&(el.id==='splitPickSameQty'
     ||el===[...document.querySelectorAll('#splitPickGrid [data-sp-qty]')].pop())) return;
@@ -50997,7 +50999,6 @@ document.addEventListener('paste',e=>{
 // Edited in place and saved as a whole; nothing reaches other PCs until Save.
 let finSettings={paper_columns:['Paper','GSM','Size','Paper Cost','Print Cost','Notes',''],
   paper_col_widths:[],papers:[],laminates:[]};
-// a column's width in px: what was dragged, else wide for the paper name and size
 // columns worked out from the row, found by their heading so they survive a move
 // or rename elsewhere: Single Side = paper + 1 print, Double Side = paper + 2 prints
 function finAutoCols(){
@@ -51011,6 +51012,7 @@ function finAutoVal(cells,i,a){
   if((cells[a.paper]??'')===''&&(cells[a.print]??'')==='') return '';
   return (finNum(cells[a.paper])+a.auto[i]*finNum(cells[a.print])).toFixed(2);
 }
+// a column's width in px: what was dragged, else wide for the paper name and size
 const finColW=i=>finNum(finSettings.paper_col_widths[i])||(i===0?300:i===2?130:80);
 // rows ticked for "Delete selected", by index; cleared on every redraw
 const finSel={paper:new Set(),lam:new Set()};
@@ -51183,7 +51185,7 @@ async function openOfflineOrders(){
   const msg=document.getElementById('ooMsg');
   if(!sb) return;
   // paper prices for the POS lines come from Finance settings
-  if(!finSettings.papers.length){
+  {
     const {data}=await sb.from('finance_settings').select('*').limit(1).maybeSingle();
     if(data) finSettings={...finSettings,...data};
   }
@@ -51303,18 +51305,25 @@ const ooClosed=o=>!!(o.paid&&o.done&&o.sent);
 const OO_PILLS=[['all','Open'],['unpaid','Not paid'],['todo','Not done'],['tosend','To collect / send'],['completed','Completed']];
 const ooMatch={all:o=>!ooClosed(o),unpaid:o=>!ooClosed(o)&&!o.paid,todo:o=>!ooClosed(o)&&!o.done,
   tosend:o=>!ooClosed(o)&&!o.sent,completed:ooClosed};
-const ooMonthOf=o=>(o.completed_at||o.done_at||o.invoice_date||'').slice(0,7);
+const ooMonthOf=o=>(o.completed_at?ooIsoDate(o.completed_at):o.done_at?ooIsoDate(o.done_at):o.invoice_date||'').slice(0,7);
 // Done needs at least one paper on the POS lines, with sheets
-const ooHasPaper=o=>(o.pos_items||[]).some(p=>p.paper!==''&&p.paper!=null&&finNum(p.sheets)>0);
 const ooPaperName=r=>{ const c=(r&&r.cells)||[]; return [c[0],c[1]?c[1]+'gsm':''].filter(Boolean).join(' '); };
+// which Finance paper a POS line means: by its name, the index only for lines
+// saved before the name was kept
+const ooPaperIdx=p=>{
+  if(!p||p.paper===''||p.paper==null) return -1;
+  if(p.name){ const i=finSettings.papers.findIndex(r=>ooPaperName(r)===p.name); if(i>=0) return i; }
+  return finSettings.papers[+p.paper]&&(!p.name||ooPaperName(finSettings.papers[+p.paper])===p.name)?+p.paper:-1;
+};
+const ooHasPaper=o=>(o.pos_items||[]).some(p=>p.paper!==''&&p.paper!=null&&finNum(p.sheets)>0);
 // what one sheet of a paper costs printed on one side, both, or neither (paper alone)
 function ooSheetPrice(pi,side){
-  const r=finSettings.papers[pi]; if(pi===''||pi==null||!r) return 0;
+  const r=finSettings.papers[pi]; if(pi<0||!r) return 0;
   const a=finAutoCols(), c=r.cells||[];
   const paper=finNum(c[a.paper>=0?a.paper:3]), print=finNum(c[a.print>=0?a.print:4]);
   return paper+({single:1,double:2,blank:0}[side]??1)*print;
 }
-const ooPosPrice=o=>(o.pos_items||[]).reduce((t,p)=>t+finNum(p.sheets)*ooSheetPrice(p.paper,p.side),0);
+const ooPosPrice=o=>(o.pos_items||[]).reduce((t,p)=>t+finNum(p.sheets)*ooSheetPrice(ooPaperIdx(p),p.side),0);
 function renderOfflineOrders(){
   const q=(document.getElementById('ooSearch').value||'').trim().toLowerCase();
   document.getElementById('ooPills').innerHTML=OO_PILLS.map(([k,l])=>{
@@ -51337,7 +51346,8 @@ function renderOfflineOrders(){
     const flag=(f,l,off)=>`<button type="button" class="oo-flag${o[f]?' on':''}" data-oo-flag="${f}"${off?` disabled title="${off}"`:''}>${l}</button>`;
     const pos=(o.pos_items||[]).map((p,i)=>`<div class="oo-pos" data-oo-pos="${i}">
         <select data-oo-pf="paper"><option value="">Paper…</option>${papers.map(([v,l])=>
-          `<option value="${v}"${p.paper!==''&&p.paper!=null&&+p.paper===v?' selected':''}>${escapeHtml(l)}</option>`).join('')}</select>
+          `<option value="${v}"${ooPaperIdx(p)===v?' selected':''}>${escapeHtml(l)}</option>`).join('')}
+          ${p.name&&ooPaperIdx(p)<0?`<option value="" selected>${escapeHtml(p.name)} (no longer in settings)</option>`:''}</select>
         <input type="number" min="0" data-oo-pf="sheets" placeholder="Sheets" value="${escapeHtml(String(p.sheets??''))}"/>
         <select data-oo-pf="side">${[['single','Single side'],['double','Double side'],['blank','Paper only']].map(([v,l])=>
           `<option value="${v}"${(p.side||'single')===v?' selected':''}>${l}</option>`).join('')}</select>
@@ -51348,8 +51358,8 @@ function renderOfflineOrders(){
         <span class="oo-total">${ooMoney(o.total)}</span>
         <button type="button" class="del-btn" data-oo-del title="Delete order">✕</button></div>
       <div class="oo-flags">${flag('paid','Paid')}${flag('done','Done',!o.done&&!ooHasPaper(o)?'Add the paper used (POS items) first':'')}${flag('sent','Collected / sent')}
-        ${o.done&&(o.done_by||o.done_at)?`<span class="oo-doneby">Done${o.done_by?` by <b>${escapeHtml(o.done_by)}</b>`:''}${o.done_at?' · '+ooShowDate(o.done_at.slice(0,10)):''}</span>`:''}
-        ${ooClosed(o)&&o.completed_at?`<span class="oo-doneby">· Completed ${ooShowDate(o.completed_at.slice(0,10))}</span>`:''}</div>
+        ${o.done&&(o.done_by||o.done_at)?`<span class="oo-doneby">Done${o.done_by?` by <b>${escapeHtml(o.done_by)}</b>`:''}${o.done_at?' · '+ooShowDate(ooIsoDate(o.done_at)):''}</span>`:''}
+        ${ooClosed(o)&&o.completed_at?`<span class="oo-doneby">· Completed ${ooShowDate(ooIsoDate(o.completed_at))}</span>`:''}</div>
       <div class="oo-grid">
         <div><div class="oo-lbl">Client</div><div class="oo-client">
           ${o.client_name?`<div class="nm">${escapeHtml(o.client_name)}</div>`:''}
@@ -51374,7 +51384,7 @@ function renderOfflineOrders(){
           <span class="txt">${escapeHtml(c.text||'')}</span>
           <span class="when">${c.at?new Date(c.at).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):''}</span>
           <button type="button" class="del-btn" data-oo-cmtdel="${i}" title="Delete comment">✕</button></div>`).join('')}
-          <div class="oo-cmtadd"><input type="text" data-oo-cmt placeholder="Add a comment…"/>
+          <div class="oo-cmtadd"><input type="text" data-oo-cmt data-enter-own placeholder="Add a comment…"/>
             <button type="button" class="btn-outline btn-sm" data-oo-cmtpost>Post</button></div></div>
       </div></div>`;
   }).join(''):`<p class="hint">— ${ooOrders.length?'nothing matches':'no orders yet — drop an invoice above'} —</p>`;
