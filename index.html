@@ -50906,6 +50906,19 @@ document.addEventListener('paste',e=>{
 let finSettings={paper_columns:['Paper','GSM','Size','Paper Cost','Print Cost','Notes',''],
   paper_col_widths:[],papers:[],laminates:[]};
 // a column's width in px: what was dragged, else wide for the paper name and size
+// columns worked out from the row, found by their heading so they survive a move
+// or rename elsewhere: Single Side = paper + 1 print, Double Side = paper + 2 prints
+function finAutoCols(){
+  const cols=finSettings.paper_columns, find=re=>cols.findIndex(c=>re.test(c||''));
+  const paper=find(/paper\s*cost/i), print=find(/print\s*cost/i), auto={};
+  if(paper>=0&&print>=0) cols.forEach((c,i)=>{
+    if(/single/i.test(c||'')) auto[i]=1; else if(/double/i.test(c||'')) auto[i]=2; });
+  return {paper,print,auto};
+}
+function finAutoVal(cells,i,a){
+  if((cells[a.paper]??'')===''&&(cells[a.print]??'')==='') return '';
+  return (finNum(cells[a.paper])+a.auto[i]*finNum(cells[a.print])).toFixed(2);
+}
 const finColW=i=>finNum(finSettings.paper_col_widths[i])||(i===0?300:i===2?130:80);
 // rows ticked for "Delete selected", by index; cleared on every redraw
 const finSel={paper:new Set(),lam:new Set()};
@@ -50922,7 +50935,7 @@ async function openFinanceSettings(){
 const finNum=v=>{ const n=parseFloat(v); return isFinite(n)?n:0; };
 function renderFinTables(){
   finSel.paper.clear(); finSel.lam.clear();
-  const cols=finSettings.paper_columns;
+  const cols=finSettings.paper_columns, au=finAutoCols();
   const tick=(k,i)=>`<td class="fin-sel"><input type="checkbox" data-fin-sel="${k}" data-i="${i}"/></td>`;
   const tickAll=k=>`<th class="fin-sel"><input type="checkbox" data-fin-sel-all="${k}" title="Select all"/></th>`;
   const cell=(v,attrs,cls)=>`<td${cls?` class="${cls}"`:''}><input ${attrs} value="${escapeHtml(String(v??''))}"/></td>`;
@@ -50935,6 +50948,7 @@ function renderFinTables(){
       +`<span class="fin-grip" data-fin-grip="${i}" title="Drag to resize"></span></th>`).join('')
     +'<th class="fin-del"></th></tr></thead><tbody>'
     +finSettings.papers.map((r,ri)=>'<tr>'+tick('paper',ri)+cols.map((_,ci)=>
+        au.auto[ci]?`<td class="fin-calc" data-fin-auto="${ci}" title="Worked out: paper + ${au.auto[ci]} print"><span style="display:inline-block;width:${finColW(ci)}px">${finAutoVal(r.cells||[],ci,au)}</span></td>`:
         cell((r.cells||[])[ci],`data-fin-paper="${ri}" data-fin-cell="${ci}" style="width:${finColW(ci)}px"`)).join('')
       +`<td class="fin-del"><button type="button" class="icon-btn" data-fin-del-paper="${ri}" title="Delete row">✕</button></td></tr>`).join('')
     +'</tbody>';
@@ -50959,6 +50973,8 @@ function finSelBtns(){
 }
 document.getElementById('financeSettingsScreen').addEventListener('change',e=>{
   const el=e.target, d=el.dataset;
+  // a renamed heading may turn a column into a worked-out one, or back
+  if(d.finCol!==undefined){ renderFinTables(); return; }
   if(d.finSel){ el.checked?finSel[d.finSel].add(+d.i):finSel[d.finSel].delete(+d.i); }
   else if(d.finSelAll){
     const k=d.finSelAll;
@@ -50977,6 +50993,9 @@ document.getElementById('financeSettingsScreen').addEventListener('input',e=>{
   else if(d.finPaper!==undefined){
     const r=finSettings.papers[+d.finPaper]; if(!r.cells) r.cells=[];
     r.cells[+d.finCell]=el.value;
+    const au=finAutoCols();
+    el.closest('tr').querySelectorAll('[data-fin-auto]').forEach(td=>
+      td.firstElementChild.textContent=finAutoVal(r.cells,+td.dataset.finAuto,au));
   }else if(d.finLam!==undefined){
     const l=finSettings.laminates[+d.finLam];
     l[d.finF]=d.finF==='name'?el.value:finNum(el.value);
@@ -51033,7 +51052,7 @@ document.getElementById('finPaperTable').addEventListener('pointerdown',e=>{
   const g=e.target.closest('[data-fin-grip]'); if(!g) return;
   e.preventDefault();
   const i=+g.dataset.finGrip, x0=e.clientX, w0=finColW(i);
-  const ins=[...document.querySelectorAll(`#finPaperTable [data-fin-col="${i}"],#finPaperTable [data-fin-cell="${i}"]`)];
+  const ins=[...document.querySelectorAll(`#finPaperTable [data-fin-col="${i}"],#finPaperTable [data-fin-cell="${i}"],#finPaperTable [data-fin-auto="${i}"]>span`)];
   g.classList.add('on'); g.setPointerCapture(e.pointerId);
   const move=ev=>{
     const w=Math.max(40,Math.round(w0+ev.clientX-x0));
@@ -51045,6 +51064,10 @@ document.getElementById('finPaperTable').addEventListener('pointerdown',e=>{
 async function saveFinanceSettings(btn){
   const msg=document.getElementById('finMsg');
   if(!sb) return;
+  // keep the worked-out prices in the saved rows too, for anything that reads them
+  const au=finAutoCols();
+  finSettings.papers.forEach(r=>{ r.cells=r.cells||[];
+    Object.keys(au.auto).forEach(i=>{ r.cells[i]=finAutoVal(r.cells,+i,au); }); });
   btn.disabled=true; const label=btn.textContent; btn.textContent='Saving…';
   try{
     const {data:{session}}=await sb.auth.getSession();
