@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from agent import config, duoke
+from agent import config, duoke, realtime
 from agent.duoke import Cloud, CloudError, shared_cloud
 
 CONFIG_PATH = config.ROOT_DIR / "fiery.json"
@@ -988,11 +988,20 @@ def status() -> dict:
 
 
 class Watcher:
-    """sync_once on a timer for as long as the agent is up (see labels)."""
+    """sync_once when Supabase pushes a queued job -- no timer (see labels).
+
+    Two things still come back on their own: a job whose file has not reached
+    the NAS yet (asked again in 10s, only while one is waiting) and the preset
+    refresh, which is a slow timer of its own.
+    """
 
     def __init__(self) -> None:
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._listener = realtime.Listener(
+            lambda: shared_cloud(*_credentials()), ["fiery_jobs"],
+            self._wake.set, name="fiery-jobs")
 
     def start(self) -> bool:
         if self._thread and self._thread.is_alive():
@@ -1000,11 +1009,14 @@ class Watcher:
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="fiery-watcher", daemon=True)
         self._thread.start()
+        self._listener.start()
         _state["running"] = True
         return True
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
+        self._listener.stop()
         _state["running"] = False
 
     def _run(self) -> None:
@@ -1012,6 +1024,7 @@ class Watcher:
         recovered = False
         while not self._stop.is_set():
             cfg = load()
+            retry = 0.0
             if cfg.get("enabled") and not recovered:
                 try:
                     recover()
@@ -1020,12 +1033,23 @@ class Watcher:
                     _state["last_error"] = f"{type(exc).__name__}: {exc}"
             if cfg.get("enabled"):
                 try:
-                    sync_once()
+                    report = sync_once()
+                    if report.get("waiting"):
+                        retry = 10.0            # a file the NAS has not delivered
                 except Exception as exc:        # a pass must never kill the loop
                     _state["last_error"] = f"{type(exc).__name__}: {exc}"
                     if isinstance(exc, CloudError):
-                        self._stop.wait(10)
-            self._stop.wait(max(2, int(cfg.get("poll_seconds") or 4)))
+                        retry = 10.0
+            if not cfg.get("enabled"):
+                timeout = 30                    # local config check, no network
+            elif retry:
+                timeout = retry
+            elif self._listener.connected:
+                timeout = max(30.0, _presets_due - time.time())
+            else:
+                timeout = max(2, int(cfg.get("poll_seconds") or 4)) * 4
+            self._wake.wait(timeout)
+            self._wake.clear()
         _state["running"] = False
 
 

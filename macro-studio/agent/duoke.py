@@ -771,9 +771,9 @@ class Cloud:
     def beat(self, device: str, window_found: bool, threads: int, note: str) -> None:
         # Every Pigu screen hears each heartbeat and redraws for it, and passes
         # now run within seconds of any DuoKe message -- so the same news is
-        # not sent again inside a minute. Pigu calls a PC live for 120s.
+        # not sent again inside two minutes. Pigu calls a PC live for 300s.
         same = (device, window_found, threads, note) == self._last_beat[0]
-        if same and time.time() - self._last_beat[1] < 60:
+        if same and time.time() - self._last_beat[1] < 120:
             return
         self._last_beat = ((device, window_found, threads, note), time.time())
         self.rest(

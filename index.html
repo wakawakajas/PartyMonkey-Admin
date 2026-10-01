@@ -544,6 +544,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   border-radius:8px;padding:10px 12px;margin:10px 0 0;}
 .pc-info{font-size:12.5px;color:var(--muted);margin-top:10px;}
 .pc-info .warn{color:var(--amber);font-weight:600;}
+.pc-ups-save{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:8px;}
 .pc-sum .pos b{color:var(--ps-ok);}.pc-sum .neg b{color:var(--rust);}
 .oo-sum{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 12px;}
 .oo-sum:empty{display:none;}
@@ -5357,6 +5358,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         <label class="wa-f"><span>Item name (for the quote)</span><input type="text" id="pcName" placeholder="e.g. Namecard"/></label>
       </div>
       <div class="pc-info" id="pcInfo"></div>
+      <div class="pc-ups-save" id="pcUpsSave" hidden><span id="pcUpsSaveTxt"></span>
+        <button type="button" class="btn-outline btn-sm" id="pcUpsSaveBtn"></button></div>
       <div class="wa-foot" style="justify-content:flex-end;"><button type="button" class="btn-primary" id="pcAddLine" style="padding:0 20px;">+ Add to quote</button></div>
     </div>
     <div id="pcMsg"></div>
@@ -49443,7 +49446,7 @@ function rpRenderQueue(){
 
   const beat=rpBeatRow||{};
   const age=beat.beat_at?(Date.now()-new Date(beat.beat_at).getTime())/1000:null;
-  const reading=age!==null&&age<120&&beat.window_found;
+  const reading=age!==null&&age<300&&beat.window_found;
   const lines=[];
 
   // Out first: a reply somebody has already approved and a buyer has not seen
@@ -49646,9 +49649,9 @@ function rpRenderBeat(){
     return;
   }
   const age=(Date.now()-new Date(rpBeatRow.beat_at).getTime())/1000;
-  dot.className='rp-dot '+(age<120?'live':age<1800?'stale':'off');
+  dot.className='rp-dot '+(age<300?'live':age<1800?'stale':'off');
   const where=rpBeatRow.device?rpBeatRow.device:'The shop PC';
-  text.textContent=age<120
+  text.textContent=age<300
     ? (rpBeatRow.window_found
         ? where+' is reading DuoKe — '+rpBeatRow.threads+' thread'+(rpBeatRow.threads===1?'':'s')+', '+rpAgo(rpBeatRow.beat_at)
         : where+' is running but DuoKe is not open')
@@ -51017,7 +51020,7 @@ document.addEventListener('paste',e=>{
 // One shared row in finance_settings (supabase-migration-FINANCE-COSTS.sql).
 // Edited in place and saved as a whole; nothing reaches other PCs until Save.
 let finSettings={paper_columns:['Paper','GSM','Size','Paper Cost','Print Cost','Notes',''],
-  paper_col_widths:[],papers:[],laminates:[]};
+  paper_col_widths:[],papers:[],laminates:[],print_sizes:{}};
 // columns worked out from the row, found by their heading so they survive a move
 // or rename elsewhere: Single Side = paper + 1 print, Double Side = paper + 2 prints
 function finAutoCols(){
@@ -51521,6 +51524,12 @@ function ooSavePos(o,items){ ooSave(o,{pos_items:items,pos_price:+ooPosPrice({po
 const PC_SIZES=[['A3',1],['A4',2],['A5',4],['A6',8],['A7',16],['A4 Folded',1],['A5 Folded',2],['A6 Folded',4],
   ['Namecard',20],['Placecard',12],['Custom',1]];
 const PC_SIDE={single:'single side',double:'double side',blank:'not printed'};
+// how many of a size fit a sheet: the count saved in Finance settings, else the built-in one
+function pcUpsFor(name){
+  const own=finNum((finSettings.print_sizes||{})[name]);
+  if(own>0) return own;
+  const z=PC_SIZES.find(([n])=>n===name); return z?z[1]:1;
+}
 async function openPrintCalc(){
   if(!sb) return;
   const {data,error}=await sb.from('finance_settings').select('*').limit(1).maybeSingle();
@@ -51533,8 +51542,9 @@ async function openPrintCalc(){
   const ss=document.getElementById('pcSize');
   if(!ss.options.length){
     ss.innerHTML=PC_SIZES.map(([n])=>`<option>${n}</option>`).join('');
-    ss.value='A4'; document.getElementById('pcUps').value=2;
+    ss.value='A4';
   }
+  if(ss.value!=='Custom') document.getElementById('pcUps').value=pcUpsFor(ss.value);
   pcCalc(); pcRenderQuote();
 }
 const pcPaperIdx=name=>finSettings.papers.findIndex(r=>ooPaperName(r)===name);
@@ -51551,6 +51561,13 @@ const pcForm=()=>({paper:document.getElementById('pcPaper').value,side:document.
   name:document.getElementById('pcName').value.trim()});
 function pcCalc(){
   const f=pcForm(), info=document.getElementById('pcInfo'), sum=document.getElementById('pcSum');
+  // a count that differs from the size's saved one can be kept for next time
+  const sv=document.getElementById('pcUpsSave'), was=pcUpsFor(f.size);
+  sv.hidden=f.size==='Custom'||!document.getElementById('pcUps').value||f.ups===was;
+  if(!sv.hidden){
+    document.getElementById('pcUpsSaveTxt').textContent=`${f.size} is set to ${was} per sheet.`;
+    document.getElementById('pcUpsSaveBtn').textContent=`Save ${f.ups} per sheet for ${f.size}`;
+  }
   if(!f.paper){ info.textContent=finSettings.papers.length?'':'No papers in Finance settings yet.'; sum.innerHTML=''; return; }
   const w=pcWork(f);
   info.textContent=`${f.paper}, ${PC_SIDE[f.side]} — ${ooMoney(w.sheet)} a sheet · ${f.ups} per sheet = ${ooMoney(w.sheet/f.ups)} a piece to print`;
@@ -51594,8 +51611,23 @@ function pcQuoteMessage(){
 (()=>{
   ['pcPaper','pcSide','pcUps','pcQty','pcPrice'].forEach(id=>document.getElementById(id).addEventListener('input',pcCalc));
   document.getElementById('pcSize').addEventListener('change',e=>{
-    const z=PC_SIZES.find(([n])=>n===e.target.value); if(z&&z[0]!=='Custom') document.getElementById('pcUps').value=z[1];
+    if(e.target.value!=='Custom') document.getElementById('pcUps').value=pcUpsFor(e.target.value);
     pcCalc();
+  });
+  document.getElementById('pcUpsSaveBtn').addEventListener('click',async e=>{
+    const btn=e.currentTarget, f=pcForm(), msg=document.getElementById('pcMsg');
+    if(!sb||f.size==='Custom'||!(f.ups>0)||btn.disabled) return;
+    btn.disabled=true;
+    try{
+      const next={...(finSettings.print_sizes||{}),[f.size]:f.ups};
+      const {data,error}=await sb.from('finance_settings').update({print_sizes:next}).eq('id',true).select('id');
+      if(error) throw new Error(/print_sizes/.test(error.message)
+        ?'the database needs supabase-migration-PRINT-SIZES.sql run first':error.message);
+      if(!data||!data.length) throw new Error('no permission to change these — ask an admin for Finance access');
+      finSettings.print_sizes=next;
+      showMsg(msg,`✓ ${f.size} is now ${f.ups} per sheet on every PC.`,true);
+    }catch(err){ showMsg(msg,'Could not save: '+((err&&err.message)||'unknown error'),false); }
+    finally{ btn.disabled=false; pcCalc(); }
   });
   document.getElementById('pcAddLine').addEventListener('click',()=>{
     const f=pcForm();

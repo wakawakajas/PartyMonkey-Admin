@@ -34,7 +34,7 @@ from typing import Any, Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
-from agent import config, duoke
+from agent import config, duoke, realtime
 from agent.duoke import Cloud, CloudError, shared_cloud
 
 CONFIG_PATH = config.ROOT_DIR / "labels.json"
@@ -760,7 +760,11 @@ class Watcher:
 
     def __init__(self) -> None:
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._listener = realtime.Listener(
+            lambda: shared_cloud(*_credentials()), ["label_jobs"],
+            self._wake.set, name="label-jobs")
 
     def start(self) -> bool:
         if self._thread and self._thread.is_alive():
@@ -768,17 +772,28 @@ class Watcher:
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="label-watcher", daemon=True)
         self._thread.start()
+        self._listener.start()
         _state["running"] = True
         return True
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
+        self._listener.stop()
         _state["running"] = False
 
     def _run(self) -> None:
+        """Print when Supabase says a label was queued, not on a timer.
+
+        One catch-up pass runs whenever the Realtime socket (re)connects, so a
+        label queued while this PC was off still prints. Only if the socket is
+        down does it fall back to asking every poll_seconds.
+        """
         self._stop.wait(4)
+        retry = 0.0
         while not self._stop.is_set():
             cfg = load()
+            retry = 0.0
             if cfg.get("enabled"):
                 try:
                     sync_once()
@@ -786,8 +801,17 @@ class Watcher:
                     _state["last_error"] = f"{type(exc).__name__}: {exc}"
                     # a project that cannot be reached is not worth hammering
                     if isinstance(exc, CloudError):
-                        self._stop.wait(10)
-            self._stop.wait(max(2, int(cfg.get("poll_seconds") or 3)))
+                        retry = 10.0
+            if not cfg.get("enabled"):
+                timeout = 30                    # local config check, no network
+            elif retry:
+                timeout = retry
+            elif self._listener.connected:
+                timeout = None                  # nothing to do until pushed
+            else:
+                timeout = max(2, int(cfg.get("poll_seconds") or 3)) * 5
+            self._wake.wait(timeout)
+            self._wake.clear()
         _state["running"] = False
 
 
