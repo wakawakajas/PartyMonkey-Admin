@@ -1045,7 +1045,7 @@ class Watcher:
             elif retry:
                 timeout = retry
             elif self._listener.connected:
-                timeout = max(30.0, _presets_due - time.time())
+                timeout = None                  # presets refresh with the next job
             else:
                 timeout = max(2, int(cfg.get("poll_seconds") or 4)) * 4
             self._wake.wait(timeout)
