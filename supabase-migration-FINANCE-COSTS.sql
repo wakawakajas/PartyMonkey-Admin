@@ -24,7 +24,7 @@ create table if not exists public.finance_settings (
   -- the header of each paper column, editable because the sheet they came
   -- from left two of them unnamed
   paper_columns jsonb not null default
-    '["Paper","GSM","Size","Paper Cost","Print Cost","Notes","Price"]'::jsonb,
+    '["Paper","GSM","Size","Paper Cost","Print Cost","Notes",""]'::jsonb,
   -- [{"cells": ["SR A3 - Japan White A Art card","260","320mm x 450mm","0.11","0.10","","0.28"]}, ...]
   papers jsonb not null default '[]'::jsonb,
   -- [{"name": "Matte Laminate (HOT)", "roll_cm": 50000, "roll_cost": 86.11}, ...]

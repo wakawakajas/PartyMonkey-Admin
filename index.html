@@ -494,6 +494,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .fin-table td.fin-size input{min-width:130px;}
 .fin-table td.fin-calc{color:var(--muted,#888);font-variant-numeric:tabular-nums;padding:5px 8px;}
 .fin-table .fin-del{width:28px;text-align:center;}
+.fin-table .fin-sel{width:24px;text-align:center;}
+.fin-table .fin-sel input{width:auto;min-width:0;cursor:pointer;}
+.fin-bar{display:flex;gap:8px;margin-top:8px;}
 /* ---- mobile-app-style nav drawer ---- */
 .nav-backdrop{display:none;position:fixed;inset:0;background:rgba(35,35,35,.42);z-index:65;}
 .nav-backdrop.open{display:block;}
@@ -5167,13 +5170,15 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
     <div class="sect-label">Paper</div>
     <div class="card"><div class="card-body" style="padding:10px;">
       <div class="fin-scroll"><table class="fin-table" id="finPaperTable"></table></div>
-      <button type="button" class="btn-outline btn-sm" id="finAddPaper" style="margin-top:8px;">+ Add paper</button>
+      <div class="fin-bar"><button type="button" class="btn-outline btn-sm" id="finAddPaper">+ Add paper</button>
+        <button type="button" class="btn-outline btn-sm" id="finDelPaperSel" style="display:none;"></button></div>
     </div></div>
 
     <div class="sect-label">Laminate</div>
     <div class="card"><div class="card-body" style="padding:10px;">
       <div class="fin-scroll"><table class="fin-table" id="finLamTable"></table></div>
-      <button type="button" class="btn-outline btn-sm" id="finAddLam" style="margin-top:8px;">+ Add laminate</button>
+      <div class="fin-bar"><button type="button" class="btn-outline btn-sm" id="finAddLam">+ Add laminate</button>
+        <button type="button" class="btn-outline btn-sm" id="finDelLamSel" style="display:none;"></button></div>
     </div></div>
 
     <button type="button" class="btn-primary" id="finSave" style="width:100%;margin-top:12px;">Save</button>
@@ -50889,8 +50894,10 @@ document.addEventListener('paste',e=>{
 // ---- FINANCE: paper & laminate costs ----
 // One shared row in finance_settings (supabase-migration-FINANCE-COSTS.sql).
 // Edited in place and saved as a whole; nothing reaches other PCs until Save.
-let finSettings={paper_columns:['Paper','GSM','Size','Paper Cost','Print Cost','Notes','Price'],
+let finSettings={paper_columns:['Paper','GSM','Size','Paper Cost','Print Cost','Notes',''],
   papers:[],laminates:[]};
+// rows ticked for "Delete selected", by index; cleared on every redraw
+const finSel={paper:new Set(),lam:new Set()};
 async function openFinanceSettings(){
   const msg=document.getElementById('finMsg');
   if(sb){
@@ -50903,32 +50910,53 @@ async function openFinanceSettings(){
 }
 const finNum=v=>{ const n=parseFloat(v); return isFinite(n)?n:0; };
 function renderFinTables(){
+  finSel.paper.clear(); finSel.lam.clear();
   const cols=finSettings.paper_columns;
+  const tick=(k,i)=>`<td class="fin-sel"><input type="checkbox" data-fin-sel="${k}" data-i="${i}"/></td>`;
+  const tickAll=k=>`<th class="fin-sel"><input type="checkbox" data-fin-sel-all="${k}" title="Select all"/></th>`;
   const cell=(v,attrs,cls)=>`<td${cls?` class="${cls}"`:''}><input ${attrs} value="${escapeHtml(String(v??''))}"/></td>`;
   document.getElementById('finPaperTable').innerHTML=
-    '<thead><tr>'+cols.map((c,i)=>`<th><input data-fin-col="${i}" value="${escapeHtml(c)}"/></th>`).join('')
+    '<thead><tr>'+tickAll('paper')+cols.map((c,i)=>`<th><input data-fin-col="${i}" value="${escapeHtml(c)}"/></th>`).join('')
     +'<th class="fin-del"></th></tr></thead><tbody>'
-    +finSettings.papers.map((r,ri)=>'<tr>'+cols.map((_,ci)=>
+    +finSettings.papers.map((r,ri)=>'<tr>'+tick('paper',ri)+cols.map((_,ci)=>
         cell((r.cells||[])[ci],`data-fin-paper="${ri}" data-fin-cell="${ci}"`,ci===0?'fin-name':ci===2?'fin-size':'')).join('')
       +`<td class="fin-del"><button type="button" class="icon-btn" data-fin-del-paper="${ri}" title="Delete row">✕</button></td></tr>`).join('')
     +'</tbody>';
   document.getElementById('finLamTable').innerHTML=
-    '<thead><tr><th>Laminate</th><th>Roll (cm)</th><th>Roll cost ($)</th><th>1cm</th><th>100cm</th><th>50cm</th>'
+    '<thead><tr>'+tickAll('lam')+'<th>Laminate</th><th>Roll (cm)</th><th>Roll cost ($)</th><th>1cm</th><th>100cm</th><th>50cm</th>'
     +'<th class="fin-del"></th></tr></thead><tbody>'
     +finSettings.laminates.map((l,i)=>{
       const per=finNum(l.roll_cm)?finNum(l.roll_cost)/finNum(l.roll_cm):0;
-      return '<tr>'+cell(l.name,`data-fin-lam="${i}" data-fin-f="name"`,'fin-name')
+      return '<tr>'+tick('lam',i)+cell(l.name,`data-fin-lam="${i}" data-fin-f="name"`,'fin-name')
         +cell(l.roll_cm,`type="number" data-fin-lam="${i}" data-fin-f="roll_cm"`)
         +cell(l.roll_cost,`type="number" step="0.01" data-fin-lam="${i}" data-fin-f="roll_cost"`)
         +`<td class="fin-calc" data-fin-per="${i}">${finLamCells(per)}</td>`
         +`<td class="fin-del"><button type="button" class="icon-btn" data-fin-del-lam="${i}" title="Delete row">✕</button></td></tr>`;
     }).join('')+'</tbody>';
+  finSelBtns();
 }
+function finSelBtns(){
+  [['paper','finDelPaperSel'],['lam','finDelLamSel']].forEach(([k,id])=>{
+    const b=document.getElementById(id), n=finSel[k].size;
+    b.style.display=n?'':'none'; b.textContent=`Delete selected (${n})`;
+  });
+}
+document.getElementById('financeSettingsScreen').addEventListener('change',e=>{
+  const el=e.target, d=el.dataset;
+  if(d.finSel){ el.checked?finSel[d.finSel].add(+d.i):finSel[d.finSel].delete(+d.i); }
+  else if(d.finSelAll){
+    const k=d.finSelAll;
+    document.querySelectorAll(`[data-fin-sel="${k}"]`).forEach(c=>{
+      c.checked=el.checked; el.checked?finSel[k].add(+c.dataset.i):finSel[k].delete(+c.dataset.i); });
+  }else return;
+  finSelBtns();
+});
 // the three worked-out prices, kept as one cell's worth of html so typing a
 // roll cost can refresh them without redrawing (and unfocusing) the inputs
 const finLamCells=per=>`${+per.toFixed(7)}</td><td class="fin-calc">${+(per*100).toFixed(5)}</td><td class="fin-calc">${+(per*50).toFixed(5)}`;
 document.getElementById('financeSettingsScreen').addEventListener('input',e=>{
   const el=e.target, d=el.dataset;
+  if(el.type==='checkbox') return;
   if(d.finCol!==undefined) finSettings.paper_columns[+d.finCol]=el.value;
   else if(d.finPaper!==undefined){
     const r=finSettings.papers[+d.finPaper]; if(!r.cells) r.cells=[];
@@ -50956,6 +50984,13 @@ document.getElementById('financeSettingsScreen').addEventListener('click',e=>{
   else if(b.dataset.finDelLam!==undefined){
     const l=finSettings.laminates[+b.dataset.finDelLam];
     if(confirm(`Delete "${l.name||'this row'}"?`)){ finSettings.laminates.splice(+b.dataset.finDelLam,1); renderFinTables(); } }
+  else if(b.id==='finDelPaperSel'||b.id==='finDelLamSel'){
+    const k=b.id==='finDelPaperSel'?'paper':'lam', list=k==='paper'?finSettings.papers:finSettings.laminates;
+    const n=finSel[k].size;
+    if(n&&confirm(`Delete ${n} row${n>1?'s':''}?`)){
+      const keep=list.filter((_,i)=>!finSel[k].has(i));
+      if(k==='paper') finSettings.papers=keep; else finSettings.laminates=keep;
+      renderFinTables(); } }
   else if(b.id==='finSave') saveFinanceSettings(b);
 });
 async function saveFinanceSettings(btn){
