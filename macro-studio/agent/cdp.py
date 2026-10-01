@@ -1196,6 +1196,7 @@ def wait_ready(port: int, target_id: str, expect_url: str = "", timeout_ms: int 
             if committed:
                 try:
                     if evaluate(entry, "document.readyState", timeout=5) in ("interactive", "complete"):
+                        scroll_to_top(entry)
                         return entry
                 except RuntimeError:
                     pass  # context swapped mid-check; next pass sees the new one
@@ -1203,6 +1204,30 @@ def wait_ready(port: int, target_id: str, expect_url: str = "", timeout_ms: int 
         if time.time() >= deadline:
             return last or find_page(port, "")
         time.sleep(0.25)
+
+
+def scroll_to_top(page: dict) -> None:
+    """Starts every freshly loaded page at the top.
+
+    Chrome puts a reloaded or reopened page back where it was last
+    scrolled, so a run could begin mid-page with the header -- and every
+    sticky bar or menu that only shows at the top -- out of reach. The
+    restore lands at the load event, after 'interactive', so the jump is
+    repeated then; scrollRestoration 'manual' stops later history moves
+    doing it again."""
+    try:
+        evaluate(page, """(() => {
+          try { history.scrollRestoration = 'manual'; } catch (e) {}
+          const top = () => window.scrollTo(0, 0);
+          top();
+          if (document.readyState !== 'complete') {
+            window.addEventListener('load', () => { top(); setTimeout(top, 300); }, { once: true });
+          } else {
+            setTimeout(top, 300);
+          }
+        })()""", timeout=5)
+    except RuntimeError:
+        pass  # mid-navigation; nothing here is worth failing a step over
 
 
 def _same_page(url: str, expect: str) -> bool:
