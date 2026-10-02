@@ -51239,7 +51239,10 @@ const ooNum=t=>{ const m=String(t||'').replace(/,/g,'').match(/-?\d+(\.\d+)?/); 
 // lines and then into runs that sit apart on a line (the columns).
 async function ooReadInvoice(file){
   const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
-  const page=await pdf.getPage(1), vh=page.getViewport({scale:1}).height;
+  // an invoice can run over several pages: the items continue under repeated
+  // column heads, and the total sits on the last page
+  const pageSegs=async n=>{
+  const page=await pdf.getPage(n), vh=page.getViewport({scale:1}).height;
   const tc=await page.getTextContent();
   const bits=tc.items.filter(i=>i.str&&i.str.trim()).map(i=>({x:i.transform[4],top:vh-i.transform[5],
     w:i.width,h:i.height||Math.abs(i.transform[3])||10,str:i.str}));
@@ -51255,6 +51258,10 @@ async function ooReadInvoice(file){
     });
   });
   segs.forEach(g=>g.text=g.text.replace(/\s+/g,' ').trim());
+  return segs;
+  };
+  const pages=[]; for(let n=1;n<=pdf.numPages;n++) pages.push(await pageSegs(n));
+  const segs=pages[0];
   const find=re=>segs.find(g=>re.test(g.text));
   const right=(g,re)=>g&&segs.filter(o=>Math.abs(o.top-g.top)<3&&o.x>g.x2-1&&(!re||re.test(o.text))).sort((a,b)=>a.x-b.x)[0];
   const out={items:[]};
@@ -51265,8 +51272,11 @@ async function ooReadInvoice(file){
   if(dt) out.invoice_date=ooIsoDate(dt.text.replace(/.*INVOICE DATE:?/i,'').trim()||(right(dt)||{}).text);
   const due=find(/^DUE DATE/i);
   if(due) out.due_date=ooIsoDate(due.text.replace(/^DUE DATE:?/i,'').trim()||(right(due)||{}).text);
-  const tot=find(/^TOTAL PAYABLE/i);
-  if(tot) out.total=ooNum(tot.text.replace(/^TOTAL PAYABLE/i,''))??ooNum((right(tot,/\d/)||{}).text);
+  for(const ps of pages){
+    const tot=ps.find(g=>/^TOTAL PAYABLE/i.test(g.text)); if(!tot) continue;
+    const r=ps.filter(o=>Math.abs(o.top-tot.top)<3&&o.x>tot.x2-1&&/\d/.test(o.text)).sort((a,b)=>a.x-b.x)[0];
+    out.total=ooNum(tot.text.replace(/^TOTAL PAYABLE/i,''))??ooNum((r||{}).text); break;
+  }
   // client: under CLIENT DETAILS, left of PAYMENT METHODS, above the items
   const ch=find(/^CLIENT DETAILS/i), pm=find(/^PAYMENT METHODS/i), ih=find(/ITEM DESCRIPTION/i);
   if(ch){
@@ -51289,27 +51299,29 @@ async function ooReadInvoice(file){
   }
   // items: the rows between the column heads and the totals; a gap taller
   // than a line and a half starts the next item
-  if(ih){
+  for(const ps of pages){
+    const ih=ps.find(g=>/ITEM DESCRIPTION/i.test(g.text)); if(!ih) continue;
+    const find=re=>ps.find(g=>re.test(g.text));
     const qh=find(/^QUANTITY|^QTY/i), uh=find(/UNIT PRICE/i), dh=find(/DISC/i), ah=find(/Final Amount|^AMOUNT/i);
-    const end=Math.min(...segs.filter(g=>g.top>ih.top&&/^(TOTAL|SUBTOTAL|DUE DATE)/i.test(g.text)).map(g=>g.top),1e9);
+    const end=Math.min(...ps.filter(g=>g.top>ih.top&&/^(TOTAL|SUBTOTAL|DUE DATE)/i.test(g.text)).map(g=>g.top),1e9);
     const heads=[['qty',qh],['unit',uh],['disc',dh],['amount',ah]].filter(([,h])=>h)
       .map(([k,h])=>({k,c:(h.x+h.x2)/2}));
     const descEdge=qh?qh.x-10:(uh?uh.x-10:9999);
-    const rows=segs.filter(g=>g.top>ih.top+3&&g.top<end-2).sort((a,b)=>a.top-b.top||a.x-b.x);
-    let it=null, last=-1e9;
+    const rows=ps.filter(g=>g.top>ih.top+3&&g.top<end-2).sort((a,b)=>a.top-b.top||a.x-b.x);
+    const items=[]; let it=null, last=-1e9;
     rows.forEach(g=>{
-      if(!it||g.top-last>g.h*1.7){ it={desc:[],qty:null,unit:null,amount:null}; out.items.push(it); }
+      if(!it||g.top-last>g.h*1.7){ it={desc:[],qty:null,unit:null,amount:null}; items.push(it); }
       last=g.top;
       if(g.x2<=descEdge||!heads.length){ it.desc.push(g.text); return; }
       const mid=(g.x+g.x2)/2, col=heads.reduce((a,b)=>Math.abs(b.c-mid)<Math.abs(a.c-mid)?b:a);
       if(col.k!=='disc'&&it[col.k]==null) it[col.k]=ooNum(g.text);
     });
-    out.items=out.items.map(i=>({...i,desc:i.desc.join('\n')}));
-    // a line with nothing to pay saying how it goes out is the fulfilment, not an item
-    const ful=out.items.find(i=>!i.qty&&!i.amount&&/collect|deliver|courier|post/i.test(i.desc));
-    if(ful){ out.fulfilment=ful.desc; out.items=out.items.filter(i=>i!==ful); }
-    out.items=out.items.filter(i=>i.desc||i.amount);
+    out.items.push(...items.map(i=>({...i,desc:i.desc.join('\n')})));
   }
+  // a line with nothing to pay saying how it goes out is the fulfilment, not an item
+  const ful=out.items.find(i=>!i.qty&&!i.amount&&/collect|deliver|courier|post/i.test(i.desc));
+  if(ful){ out.fulfilment=ful.desc; out.items=out.items.filter(i=>i!==ful); }
+  out.items=out.items.filter(i=>i.desc||i.amount);
   return out;
 }
 async function ooAddFiles(files){
