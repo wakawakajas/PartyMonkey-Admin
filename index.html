@@ -2467,6 +2467,15 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 /* a hairline under each setting, as a settings panel reads */
 :is(#appScreen,#giftTagScreen) > [data-card] label.field:has(> input[type=number]):not(#gtOrderList label,#gtFieldList label){
   border-bottom:1px solid var(--border);padding:5px 0;}
+/* a design line's QTY is a label with a number box, so the settings-row looks
+   above caught it: it ran wide and sat on the bleed. It keeps its own stacked
+   look, like the BLEED and TURN beside it. */
+#appScreen > [data-card] #designLines .design-line label.field.qty{
+  flex-direction:column;align-items:stretch;gap:4px;padding:0;border-bottom:0;}
+#appScreen > [data-card] #designLines .design-line label.field.qty > span{
+  flex:none;text-transform:uppercase;font-size:inherit;letter-spacing:inherit;}
+#appScreen > [data-card] #designLines .design-line label.field.qty > input[type=number]{
+  flex:none;width:100%;height:38px;min-height:38px;padding:0 4px;text-align:center;}
 /* No descriptions on the Gift Tag screen — the labels say enough. Status lines
    (a hint with an id of its own that reports something) are kept. */
 #giftTagScreen p.sub,#giftTagScreen p.hint:not([id]),
@@ -9248,8 +9257,8 @@ async function useArtFiles(group,side,files){
 // Every page uploaded stays on the list, ticked or not, so Pages & qty can be
 // opened again later and a page left out put back without uploading again.
 let splitPick=null; // {side,list,fresh,skipped}
-function splitPickOpen(side,list,fresh,skipped){
-  splitPick={side,fresh,skipped:skipped||0,
+function splitPickOpen(side,list,fresh,skipped,custom){
+  splitPick={side,fresh,custom,skipped:skipped||0,
     list:list.map(d=>({...d,on:d.on!==false,qty:splitQty(d.qty)}))};
   document.getElementById('splitPickSameQty').value='';
   splitPickRender();
@@ -9411,8 +9420,13 @@ function splitPickCancel(){
 document.getElementById('splitPickClose').addEventListener('click',splitPickCancel);
 document.getElementById('splitPickDone').addEventListener('click',()=>{
   if(!splitPick) return;
-  const {side,list,fresh}=splitPick;
+  const {side,list,fresh,custom}=splitPick;
   const first=list.find(d=>d.on); if(!first) return;
+  // the design picker's pages: they become design lines, not Split's list
+  if(custom){
+    document.getElementById('splitPickSheet').classList.remove('open');
+    splitPick=null; custom(list); return;
+  }
   const cur=state.final[side];
   const sameFirst=!fresh&&cur&&cur.id===first.id;
   state.finalList[side]=list;
@@ -27463,7 +27477,7 @@ document.getElementById('loadDesignCount').addEventListener('click',e=>{
 const LD_LIST_MAX=200;
 // Place Card: designs ticked in the picker, path → file, in the order ticked
 const ldMulti=new Map();
-const ldMultiOn=()=>!mcRoutePickFor&&!mcSummaryPickFor&&!ldMapMode()&&ldActiveMode()==='placecard';
+const ldMultiOn=()=>!mcRoutePickFor&&!mcSummaryPickFor&&!ldMapMode();
 function ldMultiSync(){
   const row=document.getElementById('loadDesignQtyRow');
   row.style.display=ldMulti.size?'':'none';
@@ -27471,6 +27485,8 @@ function ldMultiSync(){
   document.getElementById('loadDesignSelected').textContent=
     n+' design'+(n===1?'':'s')+' selected: '+[...ldMulti.values()].map(x=>x.name).join(', ');
   document.getElementById('loadDesignConfirmBtn').textContent=n>1?`Add ${n} designs`:'Add design';
+  // several at once: each lands on its own line at 1, and the quantities are keyed in there
+  const qf=document.getElementById('loadDesignQtyField'); if(qf) qf.style.display=n>1?'none':'';
 }
 function loadDesignRenderList(){
   const q=(document.getElementById('loadDesignSearch').value||'').trim().toLowerCase();
@@ -27721,17 +27737,47 @@ document.getElementById('loadDesignConfirmBtn').addEventListener('click',async()
   btn.disabled=true;
   if(ldMultiOn()&&ldMulti.size){
     try{
-      const picks=[...ldMulti.values()]; let done=0;
+      const picks=[...ldMulti.values()]; let n=0;
+      // every PDF is opened out into its pages; a plain image is one design
+      const entries=[];
       for(const p of picks){
-        showMsg(msgEl,`Adding ${++done} of ${picks.length}…`,true);
-        await addDesignLine(p,qty,'',true);
+        showMsg(msgEl,`Reading ${++n} of ${picks.length}…`,true);
+        const file=await p.handle.getFile();
+        const pages=await pdfAllPageFiles(file).catch(()=>null);
+        if(pages) pages.forEach((f,i)=>entries.push({pick:{...p,path:p.path+'#p'+(i+1),name:p.name+' · p'+(i+1),
+          handle:{getFile:async()=>f}},name:p.name+' · p'+(i+1),paged:true}));
+        else entries.push({pick:p,name:p.name,paged:false,qty:picks.length===1?qty:1});
       }
-      fitArtToCard('front'); fitArtToCard('back');
-      renderDesignLines(); refreshArtInputs(); drawAll();
+      const place=async list=>{
+        for(const e of list){
+          const line=await addDesignLine(e.pick,e.qty||1,'',true);
+          // a page lifted out of a PDF has no path of its own to reload from
+          if(e.paged) line.source=null;
+        }
+        fitArtToCard('front'); fitArtToCard('back');
+        renderDesignLines(); refreshArtInputs(); drawAll();
+        const q=document.querySelectorAll('#designLines [data-design-qty]');
+        const f=q[q.length-list.length]; if(f&&list.length>1){ f.scrollIntoView({block:'center'}); f.focus(); f.select(); }
+      };
       ldMulti.clear(); ldMultiSync();
-      showMsg(msgEl,`✓ Added ${picks.length} design${picks.length===1?'':'s'} × ${qty} — `
-        +`${designTotal()} cards over ${sheetCount()} sheet${sheetCount()===1?'':'s'}.`,true);
-      setTimeout(closeLoadDesignModal,900);
+      if(entries.some(e=>e.paged)){
+        // a PDF with pages: pick the pages and key the quantities, as Split does
+        const list=[]; let k=0;
+        for(const e of entries){
+          showMsg(msgEl,`Drawing ${++k} of ${entries.length}…`,true);
+          const f=await e.pick.handle.getFile();
+          const data=(await designImageOf(e.pick,f)).data;
+          list.push({id:'pp'+(++finalListSeq),data,name:e.name,on:true,qty:1,entry:e});
+        }
+        closeLoadDesignModal();
+        splitPickOpen('front',list,true,0,async chosen=>{
+          try{ await place(chosen.filter(d=>d.on).map(d=>({...d.entry,qty:d.qty}))); }
+          catch(err){ renderDesignLines(); drawAll(); alert('Could not load a design: '+((err&&err.message)||'unknown error')); }
+        });
+      }else{
+        closeLoadDesignModal();
+        await place(entries);
+      }
     }catch(err){
       renderDesignLines(); drawAll();
       showMsg(msgEl,'Could not load a design: '+((err&&err.message)||'unknown error'),false);
