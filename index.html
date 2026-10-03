@@ -177,6 +177,7 @@ button:focus-visible{outline:2px solid var(--blueprint);outline-offset:2px;}
 @media (min-width:640px){ .actions4{grid-template-columns:repeat(4,1fr);} }
 .stack{display:flex;flex-direction:column;gap:9px;}
 .upload-slot{border:1px dashed var(--border-strong);border-radius:14px;padding:11px;display:flex;align-items:center;gap:11px;background:var(--nest);}
+.upload-slot.over{border-color:var(--accent,#3b82f6);background:rgba(59,130,246,.12);}
 .upload-slot .thumb{width:46px;height:46px;border:1px solid var(--border);border-radius:10px;background:#101113;flex-shrink:0;display:flex;align-items:center;justify-content:center;overflow:hidden;}
 .upload-slot .thumb img{width:100%;height:100%;object-fit:contain;}
 .upload-slot .thumb .ico{color:var(--faint);font-size:17px;}
@@ -1921,7 +1922,10 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .crop-sheet{max-width:980px;}
 .crop-bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
 .crop-bar .seg{flex:0 0 auto;}
-.crop-bar .seg button{flex:0 0 auto;min-height:34px;height:34px;padding:0 16px;}
+.crop-bar .seg button{flex:0 0 auto;width:auto;min-height:34px;height:34px;padding:0 16px;}
+/* the sheet's blanket rule makes every button full width, which stacked the
+   three chips in a column and pushed them over the Front / Back switch */
+.crop-bar .chips button{width:auto;height:34px;}
 .crop-stage{display:flex;justify-content:center;align-items:center;min-height:200px;
   background:repeating-conic-gradient(#3a3a38 0 25%,#2c2c2a 0 50%) 0 0/16px 16px;border-radius:8px;padding:8px;}
 .crop-stage canvas{display:block;touch-action:none;cursor:crosshair;max-width:100%;}
@@ -9485,6 +9489,27 @@ document.querySelectorAll('[data-pick]').forEach(b=>{
 document.querySelectorAll('[data-clear-art]').forEach(b=>{
   b.addEventListener('click',()=>clearArtSide(b.dataset.clearArt));
 });
+// Drag a file onto Front or Back instead of pressing Upload. It travels the
+// same route a chosen file does; several files only count with Multiple Design.
+document.querySelectorAll('[data-pick="final|front"],[data-pick="final|back"]').forEach(b=>{
+  const slot=b.closest('.upload-slot'); if(!slot) return;
+  const side=b.dataset.pick.split('|')[1];
+  const hasFiles=e=>e.dataTransfer&&[...e.dataTransfer.types].includes('Files');
+  ['dragenter','dragover'].forEach(ev=>slot.addEventListener(ev,e=>{
+    if(!hasFiles(e)) return;
+    e.preventDefault(); slot.classList.add('over');
+  }));
+  slot.addEventListener('dragleave',()=>slot.classList.remove('over'));
+  slot.addEventListener('drop',e=>{
+    if(!hasFiles(e)) return;
+    e.preventDefault(); slot.classList.remove('over');
+    const files=Array.from(e.dataTransfer.files).filter(f=>
+      /^image\/(png|jpeg|webp)$/.test(f.type)||/\.(pdf|png|jpe?g)$/i.test(f.name));
+    if(!files.length) return;
+    if(state.finalSplit) useArtFiles('final',side,files);
+    else useArtFile('final',side,files[0]);
+  });
+});
 function setSlot(t,i,o,list){
   document.getElementById(t).innerHTML=o.data?`<img src="${o.data}"/>`:'<span class="ico">＋</span>';
   const on=state.finalSplit&&list&&o.id&&list.some(d=>d.id===o.id)?list.filter(d=>d.on!==false):[];
@@ -11278,7 +11303,9 @@ function renderPlaceholderList(){
   wrap.innerHTML='<div class="ph-list">'+phSetNumbers().map(no=>`
     <div class="ph-card ph-setrow" data-set="${no}">
       <div class="ph-card-head"><span>${escapeHtml(phSetLabel(no))}</span>
-        <button type="button" class="btn-outline btn-sm" data-openset="${no}">Open</button></div>
+        <span style="display:flex;gap:6px;">
+          <button type="button" class="btn-outline btn-sm" data-delset="${no}">Delete</button>
+          <button type="button" class="btn-outline btn-sm" data-openset="${no}">Open</button></span></div>
       <p class="hint" style="margin:0;">${escapeHtml(phSetSummary(no))}</p>
     </div>`).join('')+'</div>'
     +'<p class="hint" style="margin:7px 0 0;">Click a card on the sheet, or Open, for the set in its own window.</p>';
@@ -11287,6 +11314,18 @@ function renderPlaceholderList(){
       e.stopPropagation();
       const first=phSetBoxes(Number(b.dataset.openset))[0];
       if(first) phPopOpen(first);
+    });
+  });
+  wrap.querySelectorAll('[data-delset]').forEach(b=>{
+    b.addEventListener('click',e=>{
+      e.stopPropagation();
+      const no=Number(b.dataset.delset), ids=new Set(phSetBoxes(no).map(q=>q.id));
+      if(!ids.size||!confirm(`Delete ${phSetLabel(no)} (${ids.size} card${ids.size===1?'':'s'})?`)) return;
+      state.placeholders=state.placeholders.filter(q=>!ids.has(q.id));
+      ids.forEach(id=>phSel.delete(id));
+      if(phPop.no===no) phPopClose();
+      renderPlaceholderList(); refreshArtInputs(); updateCalc();
+      renderDesignLines(); phSelSync(); drawAll();
     });
   });
   // the row picks the set out on the sheet, shift adds it to what is held
@@ -40861,7 +40900,7 @@ function mcIsCopyLine(it){
 let fieryRun=null;
 // onlySkus: the SKU summary's step 2 sends only what it is showing — one
 // paper at a time — and says what went wrong on its own screen
-async function mcCopyPrintOpen(orderId,onlySkus){
+async function mcCopyPrintOpen(orderId,onlySkus,again){
   const out=document.getElementById(onlySkus?'mcSummaryMsg':'mcBatchMsg');
   if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
   const lines=mcGroups()
@@ -40870,7 +40909,7 @@ async function mcCopyPrintOpen(orderId,onlySkus){
     .filter(it=>!onlySkus||onlySkus.has(String(mcRowKey(it))))
     // from the summary, a line already sent to the Fiery or ticked done is
     // not offered again; the order's own Print button still lists everything
-    .filter(it=>!onlySkus||!(it.status||(it.sheet_item&&it.sheet_item.printed)));
+    .filter(it=>!onlySkus||again||!(it.status||(it.sheet_item&&it.sheet_item.printed)));
   if(!lines.length&&onlySkus){
     showMsg(out,'Everything picked has already been printed or ticked done.',false);
     return;
@@ -45055,7 +45094,7 @@ async function mcSumAddThen(rows,which){
   await mcAddThese(rows,which);
   if(mcSumStep!=='copy') return;
   const skus=new Set(rows.filter(r=>mcSumKind(r)==='copy'&&!mcNeedsPreset(r)).map(r=>String(r.sku)));
-  if(skus.size) await mcCopyPrintOpen(undefined,skus);
+  if(skus.size) await mcCopyPrintOpen(undefined,skus,which==='selected');
 }
 document.getElementById('mcSummaryAddAll').addEventListener('click',()=>
   mcSumAddThen(mcSummaryShownRows(),'shown'));
@@ -45066,7 +45105,15 @@ document.getElementById('mcSummaryAddAll').addEventListener('click',()=>
 // variation rather than the SKU was turned away before anything had looked.
 async function mcAddThese(list,which){
   const out=document.getElementById('mcSummaryMsg');
-  const rows=list.filter(r=>!mcRowDone(r)&&!mcWhereIsSku(r.sku));
+  // Rows ticked by hand are meant, so one already printed or ticked done can
+  // be run again — asked first, since it is a second copy and a second print.
+  let again=which==='selected';
+  if(again){
+    const dn=list.filter(r=>mcRowDone(r)).length;
+    if(dn&&!confirm(`${dn===1?'1 selected SKU is':dn+' selected SKUs are'} already printed or ticked done.\n\n`
+      +'OK — copy and print them again.\nCancel — skip them.')) again=false;
+  }
+  const rows=list.filter(r=>(again||!mcRowDone(r))&&!mcWhereIsSku(r.sku));
   if(!rows.length){
     showMsg(out,which==='selected'&&!list.length
       ? 'Nothing is selected.' : 'Nothing to add — '+mcWhyNotAdd(list),false);
