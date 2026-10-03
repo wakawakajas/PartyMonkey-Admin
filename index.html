@@ -8345,6 +8345,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
     </div>
     <div id="mcMadeMsg"></div>
     <button class="btn-outline" id="mcMadeBig">⤢ Enlarge — 300% on the first card</button>
+    <button class="btn-outline" id="mcMadeSave">💾 Save to lines</button>
     <button class="btn-primary" id="mcMadeDownload">⬇ Download front PDF</button>
     <button class="btn-outline" id="mcMadeOpen">Open the builder</button>
   </div>
@@ -13220,14 +13221,16 @@ async function designBleedLift(local,store){
 // It says so when the write does not land. A bleed that looks saved on this
 // screen and reaches nobody else is the exact failure this table was added to
 // end, so it is not allowed to fail quietly.
+// true when the table has it, false when it does not — so a Save that says
+// "saved" can be told the truth.
 async function designBleedWrite(key,mm,on,rot){
-  if(!key) return;
-  if(!sb){ designBleedTold('Sync is unavailable — that bleed is on this browser only.'); return; }
+  if(!key) return false;
+  if(!sb){ designBleedTold('Sync is unavailable — that bleed is on this browser only.'); return false; }
   const turn=designRotOf({rotate:rot});
   const what=on&&turn?'bleed and turn':(turn?'turn':'bleed');
   try{
     const {data:{session}}=await sb.auth.getSession();
-    if(!session){ designBleedTold(`Sign in for the team to see that ${what} — it is on this browser only for now.`); return; }
+    if(!session){ designBleedTold(`Sign in for the team to see that ${what} — it is on this browser only for now.`); return false; }
     // The row carries both, so it lives while the design has either: its own
     // bleed, its own turn, or both. Neither, and there is nothing to say.
     const {error}=(on||turn)
@@ -13237,6 +13240,7 @@ async function designBleedWrite(key,mm,on,rot){
           {onConflict:'path'})
       : await sb.from('design_bleeds').delete().eq('path',key);
     if(error) throw error;
+    return true;
   }catch(err){
     const msg=(err&&err.message)||'unknown error';
     // the one failure that has an answer somebody can act on
@@ -13244,9 +13248,10 @@ async function designBleedWrite(key,mm,on,rot){
       designBleedTold('The turn a design keeps cannot be shared until '
         +'supabase-migration-DESIGN-ROTATE.sql is run in Supabase — it is on '
         +'this browser only until then.');
-      return;
+      return false;
     }
     designBleedTold(`Could not share that ${what}: ${msg} — it is on this browser only.`);
+    return false;
   }
 }
 function designBleedTold(text){
@@ -13370,7 +13375,14 @@ function designBleedSaved(line){
   const base=key.split('/').pop();
   if(!base) return null;
   const hits=Object.keys(store).filter(k=>k.split('/').pop()===base);
-  return hits.length===1?store[hits[0]]:null;
+  if(hits.length===1) return store[hits[0]];
+  // Choosing a different root for the designs folder (the whole Pigu folder
+  // instead of Cards) puts a folder name in front of every path, so a design
+  // saved as "big ty card/x.pdf" comes back as "cards/big ty card/x.pdf". Where
+  // the file name is shared, the one whose folders are the tail of the other's
+  // is the same design; with two of those it is still a guess, so none.
+  const tail=hits.filter(k=>key.endsWith('/'+k)||k.endsWith('/'+key));
+  return tail.length===1?store[tail[0]]:null;
 }
 function applyRememberedBleed(line){
   if(!line) return line;
@@ -42879,6 +42891,8 @@ function mcOpenMade(note,ok,mode){
     gift?`${mcGtPage(gtMode).name} gift tag sheet`:'Print sheet';
   document.getElementById('mcMadeDownload').textContent=
     gift?'⬇ Save gift tag PDF':'⬇ Download front PDF';
+  // the gift tag side is saved on its own screen; the print sheet is saved here
+  document.getElementById('mcMadeSave').style.display=gift?'none':'';
   document.getElementById('mcMadeOpen').textContent=
     gift?'Open the gift tag builder':'Open the builder';
   document.getElementById('mcMadeBig').textContent=
@@ -42915,6 +42929,15 @@ document.getElementById('mcMadeBig').addEventListener('click',()=>{
 });
 document.getElementById('mcMadePrev').addEventListener('click',()=>{mcMadePage--;mcRenderMade();});
 document.getElementById('mcMadeNext').addEventListener('click',()=>{mcMadePage++;mcRenderMade();});
+document.getElementById('mcMadeSave').addEventListener('click',async()=>{
+  const out=document.getElementById('mcMadeMsg');
+  try{
+    const r=await mcSaveSharedSheet();
+    showMsg(out,r.failed
+      ? `${r.failed} design record${r.failed===1?'':'s'} did not save.`
+      : `✓ Saved — ${r.skus} SKU${r.skus===1?'':'s'}, ${r.wrote} design record${r.wrote===1?'':'s'} written.`,!r.failed);
+  }catch(err){ showMsg(out,'Could not save: '+escapeHtml((err&&err.message)||'unknown error'),false); }
+});
 document.getElementById('mcMadeDownload').addEventListener('click',()=>{
   if(mcMadeMode==='gift'){
     // the gift tag tool's own export, which is on its screen
@@ -49349,11 +49372,36 @@ function mcSaveChipMode(){
     // A line nothing has said the kind of — no Routing rule for its SKU — is
     // opened on this builder all the same, and was worked here with nothing
     // to save it with. Saving it here makes it a Custom Template line.
-    // Never while the builder holds a shared print sheet: that is no one line's.
-    if(mcLaidShared) return '';
+    // A shared print sheet is no one line's layout, so it is never written onto
+    // a line as one. It has its own save: what was set on its designs (bleed,
+    // turn) is written to the design records, and its lines are ticked.
+    if(mcLaidShared) return (state.designs||[]).length?'sheet':'';
     return (t&&t.mode==='per-order')||(it&&!it.tile)?'line':'';
   }
   return '';
+}
+// The SKUs the shared print sheet carries for the batch: the designs the
+// summary put there (merged lines keep their own layout, so are not these).
+const mcSharedSheetSkus=()=>[...new Set((state.designs||[])
+  .filter(d=>d.sku&&!d.mcKey&&d.source&&d.source.path).map(d=>d.sku))];
+// Save for the shared print sheet. The bleed and turn a design keeps are
+// written to its record (shared with the team) and the batch lines on the
+// sheet are marked and ticked, the same marks Add made. Returns what it said.
+async function mcSaveSharedSheet(){
+  let wrote=0,failed=0;
+  const store=designBleedStore();
+  for(const d of (state.designs||[])){
+    const key=designBleedKey(d); if(!key) continue;
+    const on=!!d.bleedOn&&isFinite(Number(d.bleedMm)), rot=designRotOf(d);
+    if(!on&&!rot&&!store[key]) continue;        // nothing kept, nothing to hand back
+    if(on||rot) store[key]={on,mm:on?Number(d.bleedMm):null,rot};
+    else delete store[key];
+    if(await designBleedWrite(key,d.bleedMm,on,rot)) wrote++; else failed++;
+  }
+  designBleedSaveStore();
+  const skus=mcSharedSheetSkus();
+  const lines=skus.length?await mcMarkPrintLines(skus.map(sku=>({sku})),selectedTemplate||''):0;
+  return {wrote,failed,lines,skus:skus.length};
 }
 function mcBuilderSaveSync(){
   const chip=document.getElementById('mcSaveChip'); if(!chip) return;
@@ -49368,6 +49416,11 @@ function mcBuilderSaveSync(){
     what.textContent=`Save ${n} line${n===1?'':'s'} to the batch`;
     chip.title='Write these tags back onto the batch lines they came from. '
       +'Leaving this screen does it too — this is so you can see it happen.';
+  }else if(mode==='sheet'){
+    const n=mcSharedSheetSkus().length;
+    what.textContent=`Save sheet to ${n||''} line${n===1?'':'s'}`.replace('  ',' ');
+    chip.title='Write each design’s own bleed and turn to its design record, and tick '
+      +'the batch lines that are on this sheet.';
   }else{
     what.textContent='Save to '+((it&&it.order_id)||'this line');
     chip.title='Write this sheet onto the line as its layout, and tick it done.';
@@ -49433,6 +49486,15 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
       mcSyncBatchButtons();
       if(mcWinItem) mcWinRender();
       mcSaveChipSaid(`✓ ${n} line${n===1?'':'s'} saved`,true);
+      return;
+    }
+    if(mode==='sheet'){
+      const r=await mcSaveSharedSheet();
+      if(r.failed){
+        mcSaveChipSaid(`${r.failed} design record${r.failed===1?'':'s'} did not save — see the message`,false);
+        return;
+      }
+      mcSaveChipSaid(`✓ Saved — ${r.skus} SKU${r.skus===1?'':'s'}, ${r.wrote} design record${r.wrote===1?'':'s'}`,true);
       return;
     }
     const it=mcWinItem?mcItem(mcWinItem):null;
