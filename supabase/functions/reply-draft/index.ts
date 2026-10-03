@@ -565,13 +565,36 @@ Deno.serve(async (req) => {
       })
       .filter((f) => f.fact);
 
-    // The whole table, ranked here. It is a few hundred rows of chat at the
-    // very most — a shop that has approved a thousand replies has a thousand
-    // short lines, not a corpus — and ranking needs to see all of them.
-    const { data: exRows } = await asUser.from("reply_examples")
-      .select("id,buyer_text,reply_text,hits,edited,created_at,chat_key,buyer")
-      .order("created_at", { ascending: false })
-      .limit(1000);
+    // Not the whole table any more: it is ranked inside Supabase and only the
+    // ~100 candidates that share words with this message (plus the same chat's
+    // own replies and the most-used ones) come back, then pick() below scores
+    // them exactly as before. The shop can keep learning forever without every
+    // draft downloading a thousand rows. A project that has not run
+    // supabase-migration-REPLY-EXAMPLES-SEARCH.sql yet falls back to the old read.
+    const chatKeyForSearch = String(body?.chat_key ?? "").trim();
+    let exRows: unknown[] | null = null;
+    if (distil) {
+      const r = await asUser.from("reply_examples")
+        .select("id,buyer_text,reply_text,hits,edited,created_at,chat_key,buyer")
+        .order("created_at", { ascending: false })
+        .limit(40);
+      exRows = r.data;
+    } else {
+      const r = await asUser.rpc("reply_examples_search", {
+        p_words: [...new Set(words(message))],
+        p_chat_key: chatKeyForSearch,
+        p_limit: 60,
+      });
+      if (!r.error) {
+        exRows = r.data;
+      } else {
+        const old = await asUser.from("reply_examples")
+          .select("id,buyer_text,reply_text,hits,edited,created_at,chat_key,buyer")
+          .order("created_at", { ascending: false })
+          .limit(1000);
+        exRows = old.data;
+      }
+    }
     const examples = (exRows ?? []) as Example[];
 
     if (distil) {
