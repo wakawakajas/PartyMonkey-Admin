@@ -27461,6 +27461,17 @@ document.getElementById('loadDesignCount').addEventListener('click',e=>{
 // reads past the first screenful anyway: the rest is found by typing, and the
 // count line says how many are behind it.
 const LD_LIST_MAX=200;
+// Place Card: designs ticked in the picker, path → file, in the order ticked
+const ldMulti=new Map();
+const ldMultiOn=()=>!mcRoutePickFor&&!mcSummaryPickFor&&!ldMapMode()&&ldActiveMode()==='placecard';
+function ldMultiSync(){
+  const row=document.getElementById('loadDesignQtyRow');
+  row.style.display=ldMulti.size?'':'none';
+  const n=ldMulti.size;
+  document.getElementById('loadDesignSelected').textContent=
+    n+' design'+(n===1?'':'s')+' selected: '+[...ldMulti.values()].map(x=>x.name).join(', ');
+  document.getElementById('loadDesignConfirmBtn').textContent=n>1?`Add ${n} designs`:'Add design';
+}
 function loadDesignRenderList(){
   const q=(document.getElementById('loadDesignSearch').value||'').trim().toLowerCase();
   const all=ldMapMode()?(mcSrcFiles||[]):ldScoped();
@@ -27486,7 +27497,7 @@ function loadDesignRenderList(){
     listEl.innerHTML='<p class="hint" style="margin:4px 0 0;">— no matches —</p>';
   }else{
     listEl.innerHTML=items.map((it,i)=>
-      `<div class="ph-card" data-load-design-pick="${i}" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      `<div class="ph-card" data-load-design-pick="${i}" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px;${ldMulti.has(it.path)?'border-color:var(--blueprint);':''}">
          <span>${escapeHtml(it.name)}</span><span class="hint" style="margin:0;">${escapeHtml(it.folder)}</span>
        </div>`).join('');
   }
@@ -27524,7 +27535,7 @@ function loadDesignMapMode(){
 async function openLoadDesignModal(){
   document.getElementById('loadDesignModal').classList.add('open');
   document.getElementById('loadDesignSearch').value='';
-  loadDesignSelected=null;
+  loadDesignSelected=null; ldMulti.clear();
   document.getElementById('loadDesignQtyRow').style.display='none';
   loadDesignMapMode();
   document.getElementById('loadDesignMsg').innerHTML='';
@@ -27597,7 +27608,7 @@ document.getElementById('loadDesignForgetFolderBtn').addEventListener('click',as
   }
   loadDesignDir=null; loadDesignDirRead=true; loadDesignDirMode=ldActiveMode();
   await gtIdbPut(ldDirKey(),null);
-  loadDesignFiles=[]; loadDesignFonts=[]; loadDesignSelected=null;
+  loadDesignFiles=[]; loadDesignFonts=[]; loadDesignSelected=null; ldMulti.clear();
   document.getElementById('loadDesignQtyRow').style.display='none';
   loadDesignFolderState(); loadDesignRenderList();
   if(typeof pcRenderCats==='function') pcRenderCats();
@@ -27615,6 +27626,14 @@ document.getElementById('loadDesignList').addEventListener('click',e=>{
   const row=e.target.closest('[data-load-design-pick]'); if(!row) return;
   const items=document.getElementById('loadDesignList').__items||[];
   const it=items[parseInt(row.dataset.loadDesignPick,10)]; if(!it) return;
+  // Place Card takes several designs at once: each click ticks or unticks one
+  if(ldMultiOn()){
+    if(ldMulti.has(it.path)) ldMulti.delete(it.path); else ldMulti.set(it.path,it);
+    row.style.borderColor=ldMulti.has(it.path)?'var(--blueprint)':'';
+    loadDesignSelected=ldMulti.size?it:null;
+    ldMultiSync();
+    return;
+  }
   loadDesignSelected=it;
   document.querySelectorAll('#loadDesignList [data-load-design-pick]').forEach(r=>r.style.borderColor='');
   row.style.borderColor='var(--blueprint)';
@@ -27700,6 +27719,25 @@ document.getElementById('loadDesignConfirmBtn').addEventListener('click',async()
   const msgEl=document.getElementById('loadDesignMsg');
   const btn=document.getElementById('loadDesignConfirmBtn');
   btn.disabled=true;
+  if(ldMultiOn()&&ldMulti.size){
+    try{
+      const picks=[...ldMulti.values()]; let done=0;
+      for(const p of picks){
+        showMsg(msgEl,`Adding ${++done} of ${picks.length}…`,true);
+        await addDesignLine(p,qty,'',true);
+      }
+      fitArtToCard('front'); fitArtToCard('back');
+      renderDesignLines(); refreshArtInputs(); drawAll();
+      ldMulti.clear(); ldMultiSync();
+      showMsg(msgEl,`✓ Added ${picks.length} design${picks.length===1?'':'s'} × ${qty} — `
+        +`${designTotal()} cards over ${sheetCount()} sheet${sheetCount()===1?'':'s'}.`,true);
+      setTimeout(closeLoadDesignModal,900);
+    }catch(err){
+      renderDesignLines(); drawAll();
+      showMsg(msgEl,'Could not load a design: '+((err&&err.message)||'unknown error'),false);
+    }finally{ btn.disabled=false; }
+    return;
+  }
   try{
     await addDesignLine(loadDesignSelected,qty);
     // opened from a SKU on the summary: finish the way Add does, on the sheet
@@ -45105,10 +45143,10 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
 // on the same rows, so printing is the next tap rather than a hunt for it.
 // A SKU with no paper type was not copied, so it is not offered either.
 async function mcSumAddThen(rows,which){
-  await mcAddThese(rows,which);
+  const again=await mcAddThese(rows,which);
   if(mcSumStep!=='copy') return;
   const skus=new Set(rows.filter(r=>mcSumKind(r)==='copy'&&!mcNeedsPreset(r)).map(r=>String(r.sku)));
-  if(skus.size) await mcCopyPrintOpen(undefined,skus,which==='selected');
+  if(skus.size) await mcCopyPrintOpen(undefined,skus,again);
 }
 document.getElementById('mcSummaryAddAll').addEventListener('click',()=>
   mcSumAddThen(mcSummaryShownRows(),'shown'));
@@ -45121,19 +45159,23 @@ async function mcAddThese(list,which){
   const out=document.getElementById('mcSummaryMsg');
   // Rows ticked by hand are meant, so one already printed or ticked done can
   // be run again — asked first, since it is a second copy and a second print.
-  let again=which==='selected';
+  // Add All is asked only when nothing but done rows is left, so a normal
+  // morning's batch is not questioned about the ones it finished earlier.
+  let again=which==='selected'||(list.length&&!list.some(r=>!mcRowDone(r)&&!mcWhereIsSku(r.sku)));
   if(again){
     const dn=list.filter(r=>mcRowDone(r)).length;
-    if(dn&&!confirm(`${dn===1?'1 selected SKU is':dn+' selected SKUs are'} already printed or ticked done.\n\n`
+    if(!dn) again=false;
+    else if(!confirm(`${dn===1?'1 SKU is':dn+' SKUs are'} already printed or ticked done.\n\n`
       +'OK — copy and print them again.\nCancel — skip them.')) again=false;
   }
   const rows=list.filter(r=>(again||!mcRowDone(r))&&!mcWhereIsSku(r.sku));
   if(!rows.length){
     showMsg(out,which==='selected'&&!list.length
       ? 'Nothing is selected.' : 'Nothing to add — '+mcWhyNotAdd(list),false);
-    return;
+    return false;
   }
   await mcRouteRows(rows);
+  return again;
 }
 // the ticked rows, rather than everything on screen
 document.getElementById('mcSummaryAddSel').addEventListener('click',()=>
