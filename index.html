@@ -43210,7 +43210,7 @@ document.getElementById('mcMadeSave').addEventListener('click',async()=>{
   try{
     const r=await mcSaveSharedSheet();
     showMsg(out,r.failed
-      ? `${r.failed} design record${r.failed===1?'':'s'} did not save.`
+      ? `${r.failed} part${r.failed===1?'':'s'} of the sheet did not save — the reason is on the batch strip.`
       : mcSheetSaidOf(r)+'.',!r.failed);
   }catch(err){ showMsg(out,'Could not save: '+escapeHtml((err&&err.message)||'unknown error'),false); }
 });
@@ -49998,9 +49998,52 @@ async function mcSaveSharedSheet(){
   }
   mcNoteSheetPaths();
   if(qty||off){ mcRenderItems(); mcSyncBatchButtons(); if(mcSummaryOpen()) mcRenderSummary(); }
+  // The card positions. A shared sheet is one size of card on one template, so
+  // its layout belongs to that template: it is laid again from it every time the
+  // sheet is opened, and whatever was dragged, resized, added or deleted on the
+  // sheet was lost on the next open.
+  let layout=0;
+  const lay=await mcSaveSheetLayout();
+  if(lay===true) layout=1; else if(lay===false) failed++;
   // a line that would not take its design is as unsaved as a design record that
   // would not write
-  return {wrote,failed,lines,skus:skus.length,qty,off};
+  return {wrote,failed,lines,skus:skus.length,qty,off,layout};
+}
+// The sheet's geometry — paper, grid, card boxes, cut and fold marks, bleed —
+// written onto the template it is laid on. Only the geometry: the template's own
+// designs, artwork, paper type and folders are left as they were, and so is
+// anything the batch put on the sheet. true = written, false = could not be,
+// null = nothing to write (no template, or the layout has not changed).
+async function mcSaveSheetLayout(){
+  const id=String(selectedTemplate||'');
+  if(!sb||!id||!(state.placeholders||[]).length) return null;
+  // the builder must be holding this template's own layout: where the sheet was
+  // laid on another one, writing here would put that one's boxes on this template
+  if(mcLaidTemplate&&String(mcLaidTemplate)!==id) return null;
+  const row=(typeof templateById==='function')?templateById(id):null;
+  if(!row) return null;
+  try{
+    const {data,error}=await sb.from('templates').select('data').eq('id',id).single();
+    if(error||!data) throw error||new Error('the template is not there any more');
+    const old=data.data||{};
+    const snap=mcSnapshot();
+    const geo={paper:snap.paper,layout:snap.layout,placeholders:snap.placeholders,
+      showCut:snap.showCut,cutColor:snap.cutColor,foldOverlay:snap.foldOverlay,
+      refMark:snap.refMark,foldLine:snap.foldLine,shift:snap.shift,rotate:snap.rotate,bleed:snap.bleed};
+    const same=Object.keys(geo).every(k=>JSON.stringify(geo[k])===JSON.stringify(old[k]));
+    if(same) return null;
+    const res=await sb.from('templates').update({data:{...old,...geo},updated_at:new Date().toISOString()})
+      .eq('id',id).select('id');
+    if(res.error) throw res.error;
+    // an update the table's rules refused matches no row and says nothing
+    if(!res.data||!res.data.length)
+      throw new Error(`“${row.name}” belongs to somebody else — save the layout as your own template on the builder`);
+    await refreshTemplateList();
+    return true;
+  }catch(err){
+    mcWarn('The card layout could not be saved onto the template: '+((err&&err.message)||'unknown error'));
+    return false;
+  }
 }
 // The designs that were on the batch's shared sheet when it was laid. Only a
 // design that was there and is gone now has been taken off; one that never made
@@ -50010,7 +50053,8 @@ const mcNoteSheetPaths=()=>{
   mcSheetLaidPaths=new Set((state.designs||[]).filter(d=>!d.mcKey&&d.source&&d.source.path).map(d=>d.source.path));
 };
 const mcSheetSaidOf=r=>`✓ Saved — ${r.skus} SKU${r.skus===1?'':'s'}, ${r.wrote} design record${r.wrote===1?'':'s'}`
-  +(r.qty?`, ${r.qty} quantit${r.qty===1?'y':'ies'}`:'')+(r.off?`, ${r.off} taken off the sheet`:'');
+  +(r.qty?`, ${r.qty} quantit${r.qty===1?'y':'ies'}`:'')+(r.off?`, ${r.off} taken off the sheet`:'')
+  +(r.layout?', card layout saved to the template':'');
 function mcBuilderSaveSync(){
   const chip=document.getElementById('mcSaveChip'); if(!chip) return;
   const mode=mcSaveChipMode();
@@ -50102,7 +50146,7 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     if(mode==='sheet'){
       const r=await mcSaveSharedSheet();
       if(r.failed){
-        mcSaveChipSaid(`${r.failed} design record${r.failed===1?'':'s'} did not save — see the message`,false);
+        mcSaveChipSaid(`${r.failed} part${r.failed===1?'':'s'} did not save — see the message`,false);
         return;
       }
       mcSaveChipSaid(mcSheetSaidOf(r),true);
