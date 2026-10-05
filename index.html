@@ -9572,7 +9572,9 @@ function gridMetrics(){
   const totalH=L.rows*L.cardH+(L.rows-1)*L.cut;
   const originX=L.mode==='center'?(p.w-totalW)/2:L.side;
   const originY=L.mode==='center'?(p.h-totalH)/2:L.lead;
-  return {L,p,totalW,totalH,originX,originY,fits:totalW<=p.w+0.01&&totalH<=p.h+0.01};
+  // the grid has to fit from where it starts, not merely be narrower than the sheet
+  return {L,p,totalW,totalH,originX,originY,
+    fits:originX>=-0.01&&originY>=-0.01&&originX+totalW<=p.w+0.01&&originY+totalH<=p.h+0.01};
 }
 function generateGrid(){
   const g=gridMetrics(),L=g.L;
@@ -9992,8 +9994,12 @@ function renderSide(side,canvas,maxDim,opts){
     // Nothing of a picture reaches further than ART_REACH_MM past its own box,
     // however big it is made — on screen, in the PDF and at the printer — so an
     // enlarged picture never lies over the card beside it.
-    let clip={x:ph.xMm-ART_REACH_MM, y:ph.yMm-ART_REACH_MM,
-      w:ph.wMm+ART_REACH_MM*2, h:ph.hMm+ART_REACH_MM*2};
+    // The bleed chips offer 3, 3.5 and 5 mm and any figure can be typed, so the
+    // reach is never less than the bleed asked for — it was fixed at 2.5 mm and
+    // a 5 mm bleed printed 2.5.
+    const reachMm=Math.max(ART_REACH_MM,Number(bleedMm)||0);
+    let clip={x:ph.xMm-reachMm, y:ph.yMm-reachMm,
+      w:ph.wMm+reachMm*2, h:ph.hMm+reachMm*2};
     // a page's own bleed reaches only as far as the sheet's bleed — none at
     // all with bleed off, so the card is cut at its trim
     if(tf){
@@ -10002,8 +10008,8 @@ function renderSide(side,canvas,maxDim,opts){
       const x1=Math.min(clip.x+clip.w,fx+wMm+bleedMm*2), y1=Math.min(clip.y+clip.h,fy+hMm+bleedMm*2);
       clip={x:x0, y:y0, w:Math.max(0,x1-x0), h:Math.max(0,y1-y0)};
     }
-    const reach=(x,y)=>({x:Math.min(ART_REACH_MM,tf?Math.min(x,(wMm-ph.wMm)/2+bleedMm):x),
-      y:Math.min(ART_REACH_MM,tf?Math.min(y,(hMm-ph.hMm)/2+bleedMm):y)});
+    const reach=(x,y)=>({x:Math.min(reachMm,tf?Math.min(x,(wMm-ph.wMm)/2+bleedMm):x),
+      y:Math.min(reachMm,tf?Math.min(y,(hMm-ph.hMm)/2+bleedMm):y)});
     let ringOnly=false;
     if(opts.vec){
       const vclip={x:clip.x+artShift.xMm, y:clip.y+artShift.yMm, w:clip.w, h:clip.h};
@@ -13231,6 +13237,9 @@ async function designBleedLift(local,store){
   let lifted=mine;
   let {error}=await sb.from('design_bleeds').upsert(mine.map(k=>rowOf(k,true)),{onConflict:'path'});
   if(error){
+    // only a missing rot column earns the fallback; a dropped connection is left
+    // to try again whole, or the turns were skipped and the lift marked done
+    if(!/\brot\b|column|schema cache/i.test(String(error.message||''))) return store;
     // no rot column yet: the bleeds go up without it, and a turn with no bleed
     // has nowhere to go until supabase-migration-DESIGN-ROTATE.sql is run
     lifted=mine.filter(k=>local[k].on&&isFinite(Number(local[k].mm)));
@@ -27205,11 +27214,14 @@ async function renderSidePdfAll(side,pages,onPage,from){
   // never a sheet printed with the stand-in edge because a fill was still going.
   const filled=m=>m==='content'||m==='ai';
   if(filled(bleedModeNow())||(state.designs||[]).some(d=>d.look&&d.look.bleed&&filled(d.look.bleed.mode))){
+    // held until every fill has landed, as the gift tag export holds it: cleared
+    // first, each finished fill redrew the screen with no export running and
+    // dropped this export's other fills, which then printed the stand-in edge
     const asked=bleedAsked=new Set();
     try{
       for(let i=0;i<pages;i++) renderSide(side,document.createElement('canvas'),160,{forExport:true,page:(from||0)+i});
+      await bleedJobsSettled(asked);
     }finally{ bleedAsked=null; }
-    await bleedJobsSettled(asked);
   }
   const sources=await printVectorSources(side);
   return await gtBuildPdf(pages,async(i,forms)=>{
@@ -27617,8 +27629,13 @@ function loadDesignRenderList(){
 function computeGridForQty(qty){
   qty=Math.max(1,Math.round(qty));
   const L=layoutMm(),p=paperMm();
-  const maxCols=Math.max(1,Math.floor((p.w+L.slit)/(L.cardW+L.slit)));
-  const maxRows=Math.max(1,Math.floor((p.h+L.cut)/(L.cardH+L.cut)));
+  // In Manual mode the grid starts at the side and lead trims, so that much of
+  // the sheet is not there to be filled; and the same 0.01 mm tolerance the
+  // fit check allows, or 228.6 / 76.2 came out a column short from float error.
+  const availW=p.w-(L.mode==='center'?0:(Number(L.side)||0));
+  const availH=p.h-(L.mode==='center'?0:(Number(L.lead)||0));
+  const maxCols=Math.max(1,Math.floor((availW+L.slit+0.01)/(L.cardW+L.slit)));
+  const maxRows=Math.max(1,Math.floor((availH+L.cut+0.01)/(L.cardH+L.cut)));
   const maxPerSheet=maxCols*maxRows;
   if(maxPerSheet<=qty) return {cols:maxCols,rows:maxRows,short:maxPerSheet<qty,maxPerSheet};
   let best=null;
@@ -38143,12 +38160,13 @@ async function mcAskStock(why,want,cancelLabel){
         +'type one below.</span>';
     if(!rows.length&&!first) first=box;
   });
+  // the sheet is one element: a second ask replaced the first's handlers and its
+  // promise never settled, leaving whatever was waiting on it hung. The first is
+  // answered "cancelled" — before this one opens the sheet, because answering it
+  // closes the sheet.
+  if(mcStockOpenDone){ const prev=mcStockOpenDone; mcStockOpenDone=null; prev(null); }
   sheet.classList.add('open');
   if(first) setTimeout(()=>first.focus(),0);
-  // the sheet is one element: a second ask replaced the first's handlers and its
-  // promise never settled, leaving whatever was waiting on it hung. It is
-  // answered "cancelled" instead.
-  if(mcStockOpenDone){ const prev=mcStockOpenDone; mcStockOpenDone=null; prev(null); }
   return new Promise(res=>{
     const done=v=>{
       if(mcStockOpenDone===done) mcStockOpenDone=null;
@@ -38747,7 +38765,7 @@ async function mcDeleteBatch(id){
   mcBatches=mcBatches.filter(x=>x.id!==id);
   delete mcCounts[id];
   mcRenderBatches();
-  showMsg(out,`Deleted ${b.title}.`,true);
+  showMsg(out,`Deleted ${escapeHtml(String(b.title))}.`,true);
 }
 document.getElementById('mcRoll').addEventListener('click',e=>{
   const b=e.target.closest('[data-mc-open]'); if(!b) return;
@@ -38978,7 +38996,11 @@ async function mcLoadItems(){
   // that is no longer up, so they are dropped rather than drawn
   if(!mcBatch||mcBatch.id!==forId) return;
   if(error){
-    el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not read this batch.</p>';
+    // a refresh that fails on a batch already on screen leaves the lines alone:
+    // blanking the list while Complete and Download All stayed live for lines
+    // nobody could see was worse than the stale list
+    if(mcItems.length&&mcItems.every(x=>x.batch_id===forId)) mcWarn('Could not refresh this batch — showing what was last read.');
+    else el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not read this batch.</p>';
     return;
   }
   mcItems=data||[];
@@ -39386,7 +39408,7 @@ document.getElementById('mcShareBody').addEventListener('click',async e=>{
   await mcShareLoad();
   mcShareSync(); mcRenderShare(); mcSyncBatchButtons();
   const mine=mcShared.filter(i=>String(i.batch_id)===id).length;
-  showMsg(msg,off?`${mcShareName(id)} is off these sheets.`
+  showMsg(msg,off?`${escapeHtml(String(mcShareName(id)))} is off these sheets.`
     :`${mcShareName(id)} shares these sheets — ${mine} line${mine===1?'':'s'} of theirs `
      +'on a sheet.',true);
 });
@@ -39480,16 +39502,23 @@ async function mcPjPut(id,btn){
     const {data:claimed,error:ce}=await sb.from('print_jobs')
       .update({status:'done',updated_at:now}).eq('id',row.id).eq('status','open').select('id');
     if(ce) throw ce;
-    if(!claimed||!claimed.length) throw new Error('that saved sheet has already been put on a batch');
+    let claimedOk=!!(claimed&&claimed.length);
+    if(!claimedOk){
+      // no row matched: either somebody already put it on a batch, or the table
+      // will not let this account change a sheet it did not save — which used to
+      // carry on with a warning, and still does
+      const {data:cur}=await sb.from('print_jobs').select('status').eq('id',row.id).single();
+      if(!cur||cur.status!=='open') throw new Error('that saved sheet has already been put on a batch');
+    }
     const {data,error}=await sb.from('magic_items').insert(rows).select();
     if(error){
       // not written, so it is not "done": handed back to be tried again
-      try{ await sb.from('print_jobs').update({status:'open',updated_at:now}).eq('id',row.id); }catch(e){}
+      if(claimedOk){ try{ await sb.from('print_jobs').update({status:'open',updated_at:now}).eq('id',row.id); }catch(e){} }
       throw error;
     }
     // the live channel can deliver the new rows before this insert returns
     (data||[]).forEach(d=>{ if(!mcItems.some(x=>x.id===d.id)) mcItems.push(d); });
-    const je=null;
+    const je=claimedOk?null:true;
     mcRenderItems(); mcSyncBatchButtons();
     if(typeof mcRenderSummary==='function') mcRenderSummary();
     await mcPjRender();
@@ -39628,7 +39657,7 @@ async function mcCopyLine(id,btn){
   // has opened it would otherwise be told there is no file of that name
   await mcSrcReady('mcSummaryMsg');
   let src=mcCopySource(mcRowKey(it));
-  if(!src){ await mcSrcRescan(); src=mcCopySource(mcRowKey(it)); }
+  if(!src){ await mcSrcRescanIfStale(); src=mcCopySource(mcRowKey(it)); }
   if(!src){
     mcLogCopy(it.sku,'fail','no file mapped for it');
     showMsg(out,`No file for ${escapeHtml(String(it.sku))} — map one on the SKU summary.`,false); return; }
@@ -39685,7 +39714,7 @@ async function mcOkOrder(orderId){
   }
   lines.forEach(it=>{ it.status='done'; it.acted_by=mcMyId; it.acted_at=now; });
   mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
-  showMsg(out,`${orderId} — ${lines.length} line${lines.length===1?'':'s'} marked done.`,true);
+  showMsg(out,`${escapeHtml(String(orderId))} — ${lines.length} line${lines.length===1?'':'s'} marked done.`,true);
 }
 // The same tick, taken by SKU instead of by order. The batch is grouped by
 // order and the summary by SKU, and one card is worked across both: the shelf
@@ -39703,7 +39732,7 @@ async function mcOkSku(sku){
   if(!sb){ showMsg(out,'No connection — a batch is shared, so a tick is saved online.',false);
     return; }
   const lines=mcItems.filter(i=>mcRowKey(i)===String(sku)&&!i.status);
-  if(!lines.length){ showMsg(out,`Every line of ${sku} is already done.`,true); return; }
+  if(!lines.length){ showMsg(out,`Every line of ${escapeHtml(String(sku))} is already done.`,true); return; }
   const now=new Date().toISOString();
   const ids=lines.map(i=>i.id);
   for(let i=0;i<ids.length;i+=MC_CHUNK){
@@ -39721,7 +39750,7 @@ async function mcOkSku(sku){
   // these lines belong to are what somebody looks at next
   mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
   const orders=new Set(lines.map(i=>String(i.order_id||'—'))).size;
-  showMsg(out,`✓ ${sku} — ${lines.length} line${lines.length===1?'':'s'} marked done`
+  showMsg(out,`✓ ${escapeHtml(String(sku))} — ${lines.length} line${lines.length===1?'':'s'} marked done`
     +(orders>1?` across ${orders} orders`:'')+'.',true);
 }
 // More than the order asks for, said on the line rather than only inside the
@@ -39914,7 +39943,7 @@ async function mcClearOrder(orderId){
   if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
   // an order with no number is grouped, and so named, as '—'
   const on=mcItems.filter(i=>String(i.order_id||'—')===String(orderId)&&mcLaid(i));
-  if(!on.length){ showMsg(out,`Nothing on ${orderId} is on a sheet.`,false); return; }
+  if(!on.length){ showMsg(out,`Nothing on ${escapeHtml(String(orderId))} is on a sheet.`,false); return; }
   if(!confirm(`Take order ${orderId} off the sheets?\n\n`
     +`${on.length} line${on.length===1?'':'s'} — the page each was put on and the layout `
     +'it was given.\n\nThe order stays on the batch, and any artwork uploaded to a line '
@@ -39924,9 +39953,12 @@ async function mcClearOrder(orderId){
   for(const it of on){
     const keep={tile:it.tile,sheet_item:it.sheet_item,design:it.design,
       status:it.status,acted_by:it.acted_by,acted_at:it.acted_at};
-    it.tile=null; it.sheet_item=null; it.design=null;
+    // the words typed into the line and the extras asked for are the operator's
+    // work — what says "this is on a sheet" goes, as Remove does it
+    const kept=mcOffSheetItem(it,it.sheet_item);
+    it.tile=null; it.sheet_item=kept; it.design=null;
     // a line that did not save is put back as the batch still has it
-    if(!await mcSave(it,{tile:null,sheet_item:null,design:null,...mcDonePatch(it,false)})){
+    if(!await mcSave(it,{tile:null,sheet_item:kept,design:null,...mcDonePatch(it,false)})){
       Object.assign(it,keep); unsaved++;
     }
   }
@@ -39940,9 +39972,9 @@ async function mcClearOrder(orderId){
   // a line open in the window has just had its layout taken away; it should
   // not go on showing it
   if(mcWinItem&&on.some(i=>i.id===mcWinItem)) mcWinRender();
-  if(unsaved) showMsg(out,`${unsaved} of ${on.length} lines of ${orderId} did not save — `
+  if(unsaved) showMsg(out,`${unsaved} of ${on.length} lines of ${escapeHtml(String(orderId))} did not save — `
     +'they are off the sheet here but not on the batch. Try again.',false);
-  else showMsg(out,`Took ${on.length} line${on.length===1?'':'s'} of ${orderId} off the sheets.`,true);
+  else showMsg(out,`Took ${on.length} line${on.length===1?'':'s'} of ${escapeHtml(String(orderId))} off the sheets.`,true);
 }
 // ---------- hold an order's header to delete it ----------
 // Clear takes an order off the sheets and leaves it on the batch. Delete takes
@@ -40038,7 +40070,7 @@ async function mcDeleteOrder(orderId){
   // a line open in the window has just stopped existing
   if(mcWinItem&&gone.has(mcWinItem)) mcWinClose();
   mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
-  showMsg(out,`Deleted ${orderId} — ${lines.length} line${lines.length===1?'':'s'} off the batch.`,true);
+  showMsg(out,`Deleted ${escapeHtml(String(orderId))} — ${lines.length} line${lines.length===1?'':'s'} off the batch.`,true);
 }
 // quiet: the question has already been asked somewhere else — Create asks it
 // in its own words before opening a line that is ticked — so it is not asked
@@ -40079,18 +40111,27 @@ async function mcToggleDone(id,quiet){
       &&(si.copied||it.tile==='sheetPrint'||it.tile==='giftTag')){
       // (a line merged by its own Merge box stays merged: that box is how it
       // comes off the sheet, and the tick is only whether it has been printed)
-      it.tile=null; it.sheet_item=null;
-      patch.tile=null; patch.sheet_item=null;
+      // what was on the sheet is taken off it below; the words and extras stay
+      it.tile=null; it.sheet_item=mcOffSheetItem(it,si);
+      patch.tile=null; patch.sheet_item=it.sheet_item;
     }
   }
+  const before=(!now&&(wasTile==='sheetPrint'||wasTile==='giftTag'))?{...it,tile:wasTile,sheet_item:wasItem}:null;
   mcRepaintRow(it);                                   // optimistic
   const {error}=await sb.from('magic_items').update(patch).eq('id',id);
   if(error){
     it.status=was; it.tile=wasTile; it.sheet_item=wasItem;
     it.acted_by=wasBy; it.acted_at=wasAt;             // who ticked it, too
     mcRepaintRow(it);                                 // and back again
-    showMsg(document.getElementById('mcBatchMsg'),'Could not save that: '+error.message,false);
+    showMsg(document.getElementById('mcBatchMsg'),'Could not save that: '+escapeHtml(error.message),false);
     return;
+  }
+  // the card goes off the builder's sheet as well, or the line said "not on a
+  // sheet" while the sheet went on printing it and the summary offered Remove
+  if(before&&!it.tile&&mcLaid(before)){
+    const off=mcOffSheets([before],it.order_id);
+    if(off.print){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
+    if(off.gift&&typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
   }
   mcRenderSummary();
 }
@@ -41432,7 +41473,7 @@ async function fieryRunSend(ticked){
       const p=fieryRunPresetOf(l.sku,R);
       return {user_id:R.session.user.id,
         file_name:l.file||l.it.sheet_item.copied.name,folder:dir.name,
-        preset_id:p.id,preset_name:p.name,copies:l.qty,pages:'',action:R.action,
+        preset_id:p.id,preset_name:p.name,copies:Math.min(9999,Math.max(1,Math.round(Number(l.qty)||1))),pages:'',action:R.action,
         run_id:run,seq:i,item_id:l.it.id};
     });
     try{ localStorage.setItem('mcFieryAction',R.action); }catch(e){}
@@ -41796,7 +41837,9 @@ function mcSummaryRows(){
 // a sheet is ticked off by the same act: read the other way round, everything
 // added would leave Added empty and pile up under Done.
 function mcSumState(r){
-  if(mcWhereIsSku(r.sku)||r.copied>0) return 'added';
+  // copied counts only when every line of the SKU is: one line of three copied
+  // read as the SKU being done, "0 left", and was skipped by the next step
+  if(mcWhereIsSku(r.sku)||(r.copied>0&&r.copied>=r.lines)) return 'added';
   if(r.allDone) return 'done';
   return 'pending';
 }
@@ -42178,7 +42221,7 @@ async function mcBulkDest(skus,dest,into){
   if(!ok) return;
   showMsg(out,`✓ ${want.length} SKU${want.length===1?'':'s'} → `
     +`${dest?mcDestLabel(dest):'left to the rules'}`
-    +`${dest==='copy'&&patch.copy_to?` · into ${patch.copy_to}`:''}.`,true);
+    +`${dest==='copy'&&patch.copy_to?` · into ${escapeHtml(String(patch.copy_to))}`:''}.`,true);
 }
 // The file a SKU copies, found in the designs folder by name. Everything with
 // that exact name is collected rather than the first one taken: two files of
@@ -42255,7 +42298,7 @@ async function mcBulkMap(rows,into,folder){
   if(!entries.length){
     const eg=(folder?(mcSrcFiles||[]).filter(f=>String(f.folder||'')===String(folder))
       :(mcSrcFiles||[])).slice(0,3).map(f=>f.name);
-    showMsg(out,`Nothing to map — no file ${folder?`in ${folder} `:'in the copy-from folder '}`
+    showMsg(out,`Nothing to map — no file ${folder?`in ${escapeHtml(String(folder))} `:'in the copy-from folder '}`
       +`is named after ${rows.length===1?'that SKU':'any of these'}. `
       +`${mcSrcFiles.length} file${mcSrcFiles.length===1?'':'s'} to choose from`
       +(eg.length?`, e.g. ${eg.join(', ')}`:'')
@@ -42279,12 +42322,18 @@ async function mcBulkMap(rows,into,folder){
   const ok=await mcBulkWrite(entries);
   if(!ok) return;
   showMsg(out,[`✓ ${entries.length} mapped to Copy file`,
-    folder?`from ${folder}`:'',to?`into ${to}`:'',
-    missing.length?`${missing.length} with no file of that name: ${list(missing)}`:'',
-    twice.length?`${twice.length} with more than one file of that name: ${list(twice)}`:'']
+    folder?`from ${escapeHtml(String(folder))}`:'',to?`into ${escapeHtml(String(to))}`:'',
+    missing.length?`${missing.length} with no file of that name: ${escapeHtml(list(missing))}`:'',
+    twice.length?`${twice.length} with more than one file of that name: ${escapeHtml(list(twice))}`:'']
     .filter(Boolean).join(' · '),!missing.length&&!twice.length);
 }
 function mcRenderSummary(){
+  // a ticked SKU that has gone from the batch (another PC deleted its order)
+  // would go on counting in the bar
+  if(mcSel.size){
+    const live=new Set(mcItems.map(i=>mcRowKey(i)));
+    [...mcSel].forEach(k=>{ if(!live.has(String(k))) mcSel.delete(k); });
+  }
   const body=document.getElementById('mcSummaryBody');
   const q=(document.getElementById('mcSummarySearch').value||'').trim().toLowerCase();
   const all=mcSummaryRows();
@@ -42895,6 +42944,13 @@ function mcRemoveSku(sku){
   // and the sheet stops expecting back what is no longer on it
   if(mcGtHome&&Array.isArray(mcGtHome.ids))
     mcGtHome.ids=mcGtHome.ids.filter(id=>!ids.has('mc-'+String(id)));
+  // and the summary's own rows for it that were set aside while the sheet was on
+  // loan: put back on return they brought the removed tag back onto the page
+  if(mcGtHome&&Array.isArray(mcGtHome.dropped)){
+    const was=mcGtHome.dropped.length;
+    mcGtHome.dropped=mcGtHome.dropped.filter(l=>!mine(l));
+    if(mcGtHome.dropped.length!==was) hit=hit||'gift';
+  }
   // failing all that, the row that carries the design of this name — a tag put
   // on the sheet by hand knows its design and nothing about any SKU
   if(!hit){
@@ -44380,6 +44436,11 @@ function mcOffSheetItem(it,was){
   const w=was||{}, out={};
   if(Object.keys(w.vals||{}).length) out.vals=w.vals;
   if((w.extra||[]).length) out.extra=w.extra;
+  // the run a gift tag is on, and the copy of a one-off design it carries: a
+  // line taken off a sheet and put back came back on the Matte run, and its
+  // one-off was lost and its stored file left behind
+  if(w.finish) out.finish=w.finish;
+  if(w.oneOff) out.oneOff=w.oneOff;
   const more=mcExtra({qty:it&&it.qty,sheet_item:w});
   if(more>0) out.extra_qty=more;
   return Object.keys(out).length?out:null;
@@ -44590,7 +44651,9 @@ async function mcMarkLinesOnSheet(laid,page){
       // answer that was given when they went on it.
       const si={...was,designId,qty:Math.max(1,mcQty(it)||1),
         vals:was.vals||{},page:String(page||gtMode||''),
-        shape:String(shape||was.shape||''),
+        // the old design's shape goes with the old design: swapping to another left
+        // the line cut to the first one's die
+        shape:String(shape||(was.designId&&was.designId!==designId?'':was.shape)||''),
         finish:was.finish||(typeof gtFinish!=='undefined'?gtFinish:'Matte')};
       if(it.tile==='giftTag'&&was.designId===designId&&was.qty===si.qty
         &&String(was.page||'')===si.page&&String(was.shape||'')===si.shape){
@@ -44762,7 +44825,7 @@ async function mcSrcDirGet(){
   }
   return mcSrcDir;
 }
-async function mcSrcDirSet(dir){ mcSrcDir=dir; mcSrcRead=true; await gtIdbPut(MC_SRC_KEY,dir); }
+async function mcSrcDirSet(dir){ mcSrcDir=dir; mcSrcRead=true; mcSrcGen++; mcSrcScannedAt=0; await gtIdbPut(MC_SRC_KEY,dir); }
 // every file, not only the kinds a sheet can be drawn from: a design that is
 // copied rather than printed is whatever it is — a PDF, a cutting file, a font
 // Reading a folder over the network is nearly all waiting. Walking the tree a
@@ -44808,19 +44871,31 @@ async function mcSrcScan(dir,prefix,onCount,skip){
 // until the new one is complete — it used to be emptied first, so anything that
 // asked meanwhile found "no design in the folder", and a scan that failed half
 // way left nothing at all.
-let mcSrcScanP=null;
+let mcSrcScanP=null, mcSrcScanGen=0, mcSrcGen=0, mcSrcScannedAt=0;
 async function mcSrcRescan(onCount){
+  // a scan of the same folder is joined; one of the previous folder is waited
+  // out and a fresh one made, or the new folder came back holding the old one's files
+  while(mcSrcScanP&&mcSrcScanGen!==mcSrcGen) await mcSrcScanP.catch(()=>{});
   if(mcSrcScanP) return mcSrcScanP;
+  mcSrcScanGen=mcSrcGen;
   mcSrcScanP=(async()=>{
     const dir=await mcSrcDirGet();
     if(!dir||!await loadDesignDirOk(dir,false)){ mcSrcFiles=[]; return mcSrcFiles; }
     const out=await mcSrcScan(dir,'',onCount,await mcCopyDirGet().catch(()=>null));
     out.sort((a,b)=>a.path.localeCompare(b.path,undefined,{numeric:true,sensitivity:'base'}));
     mcSrcFiles=out;
+    mcSrcScannedAt=Date.now();
     return mcSrcFiles;
   })();
   try{ return await mcSrcScanP; }
   finally{ mcSrcScanP=null; }
+}
+// Read again on a miss — but not when the list was read a moment ago, which is
+// the case right after mcSrcReady did its walk: a SKU with no file made the user
+// wait through two multi-minute scans of the NAS before being told so.
+async function mcSrcRescanIfStale(){
+  if(Date.now()-mcSrcScannedAt<30000) return mcSrcFiles;
+  return mcSrcRescan();
 }
 // read it if nothing has yet — every copy and every mapping goes through here
 async function mcSrcReady(where){
@@ -45125,19 +45200,20 @@ async function mcCopySku(sku,btn){
   // the copy-to folder is asked for first, while the tap is still ours: after a
   // long first read of the NAS the permission prompt had expired and failed,
   // and the second press only worked because the read was cached by then
-  const dir=await mcCopyDirReady(true);
-  if(!dir){ showMsg(out,'No folder to copy into — pick one and press Copy again.',false); return; }
-  await mcSrcReady();
   // the print preset comes first: a file copied with none is a file nobody
-  // can send to the Fiery without going back to ask
+  // can send to the Fiery without going back to ask — and it is checked before
+  // the folder is asked for, so nobody picks a folder and is then refused
   if(mcNeedsPreset({sku})){
     showMsg(out,`${escapeHtml(String(sku))} has no paper type yet — tick it, pick one in `
       +'📄 Paper type and press Change paper type, then Copy.',false);
     return; }
+  const dir=await mcCopyDirReady(true);
+  if(!dir){ showMsg(out,'No folder to copy into — pick one and press Copy again.',false); return; }
+  await mcSrcReady();
   let src=mcCopySource(sku);
   // a file put in the folder since it was first read is not in the list: read
   // it again before saying there is none
-  if(!src){ await mcSrcRescan(); src=mcCopySource(sku); }
+  if(!src){ await mcSrcRescanIfStale(); src=mcCopySource(sku); }
   if(!src){
     mcTold(out,`No design in the folder for ${escapeHtml(String(sku))} — use Choose… to say which file.`,false,
       `No design for ${sku}`); return; }
@@ -45154,14 +45230,14 @@ async function mcCopySku(sku,btn){
     const done=await mcMarkCopiedLines(sku,src,src.to);
     mcRenderSummary();
     mcSay(r.done?'Copied':'Already there');
-    showMsg(out,[`✓ ${r.done?`Copied ${r.done} into ${where}`
+    showMsg(out,[`✓ ${r.done?`Copied ${r.done} into ${escapeHtml(String(where))}`
         :`Already in ${where}`}`,
       r.done&&r.already?`${r.already} already there`:'',
       r.gone.length?`${r.gone.length} no longer in the designs folder`:'',
       done?`${done} line${done===1?'':'s'} ticked off`:''].filter(Boolean).join(' · '),
       !r.gone.length);
   }catch(err){
-    mcTold(out,`Could not copy that: ${(err&&err.message)||'unknown error'}`,false,
+    mcTold(out,`Could not copy that: ${escapeHtml(String((err&&err.message)||'unknown error'))}`,false,
       'Could not copy that');
   }
   }finally{ free(); }
@@ -45266,7 +45342,7 @@ async function mcCopyRows(rows){
   for(const r of rows){
     showMsg(out,`Copying ${++i} of ${rows.length}… ${escapeHtml(String(r.sku||''))}`,true);
     let src=mcCopySource(r.sku);
-    if(!src&&!rescanned){ rescanned=true; await mcSrcRescan(); src=mcCopySource(r.sku); }
+    if(!src&&!rescanned){ rescanned=true; await mcSrcRescanIfStale(); src=mcCopySource(r.sku); }
     if(!src){ missing.push(r.sku); mcLogCopy(r.sku,'fail','no file to copy'); continue; }
     const its=mcItems.filter(x=>mcRowKey(x)===String(r.sku));
     mcCopyingOn(its,true);
@@ -45482,7 +45558,7 @@ document.getElementById('mcSummaryCopyFolderBtn').addEventListener('click',async
     if(!dir) return;
     if(!await gtDirOk(dir,true)){ showMsg(out,'Permission to that folder was not given.',false); return; }
     await mcCopyDirSet(dir); mcSummaryFolderState();
-    showMsg(out,`✓ Copy files into ${dir.name}.`,true);
+    showMsg(out,`✓ Copy files into ${escapeHtml(String(dir.name))}.`,true);
   }catch(e){ /* cancelled */ }
 });
 document.getElementById('mcSummarySearch').addEventListener('input',mcRenderSummary);
@@ -45812,7 +45888,11 @@ document.getElementById('mcReopenBtn').addEventListener('click',async()=>{
   if(error){ showMsg(out,'Could not re-open it: '+error.message,false); return; }
   mcBatch.status='open'; mcBatch.completed_at=null;
   mcSyncBatchButtons();
-  showMsg(out,'✓ Open again — the three day clock is off.',true);
+  // one-time gift tag designs were thrown away when it was completed, and are not
+  // brought back: said, so a reprint does not find blank tags with no explanation
+  const tags=mcItems.some(i=>i.tile==='giftTag');
+  showMsg(out,'✓ Open again — the three day clock is off.'
+    +(tags?' One-time gift tag designs were discarded when it was completed, so any tag that used one needs its design picked again.':''),true);
 });
 
 // ---------- several people, one batch ----------
@@ -45833,22 +45913,47 @@ function mcSameRow(a,b){
     return Object.keys(b).every(k=>JSON.stringify(norm(a[k]))===JSON.stringify(norm(b[k])));
   }catch(e){ return false; }
 }
+// The summary redrawn from an echo: only if it is open, not while somebody is
+// typing in it (the rebuild took the box and the focus away mid-figure), and
+// gathered so a colleague's OK all of fifty lines is one redraw and not fifty.
+let mcSumEchoT=null;
+function mcSumSoon(){
+  clearTimeout(mcSumEchoT);
+  mcSumEchoT=setTimeout(()=>{
+    if(!mcSummaryOpen()) return;
+    const a=document.activeElement, body=document.getElementById('mcSummaryBody');
+    if(a&&body&&body.contains(a)&&/^(input|textarea|select)$/i.test(a.tagName)){ mcSumSoon(); return; }
+    mcRenderSummary();
+  },150);
+}
+// A line somebody else deleted: gone from this screen, and its cards off the
+// sheets here too, as they are on the screen that deleted it.
+function mcOnItemDeleted(id){
+  if(!id) return;
+  const gone=mcItems.find(x=>x.id===id);
+  if(!gone) return;
+  mcItems=mcItems.filter(x=>x.id!==id);
+  if(mcWinItem===id) mcWinClose();
+  if(mcLaid(gone)){
+    try{
+      const off=mcOffSheets([gone],gone.order_id);
+      if(off.print){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
+      if(off.gift&&typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
+    }catch(e){}
+  }
+  mcRenderItems(); mcSyncBatchButtons(); mcSumSoon();
+}
+let mcChannelSeen=false;
 function mcWatch(){
   if(!sb||!mcBatch||mcChannel) return;
+  mcChannelSeen=false;
   try{
     mcChannel=sb.channel('magic:'+mcBatch.id)
       .on('postgres_changes',
           {event:'*',schema:'public',table:'magic_items',filter:'batch_id=eq.'+mcBatch.id},
           p=>{
             // somebody else deleted an order; the rows under it are gone
-            if(p.eventType==='DELETE'){
-              const id=p.old&&p.old.id;
-              if(!id||!mcItems.some(x=>x.id===id)) return;
-              mcItems=mcItems.filter(x=>x.id!==id);
-              if(mcWinItem===id) mcWinClose();
-              mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
-              return;
-            }
+            if(p.eventType==='DELETE'){ mcOnItemDeleted(p.old&&p.old.id); return; }
             const row=p.new;
             if(!row||!row.id) return;
             const i=mcItems.findIndex(x=>x.id===row.id);
@@ -45869,7 +45974,7 @@ function mcWatch(){
               const at=mcItems.findIndex(x=>
                 Number(x.sort_order||0)>Number(row.sort_order||0));
               if(at<0) mcItems.push(row); else mcItems.splice(at,0,row);
-              mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
+              mcRenderItems(); mcSyncBatchButtons(); mcSumSoon();
               return;
             }
             // into the object already held, not in place of it: the open panel
@@ -45910,8 +46015,12 @@ function mcWatch(){
             // the summary is this same list added up by SKU, so a change to a
             // line is a change to it — repainting only the row left the totals
             // and the "on the sheet" marks a step behind whatever just happened
-            mcRenderSummary();
+            mcSumSoon();
           })
+      // A filtered subscription does not receive DELETE events, so deletes are
+      // listened for on their own, unfiltered, and kept only if the line is here.
+      .on('postgres_changes',{event:'DELETE',schema:'public',table:'magic_items'},
+          p=>mcOnItemDeleted(p.old&&p.old.id))
       // The shop's routing is shared and is written while both machines are
       // looking at the same batch: a SKU mapped in the office has to reach the
       // packing room without a reload, or the row there goes on asking to be
@@ -45922,7 +46031,8 @@ function mcWatch(){
             clearTimeout(mcRoutesEcho);
             mcRoutesEcho=setTimeout(async()=>{
               await mcRoutesLoad(true).catch(()=>{});
-              mcRenderSummary();
+              if(mcOnBatch()) mcRenderItems();   // the 🖨 Print and Copy state on each order
+              mcSumSoon();
               if(document.getElementById('mcRouteSheet').classList.contains('open'))
                 mcRenderRoutes();
             },400);
@@ -45945,7 +46055,10 @@ function mcWatch(){
         // any drop (sleep, network). Changes that came in meanwhile were never
         // delivered, so the batch is read once more whenever it connects — not
         // while a line is open, whose window holds the objects being read.
-        if(status==='SUBSCRIBED'&&mcBatch&&!mcWinItem&&!mcBusy) mcLoadItems().catch(()=>{});
+        if(status!=='SUBSCRIBED') return;
+        // the first connection follows a read that has just been made
+        if(!mcChannelSeen){ mcChannelSeen=true; return; }
+        if(mcBatch&&!mcWinItem&&!mcBusy) mcLoadItems().catch(()=>{});
       });
   }catch(e){ mcChannel=null; }
 }
@@ -46232,8 +46345,16 @@ async function mcPrintOpenFull(it){
 // a print sheet being laid for one line: another opened meanwhile would have
 // its own layout laid over by that sheet as it lands
 let mcPrintOpening=false;
+let mcWinOpeningId='';
 async function mcWinOpen(id){
   if(mcPrintOpening) return;
+  // two taps on Create ran the tile, finish and stock questions twice
+  if(mcWinOpeningId===id) return;
+  mcWinOpeningId=id;
+  try{ return await mcWinOpenRun(id); }
+  finally{ if(mcWinOpeningId===id) mcWinOpeningId=''; }
+}
+async function mcWinOpenRun(id){
   // a line still being closed has not handed the builder back yet; opening
   // another now captured a half-restored builder as the operator's own work
   if(mcWinClosing) await mcWinClosing.catch(()=>{});
@@ -46788,14 +46909,20 @@ async function mcSave(it,patch){
     Object.keys(patch).forEach(k=>{ if(!mcMissingCols.has(k)) body[k]=patch[k]; });
   }
   if(!Object.keys(body).length) return true;
-  let {error}=await sb.from('magic_items').update(body).eq('id',it.id);
+  // An update the table refuses (the batch was completed or deleted by somebody
+  // else) matches no row and says nothing, so every caller took it for saved and
+  // the work was lost on reload. The row is asked back, and none is a failure.
+  const noRow={message:'that line is no longer on an open batch — it was completed or deleted'};
+  let {data:upd,error}=await sb.from('magic_items').update(body).eq('id',it.id).select('id');
+  if(!error&&(!upd||!upd.length)) error=noRow;
   const gone=error?mcMissingCol(error,body):'';
   if(gone){
     mcMissingCols.add(gone);
     const rest={};
     Object.keys(body).forEach(k=>{ if(k!==gone) rest[k]=body[k]; });
     if(!Object.keys(rest).length) return true;
-    ({error}=await sb.from('magic_items').update(rest).eq('id',it.id));
+    ({data:upd,error}=await sb.from('magic_items').update(rest).eq('id',it.id).select('id'));
+    if(!error&&(!upd||!upd.length)) error=noRow;
   }
   const msg=document.getElementById('mcWinMsg');
   mcLastSaveError=error?String(error.message||'the write was refused'):'';
@@ -47102,8 +47229,8 @@ async function mcAutoLayoutFor(it,sel){
     if(typeof mcLinePreview==='function') mcLinePreview();
     return !!tpl;
   }
-  if(msg) showMsg(msg,[tpl?`${sameSheet?'Added to the sheet on':'Layout:'} ${tpl.name}`:'',
-    pick?`Artwork: ${pick.name}`:'']
+  if(msg) showMsg(msg,[tpl?`${sameSheet?'Added to the sheet on':'Layout:'} ${escapeHtml(String(tpl.name))}`:'',
+    pick?`Artwork: ${escapeHtml(String(pick.name))}`:'']
     .filter(Boolean).join(' · ')+(routed?' — from Routing.':' — matched by name.'),true);
   // and said, the same as an Add off the summary: this is a line going onto a
   // sheet, whichever list the press came from
@@ -47533,7 +47660,10 @@ async function mcUseArt(it,pairs){
       throw new Error('the line did not save — '+(mcLastSaveError||'no connection'));
     }
     // and the picture it replaced, which nothing points at any more
-    if(replaced.length){ try{ await sb.storage.from(PHOTO_BUCKET).remove(replaced); }catch(e){} }
+    // — unless a split-pages list still names it (art.front is the first page's path)
+    const inSplit=new Set(['frontSplit','backSplit'].flatMap(k=>Array.isArray(it.art&&it.art[k])?it.art[k].map(x=>x&&x.path):[]));
+    const toRemove=replaced.filter(pth=>!inSplit.has(pth));
+    if(toRemove.length){ try{ await sb.storage.from(PHOTO_BUCKET).remove(toRemove); }catch(e){} }
     got.forEach(({side})=>{
       const i=info(side); if(i) i.textContent=side==='front'?'Front loaded':'Back loaded';
       const th=document.getElementById('mcThumb-'+side);
@@ -47779,9 +47909,14 @@ async function mcGtPutOneOff(it,d){
 async function mcGtKeepOneOffOn(it,si){
   if(!si) return;
   const d=si.designId?mcGtDesign(si.designId):null;
+  // A design the loaded library does not hold is not "no longer a one-off": the
+  // library on hand may be the other page's, or the fetch of the copy may have
+  // failed. Only a design that is there and is an ordinary one clears the saved
+  // copy — wiping it here left a line with no artwork after a page switch.
+  if(!d&&si.designId&&si.oneOff&&si.oneOff.id===si.designId) return;
   if(!d||!d.adhoc){
     // not a one-off any more — what is kept on the line is another design's
-    if(si.oneOff) si.oneOff=null;
+    if(si.oneOff&&(d||!si.designId)) si.oneOff=null;
     return;
   }
   const had=si.oneOff&&si.oneOff.id===d.id&&si.oneOff.path?si.oneOff:null;
@@ -48640,6 +48775,7 @@ let mcLaidTemplate=null;
 let mcLaidShared=false;
 // does the builder hold this very shared sheet
 const mcHoldsSheet=k=>mcLaidShared===true||(!!mcLaidShared&&mcLaidShared===k);
+let mcBorrowing=0;   // >0 while an export/proof/count has the builder on loan
 async function mcBorrowBuilder(fn){
   const keep={meta:mcSnapshot(),orderId:state.orderId,laidShared:mcLaidShared,
     paperType:state.paperType,gsm:state.gsm,
@@ -48666,8 +48802,10 @@ async function mcBorrowBuilder(fn){
   // whatever a window or plan left in mcLaidTemplate is not known to be this
   // builder's geometry: forced to load fresh rather than trusted
   mcLaidTemplate=null;
+  mcBorrowing++;
   try{ return await fn(); }
   finally{
+    mcBorrowing--;
     if(pcMode!==keep.pcWas) pcSetMode(keep.pcWas);
     applyPrintState(keep.meta);
     // the layout starts its own artwork loading, and that landed after the
@@ -48844,7 +48982,7 @@ async function mcDownloadOne(id){
         if(!b) throw new Error('there is no sheet for this line');
         const name=mcOneName(it,b.name);
         await mcPut(dir,name,await t.make({set:[it],meta:b.meta}));
-        showMsg(out,`✓ ${name} ${dir?'saved into '+dir.name:'downloaded'}`,true);
+        showMsg(out,`✓ ${escapeHtml(String(name))} ${dir?'saved into '+escapeHtml(String(dir.name)):'downloaded'}`,true);
         return;
       }
       let n=0;
@@ -48857,7 +48995,7 @@ async function mcDownloadOne(id){
         n++;
         await mcMarkExported(it,oneRun,side);
       }
-      showMsg(out,`✓ ${n} file${n===1?'':'s'} ${dir?'saved into '+dir.name:'downloaded'}`,true);
+      showMsg(out,`✓ ${n} file${n===1?'':'s'} ${dir?'saved into '+escapeHtml(String(dir.name)):'downloaded'}`,true);
     });
     // a sheet that came out without this line's own design is not this line done
     if(mcBundleSkipped.has(it.id)){
@@ -49005,7 +49143,7 @@ async function mcDownloadAll(){
     mcRenderItems();
     showMsg(out,`✓ ${files} order file${files===1?'':'s'}`
       +(bundles?` and ${bundles} sheet${bundles===1?'':'s'}`:'')
-      +` ${dir?'saved into '+dir.name:'downloaded'}`
+      +` ${dir?'saved into '+escapeHtml(String(dir.name)):'downloaded'}`
       +(failed.length?` · ${failed.length} not made: ${failed.slice(0,3).join('; ')}`:''),
       !failed.length);
   }catch(err){
@@ -49292,7 +49430,9 @@ async function mcPrintLay(lines,template){
         +'nor as artwork uploaded to the line'
       : 'nothing landed on the print sheet');
   setArtMode('preset');
-  mcNoteSheetPaths();
+  // not while on loan to an export or proof: the builder is handed back as it
+  // was, and the paths noted here belong to the borrowed sheet, not the operator's
+  if(!mcBorrowing) mcNoteSheetPaths();
   return {pages:sheetCount(),missing};
 }
 // The lines a sheet was asked to carry and could not — a design gone from the
@@ -50081,7 +50221,11 @@ async function mcSaveSheetLayout(){
     const geo={paper:snap.paper,layout:snap.layout,placeholders:snap.placeholders,
       showCut:snap.showCut,cutColor:snap.cutColor,foldOverlay:snap.foldOverlay,
       refMark:snap.refMark,foldLine:snap.foldLine,shift:snap.shift,rotate:snap.rotate,bleed:snap.bleed};
-    const same=Object.keys(geo).every(k=>JSON.stringify(geo[k])===JSON.stringify(old[k]));
+    // jsonb hands objects back with their keys in its own order, so the two are
+    // compared with the keys sorted — plain stringify said "changed" every time
+    const canon=v=>JSON.stringify(v,(k,x)=>x&&typeof x==='object'&&!Array.isArray(x)
+      ?Object.keys(x).sort().reduce((o,kk)=>{ o[kk]=x[kk]; return o; },{}):x);
+    const same=Object.keys(geo).every(k=>canon(geo[k])===canon(old[k]));
     if(same) return null;
     const res=await sb.from('templates').update({data:{...old,...geo},updated_at:new Date().toISOString()})
       .eq('id',id).select('id');
