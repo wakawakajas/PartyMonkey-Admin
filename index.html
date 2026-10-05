@@ -38470,7 +38470,12 @@ async function mcOpenOverview(){
   await mcWhoAmI();
   await mcRefreshBatches();
 }
+// Two refreshes can be in the air together (tab taps, Open then Completed). Each
+// builds its own counts and only the latest one is let write them, or both
+// added into one shared object and a card read "6 of 12" for 3 of 6.
+let mcRefreshSeq=0;
 async function mcRefreshBatches(){
+  const seq=++mcRefreshSeq;
   const el=document.getElementById('mcRoll');
   if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable — check your connection.</p>'; return; }
   const {data,error}=await sb.from('magic_batches').select('*')
@@ -38480,19 +38485,22 @@ async function mcRefreshBatches(){
       +'supabase-migration-MAGIC-CREATE.sql in Supabase.</p>';
     return;
   }
-  mcBatches=data||[];
+  if(seq!==mcRefreshSeq) return;
+  const batches=data||[];
   // how far through each one is, for the line under its name. Only the tab
   // being looked at is counted — the other is a scroll away at most.
-  const ids=mcBatches.filter(b=>b.status===mcTab).map(b=>b.id);
-  mcCounts={};
+  const ids=batches.filter(b=>b.status===mcTab).map(b=>b.id);
+  const counts={};
   if(ids.length){
     const {data:rows}=await sb.from('magic_items')
       .select('batch_id,status').in('batch_id',ids);
     (rows||[]).forEach(r=>{
-      const m=mcCounts[r.batch_id]||(mcCounts[r.batch_id]={total:0,done:0});
+      const m=counts[r.batch_id]||(counts[r.batch_id]={total:0,done:0});
       m.total++; if(r.status) m.done++;
     });
   }
+  if(seq!==mcRefreshSeq) return;
+  mcBatches=batches; mcCounts=counts;
   mcRenderBatches();
   mcPurgeOld();                  // fire and forget; the next open shows the result
 }
@@ -38581,16 +38589,21 @@ async function mcDropOneOffs(batchId){
   if(!sb||!batchId) return;
   let rows=[];
   try{
-    const {data}=await sb.from('magic_items').select('id,sheet_item').eq('batch_id',batchId);
+    const {data,error}=await sb.from('magic_items').select('id,sheet_item').eq('batch_id',batchId);
+    // a read that failed is not a batch with nothing to drop
+    if(error) return;
     rows=(data||[]).filter(r=>r.sheet_item&&r.sheet_item.oneOff);
   }catch(e){ return; }
   if(!rows.length) return;
-  const paths=rows.map(r=>r.sheet_item.oneOff.path).filter(Boolean);
-  if(paths.length){ try{ await sb.storage.from(PHOTO_BUCKET).remove(paths); }catch(e){} }
   for(const r of rows){
     const one=r.sheet_item.oneOff;
     const si={...r.sheet_item,oneOff:null};
-    try{ await sb.from('magic_items').update({sheet_item:si}).eq('id',r.id); }catch(e){}
+    // the row stops pointing at the file first and the file goes second: the
+    // other way round, a refused update left a line naming a deleted picture
+    let upd=null;
+    try{ upd=await sb.from('magic_items').update({sheet_item:si}).eq('id',r.id); }catch(e){ continue; }
+    if(upd&&upd.error) continue;
+    if(one&&one.path){ try{ await sb.storage.from(PHOTO_BUCKET).remove([one.path]); }catch(e){} }
     const it=(typeof mcItem==='function')?mcItem(r.id):null;
     if(it&&it.sheet_item) it.sheet_item.oneOff=null;
     // and out of this session's library, where it was put back for the sheet
@@ -38728,9 +38741,13 @@ async function mcCreateBatch(){
   const out=document.getElementById('mcMapMsg');
   if(!sb||!mcPending) return;
   const btn=document.getElementById('mcMapGoBtn');
+  // taken before the first wait: a double click got in while the session was read
+  if(btn.disabled) return;
+  btn.disabled=true;
   const {data:{session}}=await sb.auth.getSession();
-  if(!session){ showMsg(out,'Sign in first.',false); return; }
+  if(!session){ btn.disabled=false; showMsg(out,'Sign in first.',false); return; }
   if(!mcPending.map.order_id){
+    btn.disabled=false;
     showMsg(out,'Say which column is the Order No — the whole list is grouped by it.',false);
     return;
   }
@@ -38801,6 +38818,13 @@ async function mcOpenBatch(){
   // a search is one person's question about one visit; it does not follow the
   // next batch in, where it would silently hide most of it
   mcFind=''; document.getElementById('mcFindBox').value=''; mcFindShow(false);
+  // the last batch's lines are not this one's: a slow or failed read left them
+  // on screen and clickable under the new title, acting on the wrong batch
+  if(mcItems.some(x=>x.batch_id!==mcBatch.id)){
+    mcItems=[]; mcShared=[];
+    document.getElementById('mcItems').innerHTML='<p class="hint" style="margin:4px 0 0;">Loading…</p>';
+    mcSyncBatchButtons();
+  }
   await mcLoadItems();
   // and what this batch was last told to share its sheets with
   await mcShareRestore();
@@ -39461,9 +39485,12 @@ async function mcCopyLine(id,btn){
   await mcSrcReady('mcSummaryMsg');
   const src=mcCopySource(it.sku);
   if(!src){
+    mcLogCopy(it.sku,'fail','no file mapped for it');
     showMsg(out,`No file for ${it.sku} — map one on the SKU summary.`,false); return; }
   const dir=await mcCopyDirReady(true);
-  if(!dir){ showMsg(out,'No folder to copy into — pick one and try again.',false); return; }
+  if(!dir){
+    mcLogCopy(it.sku,'fail','no folder to copy into');
+    showMsg(out,'No folder to copy into — pick one and try again.',false); return; }
   try{
     const r=await mcCopyInto(dir,src);
     if(!r.n){
@@ -39475,8 +39502,12 @@ async function mcCopyLine(id,btn){
     const was=it.sheet_item||{};
     const si={...was,copied:{path:src.path,name:mcCopyWhat(src),to:src.to||'',
       at:new Date().toISOString()}};
+    const undo=mcUndoOf(it,MC_LINE_KEYS);
     it.sheet_item=si;
-    await mcSave(it,{sheet_item:si,...mcDonePatch(it,true)});
+    if(!await mcSaveOrUndo(it,{sheet_item:si,...mcDonePatch(it,true)},undo,`Ticking ${it.sku}`)){
+      mcLogCopy(it.sku,'fail',`${src.name} was copied, but the tick did not save`);
+      return;
+    }
     mcRepaintRow(it); mcRenderSummary();
     const where=src.to?`${dir.name}/${src.to}`:dir.name;
     mcLogCopy(it.sku,'done',`${src.name} ${r.done?'into':'already in'} ${where}`);
@@ -42296,7 +42327,9 @@ async function mcSetSkuQty(sku,want){
   // to be told only when the SKU was taken off and put on again: the box said
   // four, the sheet still had two on it, and the two did not disagree out loud
   // until the PDF came out short.
-  mcSkuQtyToSheet(sku,target);
+  // the sheet is told what the lines now hold, which is the typed figure only
+  // if every line took it
+  mcSkuQtyToSheet(sku,failed?lines.reduce((t,it)=>t+mcQty(it),0):target);
   mcRenderSummary(); mcRenderItems();
   if(failed) showMsg(out,`${failed} of ${share.length} lines would not save — try again.`,false);
   else showMsg(out,`✓ ${escapeHtml(sku)} set to ${target} on the sheet`
@@ -42723,11 +42756,6 @@ async function mcAddSkusToSheet(rows,extra){
     if(!ans){ showMsg(out,'Stopped — nothing was put on the sheet.',false); return; }
     replace=ans==='new';
   }
-  if(replace&&(hadLines||hadSingle)){
-    state.designs=[]; state.page=0;
-    state.final.front={data:null,img:null,name:'',source:null};
-    refreshSlots();
-  }
   showMsg(out,`Putting ${usable.length} design${usable.length===1?'':'s'} on the sheet…`,true);
   // The layout they are printed on, before any of them are laid into it —
   // loading a template replaces the design list, so it has to come first.
@@ -42753,6 +42781,24 @@ async function mcAddSkusToSheet(rows,extra){
     tplName=`${open.name} (the one that was open)`;
   }
   if(tpl) tplName=tpl.name;
+  // Everything that could stop the Add has been asked by now, so this is the
+  // first point the sheet may be emptied. Done earlier, a Cancel or a missing
+  // template said "nothing was put on the sheet" over a sheet already blank.
+  const swapsTemplate=!!tpl&&String(selectedTemplate||'')!==String(tpl.id);
+  if(!replace&&swapsTemplate&&hadLines&&!confirm(
+    `These designs print on ${tpl.name}, and putting that template on the sheet replaces the `
+    +`${hadLines} design line${hadLines===1?'':'s'} already there.
+
+OK — replace them.
+Cancel — stop.`)){
+    showMsg(out,'Stopped — nothing was put on the sheet.',false);
+    return;
+  }
+  if(replace&&(hadLines||hadSingle)){
+    state.designs=[]; state.page=0;
+    state.final.front={data:null,img:null,name:'',source:null};
+    refreshSlots();
+  }
   if(tpl&&String(selectedTemplate||'')!==String(tpl.id)){
     await loadTemplate(tpl.id);
     setSelectedTemplate(tpl.id);
@@ -43226,10 +43272,18 @@ async function mcRouteInsert(fields){
 }
 async function mcRouteDelete(id){
   const out=document.getElementById('mcRouteMsg');
+  const gone=mcRoutes.find(r=>r.id===id);
   mcRoutes=mcRoutes.filter(r=>r.id!==id);
   if(sb){
     const {error}=await sb.from('magic_routes').delete().eq('id',id);
-    if(error) showMsg(out,'Could not delete that — '+error.message,false);
+    if(error){
+      // the row is still there for everybody else: it goes back here too, and
+      // the batch strip says so, because the Routing sheet may be shut by now
+      if(gone) mcRoutes.push(gone);
+      mcRoutes.sort((x,y)=>(Number(x.sort_order)||0)-(Number(y.sort_order)||0));
+      showMsg(out,'Could not delete that — '+error.message,false);
+      mcWarn('A routing row could not be deleted: '+error.message);
+    }
   }
   mcRenderSummary();
 }
@@ -43243,6 +43297,7 @@ async function mcRouteMove(id,dir){
   if(i<0||j<0||j>=rows.length) return;
   const a=rows[i], b=rows[j];
   const av=Number(a.sort_order)||0, bv=Number(b.sort_order)||0;
+  const was=[[a,a.sort_order],[b,b.sort_order]];
   // two rules written in the same second can share a number; give them one
   // each so the swap has something to swap
   const [na,nb]=av===bv?(dir==='up'?[bv-1,bv]:[bv+1,bv]):[bv,av];
@@ -43250,8 +43305,20 @@ async function mcRouteMove(id,dir){
   mcRoutes.sort((x,y)=>(Number(x.sort_order)||0)-(Number(y.sort_order)||0));
   // two updates rather than an upsert of the pair: a rule somebody else wrote
   // is not ours to insert, and an upsert of it is refused by the table's rules
-  if(sb) await Promise.all([[a.id,na],[b.id,nb]].map(([id,v])=>
-    sb.from('magic_routes').update({sort_order:v}).eq('id',id)));
+  if(sb){
+    const res=await Promise.all([[a.id,na],[b.id,nb]].map(([id,v])=>
+      sb.from('magic_routes').update({sort_order:v}).eq('id',id)));
+    const bad=res.find(r=>r&&r.error);
+    if(bad){
+      // one landing and one not is a rule order that differs from machine to
+      // machine; the screen goes back to what the table still says
+      was.forEach(([r,v])=>{ r.sort_order=v; });
+      mcRoutes.sort((x,y)=>(Number(x.sort_order)||0)-(Number(y.sort_order)||0));
+      const m=document.getElementById('mcRouteMsg');
+      if(m) showMsg(m,'Could not move that — '+escapeHtml(bad.error.message),false);
+      await mcRoutesLoad(true).catch(()=>{});
+    }
+  }
   mcRenderRoutes(); mcRenderSummary();
 }
 // One SKU, named outright. '' takes the override away and leaves the SKU to
@@ -43503,12 +43570,24 @@ document.getElementById('mcRouteImport').addEventListener('click',async()=>{
         dest:key(o,'where')||key(o,'dest'),template:key(o,'template'),
         copy_path:key(o,'file')||key(o,'copy_path'),
         copy_to:key(o,'into')||key(o,'copy_to'),
-        remarks:key(o,'remarks'),sort_order:key(o,'order')}));
+        // a blank Order cell is no order at all, not 0 — 0 made every rule tie
+        remarks:key(o,'remarks'),sort_order:key(o,'order')===''?undefined:key(o,'order')}));
     }
     // the Template column comes in by name, so the saved templates have to be
     // in hand before the rows are read
     if(!(templateRows||[]).length) await refreshTemplateList().catch(()=>{});
-    const rows=cells.map(mcRouteFromCells).filter(Boolean);
+    let rows=cells.map(mcRouteFromCells).filter(Boolean);
+    // the table holds one row per SKU name, case aside; a file with two of the
+    // same would be refused by the insert after everything here was deleted
+    const seenSku=new Set();
+    const before=rows.length;
+    rows=rows.filter(r=>{
+      if(r.kind!=='sku') return true;
+      const k=String(r.match||'').trim().toLowerCase();
+      if(seenSku.has(k)) return false;
+      seenSku.add(k); return true;
+    });
+    const dupes=before-rows.length;
     if(!rows.length) throw new Error('there are no usable rows in that file');
     await mcRoutesLoad(true);
     const had=mcRoutes.length;
@@ -43520,17 +43599,30 @@ document.getElementById('mcRouteImport').addEventListener('click',async()=>{
     showMsg(out,'Importing…',true);
     if(!sb) throw new Error('no connection');
     const uid=await mcWhoAmI();
-    if(mcRoutes.length){
+    const old=mcRoutes.slice();
+    if(old.length){
       const {error}=await sb.from('magic_routes').delete()
-        .in('id',mcRoutes.map(r=>r.id));
+        .in('id',old.map(r=>r.id));
       if(error) throw error;
     }
     const {data:made,error:err2}=await sb.from('magic_routes')
       .insert(rows.map(r=>({user_id:uid,...r}))).select();
-    if(err2) throw err2;
+    if(err2){
+      // the old list goes back, or a refused file leaves everybody with none
+      let back=true;
+      if(old.length){
+        const {error:e3}=await sb.from('magic_routes').insert(old);
+        if(e3) back=false;
+      }
+      await mcRoutesLoad(true).catch(()=>{});
+      mcRenderRoutes(); mcRenderSummary();
+      throw new Error((err2.message||'the table refused the rows')
+        +(back?' — the routing that was here has been put back':' — the old routing could not be put back, import it from your last export'));
+    }
     mcRoutes=made||[]; mcRoutesRead=true;
     mcRenderRoutes(); mcRenderSummary();
-    showMsg(out,`✓ Imported ${mcRoutes.length} row${mcRoutes.length===1?'':'s'}.`,true);
+    showMsg(out,`✓ Imported ${mcRoutes.length} row${mcRoutes.length===1?'':'s'}`
+      +(dupes?` — ${dupes} repeated SKU row${dupes===1?'':'s'} left out`:'')+'.',true);
   }catch(err){ showMsg(out,'Import failed: '+((err&&err.message)||'unknown error'),false); }
 });
 document.getElementById('mcRouteAdd').addEventListener('click',async()=>{
@@ -43699,6 +43791,9 @@ let mcPageAsk=null;
 function mcAskPage(what){
   document.getElementById('mcPageWhat').textContent=what;
   document.getElementById('mcPageSheet').classList.add('open');
+  // a second ask replaces the first's resolver; the first is answered "no"
+  // rather than left waiting for ever
+  if(mcPageAsk){ const f=mcPageAsk; mcPageAsk=null; f(''); }
   return new Promise(res=>{ mcPageAsk=res; });
 }
 function mcPageAnswer(v){
@@ -43935,11 +44030,20 @@ function mcDonePatch(it,on){
   it.acted_at=now?new Date().toISOString():null;
   return {status:now,acted_by:it.acted_by,acted_at:it.acted_at};
 }
+// how many lines the last mcMarkPrintLines could not write, for a caller that
+// has to say "saved" and mean it
+let mcMarkFailed=0;
 async function mcMarkPrintLines(rows,template){
+  mcMarkFailed=0;
   if(!rows||!rows.length||!mcBatch||mcBatch.status!=='open') return 0;
   let n=0;
   for(const r of rows){
-    const pick=designFileForSku(r.sku); if(!pick) continue;
+    // a row may name the file it was swapped to on the sheet; without one the
+    // SKU's own file is the design
+    const pick=r.path
+      ? ((loadDesignFiles||[]).find(f=>f.path===r.path)||{path:r.path,name:r.name||String(r.path).split('/').pop()})
+      : designFileForSku(r.sku);
+    if(!pick) continue;
     for(const it of mcItems.filter(i=>mcRowKey(i)===String(r.sku))){
       const was=it.sheet_item||{};
       // merged by its own Merge box with its own artwork: not the summary's
@@ -43950,13 +44054,16 @@ async function mcMarkPrintLines(rows,template){
         &&String(was.template||'')===si.template){
         // already on the sheet, but perhaps not ticked — Add all run twice
         // should still leave every line saying the same thing
+        const undo=mcUndoOf(it,MC_LINE_KEYS);
         const tick=mcDonePatch(it,true);
-        if(Object.keys(tick).length){ await mcSave(it,tick); n++; }
+        if(Object.keys(tick).length){
+          if(await mcSaveOrUndo(it,tick,undo,it.sku||'That line')) n++; else mcMarkFailed++; }
         continue;
       }
+      const undo=mcUndoOf(it,MC_LINE_KEYS);
       it.tile='sheetPrint'; it.sheet_item=si;
-      await mcSave(it,{tile:'sheetPrint',sheet_item:si,...mcDonePatch(it,true)});
-      n++;
+      if(await mcSaveOrUndo(it,{tile:'sheetPrint',sheet_item:si,...mcDonePatch(it,true)},undo,it.sku||'That line')) n++;
+      else mcMarkFailed++;
     }
   }
   if(n){ mcRenderItems(); mcSyncBatchButtons(); }
@@ -43998,8 +44105,10 @@ async function mcUnmarkLine(it){
   const kept=mcOffSheetItem(it,was);
   // a line merged off its own tile goes back to that tile, not to none
   const back=it.tile==='sheetPrint'?(was.fromTile||null):null;
+  const undo=mcUndoOf(it,MC_LINE_KEYS);
   it.tile=back; it.sheet_item=kept;
-  await mcSave(it,{tile:back,sheet_item:kept,...mcDonePatch(it,false)});
+  if(!await mcSaveOrUndo(it,{tile:back,sheet_item:kept,...mcDonePatch(it,false)},undo,
+    `Taking ${it.sku||'that line'} off the sheet`)) return false;
   // and its own layout is told the extras again, now it prints from that
   if(back==='custom') await mcExtraToSheet(it);
   return true;
@@ -44194,13 +44303,14 @@ async function mcMarkLinesOnSheet(laid,page){
         finish:was.finish||(typeof gtFinish!=='undefined'?gtFinish:'Matte')};
       if(it.tile==='giftTag'&&was.designId===designId&&was.qty===si.qty
         &&String(was.page||'')===si.page&&String(was.shape||'')===si.shape){
+        const undo=mcUndoOf(it,MC_LINE_KEYS);
         const tick=mcDonePatch(it,true);
-        if(Object.keys(tick).length){ await mcSave(it,tick); n++; }
+        if(Object.keys(tick).length&&await mcSaveOrUndo(it,tick,undo,it.sku||'That line')) n++;
         continue;
       }
+      const undo=mcUndoOf(it,MC_LINE_KEYS);
       it.tile='giftTag'; it.sheet_item=si;
-      await mcSave(it,{tile:'giftTag',sheet_item:si,...mcDonePatch(it,true)});
-      n++;
+      if(await mcSaveOrUndo(it,{tile:'giftTag',sheet_item:si,...mcDonePatch(it,true)},undo,it.sku||'That line')) n++;
     }
   }
   if(n){ mcRenderItems(); mcSyncBatchButtons(); }
@@ -45348,6 +45458,9 @@ document.getElementById('mcCompleteBtn').addEventListener('click',async()=>{
   if(!confirm('Complete this batch?\n\nIt moves to Completed, becomes read only, '
     +'and it and its artwork are permanently deleted three days from now. '
     +'One-time gift tag designs on it are thrown away now.')) return;
+  // the open line's layout is written down first, while the batch can still be
+  // written to; one that will not save stops the Complete
+  if(!await mcCommit()) return;
   const at=new Date().toISOString();
   const {error}=await sb.from('magic_batches')
     .update({status:'completed',completed_at:at,completed_by:mcMyId}).eq('id',mcBatch.id);
@@ -45355,7 +45468,7 @@ document.getElementById('mcCompleteBtn').addEventListener('click',async()=>{
   if(error){ showMsg(out,'Could not complete it: '+error.message,false); return; }
   mcBatch.status='completed'; mcBatch.completed_at=at;
   await mcDropOneOffs(mcBatch.id);
-  mcWinClose();
+  await mcWinClose();
   mcSyncBatchButtons();
   showMsg(out,'✓ Completed — it is in the Completed tab now.',true);
 });
@@ -46152,7 +46265,9 @@ function mcWinRender(){
   document.getElementById('mcPick').addEventListener('change',async e=>{
     const val=e.target.value;
     if(val===mcChoiceOf(it)) return;
-    await mcCommit();
+    // the layout on the builder is saved first; one that did not save is not
+    // thrown away by changing what the line is
+    if(!await mcCommit()){ e.target.value=mcChoiceOf(it); return; }
     mcWiredLine=null;          // a line turned into something else is laid out afresh
     const c=mcChoices().find(x=>x.value===val)||null;
     // The paper and the weight, asked at the moment the line is made into
@@ -46185,6 +46300,7 @@ function mcWinRender(){
     // a sheet on loan is handed back before the line changes page or kind —
     // switched under it, the loan wrote the old page back over this choice
     if(mcGtHome) await mcGtReturn();
+    const undoPick=mcUndoOf(it,MC_LINE_KEYS);
     const patch={tile:c?c.tile:null};
     // A merged line moved to another page is unmerged on the way: what put it
     // on the shared sheet goes, and so do its pieces on the sheet laid in the
@@ -46219,7 +46335,10 @@ function mcWinRender(){
       // would be offering the other one's designs
       if(typeof gtSetMode==='function'&&gtMode!==c.page) await gtSetMode(c.page);
     }
-    await mcSave(it,patch);
+    if(!await mcSave(it,patch)){
+      undoPick();
+      mcWarn(`${it.sku||'That line'} was not changed — it did not save${mcLastSaveError?': '+mcLastSaveError:''}.`);
+    }
     mcWinRender(); mcRepaintRow(it);
     // the answer to "which page builds this" is also which builder belongs in
     // the right column, so the column follows it
@@ -46239,18 +46358,21 @@ async function mcAutoTile(it){
   if(dest==='print'){
     // the line's own card, on the line's own sheet: Custom Template is what a
     // per-order print job is, and the template comes with it
+    const undo=mcUndoOf(it,['tile','sheet_item']);
     it.tile='custom';
-    await mcSave(it,{tile:'custom'});
+    if(!await mcSaveOrUndo(it,{tile:'custom'},undo,'The tile')) return '';
     return 'custom';
   }
   if(dest==='placeCard'){
+    const undo=mcUndoOf(it,['tile','sheet_item']);
     it.tile='placeCard';
-    await mcSave(it,{tile:'placeCard'});
+    if(!await mcSaveOrUndo(it,{tile:'placeCard'},undo,'The tile')) return '';
     return 'placeCard';
   }
   const si={...(it.sheet_item||{}),page:dest};
+  const undo=mcUndoOf(it,['tile','sheet_item']);
   it.tile='giftTag'; it.sheet_item=si;
-  await mcSave(it,{tile:'giftTag',sheet_item:si});
+  if(!await mcSaveOrUndo(it,{tile:'giftTag',sheet_item:si},undo,'The tile')) return '';
   return 'giftTag';
 }
 // Whatever the open line has been given, written back to its row.
@@ -46328,6 +46450,30 @@ async function mcSave(it,patch){
   mcLastSaveError=error?String(error.message||'the write was refused'):'';
   if(error&&msg) showMsg(msg,'Could not save: '+error.message,false);
   return !error;
+}
+// What a line was before a write is changed in memory, kept so a write that
+// does not land can put it back. The screen, the next save and every other
+// reader trust the row in memory: left changed, a refused write read as done
+// until the page was reloaded, and the retry skipped what it believed was sent.
+function mcUndoOf(it,keys){
+  const was={};
+  keys.forEach(k=>{ was[k]=it[k]; });
+  return ()=>{ keys.forEach(k=>{ it[k]=was[k]; }); };
+}
+const MC_LINE_KEYS=['tile','sheet_item','status','acted_by','acted_at','art','design','paper_type','gsm'];
+// said on the batch strip, which is still on screen when a window has closed
+function mcWarn(text){
+  const el=document.getElementById('mcBatchMsg');
+  if(el) showMsg(el,escapeHtml(text),false);
+}
+// mcSave that puts the line back as it was, and says so, when the write fails
+async function mcSaveOrUndo(it,patch,undo,what){
+  const ok=await mcSave(it,patch);
+  if(!ok){
+    try{ if(undo) undo(); }catch(e){}
+    mcWarn(`${what||'That change'} did not save${mcLastSaveError?': '+mcLastSaveError:''} — it was put back.`);
+  }
+  return ok;
 }
 
 // ---------- the Custom Template tile ----------
@@ -46854,9 +47000,9 @@ function mcCustomWire(it){
       }
     }
     mcWinLive=true;
+    const undoLine=mcUndoOf(it,MC_LINE_KEYS);
     const {patch:kept,failed}=await mcKeepBuilderArt(it);
     it.design=mcLineSnapshot();
-    console.log('[bleed-debug] mcSaveLineBtn save',it.order_id||it.sku,JSON.parse(JSON.stringify(it.design.bleed)));
     // and what the builder was set to, where the line has not been told
     // itself: paper and GSM are two thirds of the file name, and a line
     // missing them is a line whose PDF button stays greyed out with the
@@ -46875,6 +47021,11 @@ function mcCustomWire(it){
       // saved is finished with, and the next line is on the list behind this
       // window — so it gets out of the way by itself, still going in the bubble
       mcWinToBubble();
+    }else{
+      // put back as it was, or the line reads done and holds artwork the row
+      // never got, and saving again sends neither
+      undoLine();
+      mcRepaintRow(it);
     }
   });
 }
@@ -47016,8 +47167,13 @@ async function mcUseArt(it,pairs){
     const paths=await Promise.all(got.map(g=>mcPutArt(it,g.side,g.f,g.dataURL,g.img)));
     const art=Object.assign({},it.art);
     got.forEach((g,k)=>{ state.final[g.side].mcPath=paths[k]; art[g.side]=paths[k]; });
+    const undoArt=mcUndoOf(it,['art']);
     it.art=art;
-    await mcSave(it,{art:it.art});
+    if(!await mcSave(it,{art:it.art})){
+      undoArt();
+      got.forEach(g=>{ state.final[g.side].mcPath=''; });
+      throw new Error('the line did not save — '+(mcLastSaveError||'no connection'));
+    }
     got.forEach(({side})=>{
       const i=info(side); if(i) i.textContent=side==='front'?'Front loaded':'Back loaded';
       const th=document.getElementById('mcThumb-'+side);
@@ -47324,9 +47480,14 @@ async function mcGtMoveToPage(it,mode,id){
   // and the old page's cutting file and text boxes stay behind with it: a
   // line's own shape wins, so it was cut to the other page's die
   const si={...(it.sheet_item||{}),page:mode,designId:id,vals:{},shape:'',extra:[]};
+  const undoMove=mcUndoOf(it,['tile','sheet_item']);
   it.tile='giftTag'; it.sheet_item=si;
   await mcGtKeepOneOffOn(it,si);
-  await mcSave(it,{tile:'giftTag',sheet_item:si});
+  if(!await mcSaveOrUndo(it,{tile:'giftTag',sheet_item:si},undoMove,'Moving it to that page')){
+    if(mcWinItem===it.id) mcWinRender();
+    mcRepaintRow(it);
+    return;
+  }
   if(typeof gtSetMode==='function'&&gtMode!==mode) await gtSetMode(mode);
   if(mcWinItem===it.id) mcWinRender();
   mcRepaintRow(it);
@@ -48027,14 +48188,21 @@ async function mcGtWriteBack(edited,home){
     await mcGtKeepOneOffOn(it,it.sheet_item);
     // and a tag on the sheet is a gift tag line — Download All goes by the tile
     const retile=l.designId&&it.tile!=='giftTag';
+    // the edits stay on the line (the sheet they were made on is gone); what a
+    // failed write puts back is the tile and the tick, so a retry sends them
+    const undoMarks=mcUndoOf(it,['tile','status','acted_by','acted_at']);
     if(retile) it.tile='giftTag';
     // A line on a sheet has been dealt with — that is the rule everywhere else
     // here, and the tick comes off again by itself when a tag is taken off the
     // sheet. It was the one way onto a sheet that left the batch reading as if
     // nothing had been done, so a morning's work looked untouched on the list.
     // A row still waiting for a design is not on the sheet yet and is left open.
-    await mcSave(it,{sheet_item:it.sheet_item,...(retile?{tile:'giftTag'}:{}),
-      ...(l.designId?mcDonePatch(it,true):{})});
+    if(!await mcSave(it,{sheet_item:it.sheet_item,...(retile?{tile:'giftTag'}:{}),
+      ...(l.designId?mcDonePatch(it,true):{})})){
+      undoMarks();
+      mcWarn(`${it.sku||'A tag'}: the changes made on the gift tag sheet did not save`
+        +`${mcLastSaveError?': '+mcLastSaveError:''}. Open the line and save it again.`);
+    }
     mcRepaintRow(it);
   }
   // And the ones that are not in the list any more. A tag taken off with the ×
@@ -48820,7 +48988,12 @@ function mcMergeSameName(set,side,n){
 // turning the proof's pages or saving it after a Look does not read every
 // design off the NAS again.
 const mcMergeCache=new Map();
-const mcMergeCacheKey=set=>set.map(it=>`${it.id}:${it.updated_at||''}:${mcQty(it)}`).join(',');
+// magic_items has no updated_at, so what stood in for "changed" was the
+// quantity alone — a line re-Created or given other artwork kept its old merged
+// picture. The key is the line's layout, artwork and sheet entry themselves.
+const mcHashStr=str=>{ let h=0; for(let i=0;i<str.length;i++) h=(Math.imul(h,31)+str.charCodeAt(i))|0; return h; };
+const mcMergeCacheKey=set=>set.map(it=>`${it.id}:${mcHashStr(JSON.stringify(
+  [it.design||null,it.art||null,it.sheet_item||null,it.paper_type||'',it.gsm||'']))}:${mcQty(it)}`).join(',');
 // why a line put nothing up, as far as can be told
 // — an upload is the line's own; only a design off the folder needs the folder
 const mcMergeWhy=it=>(it&&it.art&&it.art.front)||(loadDesignFiles&&loadDesignFiles.length)?''
@@ -49121,7 +49294,12 @@ const PJ_KINDS={
           bleedOn:!!d.bleedOn,bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}));
       const design=state.final.front.source
         ? {path:state.final.front.source.path,name:state.final.front.name} : null;
-      return {page:'',items:designTotal(),
+      // counted from what is kept: an uploaded picture has no path to keep, so
+      // counting it made a row that said "N cards" and opened to an empty sheet
+      const kept=designs.length
+        ? designs.reduce((n,d)=>n+Math.max(1,Math.round(Number(d.qty)||1)),0)
+        : (design?designTotal():0);
+      return {page:'',items:kept,
         data:{paper:state.paper,layout:state.layout,placeholders:state.placeholders,
           showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
           refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,
@@ -49293,6 +49471,13 @@ async function pjWrite(id,add){
     // What is on screen is added to what the saved sheet already holds, not
     // the other way round: the saved sheet keeps the layout it was set up on.
     if(pjKind==='giftTag'){
+      // a saved sheet is one page's: tags from another page's library would be
+      // written under the saved page and open blank
+      if(s.page&&row.page&&String(s.page)!==String(row.page)){
+        showMsg(pjMsgEl(),`That sheet is on the ${escapeHtml(String(row.page))} page and the builder is on `
+          +`${escapeHtml(String(s.page))} — switch pages first.`,false);
+        return;
+      }
       data={...(row.data||{}),order:((row.data&&row.data.order)||[]).concat(s.data.order)};
       items=(data.order||[]).reduce((n,l)=>n+(Number(l.qty)||0),0);
     }else{
@@ -49302,7 +49487,7 @@ async function pjWrite(id,add){
     }
   }
   const {error}=await sb.from('print_jobs')
-    .update({data,items,page:s.page||row.page,updated_at:new Date().toISOString()})
+    .update({data,items,page:(add&&pjKind==='giftTag')?(row.page||s.page):(s.page||row.page),updated_at:new Date().toISOString()})
     .eq('id',id);
   if(error){ showMsg(pjMsgEl(),'Could not save onto it: '+error.message,false); return; }
   await pjLoad(true); pjRender();
@@ -49409,8 +49594,16 @@ async function mcSaveSharedSheet(){
   }
   designBleedSaveStore();
   const skus=mcSharedSheetSkus();
-  const lines=skus.length?await mcMarkPrintLines(skus.map(sku=>({sku})),selectedTemplate||''):0;
-  return {wrote,failed,lines,skus:skus.length};
+  // a design swapped on a row is written onto that SKU's lines, or the sheet
+  // is rebuilt from the old file the next time it is opened
+  const rows=skus.map(sku=>{
+    const d=(state.designs||[]).find(x=>x.sku===sku&&!x.mcKey&&x.source&&x.source.path);
+    return {sku,path:d.source.path,name:d.name};
+  });
+  const lines=rows.length?await mcMarkPrintLines(rows,selectedTemplate||''):0;
+  // a line that would not take its design is as unsaved as a design record that
+  // would not write
+  return {wrote,failed:failed+(rows.length?mcMarkFailed:0),lines,skus:skus.length};
 }
 function mcBuilderSaveSync(){
   const chip=document.getElementById('mcSaveChip'); if(!chip) return;
@@ -49538,15 +49731,15 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     // said outright rather than left to whether the panel got there first.
     mcWinLive=true;
     const untyped=!it.tile;
+    const undoLine=mcUndoOf(it,MC_LINE_KEYS);
     if(untyped) it.tile='custom';
     const {patch:kept,failed}=await mcKeepBuilderArt(it);
     it.design=mcLineSnapshot();
-    console.log('[bleed-debug] mcSaveChip save',it.order_id||it.sku,JSON.parse(JSON.stringify(it.design.bleed)));
     it.paper_type=state.paperType||it.paper_type||'';
     it.gsm=state.gsm||it.gsm||'';
     const ok=await mcSave(it,{design:it.design,paper_type:it.paper_type,
       gsm:it.gsm,...(untyped?{tile:'custom'}:{}),...(kept||{}),...(failed.length?{}:mcDonePatch(it,true))});
-    if(!ok&&untyped) it.tile=null;
+    if(!ok) undoLine();
     if(!ok){ mcSaveChipSaid('Did not save: '+(mcLastSaveError||'no connection'),false); return; }
     mcRepaintRow(it);
     mcSyncBatchButtons();
