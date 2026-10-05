@@ -42917,6 +42917,7 @@ Cancel — stop.`)){
     else { await addDesignLine(pick,r.qty,r.sku); added++; }
   }
   setArtMode('preset');
+  mcNoteSheetPaths();
   // the builder now holds the batch's sheet, which is no one line's layout —
   // and a line open beside it no longer has its own layout in there
   mcLaidShared=true; mcWinLive=false; mcWiredLine=null;
@@ -43093,7 +43094,7 @@ document.getElementById('mcMadeSave').addEventListener('click',async()=>{
     const r=await mcSaveSharedSheet();
     showMsg(out,r.failed
       ? `${r.failed} design record${r.failed===1?'':'s'} did not save.`
-      : `✓ Saved — ${r.skus} SKU${r.skus===1?'':'s'}, ${r.wrote} design record${r.wrote===1?'':'s'} written.`,!r.failed);
+      : mcSheetSaidOf(r)+'.',!r.failed);
   }catch(err){ showMsg(out,'Could not save: '+escapeHtml((err&&err.message)||'unknown error'),false); }
 });
 document.getElementById('mcMadeDownload').addEventListener('click',()=>{
@@ -49042,6 +49043,7 @@ async function mcPrintLay(lines,template){
         +'nor as artwork uploaded to the line'
       : 'nothing landed on the print sheet');
   setArtMode('preset');
+  mcNoteSheetPaths();
   return {pages:sheetCount(),missing};
 }
 // The lines a sheet was asked to carry and could not — a design gone from the
@@ -49760,10 +49762,51 @@ async function mcSaveSharedSheet(){
     return {sku,path:d.source.path,name:d.name};
   });
   const lines=rows.length?await mcMarkPrintLines(rows,selectedTemplate||''):0;
+  failed+=rows.length?mcMarkFailed:0;
+  // What was done to the sheet on the builder reaches the lines too, or the
+  // sheet is laid again from the lines the next time it is opened and every
+  // edit is gone: a quantity typed on a design row, and a design taken off.
+  let qty=0, off=0;
+  const mine=(state.designs||[]).filter(d=>d.sku&&!d.mcKey&&d.source&&d.source.path);
+  const want=new Map();
+  mine.forEach(d=>want.set(d.sku,(want.get(d.sku)||0)+Math.max(0,Math.round(Number(d.qty)||0))));
+  for(const [sku,q] of want){
+    const its=mcItems.filter(it=>mcRowKey(it)===sku&&!mcMergedKey(it)&&it.tile==='sheetPrint');
+    if(!its.length||q<its.length) continue;       // one a line at the least; 0 is a design left for later
+    const now=its.reduce((t,it)=>t+mcQty(it),0);
+    if(q===now) continue;
+    await mcSetSkuQty(sku,q);
+    if(its.reduce((t,it)=>t+mcQty(it),0)===q) qty++; else failed++;
+  }
+  // a design deleted from the sheet takes its lines off it: still marked, they
+  // were laid straight back on the sheet when it was next opened
+  const tpl=String(selectedTemplate||'');
+  const paths=new Set(mine.map(d=>d.source.path));
+  const here=new Set(mine.map(d=>d.sku));
+  const keyOfSheet=typeof mcLaidShared==='string'?mcLaidShared:null;
+  for(const it of mcItems.filter(x=>x.tile==='sheetPrint'&&x.sheet_item&&!x.sheet_item.merged&&!x.sheet_item.art
+      &&!mcMergedKey(x))){
+    const si=it.sheet_item;
+    if(keyOfSheet?mcPrintSheetKey(it)!==keyOfSheet:String(si.template||'')!==tpl) continue;
+    if(here.has(mcRowKey(it))||paths.has(si.path)) continue;
+    if(!mcSheetLaidPaths.has(si.path)) continue;       // never on this sheet: not a deletion
+    if(await mcUnmarkLine(it)) off++; else failed++;
+  }
+  mcNoteSheetPaths();
+  if(qty||off){ mcRenderItems(); mcSyncBatchButtons(); if(mcSummaryOpen()) mcRenderSummary(); }
   // a line that would not take its design is as unsaved as a design record that
   // would not write
-  return {wrote,failed:failed+(rows.length?mcMarkFailed:0),lines,skus:skus.length};
+  return {wrote,failed,lines,skus:skus.length,qty,off};
 }
+// The designs that were on the batch's shared sheet when it was laid. Only a
+// design that was there and is gone now has been taken off; one that never made
+// it onto the sheet (file not found, line not ready) is not the user's deletion.
+let mcSheetLaidPaths=new Set();
+const mcNoteSheetPaths=()=>{
+  mcSheetLaidPaths=new Set((state.designs||[]).filter(d=>!d.mcKey&&d.source&&d.source.path).map(d=>d.source.path));
+};
+const mcSheetSaidOf=r=>`✓ Saved — ${r.skus} SKU${r.skus===1?'':'s'}, ${r.wrote} design record${r.wrote===1?'':'s'}`
+  +(r.qty?`, ${r.qty} quantit${r.qty===1?'y':'ies'}`:'')+(r.off?`, ${r.off} taken off the sheet`:'');
 function mcBuilderSaveSync(){
   const chip=document.getElementById('mcSaveChip'); if(!chip) return;
   const mode=mcSaveChipMode();
@@ -49855,7 +49898,7 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
         mcSaveChipSaid(`${r.failed} design record${r.failed===1?'':'s'} did not save — see the message`,false);
         return;
       }
-      mcSaveChipSaid(`✓ Saved — ${r.skus} SKU${r.skus===1?'':'s'}, ${r.wrote} design record${r.wrote===1?'':'s'}`,true);
+      mcSaveChipSaid(mcSheetSaidOf(r),true);
       return;
     }
     const it=mcWinItem?mcItem(mcWinItem):null;
