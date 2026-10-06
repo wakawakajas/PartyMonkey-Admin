@@ -56,7 +56,11 @@ class Listener:
                 backoff = 3.0
             except Exception as exc:        # never let the listener thread die
                 self.last_error = f"{type(exc).__name__}: {exc}"
-            self.connected = False
+            if self.connected:
+                # the watcher may be asleep waiting for a push that can no
+                # longer come -- wake it so it falls back to polling
+                self.connected = False
+                self._on_change()
             self._stop.wait(backoff)
             backoff = min(backoff * 2, 60.0)
 
@@ -114,6 +118,7 @@ class Listener:
                         self.last_error = ""
                         self._on_change()               # catch up on what was missed
                     elif status == "error":
+                        cloud.token = None              # likely expired: sign in afresh
                         raise RuntimeError("realtime join refused: "
                                            + json.dumps(msg.get("payload"))[:200])
                 elif event == "phx_error" or event == "phx_close":

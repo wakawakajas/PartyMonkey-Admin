@@ -207,7 +207,8 @@ def _name(o: dict) -> str:
 
 def read_job(cloud: Cloud, job: dict, port: int) -> None:
     orders = pickup_orders(port)
-    sessions = duoke_web.all_sessions(5) if orders and duoke_web.available() else []
+    readable = bool(orders) and duoke_web.available()
+    sessions = duoke_web.all_sessions(5) if readable else []
     found = []
     for o in orders:
         remarks = ""
@@ -216,7 +217,8 @@ def read_job(cloud: Cloud, job: dict, port: int) -> None:
         except Exception:
             pass  # a note we could not write is a blank note, not a failed press
         found.append({"bs_id": o["bs_id"], "order_id": o["order_id"], "name": _name(o),
-                      "buyer": o["buyer"], "remarks": remarks, "shop": o["shop"]})
+                      "buyer": o["buyer"], "remarks": remarks, "shop": o["shop"],
+                      "duoke": readable})   # False = notes left blank, DuoKe not readable
     _patch(cloud, job["id"], "reading", {"status": "found", "found": found})
 
 
