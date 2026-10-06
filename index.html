@@ -9065,6 +9065,17 @@ function artTrimFrac(img,cardW,cardH){
   if(t.some(x=>x>0.0005)) return {x:1-t[0]-t[2], y:1-t[1]-t[3]};
   return null;
 }
+// A design with no trim marked that is already the card plus the bleed (or
+// more) on both sides carries its own bleed: it prints at its own size and
+// none is made up on top. A tenth of a millimetre spare for pixel rounding —
+// 94 mm at 300 DPI is 93.98. maxMm, when given, is the most a side may be
+// over, so a much bigger file is not taken as the card with bleed.
+function artOwnBleed(wMm,hMm,cardW,cardH,bleedMm,maxMm){
+  if(!(wMm>0)||!(hMm>0)||!(cardW>0)||!(cardH>0)||!(bleedMm>0)) return false;
+  const b=bleedMm-0.1;
+  const bx=(wMm-cardW)/2, by=(hMm-cardH)/2;
+  return bx>=b&&by>=b&&(maxMm==null||(bx<=maxMm&&by<=maxMm));
+}
 // A pHYs chunk slipped in straight after IHDR. The signature and IHDR are 33
 // bytes and the chunk 21, 54 in all — a whole number of base64 groups — so the
 // rest of the file's base64 is carried over untouched rather than re-encoded.
@@ -10036,13 +10047,18 @@ function renderSide(side,canvas,maxDim,opts){
     // Bleed on always reaches its full depth past the cut, whatever shape the
     // design came in: a wrong-ratio file has the gap made up from its edges
     // too, so it no longer waits on its own switch.
-    const fillGap=!tf&&bleedMm>0;
+    // An Actual-size design already as big as its card and the bleed together
+    // brought its own bleed (a client's 94 × 59 for an 89 × 54 card): it prints
+    // at its own size, centred on the cut, with nothing stretched or made up —
+    // stretching it again made it 99 × 64 and cut its edges off.
+    const own=!tf&&state.artFit==='actual'&&artOwnBleed(wMm,hMm,ph.wMm,ph.hMm,bleedMm);
+    const fillGap=!tf&&!own&&bleedMm>0;
     // a hair of gap is rounding, not a wrong-ratio design: it left Stretch
     // making its bleed from the edges on cards that fill their box
     const gapOf=v=>v>0.05?v:0;
     const padX=fillGap?gapOf((ph.wMm-wMm)/2):0;
     const padY=fillGap?gapOf((ph.hMm-hMm)/2):0;
-    const bX=tf?(wMm/tf.x-wMm)/2:bleedMm+padX, bY=tf?(hMm/tf.y-hMm)/2:bleedMm+padY;
+    const bX=tf?(wMm/tf.x-wMm)/2:own?0:bleedMm+padX, bY=tf?(hMm/tf.y-hMm)/2:own?0:bleedMm+padY;
     const effW=wMm+bX*2, effH=hMm+bY*2;
     // Mirror and Extend keep the artwork at its own size and make the bleed up
     // from its edges; Stretch enlarges the picture into it as it always did —
@@ -10050,7 +10066,7 @@ function renderSide(side,canvas,maxDim,opts){
     // shape, so the gap is extended instead
     const padded=padX>0||padY>0;
     const bleedMode=bleedModeNow()==='stretch'?'extend':bleedModeNow();
-    const grow=!tf&&bleedMm>0&&(bleedModeNow()!=='stretch'||padded);
+    const grow=!tf&&!own&&bleedMm>0&&(bleedModeNow()!=='stretch'||padded);
     // the sheet's turn and the design's own, one on top of the other: the
     // sheet turns everything printed on it, and a design that arrived on its
     // side turns again inside its own box
@@ -10084,8 +10100,10 @@ function renderSide(side,canvas,maxDim,opts){
       const x1=Math.min(clip.x+clip.w,fx+wMm+bleedMm*2), y1=Math.min(clip.y+clip.h,fy+hMm+bleedMm*2);
       clip={x:x0, y:y0, w:Math.max(0,x1-x0), h:Math.max(0,y1-y0)};
     }
-    const reach=(x,y)=>({x:Math.min(reachMm,tf?Math.min(x,(wMm-ph.wMm)/2+bleedMm):x),
-      y:Math.min(reachMm,tf?Math.min(y,(hMm-ph.hMm)/2+bleedMm):y)});
+    // and a design's own bleed is cut back the same way
+    if(own) clip={x:ph.xMm-bleedMm, y:ph.yMm-bleedMm, w:ph.wMm+bleedMm*2, h:ph.hMm+bleedMm*2};
+    const reach=(x,y)=>({x:Math.min(reachMm,tf?Math.min(x,(wMm-ph.wMm)/2+bleedMm):own?Math.min(x,bleedMm):x),
+      y:Math.min(reachMm,tf?Math.min(y,(hMm-ph.hMm)/2+bleedMm):own?Math.min(y,bleedMm):y)});
     let ringOnly=false;
     // Invert colours is done to pixels, so an inverted PDF is drawn rather
     // than placed
@@ -10127,7 +10145,7 @@ function renderSide(side,canvas,maxDim,opts){
     ctx.drawImage(grow?bleedArt(img,trimW,trimH,swapped?bY:bX,bleedMode,swapped?bX:bY,bleedTrimPx())
       // the edge trim is part of making a bleed: with no bleed on this card, or
       // a page that brings its own, the picture prints whole as it always did
-      :!tf&&bleedMm>0&&bleedTrimPx()>0
+      :!tf&&!own&&bleedMm>0&&bleedTrimPx()>0
         &&Math.min(img.naturalWidth||img.width,img.naturalHeight||img.height)>bleedTrimPx()*2+2
         ?bleedTrimmed(img,bleedTrimPx()):img,
       -srcW/2,-srcH/2,srcW,srcH);
@@ -13403,7 +13421,19 @@ document.getElementById('printReadyBtn').addEventListener('click',async()=>{
     // Placeholder size: the design fills the card, the way the operator sets
     // it by hand — Original, which kept the file's shape inside the card, has
     // no button any more and left none lit.
-    setArtFit('card');   // refits both sides and redraws
+    // But a client file that already carries its own bleed — no trim marked,
+    // the card plus 2.5 to 6 mm a side — keeps it: Actual size prints it at its
+    // own size, where Placeholder size squashed its bleed inside the cut and
+    // made more up on top.
+    const L=layoutMm();
+    const keepOwn=sides.some(s=>{
+      const img=state.final[s].img;
+      if(artTrimFrac(img,L.cardW,L.cardH)) return false;
+      const r=artRealMm(img); if(!r) return false;
+      const turned=((state.rotate[s]||0)%180)!==0;
+      return artOwnBleed(turned?r.h:r.w,turned?r.w:r.h,L.cardW,L.cardH,state.bleed.mm,6);
+    });
+    setArtFit(keepOwn?'actual':'card');   // refits both sides and redraws
     const soft=sides.filter(s=>!artIsVector(state.final[s])&&(artPrintDpi(s)||PRINT_DPI)<PRINT_DPI*0.95);
     const done=[];
     for(const s of soft){
@@ -13411,7 +13441,7 @@ document.getElementById('printReadyBtn').addEventListener('click',async()=>{
       if(await enhanceArt(s)) done.push(s);
     }
     const failed=soft.filter(s=>!done.includes(s));
-    const parts=['placeholder size',
+    const parts=keepOwn?['actual size, keeping the file’s own bleed']:['placeholder size',
       '2.5 mm '+({mirror:'mirrored',extend:'extended',content:'content-aware',ai:'AI-filled'}[bleedModeNow()])+' bleed to the edge'];
     if(done.length) parts.push(done.join(' and ')+' upscaled to print resolution');
     showMsg(out,(failed.length?'⚠ ':'✓ ')+parts.join(', ')
@@ -24438,6 +24468,7 @@ document.getElementById('pickupFromBs').addEventListener('click',async()=>{
     }
     if(got.status==='failed'){ say('Could not read BigSeller: '+escapeHtml(got.error||'unknown'),false); return; }
     const found=Array.isArray(got.found)?got.found:[];
+    const noDuoke=found.some(f=>f.duoke===false);
     if(!found.length){
       await sb.from('pickup_sync_jobs').update({status:'done'}).eq('id',job.id);
       say('No Seller Store Pick Up orders in BigSeller New orders.'); return;
@@ -24464,8 +24495,9 @@ document.getElementById('pickupFromBs').addEventListener('click',async()=>{
     say(`Added ${added.length} pick up${added.length===1?'':'s'}, packed ${res.length-bad.length} of ${ship.length}.`
       +(bad.length?'<br/>Not packed: '+bad.map(r=>escapeHtml(r.order_id+' ('+r.note+')')).join(', '):'')
       +(failed.length?'<br/>Not added: '+failed.map(escapeHtml).join(', '):'')
-      +(!done?'<br/>Macro Studio did not confirm the packing — check BigSeller.':(done.status==='failed'?'<br/>'+escapeHtml(done.error):'')),
-      !bad.length&&!failed.length&&!!done&&done.status==='done');
+      +(!done?'<br/>Macro Studio did not confirm the packing — check BigSeller.':(done.status==='failed'?'<br/>'+escapeHtml(done.error):''))
+      +(noDuoke?'<br/>No notes: DuoKe is not readable on the shop PC — close it and open "DuoKe (readable)".':''),
+      !bad.length&&!failed.length&&!!done&&done.status==='done'&&!noDuoke);
   }catch(err){
     say('Pull from BigSeller failed: '+escapeHtml((err&&err.message)||'unknown error'),false);
   }finally{
@@ -28575,7 +28607,7 @@ let gtCurrentDesign=null;          // the design open in the editor
 let gtSlotEdit=false, gtSelSlot=null;   // Contours on, and the placeholder in hand
 const gtShapeSig=new Map();          // see gtKeepShape
 const gtSelSet=new Set();          // every placeholder picked, gtSelSlot among them
-const GT_SHEET_NEW={pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{}};
+const GT_SHEET_NEW={pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{},marksFromBase:true,marksFromBaseV2:false,baseRemoved:false};
 const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
   // null rather than a number: the layout centres itself until it is told
@@ -30017,7 +30049,8 @@ document.getElementById('gtShapeMapList').addEventListener('change',async e=>{
 // A sheet with no base layer takes the picture in the shape folder whose name
 // says "registration" — the one carrying the dots the cutter registers on.
 async function gtAutoBase(){
-  if(gtSheet.baseFile) return false;
+  // a base taken off by hand stays off; '' alone would read as "none yet"
+  if(gtSheet.baseFile||gtSheet.baseRemoved) return false;
   const list=await gtShapeList().catch(()=>[]);
   const hit=(list||[]).find(f=>f.kind==='art'&&/registration/i.test(f.name));
   if(!hit) return false;
@@ -30028,7 +30061,7 @@ async function gtAutoBase(){
 }
 async function gtApplyBase(file,path){
   gtAssets.set(path,file);
-  gtSheet.baseFile=path; gtBaseFrom=path;
+  gtSheet.baseFile=path; gtBaseFrom=path; gtSheet.baseRemoved=false;
   try{ gtBaseImg=await loadImage(await gtArtURL(file,path)); }
   catch(e){ gtBaseImg=null; return false; }
   return true;
@@ -31645,11 +31678,27 @@ function gtDrawTag(ctx,line,x,y,w,h,sc,forExport,vec){
     // page is placed under this render, at exactly this rectangle
     // Invert colours flips the artwork and its bleed alike; transparent stays
     // transparent, so a cut-out stays the shape it is
-    const gap={x:Math.max(r.x-x,x+w-(r.x+r.w)),y:Math.max(r.y-y,y+h-(r.y+r.h))};
-    if(!(vec&&vec.take(d,r,b,gap))){
+    // the gap each side on its own: a tag nudged right has paper on its left
+    // and none on its right. The bleed is grown by the larger, which is enough
+    // for every side; the clip below stops each side at the cut plus the bleed,
+    // so the side with no gap never runs on over the next tag.
+    const gl=r.x-x, gr=x+w-(r.x+r.w), gt=r.y-y, gb=y+h-(r.y+r.h);
+    const gap={x:Math.max(gl,gr),y:Math.max(gt,gb)};
+    const clip={x:x-b,y:y-b,w:w+b*2,h:h+b*2};
+    // a placed page with a made-up bleed: its page goes in at the trim and only
+    // the ring of bleed around it is drawn here, the way the Custom Print
+    // Template does it
+    const took=vec?vec.take(d,r,b,gap,clip):false;
+    if(took!==true){
       ctx.save();
+      ctx.beginPath();
+      ctx.rect(clip.x*sc,clip.y*sc,clip.w*sc,clip.h*sc);
+      ctx.clip();
       if(gtSheet.invertArt) ctx.filter='invert(1)';
       gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,d.id,gap);
+      // a pixel short of the trim, so the ring overlaps the placed page rather
+      // than leaving a hairline of paper between them
+      if(took==='ring') ctx.clearRect(r.x*sc+0.5,r.y*sc+0.5,r.w*sc-1,r.h*sc-1);
       ctx.restore();
     }
   }
@@ -31669,6 +31718,23 @@ function gtDrawBase(ctx,sc){
   ctx.drawImage(gtBaseImg,base.x*sc,base.y*sc,base.w*sc,base.h*sc);
   ctx.restore();
 }
+// The base layer for a PDF with artwork placed in it. The render then has no
+// base in it (see gtRenderPage): the placed pages lie under the render, and a
+// base drawn into it would cover them. It goes over everything instead, as its
+// own layer multiplied onto the page — the same look as on screen. sc: pixels
+// per mm, the render's own.
+function gtBaseOver(sc){
+  const base=gtBaseRect(); if(!base) return [];
+  return [{x:base.x,y:base.y,w:base.w,h:base.h,blend:'multiply',draw(){
+    const c=document.createElement('canvas');
+    c.width=Math.max(1,Math.round(base.w*sc)); c.height=Math.max(1,Math.round(base.h*sc));
+    const ctx=c.getContext('2d');
+    ctx.drawImage(gtBaseImg,0,0,c.width,c.height);
+    const d=ctx.getImageData(0,0,c.width,c.height);
+    c.width=c.height=0;
+    return d;
+  }}];
+}
 // `view` is the piece of the sheet to draw, in mm — the whole of it normally,
 // a window onto one placeholder when zoomed. Everything below is drawn in sheet
 // millimetres either way; only what the canvas is looking at changes.
@@ -31687,7 +31753,7 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec){
   // this sheet's own shape and its own slice of that shape's queue — the page
   // number counts across the whole order, not within one shape
   const plan=gtPageAt(page);
-  const per=S.slots.length; if(!per){ gtDrawBase(ctx,sc); return; }
+  const per=S.slots.length; if(!per){ if(!vec) gtDrawBase(ctx,sc); return; }
   const q=plan?plan.queue:gtQueue();
   const start=plan?plan.start:page*per;
   S.slots.forEach((slot,i)=>{
@@ -31697,7 +31763,9 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec){
   // The base layer goes over the tags, so its dots and template lines are
   // never hidden by artwork — on screen and in the PDF alike. Multiplied, so
   // its white paper lets the tags show through while its black stays black.
-  gtDrawBase(ctx,sc);
+  // With artwork placed under the render the base is the PDF's own layer over
+  // it all instead (gtBaseOver), so it does not cover the placed pages.
+  if(!vec) gtDrawBase(ctx,sc);
   // the boxes of the line being worked on, because they are dragged here
   if(!forExport&&gtSelLine) S.slots.forEach((slot,i)=>{
     const line=q[start+i]; if(!line||line.id!==gtSelLine) return;
@@ -32802,7 +32870,8 @@ document.getElementById('gtHoleToggle').addEventListener('change',e=>{ gtSheet.s
 // The dots change what is printed, so every one of these redraws the sheet.
 document.getElementById('gtMarksToggle').addEventListener('change',e=>{ gtSheet.marksOn=e.target.checked; gtDraw(); gtSaveSoon(); });
 document.getElementById('gtMarksFromBase').addEventListener('change',e=>{
-  gtSheet.marksFromBase=e.target.checked; gtBaseDotsCache=null;
+  // a pick made by hand is a choice, never the old default to migrate away
+  gtSheet.marksFromBase=e.target.checked; gtSheet.marksFromBaseV2=true; gtBaseDotsCache=null;
   gtDraw(); gtSyncShapeSlots(); gtSaveSoon();
 });
 // nothing on screen changes: this is about what every export is made of, on
@@ -33528,13 +33597,13 @@ document.getElementById('gtBaseBtn').addEventListener('click',async()=>{
   if(!file) return;
   const path=await gtAssetPath('shape',file);
   gtAssets.set(path,file);
-  gtSheet.baseFile=path; gtBaseFrom=path;
+  gtSheet.baseFile=path; gtBaseFrom=path; gtSheet.baseRemoved=false;
   try{ gtBaseImg=await loadImage(await fileToDataURL(file)); }catch(e){ gtBaseImg=null; }
   await gtSaveLib();
   gtSyncShapeSlots(); gtDraw();
 });
 document.getElementById('gtBaseDelBtn').addEventListener('click',async()=>{
-  gtSheet.baseFile=''; gtBaseImg=null; gtBaseFrom='';
+  gtSheet.baseFile=''; gtBaseImg=null; gtBaseFrom=''; gtSheet.baseRemoved=true;
   await gtSaveLib(); gtSyncShapeSlots(); gtDraw();
 });
 document.getElementById('gtDesignSearch').addEventListener('input',()=>gtRenderDesignList());
@@ -34762,7 +34831,7 @@ async function gtBuildPdf(count,render,sources){
     // Layers over the page at a finer resolution than it — a place card's
     // words. Each is drawn, packed and let go one at a time, so a sheet of
     // them never holds more than one layer's pixels at once.
-    const layers=[];
+    const layers=[]; let multiply=false;
     for(const o of (over||[])){
       const d=o.draw(); if(!d) continue;
       const a=rgbaToAlphaScanlines(d);
@@ -34778,7 +34847,11 @@ async function gtBuildPdf(count,render,sources){
         +`/DecodeParms << /Predictor 15 /Colors 1 /BitsPerComponent 8 /Columns ${d.width} >> `
         +`/Length ${msk.length} >>\nstream\n`));
       push(msk); push(enc.encode('\nendstream\nendobj\n'));
-      cs+=`\nq ${f(mmToPt(o.w))} 0 0 ${f(mmToPt(o.h))} ${f(mmToPt(o.x))} ${f(mmToPt(hMm-(o.y+o.h)))} cm /${nm} Do Q`;
+      // a layer that multiplies (the gift tag base) darkens what is under it
+      // rather than covering it
+      const gs=o.blend==='multiply'?'/Gm gs ':'';
+      if(gs) multiply=true;
+      cs+=`\nq ${gs}${f(mmToPt(o.w))} 0 0 ${f(mmToPt(o.h))} ${f(mmToPt(o.x))} ${f(mmToPt(hMm-(o.y+o.h)))} cm /${nm} Do Q`;
       layers.push([nm,num]);
     }
     const content=enc.encode(cs);
@@ -34786,7 +34859,8 @@ async function gtBuildPdf(count,render,sources){
       .concat([...names].map(([form,nm])=>`/${nm} ${form} 0 R`))
       .concat(layers.map(([nm,num])=>`/${nm} ${num} 0 R`)).join(' ');
     mark(pageNum); push(enc.encode(`${pageNum} 0 obj\n<< /Type /Page /Parent ${pages} 0 R `
-      +`/MediaBox [0 0 ${W} ${H}] /Resources << /XObject << ${xo} >> >> `
+      +`/MediaBox [0 0 ${W} ${H}] /Resources << /XObject << ${xo} >> `
+      +(multiply?'/ExtGState << /Gm << /Type /ExtGState /BM /Multiply >> >> ':'')+`>> `
       +`/Contents ${contentNum} 0 R >>\nendobj\n`));
     mark(contentNum); push(enc.encode(`${contentNum} 0 obj\n<< /Length ${content.length} >>\nstream\n`));
     push(content); push(enc.encode('\nendstream\nendobj\n'));
@@ -34844,17 +34918,26 @@ async function gtFillBleeds(pages,plan){
 // rectangle is clear: nothing of the sheet's own printed underneath it, and a
 // bleed the placing can do — growing artwork outward is something done to
 // pixels, not to a page.
+// The base layer does not stop a placing: with artwork placed the base goes
+// into the PDF as a layer of its own over everything, multiplied, as on screen.
+// Answers true when the whole tag is placed, 'ring' when its page is placed at
+// the trim and the bleed round it is still to be drawn from pixels (a gap to
+// carry across, or a bleed made from the edges), false when it is drawn.
 function gtVecTaker(forms,place){
-  const base=gtBaseRect();
-  return {take(d,r,b,gap){
+  return {take(d,r,b,gap,clip){
     if(!forms.has(d.id)) return false;
     if(gtSheet.invertArt) return false;     // a placed page cannot be inverted
-    // a gap to carry the bleed across is made up from pixels
+    // growing a cut-out's shape outward reaches inside its box too, which a
+    // ring round the trim cannot carry — that one stays pixels
+    if(b>0&&gtSheet.bleedMode==='offset') return false;
     const gapped=!!gap&&(gap.x>0.05||gap.y>0.05);
-    if(b>0&&(gtSheet.bleedMode!=='scale'||gtSheet.bleedTrimPx>0||gapped)) return false;
+    if(b>0&&(gtSheet.bleedMode!=='scale'||gapped)){
+      place.push({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip});
+      return 'ring';
+    }
+    // Stretch with nothing to cross: the page itself is enlarged into the bleed
     const R=b>0?{x:r.x-b,y:r.y-b,w:r.w+b*2,h:r.h+b*2}:{x:r.x,y:r.y,w:r.w,h:r.h};
-    if(base&&R.x<base.x+base.w&&base.x<R.x+R.w&&R.y<base.y+base.h&&base.y<R.y+R.h) return false;
-    place.push({key:d.id,rect:R});
+    place.push({key:d.id,rect:R,clip});
     return true;
   }};
 }
@@ -35083,7 +35166,8 @@ async function gtExport(print){
       placed+=place.length;
       const ctx=c.getContext('2d');
       const out={imgData:ctx.getImageData(0,0,c.width,c.height),
-                 wMm:S.paperW,hMm:S.paperH,place,clear:!!vec};
+                 wMm:S.paperW,hMm:S.paperH,place,clear:!!vec,
+                 over:vec?gtBaseOver(px/Math.max(S.paperW,S.paperH)):[]};
       setTimeout(()=>{ c.width=c.height=0; },0);
       return out;
     },sources);
@@ -50422,7 +50506,8 @@ async function mcGiftBundle(lines,mode){
       gtRenderPage(c,i,px,true,null,vec);
       const ctx=c.getContext('2d');
       const imgData=ctx.getImageData(0,0,c.width,c.height);
-      return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH,place,clear:!!vec};
+      return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH,place,clear:!!vec,
+              over:vec?gtBaseOver(px/Math.max(gtSheet.paperW,gtSheet.paperH)):[]};
     },sources);
     // handed to mcPut, which every caller saves this PDF through next
     if(cuts) mcPendingCuts=cuts.filter(Boolean);
