@@ -8795,10 +8795,31 @@ async function pcRegisterFolderFonts(){
     const w=document.getElementById('pcCatList');
     if(w&&!w.contains(document.activeElement)&&typeof pcRenderCats==='function') pcRenderCats(); });
 }
+// The Place Card folder's fonts loaded without the Place Card screen being
+// open — a Magic Create batch renders its lines from anywhere, where the active
+// folder set is Custom Template's and holds no fonts. Asks for nothing: a
+// folder whose permission has lapsed stays unloaded, and the line says so.
+async function pcEnsureFolderFonts(){
+  const dir=await gtIdbGet('loadDesignDir:placecard').catch(()=>null);
+  if(!dir||!await loadDesignDirOk(dir,false)) return;
+  const fonts=[];
+  try{ await loadDesignScan(dir,'',fonts); }catch(e){ return; }
+  for(const f of fonts){
+    if(pcFontReg.has(f.key)) continue;
+    try{
+      const face=new FontFace(f.family,await (await f.handle.getFile()).arrayBuffer());
+      await face.load(); document.fonts.add(face); pcFontReg.add(f.key);
+    }catch(e){ console.warn('Place Card font did not load:',f.name,e); }
+  }
+}
 function pcFamily(key){
   if(typeof key==='string'&&key.startsWith('file:')){
     const f=(loadDesignFonts||[]).find(x=>x.key===key);
-    return f?`"${f.family}", 'IBM Plex Sans', sans-serif`:PC_FONTS.plex;
+    if(f) return `"${f.family}", 'IBM Plex Sans', sans-serif`;
+    // loaded earlier, from a folder set no longer on screen: its family is
+    // its path's, so it is still there to draw in
+    if(pcFontReg.has(key)) return `"pcf-${pcHash(key.slice(5))}", 'IBM Plex Sans', sans-serif`;
+    return PC_FONTS.plex;
   }
   return PC_FONTS[key]||PC_FONTS.plex;
 }
@@ -9749,8 +9770,16 @@ function fillOrder(list){
   const ph=list||state.placeholders;
   if(ph.length<2) return ph.slice();
   const band=Math.max(0.5,(ph.reduce((s,x)=>s+x.hMm,0)/ph.length)/2);
-  return ph.slice().sort((a,b)=>
-    (Math.round(b.yMm/band)-Math.round(a.yMm/band))||(a.xMm-b.xMm));
+  // rows are clustered from the bottom up: a box joins the row while it sits
+  // within half a card of that row's first box. Rounding y onto fixed bands
+  // flipped a row sitting on a band edge after a 0.1 mm nudge.
+  const byY=ph.slice().sort((a,b)=>(b.yMm-a.yMm)||(a.xMm-b.xMm));
+  const rows=[];
+  byY.forEach(p=>{
+    const r=rows[rows.length-1];
+    if(r&&r.y0-p.yMm<=band) r.items.push(p); else rows.push({y0:p.yMm,items:[p]});
+  });
+  return rows.flatMap(r=>r.items.sort((a,b)=>a.xMm-b.xMm));
 }
 // The boxes the artwork goes into, in fill order. On Place Card a box that
 // belongs to a category is where a card's words go — the Names half of a tent
@@ -10644,9 +10673,16 @@ function phZoomToPh(ph,side){
   if(!ph) return false;
   const Z=phZs(side);
   Z.scale=phFillScale(ph);
-  Z.at={x:ph.xMm+ph.wMm/2,y:ph.yMm+ph.hMm/2};
+  const sh=phShiftOf(side);
+  Z.at={x:ph.xMm+ph.wMm/2+sh.xMm,y:ph.yMm+ph.hMm/2+sh.yMm};
   Z.on=true;
   return true;
+}
+// where a side's cards are drawn from: renderSide moves each side by its own
+// registration shift, so the window is centred on the card as drawn
+function phShiftOf(side){
+  const s=state.shift&&state.shift[side==='back'?'back':'front'];
+  return {xMm:Number(s&&s.xMm)||0,yMm:Number(s&&s.yMm)||0};
 }
 function phZoomOff(side){ const Z=phZs(side); Z.on=false; Z.scale=1; }
 // The card being worked on — the one selected, or the bottom-left one when
@@ -10678,7 +10714,8 @@ function phZoomFollowSel(){
   const ph=phSelected()[0]; if(!ph) return;
   ['front','back'].forEach(side=>{
     const Z=phZs(side);
-    if(Z.on) Z.at={x:ph.xMm+ph.wMm/2,y:ph.yMm+ph.hMm/2};
+    const sh=phShiftOf(side);
+    if(Z.on) Z.at={x:ph.xMm+ph.wMm/2+sh.xMm,y:ph.yMm+ph.hMm/2+sh.yMm};
   });
 }
 function phZoomSync(){
@@ -10886,14 +10923,17 @@ function refreshSheetNav(){
 // ---------- layout controls ----------
 function readLayoutInputs(){
   const L=state.layout;
-  L.cardW=parseFloat(document.getElementById('cardW').value)||L.cardW;
-  L.cardH=parseFloat(document.getElementById('cardH').value)||L.cardH;
+  // a card has a size and a gap is never negative; anything else keeps what was there
+  const pos=(id,fb)=>{ const v=parseFloat(document.getElementById(id).value); return isFinite(v)&&v>0?v:fb; };
+  const nn=id=>Math.max(0,parseFloat(document.getElementById(id).value)||0);
+  L.cardW=pos('cardW',L.cardW);
+  L.cardH=pos('cardH',L.cardH);
   L.cols=Math.max(1,parseInt(document.getElementById('gridCols').value)||1);
   L.rows=Math.max(1,parseInt(document.getElementById('gridRows').value)||1);
-  L.leadTrim=parseFloat(document.getElementById('leadTrim').value)||0;
-  L.sideTrim=parseFloat(document.getElementById('sideTrim').value)||0;
-  L.slit=parseFloat(document.getElementById('gutterSlit').value)||0;
-  L.cut=parseFloat(document.getElementById('gutterCut').value)||0;
+  L.leadTrim=nn('leadTrim');
+  L.sideTrim=nn('sideTrim');
+  L.slit=nn('gutterSlit');
+  L.cut=nn('gutterCut');
 }
 function writeLayoutInputs(){
   const L=state.layout;
@@ -10940,7 +10980,10 @@ document.querySelectorAll('#layoutSeg button').forEach(b=>{
   document.getElementById(id).addEventListener('input',updateCalc);
 });
 document.getElementById('genGridBtn').addEventListener('click',()=>{
-  readLayoutInputs();generateGrid();
+  readLayoutInputs();
+  // a grid that runs off the paper is not built; the calc box already says why
+  if(!gridMetrics().fits){ updateCalc(); return; }
+  generateGrid();
   fitArtToCard('front');fitArtToCard('back');
   // how many fit per sheet just changed, so how many sheets the job needs has too
   renderPlaceholderList();refreshArtInputs();updateCalc();renderDesignLines();drawAll();
@@ -11017,10 +11060,18 @@ document.getElementById('addPlaceholderBtn').addEventListener('click',()=>{
       else if(first.length){ x=fx0+c*(S.cardW+S.slit); y=fy0+r*(S.cardH+S.cut); }
       else { x=S.originX+c*(S.cardW+S.slit); y=S.originY+r*(S.cardH+S.cut); }
       added.push({id:uid(), label:'C'+(n+added.length+1), cat, setNo,
-        xMm:Math.max(0,Math.min(p.w-S.cardW,x)),
-        yMm:Math.max(0,Math.min(p.h-S.cardH,y)),
-        wMm:S.cardW, hMm:S.cardH});
+        xMm:x, yMm:y, wMm:S.cardW, hMm:S.cardH});
     }
+  }
+  // A set that runs off the paper is refused: pinning the strays to the edge
+  // stacked them on top of each other
+  const off=added.some(a=>a.xMm<-0.01||a.yMm<-0.01||a.xMm+a.wMm>p.w+0.01||a.yMm+a.hMm>p.h+0.01);
+  if(off){
+    updateSetCalc();
+    const el=document.getElementById('setCalc');
+    if(el){ el.innerHTML+='<br>⚠ this set runs off the sheet — not added';
+      el.style.borderColor='var(--rust)'; el.style.color='var(--rust)'; }
+    return;
   }
   state.placeholders.push(...added);
   renderPlaceholderList();refreshArtInputs();updateCalc();updateSetCalc();renderDesignLines();
@@ -11435,8 +11486,10 @@ document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
   const at=e=>{
     const r=c.getBoundingClientRect();
     if(!r.width||!r.height) return null;
-    const V=phView('front');
-    return {x:V.x+(e.clientX-r.left)/r.width*V.w, y:V.y+(e.clientY-r.top)/r.height*V.h};
+    // and back out of the front's registration shift, which the cards are drawn
+    // through: the pointer lands on the drawn card, the card's numbers are not
+    const V=phView('front'), sh=phShiftOf('front');
+    return {x:V.x+(e.clientX-r.left)/r.width*V.w-sh.xMm, y:V.y+(e.clientY-r.top)/r.height*V.h-sh.yMm};
   };
   // the handle is drawn 7 canvas pixels across, so that is what it is worth in
   // millimetres at whatever size the sheet is being shown — which is smaller
@@ -11930,9 +11983,26 @@ function pcBulkCatOptions(){
 
 // ---------- sheet controls ----------
 document.getElementById('applySizeBtn').addEventListener('click',()=>{
-  state.paper.w=parseFloat(document.getElementById('paperW').value)||state.paper.w;
-  state.paper.h=parseFloat(document.getElementById('paperH').value)||state.paper.h;
-  state.paper.unit=document.getElementById('paperUnit').value;
+  const pos=(id,fb)=>{ const v=parseFloat(document.getElementById(id).value); return isFinite(v)&&v>0?v:fb; };
+  const was=state.paper.unit, unit=document.getElementById('paperUnit').value;
+  const cv=v=>Math.round(fromMm(toMm(v,was),unit)*1000)/1000;
+  let w=pos('paperW',state.paper.w), h=pos('paperH',state.paper.h);
+  if(unit!==was){
+    // Only the unit changed: the sheet and the layout keep their real size. A
+    // paper box left as it was is the old unit's figure and is converted; one
+    // retyped is taken as the new unit's.
+    if(w===state.paper.w) w=cv(w);
+    if(h===state.paper.h) h=cv(h);
+    readLayoutInputs();
+    const L=state.layout;
+    ['cardW','cardH','leadTrim','sideTrim','slit','cut'].forEach(k=>{ L[k]=cv(Number(L[k])||0); });
+    ['setCardW','setCardH'].forEach(id=>{ const el=document.getElementById(id);
+      const v=el&&parseFloat(el.value); if(el&&isFinite(v)&&v>0) el.value=cv(v); });
+  }
+  state.paper.w=w; state.paper.h=h; state.paper.unit=unit;
+  document.getElementById('paperW').value=w;
+  document.getElementById('paperH').value=h;
+  if(unit!==was) writeLayoutInputs();
   // the design rows carry a bleed in the sheet's unit, so they are redrawn too
   renderPlaceholderList();refreshArtInputs();renderDesignLines();updateCalc();drawAll();
 });
@@ -12423,6 +12493,11 @@ async function cropApply(){
       state.final[side]={...state.final[side],...fresh(cut)};
       n=1;
     }
+    // the turn upload chose fitted the picture's old shape; a crop that flips
+    // it portrait <-> landscape re-decides it (a same-shape crop keeps any turn)
+    const now=state.final[side].img, wideOf=i=>i.naturalWidth>i.naturalHeight;
+    if(now&&now.naturalWidth&&now.naturalWidth!==now.naturalHeight&&img.naturalWidth!==img.naturalHeight
+      &&wideOf(now)!==wideOf(img)) matchCardOrientation(side,now);
     fitArtToCard(side);
     refreshSlots(); refreshArtInputs(); drawAll();
     cropClose();
@@ -13084,9 +13159,15 @@ function modelWorker(main,onDead){
     for(const p of waiting.values()) p.rej(new Error(e.message||'the AI worker stopped'));
     waiting.clear(); if(onDead) onDead();
   };
-  return (msg,transfer)=>new Promise((res,rej)=>{
+  const call=(msg,transfer)=>new Promise((res,rej)=>{
     const id=++seq; waiting.set(id,{res,rej}); wk.postMessage({...msg,id},transfer||[]);
   });
+  // a worker whose model would not start is let go, model bytes and all —
+  // otherwise every retry keeps another copy alive
+  call.kill=()=>{ try{ wk.terminate(); }catch(e){} URL.revokeObjectURL(url);
+    for(const p of waiting.values()) p.rej(new Error('the AI worker stopped'));
+    waiting.clear(); };
+  return call;
 }
 // LaMa runs on the processor: the graphics card route cannot run its Fourier
 // layers, and on the page's own thread a quarter of a minute per square would
@@ -13096,7 +13177,8 @@ function lamaSession(say){
     const bytes=await modelBytes(LAMA_URL,LAMA_SIZE,'AI model',say);
     say('Starting the AI model…',true);
     const call=modelWorker(lamaWorkerMain,()=>{ lamaSessionP=null; });
-    await call({type:'init',ortBase:ORT_BASE,bytes:bytes.buffer},[bytes.buffer]);
+    await call({type:'init',ortBase:ORT_BASE,bytes:bytes.buffer},[bytes.buffer])
+      .catch(err=>{ call.kill(); throw err; });
     return {run:async(image,mask)=>{
       const im=image.slice(), mk=mask.slice();
       const m=await call({type:'run',image:im.buffer,mask:mk.buffer},[im.buffer,mk.buffer]);
@@ -13235,7 +13317,8 @@ function srSession(say){
     const bytes=await modelBytes(SR_URL,SR_SIZE,'upscaler',say);
     say('Starting the upscaler…',true);
     const call=modelWorker(srWorkerMain,()=>{ srSessionP=null; });
-    const init=await call({type:'init',ortBase:ORT_BASE,bytes:bytes.buffer},[bytes.buffer]);
+    const init=await call({type:'init',ortBase:ORT_BASE,bytes:bytes.buffer},[bytes.buffer])
+      .catch(err=>{ call.kill(); throw err; });
     return {gpu:!!init.gpu,run:async(rgb,w,h)=>{
       const buf=rgb.slice().buffer;
       const m=await call({type:'run',rgb:buf,w,h},[buf]);
@@ -13463,12 +13546,18 @@ async function enhanceArt(side){
     try{ tag=imageDpi(o.data); }catch(e){}
     const k=c.width/img.naturalWidth;
     const dx=tag&&tag.x>0?tag.x*k:dpi*k, dy=tag&&tag.y>0?tag.y*k:dx;
-    const data=pngWithDpi(c.toDataURL('image/png'),dx,dy);
+    // a trim the crop (or the PDF) stamped in is fractions of the picture, so
+    // it carries over to the bigger copy unchanged
+    artTrimFrac(img);
+    const trim=img._pdfTrim;
+    const data=trim?pngWithDpi(c.toDataURL('image/png'),dx,dy,'pigu-pdf',trim.map(n=>Math.max(0,n).toFixed(5)).join(','))
+      :pngWithDpi(c.toDataURL('image/png'),dx,dy);
     const up=await loadImage(data);
     const name=(o.name||'artwork').replace(/(\.[^.]+)?$/,'')+` · enhanced ×${shown}.png`;
     // the upload was a JPEG or PNG on disk; the file now printing is this one
-    // and no longer the line's filed copy, or Save to line would pass it over
-    state.final[side]={...o,data,img:up,name,file:null,mcPath:null};
+    // and no longer the line's filed copy, or Save to line would pass it over —
+    // nor the designs-folder file `source` names, or a template would reopen that
+    state.final[side]={...o,data,img:up,name,file:null,source:null,mcPath:null};
     artEnhancing[side]=false;
     refreshSlots(); drawAll();
     return true;
@@ -26173,11 +26262,11 @@ async function saveTemplate(){
     // plain Upload has no reusable path to point the next load back at. The
     // path and the quantity are what is kept, never the pixels: a row holding
     // a few hundred KB of data URL per design is a row nobody can sync.
-    const design=state.final.front.source
+    const design=state.final.front.source&&state.final.front.source.path
       ? {path:state.final.front.source.path,name:state.final.front.name} : null;
     // a design keeping its own bleed keeps it in the template too, so a job
     // reopened next month lays down what it laid down the first time
-    const designs=state.designs.filter(d=>d.source).map(d=>
+    const designs=state.designs.filter(d=>d.source&&d.source.path).map(d=>
       ({path:d.source.path,name:d.name,qty:d.qty,rotate:designRotOf(d),
         bleedOn:!!d.bleedOn,bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}));
     const meta={name,folders,
@@ -26527,9 +26616,9 @@ async function pcSaveTemplate(){
   btn.disabled=true;btn.textContent='Saving…';
   try{
     readLayoutInputs();
-    const design=state.final.front.source
+    const design=state.final.front.source&&state.final.front.source.path
       ? {path:state.final.front.source.path,name:state.final.front.name} : null;
-    const designs=state.designs.filter(d=>d.source).map(d=>
+    const designs=state.designs.filter(d=>d.source&&d.source.path).map(d=>
       ({path:d.source.path,name:d.name,qty:d.qty,rotate:designRotOf(d),
         bleedOn:!!d.bleedOn,bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}));
     const meta={name,kind:'place-card',
@@ -28087,9 +28176,9 @@ function cptExportBtnsOff(off){
   CPT_EXPORT_BTNS.forEach(id=>{ const b=document.getElementById(id); if(b) b.disabled=off; });
 }
 async function exportSide(side,msgId,print){
-  if(side==='front'&&!pcFontsOkToPrint()) return;   // Place Card names in a missing font
   const out=msgId?document.getElementById(msgId):exportMsgEl(side);
   if(cptExportBusy){ showMsg(out,'An export is already running — wait for it to finish.',false); return; }
+  if(side==='front'&&!pcFontsOkToPrint()) return;   // Place Card names in a missing font
   cptExportBusy=true; cptExportBtnsOff(true);
   try{ await exportSideRun(side,out,print); }
   finally{ cptExportBusy=false; cptExportBtnsOff(false); }
@@ -30017,8 +30106,11 @@ async function gtSetModeNow(m,save){
   }
   // the order was built out of the page being left, and belongs to it
   gtOrders[gtMode]=gtOrder;
+  // and so was its run (Matte / Gloss / Sticker)
+  if(gtLoaded) await gtFinishKeep(gtMode);
   gtMode=next;
   if(save!==false) await gtIdbPut('gtMode',gtMode).catch(()=>{});
+  await gtFinishRestore();
   gtOrder=gtOrders[gtMode]||[];
   gtPage=0;
   await gtSwitchFolder();
@@ -34362,10 +34454,14 @@ function gtMoveSet(f){
 // in millimetres, which is what the rest of the screen is keyed in
 function gtNudgeFields(list,dx,dy){
   const A=gtEditGeom().art;
+  // held back as one, like a drag, so a group pushed to the edge keeps its shape
+  const clamp=(v,lo,hi)=>Math.min(hi,Math.max(lo,v));
+  let mx=A.w?dx/A.w:0, my=A.h?dy/A.h:0;
   list.forEach(f=>{
-    if(A.w) f.x=Math.min(1-f.w,Math.max(0,f.x+dx/A.w));
-    if(A.h) f.y=Math.min(1-f.h,Math.max(0,f.y+dy/A.h));
+    mx=clamp(mx,-f.x,1-f.w-f.x);
+    my=clamp(my,-f.y,1-f.h-f.y);
   });
+  list.forEach(f=>{ f.x+=mx; f.y+=my; });
 }
 const GT_ARROW={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]};
 // Space holds the sheet to the text that was clicked, and lets it go again.
@@ -34402,6 +34498,7 @@ document.addEventListener('keydown',e=>{
   }
   // Ctrl+G ties the ticked boxes together, and Ctrl+Shift+G unties them again
   if((e.ctrlKey||e.metaKey)&&(e.key==='g'||e.key==='G')){
+    if(typing) return;
     const ticked=d.fields.filter(f=>gtFieldPick.has(f.id));
     if(e.shiftKey){
       // untying works on whatever is in hand: the ticked boxes, or failing
@@ -34418,7 +34515,7 @@ document.addEventListener('keydown',e=>{
       const g=gtId('g');
       ticked.forEach(f=>{ f.group=g; });
     }
-    gtRenderFields(); gtDrawDesign();
+    gtRenderFields(); gtDrawDesign(); gtDraw(); gtSaveSoon();
     return;
   }
   if(typing||!GT_ARROW[e.key]) return;
@@ -34428,8 +34525,11 @@ document.addEventListener('keydown',e=>{
   const step=e.shiftKey?2:(e.altKey?0.1:0.5);          // mm
   const [ax,ay]=GT_ARROW[e.key];
   gtNudgeFields(moving,ax*step,ay*step);
-  gtRenderFields(); gtDrawDesign();
+  gtRenderFields(); gtDrawDesign(); gtSaveSoon();
+  // the sheet once the key settles, not on every repeat of a held arrow
+  clearTimeout(gtNudgeDrawT); gtNudgeDrawT=setTimeout(gtDraw,250);
 });
+let gtNudgeDrawT=0;
 (function gtDesignDrag(){
   const c=document.getElementById('gtDesignCanvas');
   // the pointer lands on a tag, and a field box is a fraction of the artwork
@@ -34504,6 +34604,8 @@ document.addEventListener('keydown',e=>{
     const p=at(e);
     for(let i=d.fields.length-1;i>=0;i--){
       const f=d.fields[i], l=localFrac(p,f,p.g);
+      // held to a box, only that box answers
+      if(gtEditLock&&f.id!==gtEditLock) continue;
       if(l.u<0||l.u>1||l.v<0||l.v>1) continue;
       e.preventDefault();
       gtFieldPick.clear(); gtEditSel=f;
@@ -34657,7 +34759,7 @@ function gtAlign(how){
     else if(how==='bottom') dy=1-y1;
     picked.forEach(f=>{ f.x+=dx; f.y+=dy; });
   }
-  gtRenderFields(); gtDrawDesign();
+  gtRenderFields(); gtDrawDesign(); gtDraw(); gtSaveSoon();
 }
 document.querySelectorAll('[data-gtalign]').forEach(b=>{
   b.addEventListener('click',()=>gtAlign(b.dataset.gtalign));
@@ -34761,6 +34863,8 @@ function gtPickLibField(card){
   const d=gtCurrentDesign; if(!d) return;
   const f=d.fields.find(x=>x.id===card.dataset.gtField);
   if(!f||gtEditSel===f) return;
+  // held to a box (space), nothing else takes the selection
+  if(gtEditLock&&f.id!==gtEditLock) return;
   gtEditSel=f;
   document.querySelectorAll('#gtFieldList .ph-card')
     .forEach(c=>c.classList.toggle('is-picked',c===card));
@@ -34799,7 +34903,7 @@ document.getElementById('gtFieldList').addEventListener('input',e=>{
       if(t.font){ f.font=t.font; const fs=card.querySelector('[data-gtd="font"]'); if(fs) fs.value=t.font; }
       const box=card.querySelector('[data-gtd="def"]');
       if(box) box.value=t.text;
-      gtDrawDesign();
+      gtDrawDesign(); gtDraw(); gtSaveSoon();
     }
     e.target.value='';
     return;
@@ -34815,7 +34919,7 @@ document.getElementById('gtFieldList').addEventListener('input',e=>{
     const span=(k==='x'||k==='w')?A.w:A.h;
     f[k]=span?Math.min(1,Math.max(0,(Number(e.target.value)||0)/span)):0;
   }
-  gtDrawDesign();
+  gtDrawDesign(); gtDraw(); gtSaveSoon();
 });
 document.getElementById('gtFieldList').addEventListener('click',async e=>{
   const d=gtCurrentDesign; if(!d) return;
@@ -34830,7 +34934,8 @@ document.getElementById('gtFieldList').addEventListener('click',async e=>{
     d.fields=d.fields.filter(x=>x!==f);
     gtFieldPick.delete(f.id);
     if(gtEditSel===f) gtEditSel=null;
-    gtRenderFields(); gtDrawDesign();
+    if(gtEditLock===f.id) gtEditLock=null;
+    gtRenderFields(); gtDrawDesign(); gtDraw(); gtSaveSoon();
     return;
   }
   if(e.target.closest('[data-gtsave]')){ await gtSavePhrase(f.def,f.font); return; }
@@ -34892,7 +34997,10 @@ document.getElementById('gtReplaceArtBtn').addEventListener('click',async()=>{
   gtAssets.set(path,file);
   d.file=path;
   try{ gtImgs.set(d.id,await loadImage(await gtArtURL(file))); }catch(e){}
-  gtDrawDesign();
+  // as with a crop: bleed grown and a cut line traced off the old picture go
+  [...gtGrown.keys()].forEach(k=>{ if(k.startsWith(d.id+'@')) gtGrown.delete(k); });
+  if(d.trace) d.trace=null;
+  gtArtWriteInputs(); gtArtChanged();
 });
 document.getElementById('gtSaveDesignBtn').addEventListener('click',async()=>{
   const msg=document.getElementById('gtDesignMsg');
@@ -35380,12 +35488,30 @@ document.getElementById('gtPltSaveBtn').addEventListener('click',async()=>{
 // sheet are the same — but they are two runs through the machine, so they
 // are two files, and the name is what tells them apart on the drive.
 let gtFinish='Matte';
+// Each page keeps its own run: Sticker chosen on the sticker page is not what
+// the festive page goes to the Fiery on. Kept by page, like the folders.
+let gtFinishes=null;
+async function gtFinishMap(){
+  if(!gtFinishes) gtFinishes=await gtIdbGet('gtFinish').catch(()=>null)||{};
+  return gtFinishes;
+}
+async function gtFinishKeep(page){
+  (await gtFinishMap())[page||gtMode]=gtFinish;
+  await gtIdbPut('gtFinish',{...gtFinishes}).catch(()=>{});
+}
+async function gtFinishRestore(){
+  const f=(await gtFinishMap())[gtMode];
+  gtFinish=(f==='Gloss'||f==='Sticker')?f:'Matte';
+  document.querySelectorAll('#gtFinishSeg [data-gt-finish]')
+    .forEach(x=>x.classList.toggle('on',x.dataset.gtFinish===gtFinish));
+}
 document.getElementById('gtFinishSeg').addEventListener('click',async e=>{
   const b=e.target.closest('[data-gt-finish]'); if(!b) return;
   const was=gtFinish;
   gtFinish=b.dataset.gtFinish;
   document.querySelectorAll('#gtFinishSeg [data-gt-finish]')
     .forEach(x=>x.classList.toggle('on',x.dataset.gtFinish===gtFinish));
+  gtFinishKeep();
   // A batch has lent this sheet one run's tags. Asking for the other run is
   // asking for the other sheet — not for these tags on different paper, which
   // is what it used to do: the same forty tags with a gloss name on the file.
@@ -35710,7 +35836,7 @@ async function gtOpen(){
         const last=gtModeOk(await gtIdbGet('gtMode').catch(()=>null));
         // the page last open, unless somebody has already asked for one
         // while this was reading — theirs is the page wanted now
-        if(!gtModeAsked) gtMode=last;
+        if(!gtModeAsked){ gtMode=last; await gtFinishRestore(); }
         // the handle survives a reload but its permission may not, and asking
         // again cannot happen here — that takes a tap, which the button is for
         await gtLoadSavedDir();
@@ -50014,6 +50140,7 @@ async function mcRenderLine(it,side){
     state.orderId=it.order_id;
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
     // names in a folder font that is not loaded would print in the fallback
+    if(side==='front'&&pcMode==='placecard'&&pcMissingFonts().length) await pcEnsureFolderFonts();
     const missFonts=side==='front'&&pcMode==='placecard'?pcMissingFonts():[];
     if(missFonts.length) throw new Error(`font not loaded: ${missFonts.join(', ')} — reconnect the design folder in Load design`);
     await mcApplyArt(it);
@@ -50954,10 +51081,10 @@ const PJ_KINDS={
     // which belong to a template and not to a job.
     snap(){
       readLayoutInputs();
-      const designs=(state.designs||[]).filter(d=>d.source).map(d=>
+      const designs=(state.designs||[]).filter(d=>d.source&&d.source.path).map(d=>
         ({path:d.source.path,name:d.name,qty:d.qty,sku:d.sku||'',rotate:designRotOf(d),
           bleedOn:!!d.bleedOn,bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}));
-      const design=state.final.front.source
+      const design=state.final.front.source&&state.final.front.source.path
         ? {path:state.final.front.source.path,name:state.final.front.name} : null;
       // counted from what is kept: an uploaded picture has no path to keep, so
       // counting it made a row that said "N cards" and opened to an empty sheet
