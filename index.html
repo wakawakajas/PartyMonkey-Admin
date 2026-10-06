@@ -9410,6 +9410,9 @@ async function useArtFile(group,side,file,source,split=true){
         // uploaded one is just its own page, so a line files half the bytes
         await Promise.all([useArtFile(group,'front',source?file:sides.front,source,false),
           useArtFile(group,'back',sides.back,null,false)]);
+        // the back is the folder file's own second page: a saved sheet names it
+        // by that path (printBackRef) rather than calling it an upload
+        if(source&&source.path&&state[group].back.file) state[group].back.pairPath=source.path;
         return;
       }
     }
@@ -10242,14 +10245,17 @@ function renderSide(side,canvas,maxDim,opts){
   // order still the front's, so each back design sits behind its front one.
   // The same cards are what the artwork below is laid into.
   const cardTrims=artOrder().map(ph=>phOnSide(ph,side));
-  const cardHoles=(ph,c)=>{
+  // (ox,oy): how far this card's own shift moved the canvas past the sheet's —
+  // the neighbours' trims did not move, so in that space they sit back by it
+  const cardHoles=(ph,c,ox=0,oy=0)=>{
     const out=[], E=0.01;
     cardTrims.forEach(o=>{
       if(o===ph||(o.id!=null&&o.id===ph.id)) return;
       // boxes laid over one another: a hole there would bite this card's own cut
       if(o.xMm<ph.xMm+ph.wMm-E&&o.xMm+o.wMm>ph.xMm+E&&o.yMm<ph.yMm+ph.hMm-E&&o.yMm+o.hMm>ph.yMm+E) return;
-      const x0=Math.max(c.x,o.xMm), y0=Math.max(c.y,o.yMm);
-      const x1=Math.min(c.x+c.w,o.xMm+o.wMm), y1=Math.min(c.y+c.h,o.yMm+o.hMm);
+      const qx=o.xMm-ox, qy=o.yMm-oy;
+      const x0=Math.max(c.x,qx), y0=Math.max(c.y,qy);
+      const x1=Math.min(c.x+c.w,qx+o.wMm), y1=Math.min(c.y+c.h,qy+o.hMm);
       if(x1-x0>1e-6&&y1-y0>1e-6) out.push({x:x0,y:y0,w:x1-x0,h:y1-y0});
     });
     return out;
@@ -10298,7 +10304,7 @@ function renderSide(side,canvas,maxDim,opts){
     if(own) clip={x:ph.xMm-bleedMm, y:ph.yMm-bleedMm, w:ph.wMm+bleedMm*2, h:ph.hMm+bleedMm*2};
     // and never inside another card's cut: the other cards' trims within reach,
     // cut out of the clip on screen and in the PDF alike
-    const holes=cardHoles(ph,clip);
+    const holes=cardHoles(ph,clip,artShift.xMm-shift.xMm,artShift.yMm-shift.yMm);
     const reach=(x,y)=>({x:Math.min(reachMm,tf?Math.min(x,(wMm-ph.wMm)/2+bleedMm):own?Math.min(x,bleedMm):x),
       y:Math.min(reachMm,tf?Math.min(y,(hMm-ph.hMm)/2+bleedMm):own?Math.min(y,bleedMm):y)});
     let ringOnly=false;
@@ -26435,6 +26441,7 @@ async function saveTemplate(){
     // a few hundred KB of data URL per design is a row nobody can sync.
     const design=state.final.front.source&&state.final.front.source.path
       ? {path:state.final.front.source.path,name:state.final.front.name} : null;
+    const designBack=printBackRef(), unkept=printUnkept();
     // a design keeping its own bleed keeps it in the template too, so a job
     // reopened next month lays down what it laid down the first time
     const designs=state.designs.filter(d=>d.source&&d.source.path).map(d=>
@@ -26443,7 +26450,7 @@ async function saveTemplate(){
     const meta={name,folders,
       paper:state.paper,layout:state.layout,placeholders:state.placeholders,
       showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate,
-      design,designs,orderId:state.orderId,pdfNaming:state.pdfNaming,
+      design,designBack,designs,unkept,orderId:state.orderId,pdfNaming:state.pdfNaming,
       // the job, not just the layout: what it is printed on, how big the
       // artwork sits and how far it bleeds all come back with the template
       artFit:state.artFit,artMode:state.artMode,art:state.art,bleed:state.bleed,
@@ -26478,7 +26485,7 @@ async function saveTemplate(){
     // that decides a batch, and reading it back here is how you see it took
     showMsg(msgEl,'✓ Saved "'+name+'"'+(folders.length?` — folder: ${folders[0]}`
       :' — no folder, so only a folder named exactly like it finds it')
-      +' — synced to your account',true);
+      +' — synced to your account'+(unkept.length?'. '+printUnkeptNote(unkept,'Saved'):''),!unkept.length);
   }catch(err){
     showMsg(msgEl,'Could not save: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false;btn.textContent='Save template'; }
@@ -26675,6 +26682,18 @@ function applyPrintState(meta,name,whole,keepArt){
     state.designs=[];               // saved with an empty list, and meant it
     renderDesignLines(); drawAll();
   }
+  // the back it was saved with, after the front (whose PDF may carry it), at
+  // the size it was saved at — loading fits it to the card afresh
+  const backRef=namesArt&&meta.designBack&&meta.designBack.path?meta.designBack:null;
+  if(backRef){
+    const prev=printArtLoading;
+    const backBox=meta.art&&meta.art.back&&meta.art.back.wMm>0&&meta.art.back.hMm>0?{...meta.art.back}:null;
+    printArtLoading=(async()=>{
+      try{ await prev; }catch(e){}
+      await printBackRestore(backRef,single,artGen);
+      if(backBox&&artGen===printArtGen&&state.final.back.data){ state.art.back={...backBox}; refreshArtInputs(); drawAll(); }
+    })();
+  }
   // Save waits on this: written mid-read, a template kept half a list (or
   // none) of what it was loaded with
   const p=printArtLoading;
@@ -26685,6 +26704,49 @@ function applyPrintState(meta,name,whole,keepArt){
 function savedDesignQty(q){
   const n=Math.round(Number(q));
   return q==null||q===''||!isFinite(n)?1:Math.max(0,n);
+}
+// The back as a saved template / sheet can name it: its own folder path, or the
+// back page of the front's two-page folder PDF. An upload has neither.
+function printBackRef(){
+  const b=state.final.back;
+  if(!b||!b.data) return null;
+  if(b.source&&b.source.path) return {path:b.source.path,name:b.name||''};
+  if(b.pairPath) return {path:b.pairPath,name:b.name||'',page:'back'};
+  return null;
+}
+// What a save cannot keep: anything uploaded rather than read off the designs
+// folder has no path to load it back from, and the pixels are never stored.
+function printUnkept(){
+  const out=[], up=o=>!!(o&&o.data&&!(o.source&&o.source.path));
+  if(usingPreset()) (state.designs||[]).forEach(d=>{ if(!(d.source&&d.source.path)) out.push(d.name||'an uploaded design'); });
+  ['front','back'].forEach(s=>{
+    const f=state.final[s];
+    if(s==='front'&&usingPreset()) return;
+    if(s==='back'?(f&&f.data&&!printBackRef()):up(f)){
+      const split=finalSplitList(s);
+      out.push(`${s} artwork “${f.name||'uploaded'}”`+(split?` (and its split list)`:''));
+    }
+  });
+  return out;
+}
+const printUnkeptNote=(list,when)=>list&&list.length
+  ? `${when} — not from the designs folder, so not kept: ${escapeHtml(list.join(', '))}. Add ${list.length===1?'it':'them'} again by hand.`
+  : '';
+// The back a template / sheet named, back on the sheet after the front's read
+async function printBackRestore(ref,single,artGen){
+  if(!ref||!ref.path) return;
+  // a back that is the front's second page comes in with the front itself
+  if(ref.page==='back'&&single&&single.path===ref.path) return;
+  const file=await loadDesignFileByPath(ref.path);
+  if(artGen!==printArtGen) return;
+  if(!file){ showMsg(msgEl,`Loaded — its back (${escapeHtml(ref.name||ref.path)}) isn't reachable. Choose the NAS folder or upload the back again.`,false); return; }
+  if(ref.page==='back'){
+    const sides=await pdfSides(file).catch(()=>null);
+    if(artGen!==printArtGen) return;
+    if(!sides){ showMsg(msgEl,`Loaded — ${escapeHtml(ref.name||ref.path)} no longer has a back page. Upload the back again.`,false); return; }
+    await useArtFile('final','back',sides.back,null,false);
+    if(state.final.back.file===sides.back) state.final.back.pairPath=ref.path;
+  }else await useArtFile('final','back',file,{dir:'loadDesignDir',path:ref.path},false);
 }
 async function loadTemplate(id){
   // whoever lays a shared sheet on it says so again once it is laid
@@ -26699,7 +26761,8 @@ async function loadTemplate(id){
   const {data,error}=await sb.from('templates').select('data').eq('id',id).single();
   if(error||!data){showMsg(msgEl,'Could not find that template.',false);return false;}
   applyPrintState(data.data,name);
-  showMsg(msgEl,'✓ Loaded "'+name+'"',true);
+  const lost=data.data&&data.data.unkept;
+  showMsg(msgEl,'✓ Loaded "'+name+'"'+(lost&&lost.length?'. '+printUnkeptNote(lost,'Saved with uploads'):''),!(lost&&lost.length));
   return true;
 }
 async function deleteTemplate(id){
@@ -29064,9 +29127,11 @@ const gtAssets=new Map();          // filename -> Blob, the bytes behind the man
 const gtImgs=new Map();            // design id -> decoded Image, ready to draw
 const gtBackImgs=new Map();        // back picture file -> decoded Image (see gtBackOf)
 // a saved sheet's own back picture, for that job only ('' = blank backs); null
-// = the library's (gtSheet.backFile). Never written into the library.
+// = the library's (gtSheet.backFile). Never written into the library. It is
+// the order's: kept per page with it (gtJobBacks), gone when the order is
+// emptied or replaced, and never lent to a Magic Create batch.
 let gtJobBack=null;
-const gtSheetBack=()=>gtJobBack!==null?gtJobBack:(gtSheet.backFile||'');
+const gtSheetBack=()=>gtJobBack!==null&&gtOrder.length?gtJobBack:(gtSheet.backFile||'');
 let gtDir=null;                    // the chosen folder, once permission is in hand
 let gtOrder=[];
 let gtPage=0;
@@ -29737,8 +29802,14 @@ async function gtOneOffRestore(lines){
 }
 async function gtLoadLib(){
   gtOneOffStash();
+  // the order outlives the library read, and so does the back it came with
+  const jb=gtJobBack;
   try{ await gtLoadLibRead(); }
-  finally{ await gtOneOffRestore(gtOrder).catch(()=>{}); }
+  finally{
+    await gtOneOffRestore(gtOrder).catch(()=>{});
+    gtJobBack=gtOrder.length?jb:null;
+    if(gtJobBack&&!gtBackImgs.has(gtJobBack)) await gtHydrateBacks().catch(()=>{});
+  }
 }
 async function gtLoadLibRead(){
   gtLib.designs=[]; gtLib.fonts=[]; gtLib.texts=[];
@@ -30209,7 +30280,7 @@ function gtApplyCut(file,path,text,fresh){
 function gtShapeLoaded(){ if(gtSheet.layoutFile) gtShapeSig.set(gtSheet.layoutFile,JSON.stringify(gtSheet.slots)); }
 function gtKeepShape(){
   const S=gtSheet, path=S.layoutFile;
-  if(!path||!gtLayout||!Array.isArray(S.slots)) return;
+  if(!path||!gtLayout||gtLayoutFrom!==path||!Array.isArray(S.slots)) return;
   if(gtShapeSig.get(path)===JSON.stringify(S.slots)) return;
   if(!S.shapeSlots||typeof S.shapeSlots!=='object') S.shapeSlots={};
   S.shapeSlots[path]=JSON.parse(JSON.stringify({slots:S.slots,paperW:S.paperW,paperH:S.paperH,
@@ -30277,6 +30348,7 @@ async function gtResolveFromRoot(ask){
   try{ return await root.getDirectoryHandle(name); }catch(e){ return null; }
 }
 const gtOrders={festive:null,custom:null,sticker:null};
+const gtJobBacks={festive:null,custom:null,sticker:null};   // each parked order's gtJobBack
 const GT_MODE_TITLE={festive:'Festive Gift Tag',custom:'Custom Gift Tag',sticker:'Sticker'};
 const gtModeOk=m=>Object.prototype.hasOwnProperty.call(GT_MODE_TITLE,m)?m:'festive';
 const GT_MODE_HINT={
@@ -30382,13 +30454,14 @@ async function gtSetModeNow(m,save){
     await gtApplyMode(); return;
   }
   // the order was built out of the page being left, and belongs to it
-  gtOrders[gtMode]=gtOrder;
+  gtOrders[gtMode]=gtOrder; gtJobBacks[gtMode]=gtOrder.length?gtJobBack:null;
   // and so was its run (Matte / Gloss / Sticker)
   if(gtLoaded) await gtFinishKeep(gtMode);
   gtMode=next;
   if(save!==false) await gtIdbPut('gtMode',gtMode).catch(()=>{});
   await gtFinishRestore();
   gtOrder=gtOrders[gtMode]||[];
+  gtJobBack=gtOrder.length?gtJobBacks[gtMode]:null;
   gtPage=0;
   await gtSwitchFolder();
   await gtApplyMode();
@@ -30958,6 +31031,7 @@ function gtBuildLayout(text){
         try{
           measure.setAttribute('d',pd);
           const bb=measure.getBBox();
+          // getCTM maps through the svg's viewBox too: min-x/min-y already off
           b=m?gtMapBox(bb,m):{x:bb.x,y:bb.y,w:bb.width,h:bb.height};
         }catch(e){ return; }
         if(!(b.w>0.5&&b.h>0.5)) return;           // a rule or a fold mark, not a tag
@@ -31064,7 +31138,7 @@ function gtRebuildSlotsFresh(){
   const S=gtSheet;
   gtPickOnly(null);                    // the new ones share the old ones' names
   if(gtLayout&&gtLayout.shapes.length){
-    const [minx,miny,vw,vh]=gtLayout.vb;
+    const [,,vw,vh]=gtLayout.vb;
     // the size the layout has been told to be, centred on the sheet. W and H
     // are independent on purpose — a file drawn in the wrong units is rarely
     // wrong by the same amount both ways.
@@ -31074,7 +31148,8 @@ function gtRebuildSlotsFresh(){
     const ox=S.layoutX==null?(S.paperW-LW)/2:S.layoutX;
     const oy=S.layoutY==null?(S.paperH-LH)/2:S.layoutY;
     S.slots=gtLayout.shapes.map((sh,i)=>({id:'s'+i,shape:i,
-      x:ox+(sh.bbox.x-minx)*sx, y:oy+(sh.bbox.y-miny)*sy,
+      // bbox is in viewport units already (gtBuildLayout): no viewBox offset again
+      x:ox+sh.bbox.x*sx, y:oy+sh.bbox.y*sy,
       w:sh.bbox.w*sx, h:sh.bbox.h*sy}));
     return;
   }
@@ -31972,8 +32047,9 @@ async function gtShowShape(path){
   if(path===gtSheet.layoutFile) return true;
   gtKeepShape();
   gtPickOnly(null);                    // what was picked belongs to the shape left
-  // the shape being left keeps its placeholders and its paper
-  if(gtSheet.layoutFile)
+  // the shape being left keeps its placeholders and its paper — not while the
+  // layout in hand is another file's (a step back still reading it in)
+  if(gtSheet.layoutFile&&gtLayoutFrom===gtSheet.layoutFile)
     gtShapeSlots.set(gtSheet.layoutFile,{slots:gtSheet.slots,layout:gtLayout,
       paperW:gtSheet.paperW,paperH:gtSheet.paperH,
       layoutW:gtSheet.layoutW,layoutH:gtSheet.layoutH,
@@ -32347,13 +32423,30 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box){
   if(took==='ring') ctx.clearRect(r.x*sc+0.5,r.y*sc+0.5,r.w*sc-1,r.h*sc-1);
   // grown bleed over a placed page: punch out every pixel the artwork
   // itself covers, so the page underneath shows there and only the growth
-  // (round the box, and round a cut-out's shape inside it) stays raster
+  // (round the box, and round a cut-out's shape inside it) stays raster.
+  // Punched hard: art only half see-through left the grown raster near
+  // opaque over the placed page, so any alpha at all punches fully.
   if(took==='offset'){
     ctx.filter='none';
     ctx.globalCompositeOperation='destination-out';
-    ctx.drawImage(img,r.x*sc,r.y*sc,r.w*sc,r.h*sc);
+    ctx.drawImage(gtPunchMask(img,Math.max(1,Math.round(r.w*sc)),Math.max(1,Math.round(r.h*sc))),
+      r.x*sc,r.y*sc,r.w*sc,r.h*sc);
   }
   ctx.restore();
+}
+// the artwork as a hard mask at this size: every pixel it touches, opaque
+const gtPunchMasks=new WeakMap();
+function gtPunchMask(img,wpx,hpx){
+  const k=wpx+'x'+hpx, had=gtPunchMasks.get(img);
+  if(had&&had.k===k) return had.c;
+  const c=document.createElement('canvas'); c.width=wpx; c.height=hpx;
+  const x=c.getContext('2d');
+  x.drawImage(img,0,0,wpx,hpx);
+  const d=x.getImageData(0,0,wpx,hpx), a=d.data;
+  for(let i=3;i<a.length;i+=4) if(a[i]) a[i]=255;
+  x.putImageData(d,0,0);
+  gtPunchMasks.set(img,{k,c});
+  return c;
 }
 // the rect a design's words are laid out against in a placeholder: its front
 // artwork's plain fit. The back's words use the same rect — the fit is centred,
@@ -33208,6 +33301,7 @@ function gtAskAge(line){
   fields.forEach(f=>{ (line.vals[f.id]||(line.vals[f.id]={})).text=age; });
 }
 function gtRenderOrder(){
+  if(!gtOrder.length) gtJobBack=null;        // the job's back went with its order
   const wrap=document.getElementById('gtOrderList');
   if(!gtLib.designs.length){
     wrap.innerHTML='<p class="hint" style="margin:0;">Upload a design first.</p>';
@@ -36015,11 +36109,15 @@ function gtPltSheetName(at){
 // Names stay taken for the whole run: forgotten after two minutes, a long
 // batch's Matte and Gloss sheets of one order both came out 1234.plt. A run
 // starts over at exportFolderReady(true) or a fresh gift tag export.
-function gtPltUnique(base,fresh){
+// A name already on the drive from another export (the Matte run's 1234.plt
+// when Gloss comes out) is taken too: -2, -3 … rather than writing over it.
+async function gtPltUnique(base,fresh,dir){
   if(fresh) gtPltRun.used=new Set();
   gtPltRun.at=Date.now();
+  const onDrive=async n=>{ if(!dir) return false;
+    try{ await dir.getFileHandle(n+'.plt'); return true; }catch(e){ return false; } };
   let nm=base, k=1;
-  while(gtPltRun.used.has(nm.toLowerCase())) nm=base+'-'+(++k);
+  while(gtPltRun.used.has(nm.toLowerCase())||await onDrive(nm)) nm=base+'-'+(++k);
   gtPltRun.used.add(nm.toLowerCase());
   return nm+'.plt';
 }
@@ -36028,7 +36126,7 @@ async function gtSavePlts(items,fresh){
   const dir=await gtThumbReady(false);
   const names=[]; let onDrive=0;
   for(let i=0;i<items.length;i++){
-    const nm=gtPltUnique(items[i].name,fresh&&i===0);
+    const nm=await gtPltUnique(items[i].name,fresh&&i===0,dir);
     const b=new Blob([items[i].text],{type:'application/vnd.hp-HPGL'});
     let ok=false;
     if(dir){ try{ await writeIntoFolder(dir,nm,b); ok=true; onDrive++; }catch(e){} }
@@ -36365,10 +36463,15 @@ undoDef('print',{
   put:v=>applyPrintState(v)});
 undoDef('gift',{
   snap:()=>({order:gtOrder,sheet:{...gtSheet},designs:gtLib.designs,
-    fonts:gtLib.fonts,texts:gtLib.texts}),
+    fonts:gtLib.fonts,texts:gtLib.texts,base:gtDefaultShape,jobBack:gtJobBack}),
   put:v=>{
     gtOrder=v.order||[];
     Object.assign(gtSheet,v.sheet||{});
+    if(v.base!==undefined) gtDefaultShape=v.base;
+    if(v.jobBack!==undefined) gtJobBack=v.jobBack;
+    // the cutting file came back by name only: its shapes are read in again,
+    // or the cuts fall back to rectangles and the wrong ones get cached
+    if(gtSheet.layoutFile!==gtLayoutFrom) gtUndoLayout();
     gtLib.designs=(v.designs||[]).map(gtNormalizeDesign);
     gtLib.fonts=v.fonts||[]; gtLib.texts=v.texts||[];
     // the design being edited is one of those objects, and they have just been
@@ -36379,6 +36482,23 @@ undoDef('gift',{
     gtSaveSoon();
   }});
 
+// The shapes of the cutting file a step back put on the sheet, as gtShowShape
+// reads them: this session's copy, or the file. Until they are in, gtLayoutFrom
+// says the layout is not this file's, so nothing caches it under that name.
+async function gtUndoLayout(){
+  const path=gtSheet.layoutFile;
+  gtLayout=null; gtLayoutFrom='';
+  if(!path){ gtSyncShapeSlots(); gtRenderSlots(); gtDraw(); return; }
+  const had=gtShapeSlots.get(path);
+  let lay=had&&had.layout||null;
+  if(!lay){
+    const file=await gtShapeFile(path).catch(()=>null);
+    if(file){ try{ lay=gtBuildLayout(await file.text()); if(lay) gtAssets.set(path,file); }catch(e){} }
+  }
+  if(gtSheet.layoutFile!==path) return;      // moved on while it was read
+  gtLayout=lay; gtLayoutFrom=path;
+  gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
+}
 // ---------- a dropdown answers to the keyboard ----------
 // A list opened by typing into it should be finished from the same keys: the
 // arrows walk it and Enter takes what they are on, or the first of what is left
@@ -42546,7 +42666,7 @@ async function mcFieryPrint(idx){
     fieryNoFolder(msg);
     return;
   }
-  const saved=[], failed=[];
+  const saved=[], failed=[], bad=new Set();
   const run=new Set();
   try{
     // the sheet count that ran behind the Send dialog finishes first
@@ -42556,6 +42676,8 @@ async function mcFieryPrint(idx){
       for(const e of entries){
         showMsg(msg,`Rendering ${saved.length+1} of ${entries.length} — ${escapeHtml(e.name)}…`,true);
         await new Promise(r=>setTimeout(r));
+        // a gift tag sheet's back is not sent when its front could not be made
+        if(e.tile==='giftTag'&&e.side==='back'&&e.set.every(it=>bad.has(it.id))) continue;
         try{
           mcBundleSkipped=new Set();
           const bytes=e.kind==='line'
@@ -42564,7 +42686,10 @@ async function mcFieryPrint(idx){
           await mcPut(dir,e.name,bytes);
           await mcMarkMade(e,run,failed);
           saved.push(e.name);
-        }catch(err){ failed.push(`${e.name} (${(err&&err.message)||'unknown error'})`); }
+        }catch(err){
+          failed.push(`${e.name} (${(err&&err.message)||'unknown error'})`);
+          if(e.tile==='giftTag'&&e.side==='front') (e.set||[]).forEach(it=>bad.add(it.id));
+        }
       }
     });
     mcRenderItems();
@@ -46026,9 +46151,11 @@ const mcGiftShapeOf=d=>{
 async function mcGtShapesInHand(){
   if(typeof gtShapeGroups!=='function'||typeof gtShowShape!=='function') return;
   const was=gtSheet.layoutFile;
-  for(const g of gtShapeGroups())
-    if(g.shape&&g.shape!==was&&!gtShapeSlots.has(g.shape)) await gtShowShape(g.shape);
-  if(was&&gtSheet.layoutFile!==was) await gtShowShape(was);
+  try{
+    for(const g of gtShapeGroups())
+      if(g.shape&&g.shape!==was&&!gtShapeSlots.has(g.shape)&&!await gtShowShape(g.shape))
+        throw new Error('the cutting file "'+gtShapeLabel(g.shape)+'" could not be loaded — nothing was saved.');
+  }finally{ if(was&&gtSheet.layoutFile!==was) await gtShowShape(was); }
 }
 
 // ---------- the summary's tools, and what sits beside the list under them ----------
@@ -50414,6 +50541,7 @@ async function mcGtOpenFull(page,finish){
     const own=gtOrder.filter(l=>!mcGtLent(l)&&!dupe(l));
     // set aside rather than deleted: they are the page's, and go back on return
     mcGtHome={ids:lines.map(l=>l.id),page:want,finish:fin,dropped:gtOrder.filter(dupe)};
+    if(!own.length) gtJobBack=null;    // a new order: no saved sheet's back on it
     gtOrder=own.concat(lines.map(mcGtLine));
   }
   // and the sheet says which run it is, because that is what names its PDF
@@ -50689,7 +50817,9 @@ async function mcBorrowBuilder(fn){
 // press of Download All is one download, not two.
 // `side`, where one file was a front or a back, is kept on the line as well:
 // a front downloaded on its own used to read as the back downloaded too.
-async function mcMarkExported(it,run,side){
+// sides: what a shared sheet comes out as (a gift tag's front and back), where
+// the line itself has none of its own to go by (mcSides is [] for a tag)
+async function mcMarkExported(it,run,side,sides){
   if(!it) return false;
   // the stamp is kept in memory before it is written, so a write that fails
   // puts it back: the screen read "downloaded" for a line the table never heard of
@@ -50706,7 +50836,8 @@ async function mcMarkExported(it,run,side){
     si.dl=dl; it.sheet_item=si; patch.sheet_item=si;
   }
   // and it is done once every side it has is out, not at the first of them
-  const whole=!(side==='front'||side==='back')||mcSides(it).every(sd=>mcSideDl(it,sd));
+  const whole=!(side==='front'||side==='back')
+    ||(Array.isArray(sides)&&sides.length?sides:mcSides(it)).every(sd=>mcSideDl(it,sd));
   const ok=await mcSave(it,{...patch,...(whole?mcDonePatch(it,true):{})});
   if(!ok){
     undo();
@@ -50932,8 +51063,10 @@ async function mcExportPlan(){
         // two-sided: X_Front.pdf then X_Back.pdf, paired as the gift tag
         // screen's own export names them
         const sides=typeof tile.sides==='function'?await tile.sides(b):[null];
+        // every side the sheet has, so a line is done only once all are out
+        const all=sides.filter(Boolean);
         sides.forEach(side=>plan.push({kind:'bundle',tile:key,set:b.set,meta:b.meta,
-          ...(side?{side,name:mcSideName(b.name,side)}:{name:b.name}),
+          ...(side?{side,sides:all,name:mcSideName(b.name,side)}:{name:b.name}),
           what:`${tile.name}${side?' · '+side:''} · ${b.set.length} line${b.set.length===1?'':'s'}`
             +(ids.length?` · merged: ${ids.slice(0,6).join(', ')}${ids.length>6?'…':''}`:'')}));
       }
@@ -51005,7 +51138,7 @@ async function mcDownloadAll(){
         if(e.kind==='line') files++; else bundles++;
         // marked as it goes: a crash at 180 of 214 then costs 34, not 214 —
         // and a line with a side that was not made is not marked at all
-        await mcMarkMade({set:e.set.filter(it=>!bad.has(it.id)),side:e.side},run,failed);
+        await mcMarkMade({set:e.set.filter(it=>!bad.has(it.id)),side:e.side,sides:e.sides},run,failed);
       }
     });
     mcRenderItems();
@@ -51333,7 +51466,7 @@ async function mcMarkMade(e,run,failed){
         :`no design found for ${it.sku||'it'}`)+')');
       continue;
     }
-    await mcMarkExported(it,run,e.side);
+    await mcMarkExported(it,run,e.side,e.sides);
   }
 }
 // ---------- Merge same layout & paper ----------
@@ -51562,19 +51695,20 @@ async function mcGiftSides(lines,mode){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
   await mcGtRehydrate(lines);
-  const keep=gtOrder;
-  gtOrder=lines.map(mcGtLine);
+  // a batch prints the library's back, never a saved sheet's job override
+  const keep=gtOrder, jb=gtJobBack;
+  gtOrder=lines.map(mcGtLine); gtJobBack=null;
   try{ return (gtSheetHasBack()||gtBackUnread().length)?['front','back']:[null]; }
-  finally{ gtOrder=keep; }
+  finally{ gtOrder=keep; gtJobBack=jb; }
 }
 async function mcGiftPreview(lines,mode,canvas,dim,page,side){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
   // what the file will be is what is proofed, one-off copies included
   await mcGtRehydrate(lines);
-  const keep=gtOrder, keepPage=gtPage;
+  const keep=gtOrder, keepPage=gtPage, jb=gtJobBack;
   const wasShape=gtSheet.layoutFile;
-  gtOrder=lines.map(mcGtLine);
+  gtOrder=lines.map(mcGtLine); gtJobBack=null;   // the library's back, as mcGiftSides
   try{
     await mcGtShapesInHand();      // or the sheets are counted off the wrong cuts
     const pages=Math.max(1,gtPageCount());
@@ -51587,7 +51721,7 @@ async function mcGiftPreview(lines,mode,canvas,dim,page,side){
     return pages;
   }
   finally{
-    gtOrder=keep; gtPage=keepPage;
+    gtOrder=keep; gtPage=keepPage; gtJobBack=jb;
     // turning to another shape's page changed the sheet's cut file; the
     // operator's gift tag screen is put back on the one it was on
     try{ if(gtSheet.layoutFile!==wasShape&&typeof gtShowShape==='function') await gtShowShape(wasShape); }catch(e){}
@@ -51614,8 +51748,8 @@ async function mcGiftBundle(lines,mode,side){
     throw new Error(`the ${where} gift tag sheet has no places on it — set its layout up `
       +'on the Gift Tag screen first');
   // taken after the switch: the order to put back is that page's own
-  const keep=gtOrder;
-  gtOrder=lines.map(mcGtLine);
+  const keep=gtOrder, jb=gtJobBack;
+  gtOrder=lines.map(mcGtLine); gtJobBack=null;   // the library's back, as mcGiftSides
   const wasShape=gtSheet.layoutFile;
   try{
     await mcGtShapesInHand();
@@ -51649,7 +51783,9 @@ async function mcGiftBundle(lines,mode,side){
       // so the cuts under the tags are the cuts they were laid out on. Every
       // size is read after the swap: another die is often another paper.
       const at=plan[i];
-      if(at&&at.shape&&at.shape!==gtSheet.layoutFile) await gtShowShape(at.shape);
+      // one that will not load is not drawn on the last one's paper and cuts
+      if(at&&at.shape&&at.shape!==gtSheet.layoutFile&&!await gtShowShape(at.shape))
+        throw new Error('the cutting file "'+gtShapeLabel(at.shape)+'" (sheet '+(i+1)+') could not be loaded — nothing was saved.');
       if(cuts){
         const a=at||{slots:gtSheet.slots,queue:gtQueue(),start:i*gtSheet.slots.length};
         const name=gtPltSheetName(a);
@@ -51670,7 +51806,7 @@ async function mcGiftBundle(lines,mode,side){
     if(cuts) mcPendingCuts=cuts.filter(Boolean);
     return bytes;
   }finally{
-    gtOrder=keep;
+    gtOrder=keep; gtJobBack=jb;
     // back onto the sheet this started on, whatever the last page was cut to
     if(wasShape&&gtSheet.layoutFile!==wasShape) await gtShowShape(wasShape);
   }
@@ -51787,8 +51923,10 @@ const PJ_KINDS={
       const kept=designs.length
         ? designs.reduce((n,d)=>n+savedDesignQty(d.qty),0)
         : (design?designTotal():0);
-      return {page:'',items:kept,
-        data:{paper:state.paper,layout:state.layout,placeholders:state.placeholders,
+      // and what is not kept is named, on the row too, so opening it says so
+      const unkept=printUnkept();
+      return {page:'',items:kept,unkept,
+        data:{designBack:printBackRef(),unkept,paper:state.paper,layout:state.layout,placeholders:state.placeholders,
           showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
           refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,
           rotate:state.rotate,bleed:state.bleed,artFit:state.artFit,
@@ -51817,7 +51955,7 @@ const PJ_KINDS={
           setSelectedTemplate(meta.template);
       }
       try{ mcLaidShared=false; }catch(e){}
-      return '';
+      return add?'':printUnkeptNote(meta.unkept,'Kept with uploads');
     },
     screen:'tool-custom'
   }
@@ -51926,7 +52064,8 @@ document.getElementById('pjNewBtn').addEventListener('click',async()=>{
   const name=box.value.trim();
   if(!name){ showMsg(pjMsgEl(),'Give it a name — it is what you will look for tomorrow.',false); return; }
   const s=kind.snap();
-  if(!s.items){ showMsg(pjMsgEl(),'There is nothing on the builder to keep.',false); return; }
+  if(!s.items){ showMsg(pjMsgEl(),s.unkept&&s.unkept.length?printUnkeptNote(s.unkept,'Nothing kept')
+    :'There is nothing on the builder to keep.',false); return; }
   const btn=document.getElementById('pjNewBtn');
   btn.disabled=true; btn.textContent='Keeping…';
   try{
@@ -51941,8 +52080,9 @@ document.getElementById('pjNewBtn').addEventListener('click',async()=>{
     if(error) throw error;
     box.value='';
     await pjLoad(true); pjRender();
+    const lost=printUnkeptNote(s.unkept,'Kept');
     showMsg(pjMsgEl(),'✓ “'+escapeHtml(name)+'” is waiting — open it '
-      +'tomorrow and add to it.',true);
+      +'tomorrow and add to it.'+(lost?' '+lost:''),!lost);
   }catch(err){
     showMsg(pjMsgEl(),'Could not keep it: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false; btn.textContent='Keep it for later'; }
@@ -51953,7 +52093,8 @@ async function pjWrite(id,add){
   const kind=pjKindOf(pjKind); if(!kind||!sb) return;
   const row=pjRows.find(r=>r.id===id); if(!row) return;
   const s=kind.snap();
-  if(!s.items){ showMsg(pjMsgEl(),'There is nothing on the builder to put on it.',false); return; }
+  if(!s.items){ showMsg(pjMsgEl(),s.unkept&&s.unkept.length?printUnkeptNote(s.unkept,'Nothing kept')
+    :'There is nothing on the builder to put on it.',false); return; }
   let data=s.data, items=s.items;
   if(add){
     // What is on screen is added to what the saved sheet already holds, not
@@ -51970,7 +52111,8 @@ async function pjWrite(id,add){
       items=(data.order||[]).reduce((n,l)=>n+(Number(l.qty)||0),0);
     }else{
       data={...(row.data||{}),designs:((row.data&&row.data.designs)||[])
-        .concat(s.data.designs||[])};
+        .concat(s.data.designs||[]),
+        unkept:((row.data&&row.data.unkept)||[]).concat(s.unkept||[])};
       items=(data.designs||[]).reduce((n,d)=>n+savedDesignQty(d.qty),0);
     }
   }
@@ -51979,8 +52121,9 @@ async function pjWrite(id,add){
     .eq('id',id);
   if(error){ showMsg(pjMsgEl(),'Could not save onto it: '+error.message,false); return; }
   await pjLoad(true); pjRender();
+  const lost=pjKind==='print'?printUnkeptNote(s.unkept,'Saved'):'';
   showMsg(pjMsgEl(),'✓ '+escapeHtml(row.name||'That sheet')+' now holds '+items
-    +' '+(pjKind==='giftTag'?'tag':'card')+(items===1?'':'s')+'.',true);
+    +' '+(pjKind==='giftTag'?'tag':'card')+(items===1?'':'s')+'.'+(lost?' '+lost:''),!lost);
 }
 // And back onto the builder, which is where it is printed from: there is no
 // download here on purpose. A saved sheet is opened, looked at, added to, and
