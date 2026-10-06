@@ -9675,29 +9675,37 @@ function generateGrid(){
 // printed and trimmed, so filling it is the normal case and anything short of
 // it leaves white inside the cut. "Original" is the way back out: the file's
 // own proportions, sized to fit inside the card rather than stretched to it.
-function fitArtToCard(side){
-  // The image this side is sized from: on Preset the front is sized from the
-  // first design, so the box is set even when nothing was ever uploaded into
-  // the Front slot. Without this the front stayed at zero and drew nothing.
-  const img=(side==='front'&&usingPreset()&&state.designs.length&&state.designs[0].img)
+// The image this side is sized from: on Preset the front is sized from the
+// first design, so the box is set even when nothing was ever uploaded into
+// the Front slot. Without this the front stayed at zero and drew nothing.
+function artFitRef(side){
+  return (side==='front'&&usingPreset()&&state.designs.length&&state.designs[0].img)
     ? state.designs[0].img : state.final[side].img;
-  if(!img) return;
+}
+// a picture's own proportions fitted inside the card, as the footprint: a
+// picture turned a quarter takes its width from its height, and a PDF with its
+// bleed on is sized by its trim
+function artCardFit(img,turned){
   const L=layoutMm();
-  // the box is the footprint on the sheet, so a picture turned a quarter
-  // takes its width from its height
-  const turned=((state.rotate[side]||0)%180)!==0;
-  // a PDF with its bleed on is sized by its trim
   const t0=artTrimFrac(img,turned?L.cardH:L.cardW,turned?L.cardW:L.cardH);
   const tf=t0&&(turned?{x:t0.y,y:t0.x}:t0);
   const iw=(turned?img.naturalHeight:img.naturalWidth)*(tf?tf.x:1),
     ih=(turned?img.naturalWidth:img.naturalHeight)*(tf?tf.y:1);
+  const f=Math.min(L.cardW/iw,L.cardH/ih);
+  return {wMm:iw*f,hMm:ih*f,tf};
+}
+function fitArtToCard(side){
+  const img=artFitRef(side);
+  if(!img) return;
+  const L=layoutMm();
+  const turned=((state.rotate[side]||0)%180)!==0;
+  const fit=artCardFit(img,turned), tf=fit.tf;
   const r=state.artFit==='actual'?artRealMm(img):null;
   if(r){
     state.art[side]=turned?{wMm:r.h,hMm:r.w}:{wMm:r.w,hMm:r.h};
     if(tf){ state.art[side].wMm*=tf.x; state.art[side].hMm*=tf.y; }
   }else if(state.artFit==='original'||state.artFit==='actual'){
-    const f=Math.min(L.cardW/iw,L.cardH/ih);
-    state.art[side]={wMm:iw*f,hMm:ih*f};
+    state.art[side]={wMm:fit.wMm,hMm:fit.hMm};
   }else{
     state.art[side]={wMm:L.cardW,hMm:L.cardH};
   }
@@ -10029,10 +10037,19 @@ function renderSide(side,canvas,maxDim,opts){
       // design's actual size. The single artwork has no per-design fit to redo —
       // its WIDTH/HEIGHT box already is that size, so it's used as typed,
       // whichever of the two boxes was last edited.
+      // On Original the box is the first design's fit, so each design fits its
+      // card on its own proportions instead, taking on any resize made to that box
+      let kx=1, ky=1;
+      if(state.artFit==='original'&&!ph.card){
+        const ref=artFitRef(side);
+        const rf=ref&&ref.naturalWidth&&ref.naturalHeight
+          ?artCardFit(ref,((state.rotate[side]||0)%180)!==0):null;
+        if(rf&&rf.wMm>0&&rf.hMm>0){ kx=a.wMm/rf.wMm; ky=a.hMm/rf.hMm; }
+      }
+      const bw=state.artFit==='original'&&!ph.card?cw:wMm, bh=state.artFit==='original'&&!ph.card?chh:hMm;
       const L=line&&state.artFit==='actual'?layoutMm():null;
-      const bw=L?L.cardW:wMm, bh=L?L.cardH:hMm;
-      const f=Math.min(bw/iw,bh/ih);
-      wMm=iw*f; hMm=ih*f;
+      const f=Math.min((L?L.cardW:bw)/iw,(L?L.cardH:bh)/ih);
+      wMm=iw*f*kx; hMm=ih*f*ky;
     }
     // the sheet's bleed unless this design keeps its own
     const bleedMm=bleedMmFor(line);
@@ -10117,17 +10134,39 @@ function renderSide(side,canvas,maxDim,opts){
     // under the cards beside it rather than over them.
     const ghost=!opts.forExport&&(wMm>ph.wMm+0.5||hMm>ph.hMm+0.5);
     if(artPhase==='ghost'&&!ghost) return;
+    // "Trim edge first" shaves the picture's outer pixels; a placed page is
+    // never re-made, so the same pixels are cut off it instead — by the clip,
+    // as a share of the page measured off the preview's own pixels
+    const nW=img.naturalWidth||img.width, nH=img.naturalHeight||img.height;
+    const trimPx=grow?Math.min(bleedTrimPx(),Math.max(0,Math.floor((Math.min(nW,nH)-2)/2)))
+      :!tf&&!own&&bleedMm>0&&bleedTrimPx()>0&&Math.min(nW,nH)>bleedTrimPx()*2+2?bleedTrimPx():0;
+    // grown: the page stays at its trim and the trimmed edge is bleed made up
+    // from the pixels inside it, so the page shows only inside that (image axes)
+    const insW=grow&&trimPx?trimPx/nW*trimW:0, insH=grow&&trimPx?trimPx/nH*trimH:0;
+    const cut=(c,x,y,w,h)=>{ const x0=Math.max(c.x,x), y0=Math.max(c.y,y),
+      x1=Math.min(c.x+c.w,x+w), y1=Math.min(c.y+c.h,y+h);
+      return {x:x0, y:y0, w:Math.max(0,x1-x0), h:Math.max(0,y1-y0)}; };
     if(artPhase!=='ghost'&&opts.vec&&!invert){
-      const vclip={x:clip.x+artShift.xMm, y:clip.y+artShift.yMm, w:clip.w, h:clip.h};
+      let vclip={x:clip.x+artShift.xMm, y:clip.y+artShift.yMm, w:clip.w, h:clip.h};
+      const mx=ph.xMm+ph.wMm/2+artShift.xMm, my=ph.yMm+ph.hMm/2+artShift.yMm;
       if(grow){
+        // on the sheet's axes, which a quarter turn swaps
+        const ix=swapped?insH:insW, iy=swapped?insW:insH;
+        if(trimPx) vclip=cut(vclip,mx-wMm/2+ix,my-hMm/2+iy,wMm-ix*2,hMm-iy*2);
         ringOnly=opts.vec.take(key,
-          {x:ph.xMm+ph.wMm/2-trimW/2+artShift.xMm, y:ph.yMm+ph.hMm/2-trimH/2+artShift.yMm,
-           w:trimW, h:trimH, rot:rotDeg},
+          {x:mx-trimW/2, y:my-trimH/2, w:trimW, h:trimH, rot:rotDeg},
           reach((wMm-ph.wMm)/2, (hMm-ph.hMm)/2), vclip);
-      }else if(opts.vec.take(key,
-        {x:ph.xMm+ph.wMm/2-boxW/2+artShift.xMm, y:ph.yMm+ph.hMm/2-boxH/2+artShift.yMm,
-         w:boxW, h:boxH, rot:rotDeg},
-        reach((effW-ph.wMm)/2, (effH-ph.hMm)/2), vclip)) return;
+      }else{
+        // shaved and stretched back to the box: the page is enlarged by the
+        // same share and held to the box, its shaved edge falling outside
+        let w=boxW, h=boxH;
+        if(trimPx){
+          w=boxW*nW/(nW-trimPx*2); h=boxH*nH/(nH-trimPx*2);
+          vclip=cut(vclip,mx-effW/2,my-effH/2,effW,effH);
+        }
+        if(opts.vec.take(key,{x:mx-w/2, y:my-h/2, w, h, rot:rotDeg},
+          reach((effW-ph.wMm)/2, (effH-ph.hMm)/2), vclip)) return;
+      }
     }
     {
     const pass=artPhase==='ghost'?'ghost':'art';
@@ -10151,7 +10190,7 @@ function renderSide(side,canvas,maxDim,opts){
       -srcW/2,-srcH/2,srcW,srcH);
     // a pixel short of the trim, so the ring overlaps the placed page rather
     // than leaving a hairline of paper between them
-    if(ringOnly){ const iw=trimW*sc-1, ih=trimH*sc-1; ctx.clearRect(-iw/2,-ih/2,iw,ih); }
+    if(ringOnly){ const iw=(trimW-insW*2)*sc-1, ih=(trimH-insH*2)*sc-1; ctx.clearRect(-iw/2,-ih/2,iw,ih); }
     ctx.restore();
     }
   };
@@ -10181,7 +10220,9 @@ function renderSide(side,canvas,maxDim,opts){
     }
   }else if(!useList&&!splitList){
     const art=state.final[side].img;
-    if(art&&a.wMm&&a.hMm) state.placeholders.forEach(ph=>one(art,ph,null,'final:'+side));
+    // by card, as Preset and Split lay it: on Place Card a words box is part
+    // of its card, not a card of its own
+    if(art&&a.wMm&&a.hMm) artOrder().forEach(ph=>one(art,ph,null,'final:'+side));
   }
   };
   if(!opts.forExport){ artPhase='ghost'; runArt(); }
@@ -13424,9 +13465,11 @@ document.getElementById('printReadyBtn').addEventListener('click',async()=>{
     // But a client file that already carries its own bleed — no trim marked,
     // the card plus 2.5 to 6 mm a side — keeps it: Actual size prints it at its
     // own size, where Placeholder size squashed its bleed inside the cut and
-    // made more up on top.
+    // made more up on top. Only when every side does: the size is one setting
+    // for both, and a back with no bleed of its own at Actual size goes by its
+    // DPI tag — a 72 DPI JPEG would print four times the card.
     const L=layoutMm();
-    const keepOwn=sides.some(s=>{
+    const keepOwn=sides.length>0&&sides.every(s=>{
       const img=state.final[s].img;
       if(artTrimFrac(img,L.cardW,L.cardH)) return false;
       const r=artRealMm(img); if(!r) return false;
@@ -26048,6 +26091,7 @@ async function saveTemplate(){
       return;
     }
   }
+  if(printArtLoading){ showMsg(msgEl,'The template\'s designs are still loading — Save again once they are on the sheet.',false); return; }
   const btn=document.getElementById('saveTemplateBtn');
   btn.disabled=true;btn.textContent='Saving…';
   try{
@@ -26118,15 +26162,32 @@ async function printArtReady(){ try{ await printArtLoading; }catch(e){} }
 // Everything a saved template holds, put back into the tool and onto its form.
 // Undo hands back the same shape, so a step back and a template being loaded
 // are one act with one place to get it wrong.
-function applyPrintState(meta,name){
+// `whole` says this is a saved template from a library (a Place Card load, which
+// has no name to give the Custom Template's boxes): everything it leaves out is
+// the default, not what the last template happened to leave behind.
+function applyPrintState(meta,name,whole){
   if(!meta) return;
-  state.paper=meta.paper||state.paper;
+  whole=!!whole||name!==undefined;
+  // copies: a Magic Create line's stored design is handed in here, and the
+  // builder edits paper and boxes in place — it rewrote the line in memory
+  const cp=v=>v==null?v:JSON.parse(JSON.stringify(v));
+  state.paper=cp(meta.paper)||state.paper;
   document.getElementById('paperW').value=state.paper.w;
   document.getElementById('paperH').value=state.paper.h;
   document.getElementById('paperUnit').value=state.paper.unit;
   if(meta.layout) state.layout=Object.assign(state.layout,meta.layout);
   writeLayoutInputs();
-  state.placeholders=meta.placeholders||[];
+  state.placeholders=cp(meta.placeholders)||[];
+  // Whatever names its artwork — a template, a line — names all of it: a
+  // picture it does not name is the last one's, and Save wrote it in as this
+  // one's. A step back names none and keeps what is there.
+  const namesArt=whole||meta.design!==undefined||meta.designs!==undefined;
+  if(namesArt){
+    ['front','back'].forEach(s=>{
+      state.final[s]={data:null,img:null,name:'',source:null,file:null};
+      state.finalList[s]=[];
+    });
+  }
   // Place Card categories. A print template / Magic Create snapshot carries
   // none, so this also clears any left over from a Place Card session — the one
   // guarantee that keeps words off the Custom Template sheet.
@@ -26144,6 +26205,9 @@ function applyPrintState(meta,name){
   if(meta.foldLine) state.foldLine=Object.assign(state.foldLine,meta.foldLine);
   document.getElementById('foldLineToggle').checked=state.foldLine.enabled;
   if(meta.bleed) state.bleed=Object.assign(state.bleed,meta.bleed);
+  // a template saved before bleed was kept bleeds the way a fresh sheet does
+  if(whole&&!(meta.bleed&&meta.bleed.enabled!==undefined)) state.bleed.enabled=true;
+  if(whole&&!(meta.bleed&&meta.bleed.mm!==undefined)) state.bleed.mm=2.5;
   if(!(meta.bleed&&meta.bleed.mode)) state.bleed.mode='stretch';
   // as mode and trimPx are: a layout that never said fillGap does not inherit
   // the last sheet's
@@ -26175,6 +26239,7 @@ function applyPrintState(meta,name){
   if(meta.orderId!==undefined) state.orderId=meta.orderId||'';
   if(meta.pdfNaming!==undefined) setPdfNaming(meta.pdfNaming,true);
   if(meta.artFit!==undefined) setArtFit(meta.artFit,true);
+  else if(whole) setArtFit('actual',true);
   // Templates saved before the mode existed say which they meant by what they
   // carry: a saved design list is a Preset job, anything else a single one.
   if(meta.artMode!==undefined) setArtMode(meta.artMode,true);
@@ -26182,7 +26247,10 @@ function applyPrintState(meta,name){
   if(meta.paperType!==undefined) state.paperType=meta.paperType||'';
   if(meta.gsm!==undefined) state.gsm=meta.gsm||'';
   if(meta.paperType!==undefined||meta.gsm!==undefined) ppFillSelects();
-  // after presetSize, which sets these too — an explicitly saved size wins
+  // after presetSize, which sets these too — an explicitly saved size wins.
+  // A template with neither starts unsized (fit fresh), not at the last one's.
+  if(whole&&!meta.art&&!(meta.presetSize&&meta.presetSize.wMm&&meta.presetSize.hMm))
+    ['front','back'].forEach(s=>{ state.art[s]={wMm:0,hMm:0}; });
   if(meta.art){
     ['front','back'].forEach(s=>{ if(meta.art[s]) state.art[s]=Object.assign({},meta.art[s]); });
   }
@@ -26213,9 +26281,14 @@ function applyPrintState(meta,name){
   // pictures arrive on it.
   const designs=Array.isArray(meta.designs)?meta.designs:null;
   const single=meta.design&&meta.design.path?meta.design:null;
+  // a step back names no artwork: the load in flight is still this sheet's,
+  // and starting a new generation here dropped it half way
+  if(!namesArt) return;
   printArtLoading=null;
   const artGen=++printArtGen;
   if(designs&&designs.length){
+    // the last template's list is not this one's while this one's is read
+    state.designs=[]; renderDesignLines(); drawAll();
     printArtLoading=(async()=>{
       const out=[], missing=[];
       await designBleedLoad();
@@ -26256,10 +26329,14 @@ function applyPrintState(meta,name){
         showMsg(msgEl,`Template loaded — its design (${single.name||single.path}) isn't reachable. Choose the NAS folder or use Load design.`,false);
       }
     })();
-  }else if(designs){
+  }else if(designs||whole){
     state.designs=[];               // saved with an empty list, and meant it
     renderDesignLines(); drawAll();
   }
+  // Save waits on this: written mid-read, a template kept half a list (or
+  // none) of what it was loaded with
+  const p=printArtLoading;
+  if(p) p.then(()=>{},()=>{}).then(()=>{ if(printArtLoading===p) printArtLoading=null; });
 }
 async function loadTemplate(id){
   // whoever lays a shared sheet on it says so again once it is laid
@@ -26371,6 +26448,7 @@ async function pcSaveTemplate(){
   if(!name){showMsg(msg,'Enter a template name first.',false);return;}
   if(name===PC_LIB_NAME){showMsg(msg,'That name is kept for the design library — pick another.',false);return;}
   if(pcKindReady===false){ msg.innerHTML=pcKindMissingHtml; return; }
+  if(printArtLoading){ showMsg(msg,'The template\'s designs are still loading — Save again once they are on the sheet.',false); return; }
   const btn=document.getElementById('pcSaveTemplateBtn');
   btn.disabled=true;btn.textContent='Saving…';
   try{
@@ -26414,7 +26492,9 @@ async function pcLoadTemplate(id){
   const row=pcTemplateById(id); const name=row?row.name:'';
   const {data,error}=await sb.from('templates').select('data').eq('id',id).single();
   if(error||!data){showMsg(msg,'Could not find that template.',false);return;}
-  applyPrintState(data.data,name);
+  // no name: that fills the Custom Template's name and folder boxes, and a
+  // Place Card template is not the one they describe
+  applyPrintState(data.data,undefined,true);
   document.getElementById('pcTemplateName').value=name;
   // the template's text may name folder fonts — make sure they are scanned and
   // registered (the folder could have been connected since entering Place Card)
@@ -29206,7 +29286,70 @@ async function gtMergeRun(){
   gtLibDiskText=all.sig; gtLibBase=disk; gtStamps=all.stamps; gtGone=all.gone;
   return true;
 }
+// One-off designs an order line is using, kept by id with their bytes. A
+// one-off is in no library file, and gtLoadLib empties the library every time
+// a page or folder is opened: an ordinary line holding a pasted design or a
+// Pigu-folder one came back reading "Pick a design". Each is put back after
+// every load, the way mcGtRehydrate puts back a batch line's.
+const gtOneOffKeep=new Map();
+function gtOneOffStash(){
+  const used=new Set();
+  let lists=[gtOrder];
+  try{ lists=lists.concat(Object.values(gtOrders||{})); }catch(e){}
+  lists.forEach(list=>(Array.isArray(list)?list:[]).forEach(l=>{ if(l&&l.designId) used.add(l.designId); }));
+  gtLib.designs.forEach(d=>{
+    if(!d.adhoc||!used.has(d.id)) return;
+    const blob=gtAssets.get(d.file);
+    if(blob) gtOneOffKeep.set(d.id,{d,blob});
+  });
+  // nothing on any order points at it any more
+  for(const id of [...gtOneOffKeep.keys()]) if(!used.has(id)) gtOneOffKeep.delete(id);
+}
+// A Pigu-folder design read again off the folder, by the path it was given
+async function gtPiguFileRead(path){
+  const parts=String(path||'').replace(/^adhoc\/pigu\//,'').split('/');
+  if(parts.length<2) return null;
+  try{
+    const root=await gtPiguDirGet();
+    if(!root||!await loadDesignDirOk(root,false)) return null;
+    let dh=root;
+    for(const p of parts.slice(0,-1)) dh=await dh.getDirectoryHandle(p);
+    return await (await dh.getFileHandle(parts[parts.length-1])).getFile();
+  }catch(e){ return null; }
+}
+// Lines whose design the library has not got: put back from the keep, or — a
+// saved sheet's line carrying `oneOff` — read again from its Pigu folder. A
+// line whose file is already in the library is pointed at that one instead.
+async function gtOneOffRestore(lines){
+  let n=0;
+  for(const l of lines||[]){
+    const id=l&&l.designId;
+    if(!id||gtDesign(id)) continue;
+    const k=gtOneOffKeep.get(id);
+    let d=k?k.d:null, blob=k?k.blob:null;
+    const rec=l.oneOff||null;
+    const file=d?d.file:rec&&rec.file;
+    const same=file&&gtLib.designs.find(x=>x.file===file);
+    if(same){ l.designId=same.id; n++; continue; }
+    if(!d&&rec&&String(rec.file||'').startsWith('adhoc/pigu/')){
+      blob=await gtPiguFileRead(rec.file);
+      if(blob) d=gtNormalizeDesign({...rec,id,adhoc:true});
+    }
+    if(!d||!blob) continue;
+    gtAssets.set(d.file,blob);
+    try{ gtImgs.set(d.id,await loadImage(await gtArtURL(blob,d.file))); }catch(e){}
+    gtLib.designs.push(d);
+    gtOneOffKeep.set(d.id,{d,blob});
+    n++;
+  }
+  return n;
+}
 async function gtLoadLib(){
+  gtOneOffStash();
+  try{ await gtLoadLibRead(); }
+  finally{ await gtOneOffRestore(gtOrder).catch(()=>{}); }
+}
+async function gtLoadLibRead(){
   gtLib.designs=[]; gtLib.fonts=[]; gtLib.texts=[];
   // The stash of "the library's own designs", held while Pigu folders stand in
   // for them, belongs to the library being left. Carried into the next one it
@@ -30570,7 +30713,9 @@ function gtMarks(){
 // the sheet does not re-scan a multi-megapixel image for nothing.
 let gtBaseDotsCache=null, gtBaseDotsKey='';
 function gtBaseDots(){
-  const S=gtSheet, key=S.baseFile+'|'+S.markDia+'|'+S.markInset;
+  // gtBaseRect() fits the picture to the paper, so paper size and the loaded
+  // picture's pixel size belong in the key too (0×0 while it is still loading)
+  const S=gtSheet, im=gtBaseImg, key=S.baseFile+'|'+S.markDia+'|'+S.markInset+'|'+S.paperW+'x'+S.paperH+'|'+(im?(im.naturalWidth||0)+'x'+(im.naturalHeight||0):'-');
   if(key!==gtBaseDotsKey){ gtBaseDotsCache=null; gtBaseDotsKey=key; }
   if(gtBaseDotsCache) return gtBaseDotsCache;
   return (gtBaseDotsCache=gtBaseDotsFind());
@@ -31081,25 +31226,37 @@ function gtPltSheet(at){
 // Every sheet's cut file, built the way the export builds them — each shape
 // swapped in so its own placeholders and its own paper are what get written —
 // and the sheet that was on screen put back afterwards.
+// One run at a time, shared with gtExport: both swap the shape on screen.
+let gtExportBusy=false;
 async function gtCutFiles(){
+  if(gtExportBusy) throw new Error('an export is still running — wait for it to finish.');
+  gtExportBusy=true;
   const S=gtSheet;
   const wasShape=S.layoutFile, wasPage=gtPage;
-  await gtShapesInHand();
-  const plan=gtPagePlan();
-  const out=[];
-  for(let i=0;i<plan.length;i++){
-    const at=plan[i];
-    if(at.shape!==S.layoutFile) await gtShowShape(at.shape);
-    // the paper and the dots are caught per sheet: two shapes on one order can
-    // be two different sheet sizes, and the file is measured off its own
-    out.push({text:gtPltSheet(at),name:gtPltSheetName(at),paperW:S.paperW,paperH:S.paperH,
-              marks:gtMarks(),frame:gtPltFrame(),shape:at.shape});
+  try{
+    await gtShapesInHand();
+    const plan=gtPagePlan();
+    const out=[];
+    for(let i=0;i<plan.length;i++){
+      const at=plan[i];
+      // a shape that will not load would be cut on the last one's paper
+      if(at.shape!==S.layoutFile&&!await gtShowShape(at.shape))
+        throw new Error('the cutting file "'+gtShapeLabel(at.shape)+'" could not be loaded.');
+      // the paper and the dots are caught per sheet: two shapes on one order can
+      // be two different sheet sizes, and the file is measured off its own
+      out.push({text:gtPltSheet(at),name:gtPltSheetName(at),paperW:S.paperW,paperH:S.paperH,
+                marks:gtMarks(),frame:gtPltFrame(),shape:at.shape});
+    }
+    return out;
+  }finally{
+    try{ if(S.layoutFile!==wasShape) await gtShowShape(wasShape); }catch(e){}
+    gtPage=wasPage;
+    try{ gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw(); }catch(e){}
+    gtExportBusy=false;
   }
-  if(S.layoutFile!==wasShape) await gtShowShape(wasShape);
-  gtPage=wasPage;
-  gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
-  return out;
 }
+// a cutting file's name for a message: the file, not the whole folder path
+function gtShapeLabel(path){ return String(path||'(none)').split(/[\\/]/).pop()||String(path); }
 // The file read back as lines on the paper. Reading it rather than remembering
 // it is the point: if the writer put a coordinate somewhere daft, this shows
 // the daft coordinate instead of quietly drawing what was meant.
@@ -33398,18 +33555,34 @@ document.getElementById('gtDesignList').addEventListener('click',async e=>{
   gtCurrentDesign=d;
   showScreen('tool-gift-tag-design');
 });
+// Both ways of deleting a design come through here, so both remember the file
+// and both take it out of the stash as well as off the screen.
 async function gtDropDesigns(list){
   const ids=new Set(list.map(d=>d.id));
+  // A batch line lent onto this sheet is not this sheet's to drop: taken off
+  // here, the hand-back read it as removed and took the gift tag off the line.
+  const lent=gtOrder.filter(l=>String((l&&l.id)||'').startsWith('mc-')&&ids.has(l.designId));
+  if(lent.length){
+    alert(`${lent.length} line${lent.length===1?'':'s'} from the Magic Create batch `
+      +`${lent.length===1?'is':'are'} using this design. Take ${lent.length===1?'it':'them'} `
+      +'off the sheet or give them another design first.');
+    return false;
+  }
   if(!Array.isArray(gtSheet.libSeen)) gtSheet.libSeen=[];
   list.forEach(d=>{
     gtImgs.delete(d.id);
+    gtOneOffKeep.delete(d.id);
     if(d.file&&!gtSheet.libSeen.includes(d.file)) gtSheet.libSeen.push(d.file);
   });
   gtLib.designs=gtLib.designs.filter(d=>!ids.has(d.id));
+  // while Pigu folders are showing, the manifest is written from the stash,
+  // and putting the folders away hands the stash back — the design with it
+  if(gtOwnDesigns) gtOwnDesigns=gtOwnDesigns.filter(d=>!ids.has(d.id));
   gtOrder=gtOrder.filter(l=>!ids.has(l.designId));
   if(gtCurrentDesign&&ids.has(gtCurrentDesign.id)) gtCurrentDesign=null;
   await gtSaveLib();
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+  return true;
 }
 
 document.getElementById('gtFontPanel').addEventListener('click',async e=>{
@@ -34621,12 +34794,9 @@ document.getElementById('gtSaveDesignBtn').addEventListener('click',async()=>{
 document.getElementById('gtDeleteDesignBtn').addEventListener('click',async()=>{
   const d=gtCurrentDesign; if(!d) return;
   if(!confirm('Delete '+d.name+'?\n\nIt goes from the library, and from any order line using it.')) return;
-  gtLib.designs=gtLib.designs.filter(x=>x!==d);
-  gtOrder=gtOrder.filter(l=>l.designId!==d.id);
-  gtImgs.delete(d.id);
-  await gtSaveLib();
-  gtCurrentDesign=null;
-  gtRefreshLibraryUi(); gtRenderOrder();
+  // the same as × on the library list, so the next look at the folder does
+  // not hand it straight back
+  if(!await gtDropDesigns([d])) return;
   showScreen('tool-gift-tag');
 });
 function gtDesignOpen(){
@@ -34965,7 +35135,15 @@ document.getElementById('gtPltPreviewBtn').addEventListener('click',async()=>{
   showMsg(out,'Working out the cut…',true);
   try{
     const files=await gtCutFiles();
-    gtPltView.sheets=files.map(f=>({...f,parsed:gtPltParse(f.text,f.frame)}));
+    // named as the export names them: a second sheet of the same order takes
+    // -2, -3 … rather than saving over the first
+    const used=new Set();
+    gtPltView.sheets=files.map(f=>{
+      let nm=f.name||'GT', k=1;
+      while(used.has(nm.toLowerCase())) nm=(f.name||'GT')+'-'+(++k);
+      used.add(nm.toLowerCase());
+      return {...f,file:nm+'.plt',parsed:gtPltParse(f.text,f.frame)};
+    });
     gtPltView.at=0; gtPltView.raw=false;
     document.getElementById('gtPltTitle').textContent=
       `Cut file · ${gtPltView.sheets.length} sheet${gtPltView.sheets.length===1?'':'s'}`;
@@ -35077,7 +35255,7 @@ gtThumbSync();
 document.getElementById('gtPltSaveBtn').addEventListener('click',async()=>{
   const S=gtPltView.sheets[gtPltView.at]; if(!S) return;
   await gtThumbReady(true);
-  const nm=S.name+'.plt';
+  const nm=S.file||(S.name+'.plt');
   const b=new Blob([S.text],{type:'application/vnd.hp-HPGL'});
   const dir=await gtThumbReady(false);
   try{ if(dir){ await writeIntoFolder(dir,nm,b); return; } }catch(e){}
@@ -35108,38 +35286,43 @@ async function gtExport(print){
   const out=document.getElementById('gtExportMsg');
   const btn=document.getElementById('gtExportBtn');
   const pbtn=document.getElementById('gtPrintBtn');
-  // counted and planned with every shape's own placeholders, as the cuts are
-  try{ await gtShapesInHand(); gtDraw(); }catch(e){}
-  const pages=gtPageCount();
-  if(!pages||!gtQueue().length){ showMsg(out,'Nothing to print — add a design and a quantity first.',false); return; }
-  const noAge=gtAgeLeft();
-  if(noAge.length&&!confirm('No age filled in:\n\n'+noAge.join('\n')
-      +'\n\nDownload the PDF anyway?')){
-    showMsg(out,'Stopped — fill in the age on '+(noAge.length===1?'that line':'those lines')+'.',false);
-    return;
-  }
-  // stamped with the time: the shop PC sends whatever file bears the name, so
-  // a name used before would let last print's PDF go if the NAS is slow
-  const d=new Date(), p2=n=>String(n).padStart(2,'0');
-  const base=`Gift Tag_${gtFinish}_${p2(d.getMonth()+1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
-  let ans=null, session=null, dir=null;
-  if(print){
-    session=await fieryReady(out); if(!session) return;
-    ans=await fieryAsk([{name:`${base}.pdf`,it:{paper_type:gtFinish,gsm:''}}],pages);
-    if(!ans) return;
-    dir=await exportFolderReady(true);
-    if(!dir){ fieryNoFolder(out); return; }
-  }
-  // the thumb drive asked for before the render, while the tap still counts —
-  // after a minute of rendering the browser would no longer let it be asked
-  if(gtSheet.pltOn!==false) await gtThumbReady(true);
-  btn.disabled=true; pbtn.disabled=true;
-  showMsg(out,`Rendering ${pages} sheet(s) at print resolution…`,true);
+  // one run at a time: a second click during the awaits below used to start a
+  // second export swapping shapes under the first
+  if(gtExportBusy){ showMsg(out,'An export is already running — wait for it to finish.',false); return; }
+  gtExportBusy=true; btn.disabled=true; pbtn.disabled=true;
+  const S=gtSheet;
+  const wasShape=S.layoutFile, wasPage=gtPage;
+  let swapped=false;
   try{
-    const S=gtSheet;
+    // counted and planned with every shape's own placeholders, as the cuts are
+    try{ await gtShapesInHand(); gtDraw(); }catch(e){}
+    const pages=gtPageCount();
+    if(!pages||!gtQueue().length){ showMsg(out,'Nothing to print — add a design and a quantity first.',false); return; }
+    const noAge=gtAgeLeft();
+    if(noAge.length&&!confirm('No age filled in:\n\n'+noAge.join('\n')
+        +'\n\nDownload the PDF anyway?')){
+      showMsg(out,'Stopped — fill in the age on '+(noAge.length===1?'that line':'those lines')+'.',false);
+      return;
+    }
+    // stamped with the time: the shop PC sends whatever file bears the name, so
+    // a name used before would let last print's PDF go if the NAS is slow
+    const d=new Date(), p2=n=>String(n).padStart(2,'0');
+    const base=`Gift Tag_${gtFinish}_${p2(d.getMonth()+1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+    let ans=null, session=null, dir=null;
+    if(print){
+      session=await fieryReady(out); if(!session) return;
+      ans=await fieryAsk([{name:`${base}.pdf`,it:{paper_type:gtFinish,gsm:''}}],pages);
+      if(!ans) return;
+      dir=await exportFolderReady(true);
+      if(!dir){ fieryNoFolder(out); return; }
+    }
+    // the thumb drive asked for before the render, while the tap still counts —
+    // after a minute of rendering the browser would no longer let it be asked
+    if(gtSheet.pltOn!==false) await gtThumbReady(true);
+    showMsg(out,`Rendering ${pages} sheet(s) at print resolution…`,true);
+    swapped=true;
     // where the order runs over several shapes each sheet is rendered on its
     // own, so the page carries that shape's placeholders and its paper size
-    const wasShape=S.layoutFile, wasPage=gtPage;
     const plan=gtPagePlan();
     // the cut file for each sheet is taken on the same pass as its picture:
     // the shape is already swapped in and its placeholders already stand where
@@ -35156,7 +35339,10 @@ async function gtExport(print){
     let placed=0;
     const bytes=await gtBuildPdf(pages,async(i,forms)=>{
       const at=plan[i];
-      if(at&&at.shape!==S.layoutFile) await gtShowShape(at.shape);
+      // a shape that will not load would be drawn on the last one's paper
+      // and placeholders while its cut file is taken from the plan's
+      if(at&&at.shape!==S.layoutFile&&!await gtShowShape(at.shape))
+        throw new Error('the cutting file "'+gtShapeLabel(at.shape)+'" (sheet '+(i+1)+') could not be loaded — nothing was saved.');
       if(S.pltOn!==false){ try{ cuts.push({text:gtPltSheet(at),name:gtPltSheetName(at)||'GT'}); }catch(e){ cuts.push(null); } }
       const px=Math.min(6000,Math.round(Math.max(S.paperW,S.paperH)/25.4*300));
       const c=document.createElement('canvas');
@@ -35172,9 +35358,7 @@ async function gtExport(print){
       return out;
     },sources);
     // back to the sheet that was on screen before the run
-    if(S.layoutFile!==wasShape) await gtShowShape(wasShape);
-    gtPage=wasPage;
-    gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
+    await gtExportRestore(wasShape,wasPage); swapped=false;
     const filename=`${base}.pdf`;
     if(dir) await writeIntoFolder(dir,filename,new Blob([bytes],{type:'application/pdf'}));
     else downloadBlob(new Blob([bytes],{type:'application/pdf'}),filename);
@@ -35189,7 +35373,16 @@ async function gtExport(print){
     if(print) await fieryQueue(session,dir,[filename],ans,['gtExportMsg']);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
-  }finally{ btn.disabled=false; pbtn.disabled=false; }
+  }finally{
+    // put back on every path out, failed render included
+    if(swapped) await gtExportRestore(wasShape,wasPage);
+    gtExportBusy=false; btn.disabled=false; pbtn.disabled=false;
+  }
+}
+async function gtExportRestore(wasShape,wasPage){
+  try{ if(gtSheet.layoutFile!==wasShape) await gtShowShape(wasShape); }catch(e){}
+  gtPage=wasPage;
+  try{ gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw(); }catch(e){}
 }
 document.getElementById('gtExportBtn').addEventListener('click',()=>gtExport(false));
 document.getElementById('gtPrintBtn').addEventListener('click',()=>gtExport(true));
@@ -48464,7 +48657,9 @@ async function mcApplyArt(it,live){
     if(!art[side]){
       // the front the layout named is already on the sheet; anything else is
       // the last line's artwork, and it does not belong on this one
-      if(!(side==='front'&&kept)) state.final[side]={data:null,img:null,name:''};
+      // — a layout naming only a design list named no front of its own
+      if(!(side==='front'&&it.design&&it.design.design&&it.design.design.path))
+        state.final[side]={data:null,img:null,name:''};
       continue;
     }
     try{
@@ -50542,10 +50737,18 @@ const PJ_KINDS={
     // What is on the gift tag builder now. gtOrder is already nothing but
     // ids, numbers and words, so it is written down as it stands.
     snap(){
-      const order=(gtOrder||[]).filter(l=>l&&l.designId).map(l=>({
-        designId:l.designId,qty:Math.max(1,Math.round(Number(l.qty)||1)),
-        vals:l.vals||{},extra:(l.extra||[]).map(f=>({...f})),
-        shape:l.shape||'',sku:l.sku||''}));
+      // A one-off is in no library, so the line carries what it is: a
+      // Pigu-folder one is read again from its folder when the sheet is opened.
+      // A quantity of 0 is a line kept with none printed, as the line editor
+      // allows — not one tag.
+      const order=(gtOrder||[]).filter(l=>l&&l.designId).map(l=>{
+        const d=gtDesign(l.designId);
+        return {designId:l.designId,qty:Math.max(0,Math.round(Number(l.qty)||0)),
+          vals:l.vals||{},extra:(l.extra||[]).map(f=>({...f})),
+          shape:l.shape||'',sku:l.sku||'',
+          ...(d&&d.adhoc?{oneOff:{name:d.name||'',file:d.file||'',
+            fields:d.fields||[],hole:d.hole||null}}:{})};
+      });
       return {page:gtMode||'',items:order.reduce((n,l)=>n+l.qty,0),
         data:{order,finish:gtFinish,mode:gtMode||''}};
     },
@@ -50565,7 +50768,11 @@ const PJ_KINDS={
       if(page&&page!==gtMode&&typeof gtSetMode==='function') await gtSetMode(page);
       const lines=((row.data&&row.data.order)||[]).map(l=>({id:gtId('l'),
         designId:l.designId,qty:l.qty,vals:l.vals||{},extra:(l.extra||[]).map(f=>({...f})),
-        shape:l.shape||'',sku:l.sku||''}));
+        shape:l.shape||'',sku:l.sku||'',oneOff:l.oneOff||null}));
+      // one-offs back in: from this session's keep, or off their Pigu folder
+      await gtOneOffRestore(lines).catch(()=>{});
+      const oneOffs=new Set(lines.filter(l=>l.oneOff).map(l=>l.id));
+      lines.forEach(l=>{ delete l.oneOff; });
       gtOrder=add?gtOrder.concat(lines):lines;
       if(row.data&&row.data.finish&&!add){
         gtFinish=row.data.finish;
@@ -50575,9 +50782,17 @@ const PJ_KINDS={
       gtRenderOrder(); gtDraw();
       // a design named on the sheet that this page's library does not hold is
       // a line that will draw nothing, and saying so now beats a blank tag
-      const lost=lines.filter(l=>!gtDesign(l.designId)).length;
-      return lost?`${lost} design${lost===1?'':'s'} on that sheet are not in this `
-        +'page’s library — connect the folder it was built from.':'';
+      // a one-off pasted in lives only in the session that made it; one from a
+      // Pigu folder comes back once that folder is connected
+      const gone=lines.filter(l=>!gtDesign(l.designId));
+      const lostOne=gone.filter(l=>oneOffs.has(l.id)).length;
+      const lostLib=gone.length-lostOne;
+      const say=[];
+      if(lostLib) say.push(`${lostLib} design${lostLib===1?' is':'s are'} not in this `
+        +'page’s library — connect the folder it was built from.');
+      if(lostOne) say.push(`${lostOne} one-off design${lostOne===1?' is':'s are'} not here — `
+        +'connect the Pigu folder, or paste a pasted one in again and pick it on the line.');
+      return say.join(' ');
     },
     screen:'tool-gift-tag'
   },
