@@ -9286,10 +9286,26 @@ async function pdfPageFile(bytes,index,fileName,label){
   try{ em=await pdfLift.embedPage(bytes,index,alloc); }catch(e){ return null; }
   const f=n=>(Math.round(n*1e4)/1e4).toString();
   const draw=enc.encode(`q 1 0 0 1 ${f(-em.x)} ${f(-em.y)} cm /Fm0 Do Q`);
+  // the source page's TrimBox/BleedBox/ArtBox, put through the same turn and
+  // shift as its drawing so they sit where they did on the page. The new
+  // MediaBox is already the old CropBox, and the turn is already in the form,
+  // so neither a CropBox nor a /Rotate goes on (a /Rotate would turn it twice).
+  let boxes='';
+  const [ma,mb,mc,md,me,mf]=em.matrix||[1,0,0,1,0,0];
+  for(const k of ['TrimBox','BleedBox','ArtBox']){
+    const bx=em.boxes&&em.boxes[k];
+    if(!bx) continue;
+    const xs=[],ys=[];
+    [[bx[0],bx[1]],[bx[2],bx[1]],[bx[2],bx[3]],[bx[0],bx[3]]].forEach(([px,py])=>{
+      xs.push(ma*px+mc*py+me-em.x); ys.push(mb*px+md*py+mf-em.y);
+    });
+    const r=[Math.max(0,Math.min(...xs)),Math.max(0,Math.min(...ys)),Math.min(em.w,Math.max(...xs)),Math.min(em.h,Math.max(...ys))];
+    if(r[2]>r[0]&&r[3]>r[1]) boxes+=` /${k} [${r.map(f).join(' ')}]`;
+  }
   const objs=[
     {num:catalog,parts:[enc.encode(`${catalog} 0 obj\n<< /Type /Catalog /Pages ${kids} 0 R >>\nendobj\n`)]},
     {num:kids,parts:[enc.encode(`${kids} 0 obj\n<< /Type /Pages /Kids [${page} 0 R] /Count 1 >>\nendobj\n`)]},
-    {num:page,parts:[enc.encode(`${page} 0 obj\n<< /Type /Page /Parent ${kids} 0 R /MediaBox [0 0 ${f(em.w)} ${f(em.h)}]`
+    {num:page,parts:[enc.encode(`${page} 0 obj\n<< /Type /Page /Parent ${kids} 0 R /MediaBox [0 0 ${f(em.w)} ${f(em.h)}]${boxes}`
       +` /Resources << /XObject << /Fm0 ${em.form} 0 R >> >> /Contents ${content} 0 R >>\nendobj\n`)]},
     {num:content,parts:[enc.encode(`${content} 0 obj\n<< /Length ${draw.length} >>\nstream\n`),draw,
       enc.encode('\nendstream\nendobj\n')]},
@@ -9700,8 +9716,14 @@ function gridMetrics(){
   const originX=L.mode==='center'?(p.w-totalW)/2:L.side;
   const originY=L.mode==='center'?(p.h-totalH)/2:L.lead;
   // the grid has to fit from where it starts, not merely be narrower than the sheet
+  const t=fitTolMm();
   return {L,p,totalW,totalH,originX,originY,
-    fits:originX>=-0.01&&originY>=-0.01&&originX+totalW<=p.w+0.01&&originY+totalH<=p.h+0.01};
+    fits:originX>=-t&&originY>=-t&&originX+totalW<=p.w+t&&originY+totalH<=p.h+t};
+}
+// how far over the sheet still counts as on it: a figure typed in inches to
+// three places is up to 0.0127 mm out a card, so 0.01 mm read 3 × 99 mm cards
+// on A4 typed in inches as larger than the sheet
+function fitTolMm(){ return state.paper.unit==='mm'?0.01:0.05;
 }
 function generateGrid(){
   const g=gridMetrics(),L=g.L;
@@ -10921,11 +10943,23 @@ function refreshSheetNav(){
 }
 
 // ---------- layout controls ----------
+// A size box shows its figure rounded for reading, but the full figure stays
+// behind it while the box still shows what was written: rounding an inch
+// figure to 0.001 lost up to 0.03 mm a card, three cards ran past the sheet and
+// a mm → in → mm round trip did not come back to the numbers it started from.
+// A box that no longer shows what was written was retyped, and means its text.
+function numShow(el,v){
+  if(!el) return;
+  const s=String(Math.round(v*1000)/1000);
+  el.value=s; el.dataset.shown=s; el.dataset.full=String(v);
+}
+function numShown(el){ return !!el&&el.dataset.shown!=null&&el.value===el.dataset.shown; }
+function numRead(el){ return numShown(el)?Number(el.dataset.full):parseFloat(el?el.value:''); }
 function readLayoutInputs(){
   const L=state.layout;
   // a card has a size and a gap is never negative; anything else keeps what was there
-  const pos=(id,fb)=>{ const v=parseFloat(document.getElementById(id).value); return isFinite(v)&&v>0?v:fb; };
-  const nn=id=>Math.max(0,parseFloat(document.getElementById(id).value)||0);
+  const pos=(id,fb)=>{ const v=numRead(document.getElementById(id)); return isFinite(v)&&v>0?v:fb; };
+  const nn=id=>Math.max(0,numRead(document.getElementById(id))||0);
   L.cardW=pos('cardW',L.cardW);
   L.cardH=pos('cardH',L.cardH);
   L.cols=Math.max(1,parseInt(document.getElementById('gridCols').value)||1);
@@ -10937,14 +10971,12 @@ function readLayoutInputs(){
 }
 function writeLayoutInputs(){
   const L=state.layout;
-  document.getElementById('cardW').value=L.cardW;
-  document.getElementById('cardH').value=L.cardH;
-  document.getElementById('gridCols').value=L.cols;
-  document.getElementById('gridRows').value=L.rows;
-  document.getElementById('leadTrim').value=L.leadTrim;
-  document.getElementById('sideTrim').value=L.sideTrim;
-  document.getElementById('gutterSlit').value=L.slit;
-  document.getElementById('gutterCut').value=L.cut;
+  const g=id=>document.getElementById(id);
+  numShow(g('cardW'),L.cardW); numShow(g('cardH'),L.cardH);
+  g('gridCols').value=L.cols;
+  g('gridRows').value=L.rows;
+  numShow(g('leadTrim'),L.leadTrim); numShow(g('sideTrim'),L.sideTrim);
+  numShow(g('gutterSlit'),L.slit); numShow(g('gutterCut'),L.cut);
   setLayoutMode(L.mode,true);
 }
 function updateCalc(){
@@ -11001,7 +11033,7 @@ function setSpecMm(){
   readLayoutInputs();
   const u=state.paper.unit, L=layoutMm(), p=paperMm();
   const num=(id,fb)=>{ const el=document.getElementById(id);
-    const v=el?parseFloat(el.value):NaN; return isFinite(v)&&v>0?v:fb; };
+    const v=el?numRead(el):NaN; return isFinite(v)&&v>0?v:fb; };
   const cardW=Math.min(toMm(num('setCardW',fromMm(L.cardW,u)),u),p.w);
   const cardH=Math.min(toMm(num('setCardH',fromMm(L.cardH,u)),u),p.h);
   const cols=Math.max(1,Math.round(num('setCols',L.cols)));
@@ -11010,7 +11042,7 @@ function setSpecMm(){
   const originX=L.mode==='center'?(p.w-totalW)/2:L.side;
   const originY=L.mode==='center'?(p.h-totalH)/2:L.lead;
   return {cardW,cardH,cols,rows,slit:L.slit,cut:L.cut,totalW,totalH,
-          originX,originY,p,fits:totalW<=p.w+0.01&&totalH<=p.h+0.01};
+          originX,originY,p,fits:totalW<=p.w+fitTolMm()&&totalH<=p.h+fitTolMm()};
 }
 function updateSetCalc(){
   const el=document.getElementById('setCalc'); if(!el) return;
@@ -11983,35 +12015,47 @@ function pcBulkCatOptions(){
 
 // ---------- sheet controls ----------
 document.getElementById('applySizeBtn').addEventListener('click',()=>{
-  const pos=(id,fb)=>{ const v=parseFloat(document.getElementById(id).value); return isFinite(v)&&v>0?v:fb; };
-  const was=state.paper.unit, unit=document.getElementById('paperUnit').value;
-  const cv=v=>Math.round(fromMm(toMm(v,was),unit)*1000)/1000;
+  const g=id=>document.getElementById(id);
+  const pos=(id,fb)=>{ const v=numRead(g(id)); return isFinite(v)&&v>0?v:fb; };
+  const was=state.paper.unit, unit=g('paperUnit').value;
+  // full precision: the boxes round for show, the sheet and layout never do
+  const cv=v=>fromMm(toMm(v,was),unit);
+  // Only the unit changed: the sheet and the layout keep their real size. A box
+  // still showing what was last written in the old unit, or typed before the new
+  // unit was picked, is the old unit's figure and is converted; one retyped with
+  // the new unit picked is taken as the new unit's. Layout boxes are read into
+  // the layout as they are typed, so the layout alone could not tell.
+  const oldUnit=id=>{ const el=g(id); return !el||numShown(el)||el.dataset.typedIn!==unit; };
+  const ids={cardW:'cardW',cardH:'cardH',leadTrim:'leadTrim',sideTrim:'sideTrim',slit:'gutterSlit',cut:'gutterCut'};
+  const conv=unit!==was?Object.fromEntries(
+    [...Object.values(ids),'paperW','paperH','setCardW','setCardH'].map(id=>[id,oldUnit(id)])):{};
   let w=pos('paperW',state.paper.w), h=pos('paperH',state.paper.h);
   if(unit!==was){
-    // Only the unit changed: the sheet and the layout keep their real size. A
-    // paper box left as it was is the old unit's figure and is converted; one
-    // retyped is taken as the new unit's.
-    if(w===state.paper.w) w=cv(w);
-    if(h===state.paper.h) h=cv(h);
+    if(conv.paperW) w=cv(w);
+    if(conv.paperH) h=cv(h);
     readLayoutInputs();
     const L=state.layout;
-    ['cardW','cardH','leadTrim','sideTrim','slit','cut'].forEach(k=>{ L[k]=cv(Number(L[k])||0); });
-    ['setCardW','setCardH'].forEach(id=>{ const el=document.getElementById(id);
-      const v=el&&parseFloat(el.value); if(el&&isFinite(v)&&v>0) el.value=cv(v); });
+    Object.entries(ids).forEach(([k,id])=>{ if(conv[id]) L[k]=cv(Number(L[k])||0); });
+    ['setCardW','setCardH'].forEach(id=>{ const el=g(id);
+      const v=el&&numRead(el); if(el&&isFinite(v)&&v>0) numShow(el,conv[id]?cv(v):v); });
   }
   state.paper.w=w; state.paper.h=h; state.paper.unit=unit;
-  document.getElementById('paperW').value=w;
-  document.getElementById('paperH').value=h;
+  numShow(g('paperW'),w); numShow(g('paperH'),h);
   if(unit!==was) writeLayoutInputs();
   // the design rows carry a bleed in the sheet's unit, so they are redrawn too
   renderPlaceholderList();refreshArtInputs();renderDesignLines();updateCalc();drawAll();
 });
 document.getElementById('swapOrientBtn').addEventListener('click',()=>{
   const w=state.paper.w;state.paper.w=state.paper.h;state.paper.h=w;
-  document.getElementById('paperW').value=state.paper.w;
-  document.getElementById('paperH').value=state.paper.h;
+  numShow(document.getElementById('paperW'),state.paper.w);
+  numShow(document.getElementById('paperH'),state.paper.h);
   updateCalc();drawAll();
 });
+// which unit a size box was typed under: retyped with the new unit already
+// picked, Apply takes it as the new unit's figure rather than converting it
+['paperW','paperH','cardW','cardH','leadTrim','sideTrim','gutterSlit','gutterCut','setCardW','setCardH']
+  .forEach(id=>{ const el=document.getElementById(id);
+    if(el) el.addEventListener('input',()=>{ el.dataset.typedIn=document.getElementById('paperUnit').value; }); });
 [['shiftFrontX','front','xMm'],['shiftFrontY','front','yMm'],['shiftBackX','back','xMm'],['shiftBackY','back','yMm']].forEach(([id,side,axis])=>{
   document.getElementById(id).addEventListener('input',e=>{
     const v=parseFloat(e.target.value);
@@ -13706,6 +13750,28 @@ function designBleedStore(){
 function designBleedSaveStore(){
   try{ localStorage.setItem(DESIGN_BLEED_KEY,JSON.stringify(designBleedStore())); }catch(e){}
 }
+// Writes the table never took: "on this browser only" has to stay true, so the
+// next read of the table lays these back over what it says and tries again.
+// key -> {on,mm,rot}, or {del:true} for a design handed back to the sheet.
+const DESIGN_BLEED_PENDING_KEY='pigu.designBleed.pending';
+function designBleedPending(){
+  try{ return JSON.parse(localStorage.getItem(DESIGN_BLEED_PENDING_KEY)||'{}')||{}; }catch(e){ return {}; }
+}
+function designBleedSetPending(key,v){
+  const p=designBleedPending();
+  if(v) p[key]=v; else delete p[key];
+  try{ localStorage.setItem(DESIGN_BLEED_PENDING_KEY,JSON.stringify(p)); }catch(e){}
+}
+function designBleedMergePending(store){
+  const p=designBleedPending();
+  Object.keys(p).forEach(k=>{
+    const v=p[k];
+    if(!k||!v) return;
+    if(v.del) delete store[k]; else store[k]={on:!!v.on,mm:v.on?Number(v.mm):null,rot:designRotOf({rotate:v.rot})};
+    designBleedWrite(k,v.del?null:v.mm,!v.del&&!!v.on,v.del?0:v.rot,true);
+  });
+  return store;
+}
 // Reads the shared list. One in-flight read is shared by every caller: a sheet
 // being built asks once per design, and that is one question, not six.
 // A read that fails leaves the mirror alone and stays un-loaded, so the next
@@ -13740,7 +13806,7 @@ function designBleedLoad(force){
       if(noRot) Object.keys(local||{}).forEach(k=>{
         if(!store[k]&&local[k]&&local[k].rot) store[k]={on:false,mm:null,rot:designRotOf({rotate:local[k].rot})};
       });
-      designBleedMemo=await designBleedLift(local,store);
+      designBleedMemo=designBleedMergePending(await designBleedLift(local,store));
       designBleedLoaded=true;
       designBleedSaveStore();
       return designBleedMemo;
@@ -13811,23 +13877,30 @@ async function designBleedLift(local,store){
 // pressing TURN four times or typing "2.5" fired overlapping calls, a delete
 // could pass an earlier upsert, and the table kept a value the screen no longer had.
 const designBleedQueue=new Map();
-function designBleedWrite(key,mm,on,rot){
+// quiet: a retry of a pending write — it was already told once.
+function designBleedWrite(key,mm,on,rot,quiet){
   if(!key) return Promise.resolve(false);
   const prev=designBleedQueue.get(key)||Promise.resolve();
-  const run=prev.catch(()=>{}).then(()=>designBleedWriteNow(key,mm,on,rot));
+  const run=prev.catch(()=>{}).then(async()=>{
+    const ok=await designBleedWriteNow(key,mm,on,rot,quiet);
+    const turn=designRotOf({rotate:rot});
+    designBleedSetPending(key,ok?null:((on||turn)?{on:!!on,mm:on?Number(mm):null,rot:turn}:{del:true}));
+    return ok;
+  });
   designBleedQueue.set(key,run);
   const clear=()=>{ if(designBleedQueue.get(key)===run) designBleedQueue.delete(key); };
   run.then(clear,clear);
   return run;
 }
-async function designBleedWriteNow(key,mm,on,rot){
+async function designBleedWriteNow(key,mm,on,rot,quiet){
   if(!key) return false;
-  if(!sb){ designBleedTold('Sync is unavailable — that bleed is on this browser only.'); return false; }
+  const told=t=>{ if(!quiet) designBleedTold(t); };
+  if(!sb){ told('Sync is unavailable — that bleed is on this browser only.'); return false; }
   const turn=designRotOf({rotate:rot});
   const what=on&&turn?'bleed and turn':(turn?'turn':'bleed');
   try{
     const {data:{session}}=await sb.auth.getSession();
-    if(!session){ designBleedTold(`Sign in for the team to see that ${what} — it is on this browser only for now.`); return false; }
+    if(!session){ told(`Sign in for the team to see that ${what} — it is on this browser only for now.`); return false; }
     // The row carries both, so it lives while the design has either: its own
     // bleed, its own turn, or both. Neither, and there is nothing to say.
     const {error}=(on||turn)
@@ -13842,12 +13915,12 @@ async function designBleedWriteNow(key,mm,on,rot){
     const msg=(err&&err.message)||'unknown error';
     // the one failure that has an answer somebody can act on
     if(/rot/i.test(msg)&&/column|schema cache/i.test(msg)){
-      designBleedTold('The turn a design keeps cannot be shared until '
+      told('The turn a design keeps cannot be shared until '
         +'supabase-migration-DESIGN-ROTATE.sql is run in Supabase — it is on '
         +'this browser only until then.');
       return false;
     }
-    designBleedTold(`Could not share that ${what}: ${msg} — it is on this browser only.`);
+    told(`Could not share that ${what}: ${msg} — it is on this browser only.`);
     return false;
   }
 }
@@ -26334,8 +26407,8 @@ function applyPrintState(meta,name,whole,keepArt){
   // builder edits paper and boxes in place — it rewrote the line in memory
   const cp=v=>v==null?v:JSON.parse(JSON.stringify(v));
   state.paper=cp(meta.paper)||state.paper;
-  document.getElementById('paperW').value=state.paper.w;
-  document.getElementById('paperH').value=state.paper.h;
+  numShow(document.getElementById('paperW'),state.paper.w);
+  numShow(document.getElementById('paperH'),state.paper.h);
   document.getElementById('paperUnit').value=state.paper.unit;
   if(meta.layout) state.layout=Object.assign(state.layout,meta.layout);
   writeLayoutInputs();
@@ -26460,7 +26533,7 @@ function applyPrintState(meta,name,whole,keepArt){
         if(!file){ missing.push(d.name||d.path); continue; }
         try{
           const dataURL=await fileToImageData(file);
-          const line={id:uid(),name:d.name||file.name,qty:Math.max(1,Math.round(Number(d.qty)||1)),
+          const line={id:uid(),name:d.name||file.name,qty:savedDesignQty(d.qty),
             data:dataURL,img:await loadImage(dataURL),source:{dir:'loadDesignDir',path:d.path}};
           // what the template says this design bleeds beats what the design is
           // remembered by — the template is the job, and the job was saved
@@ -26483,11 +26556,19 @@ function applyPrintState(meta,name,whole,keepArt){
   }else if(single){
     state.designs=[];
     renderDesignLines();
+    // the WIDTH/HEIGHT the template saved: loading the file fits it to the
+    // card afresh, so the saved size goes back on once the file is in
+    const keepArt=(meta.art||(meta.presetSize&&meta.presetSize.wMm&&meta.presetSize.hMm))
+      ?{front:{...state.art.front},back:{...state.art.back}}:null;
     printArtLoading=(async()=>{
       const file=await loadDesignFileByPath(single.path);
       if(artGen!==printArtGen) return;
       if(file){
         await useArtFile('final','front',file,{dir:'loadDesignDir',path:single.path});
+        if(keepArt&&artGen===printArtGen){
+          ['front','back'].forEach(s=>{ if(keepArt[s].wMm>0&&keepArt[s].hMm>0) state.art[s]={...keepArt[s]}; });
+          refreshArtInputs(); drawAll();
+        }
       }else{
         showMsg(msgEl,`Template loaded — its design (${single.name||single.path}) isn't reachable. Choose the NAS folder or use Load design.`,false);
       }
@@ -26500,6 +26581,12 @@ function applyPrintState(meta,name,whole,keepArt){
   // none) of what it was loaded with
   const p=printArtLoading;
   if(p) p.then(()=>{},()=>{}).then(()=>{ if(printArtLoading===p) printArtLoading=null; });
+}
+// a saved design's count: 0 is kept (saved at 0, it prints none — designQueue
+// skips it); only a count never written at all comes back as 1
+function savedDesignQty(q){
+  const n=Math.round(Number(q));
+  return q==null||q===''||!isFinite(n)?1:Math.max(0,n);
 }
 async function loadTemplate(id){
   // whoever lays a shared sheet on it says so again once it is laid
@@ -27730,6 +27817,9 @@ const pdfLift=(function(){
       // the box the form actually draws in, in the space that places it
       x: tbox[0], y: tbox[1], w: tbox[2] - tbox[0], h: tbox[3] - tbox[1],
       bbox, matrix, rotate,
+      // the page's own trim, bleed and art boxes, untouched — a page lifted out
+      // on its own carries them over, or its bleed is lost
+      boxes: { TrimBox: box(get('TrimBox')), BleedBox: box(get('BleedBox')), ArtBox: box(get('ArtBox')) },
       pages: src.count(),
     };
   }
@@ -30695,10 +30785,18 @@ function gtBuildLayout(text){
     // comes off the printer with its blank half at the top, where it is the
     // easiest to feed again and the least likely to be cut into. Rows are
     // banded rather than sorted on an exact Y, so a row whose shapes sit a
-    // hair apart still reads as one row.
+    // hair apart still reads as one row. Clustered from the bottom up like the
+    // Custom Print Template's fillOrder: a shape joins the row while it sits
+    // within half a tag of that row's first shape. Rounding y onto fixed bands
+    // flipped a row sitting on a band edge after a 0.1 mm nudge.
     const band=Math.max(1,(tags.reduce((s,x)=>s+x.bbox.h,0)/Math.max(1,tags.length))/2);
-    tags.sort((a,b)=>(Math.round(b.bbox.y/band)-Math.round(a.bbox.y/band))||(a.bbox.x-b.bbox.x));
-    return tags.length?{vb,mm,shapes:tags}:null;
+    const rows=[];
+    tags.slice().sort((a,b)=>(b.bbox.y-a.bbox.y)||(a.bbox.x-b.bbox.x)).forEach(t=>{
+      const r=rows[rows.length-1];
+      if(r&&r.y0-t.bbox.y<=band) r.items.push(t); else rows.push({y0:t.bbox.y,items:[t]});
+    });
+    const ordered=rows.flatMap(r=>r.items.sort((a,b)=>a.bbox.x-b.bbox.x));
+    return ordered.length?{vb,mm,shapes:ordered}:null;
   }catch(e){ return null; }
   finally{ host.innerHTML=''; }
 }
@@ -34457,9 +34555,13 @@ function gtNudgeFields(list,dx,dy){
   // held back as one, like a drag, so a group pushed to the edge keeps its shape
   const clamp=(v,lo,hi)=>Math.min(hi,Math.max(lo,v));
   let mx=A.w?dx/A.w:0, my=A.h?dy/A.h:0;
+  // Each box's room always takes in standing still. A box already over the
+  // edge had its range turned inside out (lo above hi), and the clamp jumped
+  // the whole group across: now it only stops the group going further out.
+  const room=(v,lo,hi)=>clamp(v,Math.min(0,lo),Math.max(0,hi));
   list.forEach(f=>{
-    mx=clamp(mx,-f.x,1-f.w-f.x);
-    my=clamp(my,-f.y,1-f.h-f.y);
+    mx=room(mx,-f.x,1-f.w-f.x);
+    my=room(my,-f.y,1-f.h-f.y);
   });
   list.forEach(f=>{ f.x+=mx; f.y+=my; });
 }
@@ -35496,6 +35598,10 @@ async function gtFinishMap(){
   return gtFinishes;
 }
 async function gtFinishKeep(page){
+  // A batch's sheet sets the run it was lent for, not the page's own: kept
+  // here, a page switch saved the batch's Gloss over the page's Matte for good.
+  // The page's run comes back when the batch takes its sheet back (mcGtReturn).
+  if(typeof mcGtHome!=='undefined'&&mcGtHome) return;
   (await gtFinishMap())[page||gtMode]=gtFinish;
   await gtIdbPut('gtFinish',{...gtFinishes}).catch(()=>{});
 }
@@ -39107,6 +39213,8 @@ Object.keys(FILTERS).forEach(filterLabel);
 // ---------- init ----------
 window.addEventListener('resize',()=>{ measureSheetCardW(); drawAll(); });
 writeLayoutInputs();
+numShow(document.getElementById('paperW'),state.paper.w);
+numShow(document.getElementById('paperH'),state.paper.h);
 generateGrid();
 renderPlaceholderList();refreshSlots();refreshArtInputs();updateCalc();
 setArtMode(state.artMode,true);renderDesignLines();refreshPdfNamingPreview();drawAll();
@@ -49854,6 +49962,8 @@ async function mcGtReturn(){
     if(target) gtOrders[target]=(gtOrders[target]||[]).concat(back);
     else gtOrder=gtOrder.concat(back);
   }
+  // the run the batch set was the lent sheet's; the page goes back to its own
+  if(typeof gtFinishRestore==='function') await gtFinishRestore();
   if(typeof gtRenderOrder==='function') gtRenderOrder();
   await mcGtWriteBack(edited,home);
   if(mcOnBatch()) mcRenderItems();
@@ -50264,7 +50374,7 @@ async function mcExportPlan(){
             &&Array.isArray(it.design.designs)?it.design.designs:null;
           const sp=it.art&&Array.isArray(it.art.frontSplit)?it.art.frontSplit.filter(x=>x.on!==false):null;
           if(sp&&sp.length) return n+sp.reduce((m,x)=>m+Math.max(1,Math.round(Number(x.qty)||1)),0);
-          return n+(ds&&ds.length?ds.reduce((m,d)=>m+Math.max(1,Math.round(Number(d.qty)||1)),0)
+          return n+(ds&&ds.length?ds.reduce((m,d)=>m+savedDesignQty(d.qty),0)
             :Math.max(1,mcQty(it)));
         },0);
         const sides=g.set[0].art&&g.set[0].art.back?['front','back']:['front'];
@@ -51089,7 +51199,7 @@ const PJ_KINDS={
       // counted from what is kept: an uploaded picture has no path to keep, so
       // counting it made a row that said "N cards" and opened to an empty sheet
       const kept=designs.length
-        ? designs.reduce((n,d)=>n+Math.max(1,Math.round(Number(d.qty)||1)),0)
+        ? designs.reduce((n,d)=>n+savedDesignQty(d.qty),0)
         : (design?designTotal():0);
       return {page:'',items:kept,
         data:{paper:state.paper,layout:state.layout,placeholders:state.placeholders,
@@ -51275,7 +51385,7 @@ async function pjWrite(id,add){
     }else{
       data={...(row.data||{}),designs:((row.data&&row.data.designs)||[])
         .concat(s.data.designs||[])};
-      items=(data.designs||[]).reduce((n,d)=>n+Math.max(1,Math.round(Number(d.qty)||1)),0);
+      items=(data.designs||[]).reduce((n,d)=>n+savedDesignQty(d.qty),0);
     }
   }
   const {error}=await sb.from('print_jobs')
