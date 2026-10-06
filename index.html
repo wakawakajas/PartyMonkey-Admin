@@ -7423,10 +7423,9 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
       <!-- outside the block above, so it is still there to reach once the
            design list has taken that block's place -->
       <div class="sect-label" style="margin-top:0;">Artwork size</div>
-      <p class="hint">Artwork arrives at the size the file itself says. Switch to Placeholder size to fill the shape being trimmed, or Original to keep the file's own proportions inside the card.</p>
+      <p class="hint">Actual size: the design at the size its own file says — resize it with WIDTH / HEIGHT, and anything past the cut is its bleed. Placeholder size: the whole design shrunk or stretched to the card.</p>
       <div class="seg" id="artFitSeg" style="margin-bottom:14px;">
         <button data-artfit="card">Placeholder size</button>
-        <button data-artfit="original">Original</button>
         <button data-artfit="actual" class="on">Actual size</button>
       </div>
       <!-- The two boxes are typed in one at a time, and most of the time a card
@@ -7443,7 +7442,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
       <div class="sect-label">Bleed</div>
       <div class="click-row" style="margin-bottom:10px;">
         <label class="click-tog"><input type="checkbox" id="bleedToggle" checked/>Add bleed to all sides</label>
-        <label class="click-tog"><input type="checkbox" id="bleedFillGap"/>Carry it across a too-small design</label>
+        <!-- always on now: bleed fills to its depth whatever the ratio -->
+        <label class="click-tog" hidden><input type="checkbox" id="bleedFillGap"/>Carry it across a too-small design</label>
         <label class="click-tog" title="Swaps every colour in the artwork for its opposite — black for white, and so on."><input type="checkbox" id="bleedInvert"/>Invert colours</label>
       </div>
       <div class="bleed-row">
@@ -7460,9 +7460,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
            either side, and a bleed made from its own edges stops short of the
            cut. This carries the made-up edge across that gap and past the
            placeholder by the bleed, so the card prints to the edge whatever
-           shape it was sent at. Off by default: it makes up picture where the
-           client sent none, which is a decision, not a default. -->
-      <p class="hint" style="margin-top:7px;margin-bottom:0;">For a design that came in at the wrong ratio and does not fill its placeholder: the bleed starts at the artwork's edge, crosses the empty paper and carries on past the cut — on the short side only, so a file with the right width and the wrong height is made up top and bottom and left alone either side. It is made up from the edges even on <b>Stretch</b>, which across a gap would squash the picture. Needs <b>Actual size</b> or <b>Original</b> above: <b>Placeholder size</b> stretches the design to fit, so there is no gap to carry. Off, the bleed stops at the artwork and the gap prints as paper.</p>
+           shape it was sent at. Always on with bleed on. -->
+      <p class="hint" style="margin-top:7px;margin-bottom:0;">A design at the wrong ratio still bleeds the full amount on every side: the gap between it and the cut is made up from its own edges.</p>
       <!-- How the bleed is made. Stretch is what it always did; the other two
            keep the artwork at its trim size and make the bleed up around it,
            which is what a client file drawn with no bleed at all needs. -->
@@ -8970,9 +8969,11 @@ async function pdfTrimInset(bytes){
 }
 // The trim a PDF's picture carries, as the share of its width and height that
 // lies inside the cut: {x,y}, or null for a picture with no bleed of its own.
-// A page with no TrimBox is still taken as bled when it is exactly the card
-// with a few millimetres all round (within 1 mm of each other) — a card sent at 94 × 59 for an
-// 89 × 54 placeholder is that card with 2.5 mm of bleed, not a bigger card.
+// A page with no TrimBox is all design: it was once guessed to be bled when it
+// was the card with a few millimetres all round, but then Placeholder size and
+// Actual size both cut that edge off and came out the same. Unmarked, the
+// whole page is the design — Placeholder size fits it, Actual size prints it
+// at its own size and the edge past the cut is its bleed.
 // cardW/cardH are along the picture's own axes.
 function artTrimFrac(img,cardW,cardH){
   if(!img||!img.naturalWidth) return null;
@@ -8992,12 +8993,6 @@ function artTrimFrac(img,cardW,cardH){
   const t=img._pdfTrim;
   if(!t) return null;
   if(t.some(x=>x>0.0005)) return {x:1-t[0]-t[2], y:1-t[1]-t[3]};
-  const real=artRealMm(img);
-  if(!real||!(cardW>0)||!(cardH>0)) return null;
-  const bx=(real.w-cardW)/2, by=(real.h-cardH)/2;
-  // the two sides' bleed needn't match exactly: 96 × 60 for 89 × 54 is 3.5 mm
-  // across and 3 mm up, and fitting it whole made it 86.4 × 54
-  if(bx>=1&&bx<=6&&by>=1&&by<=6&&Math.abs(bx-by)<=1.01) return {x:cardW/real.w, y:cardH/real.h};
   return null;
 }
 // A pHYs chunk slipped in straight after IHDR. The signature and IHDR are 33
@@ -9965,7 +9960,10 @@ function renderSide(side,canvas,maxDim,opts){
     // shape, so a carried bleed is always made up from the edges instead.
     // A page with its own bleed makes none up: the whole page is drawn, its
     // trim on the footprint, and cut back to the bleed the sheet asks for.
-    const fillGap=!tf&&!!(state.bleed&&state.bleed.fillGap)&&bleedMm>0;
+    // Bleed on always reaches its full depth past the cut, whatever shape the
+    // design came in: a wrong-ratio file has the gap made up from its edges
+    // too, so it no longer waits on its own switch.
+    const fillGap=!tf&&bleedMm>0;
     const padX=fillGap?Math.max(0,(ph.wMm-wMm)/2):0;
     const padY=fillGap?Math.max(0,(ph.hMm-hMm)/2):0;
     const bX=tf?(wMm/tf.x-wMm)/2:bleedMm+padX, bY=tf?(hMm/tf.y-hMm)/2:bleedMm+padY;
@@ -13693,7 +13691,9 @@ document.getElementById('sheetNextBtn').addEventListener('click',()=>{
 });
 // filling the placeholder or keeping the file's own proportions
 function setArtFit(mode,skipDraw){
-  state.artFit=mode==='original'||mode==='actual'?mode:'card';
+  // Original is gone from the buttons; a sheet saved on it opens on Actual
+  // size, which keeps the file's proportions the same way
+  state.artFit=mode==='original'||mode==='actual'?'actual':'card';
   document.querySelectorAll('#artFitSeg button').forEach(b=>
     b.classList.toggle('on',b.dataset.artfit===state.artFit));
   if(skipDraw) return;
