@@ -10174,6 +10174,24 @@ function renderSide(side,canvas,maxDim,opts){
   // 'ghost' while the faded overflow of too-big pictures is laid down, then
   // 'art' for the cards themselves
   let artPhase='art';
+  // Every card's trim on this sheet (a Place Card card and its words boxes as
+  // one). With cards closer than twice the bleed, a card's bleed reached into
+  // the next card's cut: on screen the later card won, in the PDF a raster
+  // neighbour's bleed lay over a placed PDF card's edge. So a card's draw
+  // region is its own box and bleed less every other card's trim.
+  const cardTrims=artOrder();
+  const cardHoles=(ph,c)=>{
+    const out=[], E=0.01;
+    cardTrims.forEach(o=>{
+      if(o===ph||(o.id!=null&&o.id===ph.id)) return;
+      // boxes laid over one another: a hole there would bite this card's own cut
+      if(o.xMm<ph.xMm+ph.wMm-E&&o.xMm+o.wMm>ph.xMm+E&&o.yMm<ph.yMm+ph.hMm-E&&o.yMm+o.hMm>ph.yMm+E) return;
+      const x0=Math.max(c.x,o.xMm), y0=Math.max(c.y,o.yMm);
+      const x1=Math.min(c.x+c.w,o.xMm+o.wMm), y1=Math.min(c.y+c.h,o.yMm+o.hMm);
+      if(x1-x0>1e-6&&y1-y0>1e-6) out.push({x:x0,y:y0,w:x1-x0,h:y1-y0});
+    });
+    return out;
+  };
   const one=(img,ph,line,key)=>{
     const lk=line&&line.look;
     if(!lk) return oneDraw(img,ph,line,key);
@@ -10216,6 +10234,9 @@ function renderSide(side,canvas,maxDim,opts){
     }
     // and a design's own bleed is cut back the same way
     if(own) clip={x:ph.xMm-bleedMm, y:ph.yMm-bleedMm, w:ph.wMm+bleedMm*2, h:ph.hMm+bleedMm*2};
+    // and never inside another card's cut: the other cards' trims within reach,
+    // cut out of the clip on screen and in the PDF alike
+    const holes=cardHoles(ph,clip);
     const reach=(x,y)=>({x:Math.min(reachMm,tf?Math.min(x,(wMm-ph.wMm)/2+bleedMm):own?Math.min(x,bleedMm):x),
       y:Math.min(reachMm,tf?Math.min(y,(hMm-ph.hMm)/2+bleedMm):own?Math.min(y,bleedMm):y)});
     let ringOnly=false;
@@ -10245,11 +10266,13 @@ function renderSide(side,canvas,maxDim,opts){
       return {x:x0, y:y0, w:Math.max(0,x1-x0), h:Math.max(0,y1-y0)}; };
     if(artPhase!=='ghost'&&opts.vec&&!invert){
       let vclip={x:clip.x+artShift.xMm, y:clip.y+artShift.yMm, w:clip.w, h:clip.h};
+      const vHoles=holes.map(h=>({x:h.x+artShift.xMm, y:h.y+artShift.yMm, w:h.w, h:h.h}));
       const mx=ph.xMm+ph.wMm/2+artShift.xMm, my=ph.yMm+ph.hMm/2+artShift.yMm;
       if(grow){
         // on the sheet's axes, which a quarter turn swaps
         const ix=swapped?insH:insW, iy=swapped?insW:insH;
         if(trimPx) vclip=cut(vclip,mx-wMm/2+ix,my-hMm/2+iy,wMm-ix*2,hMm-iy*2);
+        if(holes.length) vclip.holes=vHoles;
         ringOnly=opts.vec.take(key,
           {x:mx-trimW/2, y:my-trimH/2, w:trimW, h:trimH, rot:rotDeg},
           reach((wMm-ph.wMm)/2, (hMm-ph.hMm)/2), vclip);
@@ -10261,6 +10284,7 @@ function renderSide(side,canvas,maxDim,opts){
           w=boxW*nW/(nW-trimPx*2); h=boxH*nH/(nH-trimPx*2);
           vclip=cut(vclip,mx-effW/2,my-effH/2,effW,effH);
         }
+        if(holes.length) vclip.holes=vHoles;
         if(opts.vec.take(key,{x:mx-w/2, y:my-h/2, w, h, rot:rotDeg},
           reach((effW-ph.wMm)/2, (effH-ph.hMm)/2), vclip)) return;
       }
@@ -10273,6 +10297,14 @@ function renderSide(side,canvas,maxDim,opts){
       ctx.beginPath();
       ctx.rect(clip.x*sc,clip.y*sc,clip.w*sc,clip.h*sc);
       ctx.clip();
+      // each other card's trim taken out in a clip of its own, so trims that
+      // touch or overlap one another still all stay out
+      holes.forEach(h=>{
+        ctx.beginPath();
+        ctx.rect(clip.x*sc,clip.y*sc,clip.w*sc,clip.h*sc);
+        ctx.rect(h.x*sc,h.y*sc,h.w*sc,h.h*sc);
+        ctx.clip('evenodd');
+      });
     }
     ctx.translate(cx,cy);
     ctx.rotate(rotDeg*Math.PI/180);
@@ -32152,6 +32184,14 @@ function gtDrawTag(ctx,line,x,y,w,h,sc,forExport,vec){
       // a pixel short of the trim, so the ring overlaps the placed page rather
       // than leaving a hairline of paper between them
       if(took==='ring') ctx.clearRect(r.x*sc+0.5,r.y*sc+0.5,r.w*sc-1,r.h*sc-1);
+      // grown bleed over a placed page: punch out every pixel the artwork
+      // itself covers, so the page underneath shows there and only the growth
+      // (round the box, and round a cut-out's shape inside it) stays raster
+      if(took==='offset'){
+        ctx.filter='none';
+        ctx.globalCompositeOperation='destination-out';
+        ctx.drawImage(img,r.x*sc,r.y*sc,r.w*sc,r.h*sc);
+      }
       ctx.restore();
     }
   }
@@ -35315,7 +35355,10 @@ async function gtBuildPdf(count,render,sources){
         M=mtxMul(M,mtxMul([1,0,0,1,-cx,-cy],mtxMul([co,si,-si,co,0,0],[1,0,0,1,cx,cy])));
       }
       // a placing that says how far it may reach is cut off there
-      const cut=c?`${f(mmToPt(c.x))} ${f(mmToPt(hMm-(c.y+c.h)))} ${f(mmToPt(c.w))} ${f(mmToPt(c.h))} re W n `:'';
+      // and a clip with holes (CPT: the other cards' trims) takes each one out
+      // in an even-odd clip of its own, so the holes never add back up
+      const re=b=>`${f(mmToPt(b.x))} ${f(mmToPt(hMm-(b.y+b.h)))} ${f(mmToPt(b.w))} ${f(mmToPt(b.h))} re `;
+      const cut=c?`${re(c)}W n `+(c.holes||[]).map(hb=>`${re(c)}${re(hb)}W* n `).join(''):'';
       cs+=`q ${cut}${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
     });
     cs+=`q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
@@ -35413,14 +35456,21 @@ async function gtFillBleeds(pages,plan){
 // into the PDF as a layer of its own over everything, multiplied, as on screen.
 // Answers true when the whole tag is placed, 'ring' when its page is placed at
 // the trim and the bleed round it is still to be drawn from pixels (a gap to
-// carry across, or a bleed made from the edges), false when it is drawn.
+// carry across, or a bleed made from the edges), 'offset' when its page is
+// placed at its box and the grown bleed is drawn with the artwork punched out,
+// false when it is drawn.
 function gtVecTaker(forms,place){
   return {take(d,r,b,gap,clip){
     if(!forms.has(d.id)) return false;
     if(gtSheet.invertArt) return false;     // a placed page cannot be inverted
     // growing a cut-out's shape outward reaches inside its box too, which a
-    // ring round the trim cannot carry — that one stays pixels
-    if(b>0&&gtSheet.bleedMode==='offset') return false;
+    // ring round the trim cannot carry. So the page goes in whole at its box
+    // and the grown bleed is drawn over it with a hole wherever the artwork
+    // itself is (see gtDrawTag) — only the growth is pixels.
+    if(b>0&&gtSheet.bleedMode==='offset'){
+      place.push({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip});
+      return 'offset';
+    }
     const gapped=!!gap&&(gap.x>0.05||gap.y>0.05);
     if(b>0&&(gtSheet.bleedMode!=='scale'||gapped)){
       place.push({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip});
@@ -42043,9 +42093,20 @@ async function mcFieryPrint(idx){
   const stamp=printStamp();
   const entries=idx.map(i=>({...mcPlan[i],name:printStamped(mcPlan[i].name,stamp)}));
   const count=(idx.length===1&&idx[0]===mcPlanAt)?mcPlanPages:0;
-  const ans=await fieryAsk(entries,count,mcFieryCountSheets(entries));
-  // a count made for the copies is the plan's count too
-  entries.forEach((e,k)=>{ const o=mcPlan[idx[k]]; if(o&&e.sheets>0&&!(o.sheets>0)) o.sheets=e.sheets; });
+  // a count made for the copies is the plan's count too — found again by its
+  // file name (and line), since the plan can be rebuilt while the dialog is
+  // open, and written whenever the count finishes, Send or no Send
+  const keys=idx.map(i=>({name:mcPlan[i].name,tile:mcPlan[i].tile,id:mcPlan[i].it&&mcPlan[i].it.id}));
+  const writeBack=()=>entries.forEach((e,k)=>{
+    if(!(e.sheets>0)) return;
+    const q=keys[k];
+    const o=mcPlan.find(p=>p&&p.name===q.name&&p.tile===q.tile&&(p.it&&p.it.id)===q.id);
+    if(o&&!(o.sheets>0)) o.sheets=e.sheets;
+  });
+  const counting=mcFieryCountSheets(entries);
+  counting.then(writeBack,()=>{});
+  const ans=await fieryAsk(entries,count,counting);
+  writeBack();
   if(!ans) return;
   mcBusy=true; mcSyncBatchButtons(); mcRenderPlan(); mcPlanZoomApply();
   let dir=null;
@@ -48632,6 +48693,14 @@ function mcCustomWire(it){
         +escapeHtml((error&&error.message)||'nothing came back'),false);
       return;
     }
+    // a template naming no artwork leaves the sheet's art alone in
+    // applyPrintState — so the last line's front stayed, and mcApplyArt kept it
+    // as this layout's own. Nothing put there by this template is this line's.
+    const td=data.data||{};
+    if(td.design===undefined&&td.designs===undefined){
+      state.final.front={data:null,img:null,name:''};
+      state.final.back={data:null,img:null,name:''};
+    }
     applyPrintState(data.data);
     mcLaidTemplate=String(want);                   // what the builder now holds
     mcLaidShared=false;                            // and it is this line's, not a shared sheet
@@ -50407,12 +50476,18 @@ async function mcExportPlan(){
   // Two files of one name in one run are one file: the folder keeps whichever
   // was written last. Two personalised cards on one order with the same
   // design, paper and weight did it, and so did two templates of one name. The
-  // second and after take a number, just before the extension.
-  const used=new Map();
+  // second and after take a number, just before the extension. The number is
+  // the pair's: a line's (or merged sheet's) front and back take the same one,
+  // so X_Back-2 still goes with its own X_Front-2.
+  const owners=new Map(), taken=new Set();
   plan.forEach(e=>{
-    const k=String(e.name||'').toLowerCase();
-    const n=(used.get(k)||0)+1; used.set(k,n);
-    if(n>1) e.name=String(e.name).replace(/(\.[^.]+)?$/,m=>`-${n}${m}`);
+    const name=String(e.name||''), k=pdfPairKey(name);
+    const who=e.kind==='line'&&e.it?e.it:e.set;
+    let l=owners.get(k); if(!l) owners.set(k,l=[]);
+    let n=l.indexOf(who)+1; if(!n){ l.push(who); n=l.length; }
+    const num=x=>x>1?name.replace(/(\.[^.]+)?$/,m=>`-${x}${m}`):name;
+    while(taken.has(num(n).toLowerCase())) n++;
+    e.name=num(n); taken.add(e.name.toLowerCase());
   });
   return plan;
 }
