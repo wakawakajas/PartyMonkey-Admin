@@ -6703,6 +6703,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <div class="click-row" style="margin-bottom:8px;">
               <label class="click-tog"><input type="checkbox" id="gtBleedToggle"/>Add bleed to all sides</label>
               <label class="click-tog"><input type="checkbox" id="gtBleedFillGap"/>Carry it across a too-small design</label>
+              <label class="click-tog" title="Swaps every colour in the artwork for its opposite — black for white, and so on. The words keyed on a line keep their own colour."><input type="checkbox" id="gtInvertArt"/>Invert colours</label>
             </div>
             <div class="bleed-row">
               <label class="field"><span>BLEED (mm)</span>
@@ -7443,6 +7444,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
       <div class="click-row" style="margin-bottom:10px;">
         <label class="click-tog"><input type="checkbox" id="bleedToggle" checked/>Add bleed to all sides</label>
         <label class="click-tog"><input type="checkbox" id="bleedFillGap"/>Carry it across a too-small design</label>
+        <label class="click-tog" title="Swaps every colour in the artwork for its opposite — black for white, and so on."><input type="checkbox" id="bleedInvert"/>Invert colours</label>
       </div>
       <div class="bleed-row">
         <label class="field"><span>BLEED (<span class="unitHint">mm</span>, ALL SIDES)</span><input type="number" step="0.1" id="bleedAmount" value="2.5"/></label>
@@ -8843,7 +8845,7 @@ const state={
   // 'card' — every design stretched to the placeholder, which is what gets
   // trimmed; 'original' — the file's own proportions, fitted inside it
   artFit:'actual',
-  bleed:{enabled:true,mm:2.5,mode:'stretch',fillGap:false,trimPx:0},
+  bleed:{enabled:true,mm:2.5,mode:'stretch',fillGap:false,trimPx:0,invert:false},
   rotate:{front:0,back:0},
   // names the exported files, and saved with the template: a template is now
   // a job that comes back — the same order id every time it is reprinted —
@@ -10011,7 +10013,10 @@ function renderSide(side,canvas,maxDim,opts){
     const reach=(x,y)=>({x:Math.min(reachMm,tf?Math.min(x,(wMm-ph.wMm)/2+bleedMm):x),
       y:Math.min(reachMm,tf?Math.min(y,(hMm-ph.hMm)/2+bleedMm):y)});
     let ringOnly=false;
-    if(opts.vec){
+    // Invert colours is done to pixels, so an inverted PDF is drawn rather
+    // than placed
+    const invert=!!(state.bleed&&state.bleed.invert);
+    if(opts.vec&&!invert){
       const vclip={x:clip.x+artShift.xMm, y:clip.y+artShift.yMm, w:clip.w, h:clip.h};
       if(grow){
         ringOnly=opts.vec.take(key,
@@ -10029,6 +10034,7 @@ function renderSide(side,canvas,maxDim,opts){
     ctx.clip();
     ctx.translate(cx,cy);
     ctx.rotate(rotDeg*Math.PI/180);
+    if(invert) ctx.filter='invert(1)';
     // the bleed along the picture's own axes, which a quarter turn swaps
     ctx.drawImage(grow?bleedArt(img,trimW,trimH,swapped?bY:bX,bleedMode,swapped?bX:bY,bleedTrimPx())
       // the edge trim is part of making a bleed: with no bleed on this card, or
@@ -11660,6 +11666,7 @@ function refreshArtInputs(){
   document.getElementById('bleedAmount').value=round(fromMm(state.bleed.mm,state.paper.unit));
   document.getElementById('bleedToggle').checked=!!state.bleed.enabled;
   document.getElementById('bleedFillGap').checked=!!state.bleed.fillGap;
+  document.getElementById('bleedInvert').checked=!!state.bleed.invert;
   document.getElementById('bleedTrimPx').value=bleedTrimPx();
   document.getElementById('refMarkOffset').value=round(fromMm(state.refMark.offsetMm,state.paper.unit));
   document.getElementById('refMarkLen').value=round(fromMm(state.refMark.lenMm,state.paper.unit));
@@ -12085,6 +12092,9 @@ document.getElementById('bleedToggle').addEventListener('change',e=>{
 });
 document.getElementById('bleedFillGap').addEventListener('change',e=>{
   state.bleed.fillGap=e.target.checked;drawAll();
+});
+document.getElementById('bleedInvert').addEventListener('change',e=>{
+  state.bleed.invert=e.target.checked;drawAll();
 });
 document.getElementById('bleedTrimPx').addEventListener('input',e=>{
   const v=parseInt(e.target.value,10);
@@ -25790,6 +25800,7 @@ function applyPrintState(meta,name){
   // as mode and trimPx are: a layout that never said fillGap does not inherit
   // the last sheet's
   if(!(meta.bleed&&meta.bleed.fillGap!==undefined)) state.bleed.fillGap=false;
+  if(!(meta.bleed&&meta.bleed.invert!==undefined)) state.bleed.invert=false;
   syncBleedModeSeg();
   // and the switch is told, the way every other one on this panel is. It was
   // the only control left saying what the markup said rather than what the
@@ -25798,6 +25809,7 @@ function applyPrintState(meta,name){
   // the panel were both right and only the switch was lying.
   document.getElementById('bleedToggle').checked=!!state.bleed.enabled;
   document.getElementById('bleedFillGap').checked=!!state.bleed.fillGap;
+  document.getElementById('bleedInvert').checked=!!state.bleed.invert;
   if(!(meta.bleed&&meta.bleed.trimPx)) state.bleed.trimPx=0;
   document.getElementById('bleedTrimPx').value=bleedTrimPx();
   if(meta.shift){ state.shift.front=Object.assign(state.shift.front,meta.shift.front); state.shift.back=Object.assign(state.shift.back,meta.shift.back); }
@@ -27948,7 +27960,7 @@ let gtCurrentDesign=null;          // the design open in the editor
 let gtSlotEdit=false, gtSelSlot=null;   // Contours on, and the placeholder in hand
 const gtShapeSig=new Map();          // see gtKeepShape
 const gtSelSet=new Set();          // every placeholder picked, gtSelSlot among them
-const GT_SHEET_NEW={pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{}};
+const GT_SHEET_NEW={pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{}};
 const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
   // null rather than a number: the layout centres itself until it is told
@@ -27957,7 +27969,7 @@ const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
   // the bleed's trim and gap carry, the Distribute spacing and the placeholders'
   // punch hole — see GT_SHEET_NEW for why they are put back per library
   pltOn:true,pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,
-  bleedTrimPx:0,bleedFillGap:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,
+  bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,
   // The four dots the cutter's camera registers on, and the cut file that is
   // measured from them. These print — they are not preview furniture like the
   // cut lines are — so they live with the sheet rather than with the view.
@@ -28674,6 +28686,7 @@ async function gtLoadLib(){
   // sizes — never a grid generated last time or placeholders left edited.
   // Changes made after this last until the library is next read.
   try{ await gtUsePreset(); }catch(e){}
+  try{ await gtAutoBase(); }catch(e){}
   // The library was just emptied and read again, and a one-off lives in no
   // folder: one put back for a batch line a moment earlier — the page opening
   // after a refresh, the batch lending its sheet — was wiped by this load and
@@ -29386,6 +29399,18 @@ document.getElementById('gtShapeMapList').addEventListener('change',async e=>{
       +(r.ok&&r.n!=null?` — ${r.n} design${r.n===1?'':'s'} in the library.`:'.')
     : `${folder} no longer brings a shape with it.`,true);
 });
+// A sheet with no base layer takes the picture in the shape folder whose name
+// says "registration" — the one carrying the dots the cutter registers on.
+async function gtAutoBase(){
+  if(gtSheet.baseFile) return false;
+  const list=await gtShapeList().catch(()=>[]);
+  const hit=(list||[]).find(f=>f.kind==='art'&&/registration/i.test(f.name));
+  if(!hit) return false;
+  const file=await gtShapeFile(hit.path);
+  if(!file||!await gtApplyBase(file,hit.path)) return false;
+  gtBaseDotsCache=null;
+  return true;
+}
 async function gtApplyBase(file,path){
   gtAssets.set(path,file);
   gtSheet.baseFile=path; gtBaseFrom=path;
@@ -31001,8 +31026,15 @@ function gtDrawTag(ctx,line,x,y,w,h,sc,forExport,vec){
     const b=gtBleedOf(d);
     // artwork that came in as a PDF is not drawn on the sheet at all: its own
     // page is placed under this render, at exactly this rectangle
-    if(!(vec&&vec.take(d,r,b))) gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,d.id,
-      {x:Math.max(r.x-x,x+w-(r.x+r.w)),y:Math.max(r.y-y,y+h-(r.y+r.h))});
+    // Invert colours flips the artwork and its bleed alike; transparent stays
+    // transparent, so a cut-out stays the shape it is
+    if(!(vec&&vec.take(d,r,b))){
+      ctx.save();
+      if(gtSheet.invertArt) ctx.filter='invert(1)';
+      gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,d.id,
+        {x:Math.max(r.x-x,x+w-(r.x+r.w)),y:Math.max(r.y-y,y+h-(r.y+r.h))});
+      ctx.restore();
+    }
   }
   gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc);
   if(!forExport&&gtSheet.showHole&&d.hole&&d.hole.on){
@@ -32054,6 +32086,8 @@ function gtSyncBleedChips(){
     b.classList.toggle('on',b.dataset.gtbm===mode));
   const fg=document.getElementById('gtBleedFillGap');
   if(fg) fg.checked=!!gtSheet.bleedFillGap;
+  const ia=document.getElementById('gtInvertArt');
+  if(ia) ia.checked=!!gtSheet.invertArt;
   const tp=document.getElementById('gtBleedTrimPx');
   if(tp&&document.activeElement!==tp) tp.value=gtSheet.bleedTrimPx||0;
 }
@@ -32079,6 +32113,9 @@ document.getElementById('gtSheetBleedModeSeg').addEventListener('click',async e=
 });
 document.getElementById('gtBleedFillGap').addEventListener('change',e=>{
   gtSheet.bleedFillGap=e.target.checked; gtDraw(); gtSaveSoon();
+});
+document.getElementById('gtInvertArt').addEventListener('change',e=>{
+  gtSheet.invertArt=e.target.checked; gtDraw(); gtSaveSoon();
 });
 document.getElementById('gtBleedTrimPx').addEventListener('input',e=>{
   const v=parseInt(e.target.value,10);
@@ -34193,6 +34230,7 @@ function gtVecTaker(forms,place){
   const base=gtBaseRect();
   return {take(d,r,b){
     if(!forms.has(d.id)) return false;
+    if(gtSheet.invertArt) return false;     // a placed page cannot be inverted
     if(b>0&&(gtSheet.bleedMode!=='scale'||gtSheet.bleedTrimPx>0||gtSheet.bleedFillGap)) return false;
     const R=b>0?{x:r.x-b,y:r.y-b,w:r.w+b*2,h:r.h+b*2}:{x:r.x,y:r.y,w:r.w,h:r.h};
     if(base&&R.x<base.x+base.w&&base.x<R.x+R.w&&R.y<base.y+base.h&&base.y<R.y+R.h) return false;
@@ -49235,7 +49273,7 @@ function mcMergeLook(it){
   const b=d.bleed||{};
   const fit=d.artFit||'actual';
   return {bleed:{enabled:!!b.enabled,mm:b.enabled?Math.max(0,Number(b.mm)||0):0,
-      mode:b.mode||'stretch',fillGap:!!b.fillGap,trimPx:Number(b.trimPx)||0},
+      mode:b.mode||'stretch',fillGap:!!b.fillGap,trimPx:Number(b.trimPx)||0,invert:!!b.invert},
     artFit:fit,
     art:fit==='actual'?null:(d.art&&d.art.front?{wMm:Number(d.art.front.wMm)||0,
       hMm:Number(d.art.front.hMm)||0}:null),
