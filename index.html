@@ -9918,21 +9918,31 @@ function clampPage(){
 // that sits on the outer edge of the whole grid, offset outward — marks that
 // card's own width and height. Corners shared between neighboring cards
 // (interior of the grid) are skipped so marks only appear along the sides.
-function drawCutMarks(ctx,sc){
+// Printed double-sided, the sheet turns over left to right, so the back's
+// cards stand where the front's do seen from behind: each one mirrored across
+// the paper. Only where a card sits moves — its picture is not turned over.
+// Every place the back is drawn asks this, and the fill order is still taken
+// from the front's boxes, so back design n lands right behind front design n.
+function phOnSide(ph,side){
+  if(side!=='back'||!ph) return ph;
+  return {...ph,xMm:paperMm().w-ph.xMm-ph.wMm};
+}
+function drawCutMarks(ctx,sc,side){
   if(!state.refMark.enabled || state.placeholders.length===0) return;
   const off=state.refMark.offsetMm, len=state.refMark.lenMm;
   const EPS=0.01;
-  const minX=Math.min(...state.placeholders.map(ph=>ph.xMm));
-  const maxX=Math.max(...state.placeholders.map(ph=>ph.xMm+ph.wMm));
-  const minY=Math.min(...state.placeholders.map(ph=>ph.yMm));
-  const maxY=Math.max(...state.placeholders.map(ph=>ph.yMm+ph.hMm));
+  const phs=state.placeholders.map(ph=>phOnSide(ph,side));
+  const minX=Math.min(...phs.map(ph=>ph.xMm));
+  const maxX=Math.max(...phs.map(ph=>ph.xMm+ph.wMm));
+  const minY=Math.min(...phs.map(ph=>ph.yMm));
+  const maxY=Math.max(...phs.map(ph=>ph.yMm+ph.hMm));
   ctx.save();
   ctx.strokeStyle='#E2231A';
   ctx.lineWidth=1;
   ctx.beginPath();
   const seg=(x1,y1,x2,y2)=>{ ctx.moveTo(x1*sc,y1*sc); ctx.lineTo(x2*sc,y2*sc); };
 
-  state.placeholders.forEach(ph=>{
+  phs.forEach(ph=>{
     const x0=ph.xMm, y0=ph.yMm, x1=ph.xMm+ph.wMm, y1=ph.yMm+ph.hMm;
     const onLeft=Math.abs(x0-minX)<EPS, onRight=Math.abs(x1-maxX)<EPS;
     const onTop=Math.abs(y0-minY)<EPS, onBottom=Math.abs(y1-maxY)<EPS;
@@ -9960,12 +9970,13 @@ function drawCutMarks(ctx,sc){
 // artwork, unlike the reference marks which sit underneath it
 // the cards a fold crosses: on Place Card a card and its joined Names box are
 // one card (artOrder), folded at their shared edge
-const foldCards=()=>pcMode==='placecard'?artOrder():state.placeholders;
-function drawFoldLines(ctx,sc){
+// — on the back, where they stand on that side (phOnSide)
+const foldCards=side=>(pcMode==='placecard'?artOrder():state.placeholders).map(ph=>phOnSide(ph,side));
+function drawFoldLines(ctx,sc,side){
   if(!state.foldLine.enabled || state.placeholders.length===0) return;
   const off=state.refMark.offsetMm, len=state.refMark.lenMm;
   const EPS=0.01;
-  const cards=foldCards();
+  const cards=foldCards(side);
   const minX=Math.min(...cards.map(ph=>ph.xMm));
   const maxX=Math.max(...cards.map(ph=>ph.xMm+ph.wMm));
   const minY=Math.min(...cards.map(ph=>ph.yMm));
@@ -9999,14 +10010,14 @@ function drawFoldLines(ctx,sc){
 // fold would land on the design. Every placeholder gets one, unlike the
 // outer-edge-only fold line ticks — this is a preview aid, not a print
 // mark, so it never appears in the exported PDF.
-function drawFoldOverlay(ctx,sc){
+function drawFoldOverlay(ctx,sc,side){
   if(!state.foldOverlay || state.placeholders.length===0) return;
   ctx.save();
   ctx.strokeStyle=state.cutColor==='white'?'#ffffff':'#B24C25';
   ctx.lineWidth=1;
   ctx.setLineDash([1.5*sc,1*sc]);
   ctx.beginPath();
-  foldCards().forEach(ph=>{
+  foldCards(side).forEach(ph=>{
     const x0=ph.xMm*sc, y0=ph.yMm*sc, x1=(ph.xMm+ph.wMm)*sc, y1=(ph.yMm+ph.hMm)*sc;
     const midX=(x0+x1)/2, midY=(y0+y1)/2;
     ctx.moveTo(x0,midY); ctx.lineTo(x1,midY); // fold line through mid-height
@@ -10156,7 +10167,7 @@ function renderSide(side,canvas,maxDim,opts){
 
   // bottom layer: auto-generated cutting reference marks, fixed to the placeholder
   // grid (not rotated) — printed both in preview and in the exported PDF
-  drawCutMarks(ctx,sc);
+  drawCutMarks(ctx,sc,side);
 
   // artwork into the placeholders, expanded by bleed on all sides but kept
   // centred, rotated in 90° steps around each tile's own centre — the footprint
@@ -10179,7 +10190,10 @@ function renderSide(side,canvas,maxDim,opts){
   // the next card's cut: on screen the later card won, in the PDF a raster
   // neighbour's bleed lay over a placed PDF card's edge. So a card's draw
   // region is its own box and bleed less every other card's trim.
-  const cardTrims=artOrder();
+  // In fill order, and on the back mirrored across the paper (phOnSide) — the
+  // order still the front's, so each back design sits behind its front one.
+  // The same cards are what the artwork below is laid into.
+  const cardTrims=artOrder().map(ph=>phOnSide(ph,side));
   const cardHoles=(ph,c)=>{
     const out=[], E=0.01;
     cardTrims.forEach(o=>{
@@ -10336,13 +10350,13 @@ function renderSide(side,canvas,maxDim,opts){
   const splitList=!useList&&finalSplitList(side);
   const runArt=()=>{
   if(useList&&a.wMm&&a.hMm){
-    const order=artOrder(), per=order.length;
+    const order=cardTrims, per=order.length;
     if(per){
       const q=designQueue(), start=(opts.page||0)*per;
       order.forEach((ph,i)=>{ const d=q[start+i]; if(d&&d.img) one(d.img,ph,d,'d:'+d.id); });
     }
   }else if(splitList&&a.wMm&&a.hMm){
-    const order=artOrder(), per=order.length;
+    const order=cardTrims, per=order.length;
     if(per){
       const start=(opts.page||0)*per;
       order.forEach((ph,i)=>{ const d=splitList[start+i]; if(d&&d.img) one(d.img,ph,d,'fl:'+d.id); });
@@ -10351,20 +10365,21 @@ function renderSide(side,canvas,maxDim,opts){
     const art=state.final[side].img;
     // by card, as Preset and Split lay it: on Place Card a words box is part
     // of its card, not a card of its own
-    if(art&&a.wMm&&a.hMm) artOrder().forEach(ph=>one(art,ph,null,'final:'+side));
+    if(art&&a.wMm&&a.hMm) cardTrims.forEach(ph=>one(art,ph,null,'final:'+side));
   }
   };
   if(!opts.forExport){ artPhase='ghost'; runArt(); }
   artPhase='art'; runArt();
 
   // fold line sits above the artwork (unlike the reference marks below it)
-  drawFoldLines(ctx,sc);
+  drawFoldLines(ctx,sc,side);
 
   if(!opts.forExport && state.showCut){
     ctx.save();
     ctx.strokeStyle=state.cutColor==='white'?'#ffffff':'#B24C25';
     ctx.lineWidth=1.2;
-    state.placeholders.forEach(ph=>ctx.strokeRect(ph.xMm*sc,ph.yMm*sc,ph.wMm*sc,ph.hMm*sc));
+    state.placeholders.forEach(ph0=>{ const ph=phOnSide(ph0,side);
+      ctx.strokeRect(ph.xMm*sc,ph.yMm*sc,ph.wMm*sc,ph.hMm*sc); });
     ctx.restore();
   }
   // the placeholder's name, in its top-left corner — so a renamed box is
@@ -10422,7 +10437,7 @@ function renderSide(side,canvas,maxDim,opts){
     ctx.restore();
   }
   // fold line overlay: highest layer, preview only — drawn last so nothing covers it
-  if(!opts.forExport) drawFoldOverlay(ctx,sc);
+  if(!opts.forExport) drawFoldOverlay(ctx,sc,side);
   ctx.restore(); // pairs with the shift save above
 
   // the Order ID is keyed for the export file name only — it is never drawn
@@ -10725,6 +10740,8 @@ function phFillScale(ph){
 // fill the window with one card, wherever it sits on the sheet
 function phZoomToPh(ph,side){
   if(!ph) return false;
+  // on the back the card stands mirrored across the paper
+  ph=phOnSide(ph,side);
   const Z=phZs(side);
   Z.scale=phFillScale(ph);
   const sh=phShiftOf(side);
@@ -10743,8 +10760,8 @@ function phZoomOff(side){ const Z=phZs(side); Z.on=false; Z.scale=1; }
 // none is. Bottom left is where the sheet starts filling, so it is the first
 // card a design lands on and the one worth looking at before anything has been
 // picked. Taken from fillOrder rather than from the list, which is in the order
-// the boxes happened to be drawn. The back's cards stand where the front's do,
-// so the card picked is the same card on either side.
+// the boxes happened to be drawn. The back's cards stand behind the front's
+// (mirrored, phOnSide), so the card picked is the same card on either side.
 const phZoomTarget=()=>phSelected()[0]||fillOrder()[0]||null;
 // closer in or further out about the middle of the window, or about a point on
 // the sheet where one is given — which is what the wheel hands over
@@ -10765,9 +10782,9 @@ function phZoomBy(mul,about,side){
 // list, the panel and the arrow keys all change the selection, and the window
 // followed none of them. Either side that is zoomed goes to it.
 function phZoomFollowSel(){
-  const ph=phSelected()[0]; if(!ph) return;
+  const ph0=phSelected()[0]; if(!ph0) return;
   ['front','back'].forEach(side=>{
-    const Z=phZs(side);
+    const Z=phZs(side), ph=phOnSide(ph0,side);
     const sh=phShiftOf(side);
     if(Z.on) Z.at={x:ph.xMm+ph.wMm/2+sh.xMm,y:ph.yMm+ph.hMm/2+sh.yMm};
   });
@@ -14402,13 +14419,14 @@ function modalScrollToFirstSlot(){
   if(!wrap.clientHeight){ setTimeout(modalScrollToFirstSlot,120); return; }
   const list=(state.placeholders||[]).slice();
   if(!list.length){ wrap.scrollLeft=0; wrap.scrollTop=wrap.scrollHeight; return; }
-  const first=list.sort((a,b)=>(b.y-a.y)||(a.x-b.x))[0];
+  // the box the first design goes in (placeholders are in mm: xMm/yMm/wMm/hMm)
+  const first=fillOrder(list)[0];
   const p=paperMm();
   const sx=c.width/p.w, sy=c.height/p.h;
   // the canvas is centred in a wider box, so its own left edge counts
   const off=Math.max(0,(wrap.scrollWidth-c.width)/2);
-  wrap.scrollLeft=Math.max(0,off+(first.x+first.w/2)*sx-wrap.clientWidth/2);
-  wrap.scrollTop=Math.max(0,(first.y+first.h/2)*sy-wrap.clientHeight/2);
+  wrap.scrollLeft=Math.max(0,off+(first.xMm+first.wMm/2)*sx-wrap.clientWidth/2);
+  wrap.scrollTop=Math.max(0,(first.yMm+first.hMm/2)*sy-wrap.clientHeight/2);
 }
 // Dragged about rather than scrolled: at 300% the sheet is bigger than the
 // window in both directions, and a scrollbar in each hand is not how anybody
