@@ -3790,7 +3790,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
 .bx-th{width:34px;height:34px;flex:none;border-radius:8px;background:#2F2F2D;color:var(--muted);display:grid;place-items:center;overflow:hidden;font-size:12px;}
 .bx-th img{width:100%;height:100%;object-fit:cover;}
 .bx-name{flex:1;min-width:0;display:flex;flex-direction:column;}
-.bx-sku{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.bx-sku{font-size:13px;white-space:normal;overflow-wrap:anywhere;word-break:break-word;line-height:1.3;}
 .bx-name .hint{font-size:11px;margin:0;}
 .bx-qc{display:flex;align-items:center;flex:none;}
 .bx-qc button{width:34px;height:36px;min-height:0;padding:0;font-size:18px;border:1px solid var(--border);background:var(--card);color:var(--ink);}
@@ -20535,14 +20535,15 @@ document.getElementById('itemBulkExport').addEventListener('click',()=>{
     const chosen=itemRows.filter(r=>pickedItems.has(r.id));
     if(!chosen.length){ showMsg(msg,'Nothing selected to download.',false); return; }
     const sh=currentShipment();
+    let chosenRows;
     const wb=XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb,
-      XLSX.utils.aoa_to_sheet([SKU_SHEET_HEADERS,...buildSkuSheetRows(chosen)]),'SKU');
+      XLSX.utils.aoa_to_sheet([SKU_SHEET_HEADERS,...(chosenRows=buildSkuSheetRows(chosen))]),'SKU');
     XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([
       ['USD','Price'],['CNY','Quantity'],['IDR','Volume'],['PHP','Weight'],['THB'],['SGD']
     ]),'Sheet1');
     XLSX.writeFile(wb,safeName(sh?sh.order_id:'order')+'_PO.xlsx');
-    showMsg(msg,`✓ Downloaded ${chosen.length} line(s).`,true);
+    showMsg(msg,`✓ Downloaded ${chosenRows.length} line(s).`,true);
   }catch(err){
     showMsg(msg,'Download failed: '+((err&&err.message)||'unknown error'),false);
   }
@@ -21519,11 +21520,16 @@ function buildSkuSheetRows(rows){
   const sh=currentShipment();
   const provisional=sh?(sh.order_id||''):'';   // Provisional No. is the order ID
   const rate=rmbRate();
-  return (rows||itemRows).map(i=>{
+  // Once anything on the order is in a box, the PO is for what arrived: a
+  // short line goes out at its arrived count and a line still waiting is left
+  // off. Before any box, the order is exported at the quantities ordered.
+  const boxed=allocRows.some(a=>(Number(a.qty)||0)>0);
+  const qtyOf=i=>boxed?arrivedQtyOf(i):(Number(i.qty)||0);
+  return (rows||itemRows).filter(i=>!boxed||qtyOf(i)>0).map(i=>{
     const row=new Array(SKU_SHEET_HEADERS.length).fill('');
     row[0]=provisional;                 // A  Provisional No.
     row[1]=i.sku||'';                   // B  SKU Name
-    row[2]=Number(i.qty)||0;            // C  Purchase Qty
+    row[2]=qtyOf(i);                    // C  Purchase Qty
     row[5]=SKU_CURRENCY;                // F  Currency
     row[6]=SKU_EXCHANGE_RATE;           // G  Exchange Rate
     // rounded UP to the cent so a fractional remainder never under-recovers cost
