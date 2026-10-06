@@ -8783,11 +8783,17 @@ async function pcRegisterFolderFonts(){
       const face=new FontFace(f.family,await file.arrayBuffer());
       await face.load(); document.fonts.add(face);
       pcFontReg.add(f.key); added=true;
-    }catch(e){ /* a font that will not load simply falls back to Plex */ }
+    }catch(e){
+      // drawn in Plex meanwhile — the select and export name it (pcFontMissing)
+      console.warn('Place Card font did not load:',f.name,e);
+    }
   }
   // a face can be a beat behind the canvas even after load() resolves — redraw
   // once the browser confirms everything is ready
-  if(added) document.fonts.ready.then(()=>{ if(currentScreen==='tool-custom') drawAll(); });
+  if(added) document.fonts.ready.then(()=>{ if(currentScreen==='tool-custom') drawAll();
+    // and a select still saying "not loaded" catches up, unless it is in use
+    const w=document.getElementById('pcCatList');
+    if(w&&!w.contains(document.activeElement)&&typeof pcRenderCats==='function') pcRenderCats(); });
 }
 function pcFamily(key){
   if(typeof key==='string'&&key.startsWith('file:')){
@@ -8795,6 +8801,28 @@ function pcFamily(key){
     return f?`"${f.family}", 'IBM Plex Sans', sans-serif`:PC_FONTS.plex;
   }
   return PC_FONTS[key]||PC_FONTS.plex;
+}
+// The name of a folder font a category asks for that is not loaded (folder
+// not connected, or the file would not load), or '' — it draws in the
+// fallback, so it is named in the select and stops an export
+function pcFontMissing(key){
+  if(typeof key!=='string'||!key.startsWith('file:')||pcFontReg.has(key)) return '';
+  const f=(loadDesignFonts||[]).find(x=>x.key===key);
+  return f?f.name:key.slice(5).split(/[\\/]/).pop().replace(/\.(ttf|otf|woff2?)$/i,'')||key;
+}
+function pcMissingFonts(){
+  const out=new Set();
+  (state.cats||[]).forEach(c=>[c.font,c.cjk].forEach(k=>{ const n=pcFontMissing(k); if(n) out.add(n); }));
+  return [...out];
+}
+// Place Card export/print: false when a missing font is not to be printed in
+// the fallback
+function pcFontsOkToPrint(){
+  if(pcMode!=='placecard') return true;
+  const miss=pcMissingFonts();
+  if(!miss.length) return true;
+  return confirm('These fonts are not loaded, so the names would print in a fallback font:\n\n  '
+    +miss.join('\n  ')+'\n\nReconnect the design folder in Load design to load them.\n\nPrint in the fallback font anyway?');
 }
 // Chinese in a name. The category's own font draws the English; a character it
 // has no glyph for falls through the family list, so the Chinese face is slotted
@@ -9879,14 +9907,18 @@ function drawCutMarks(ctx,sc){
 // offset/length as the cutting reference marks and the same outer-edge-only
 // rule (skips edges shared with a neighboring card) — drawn above the
 // artwork, unlike the reference marks which sit underneath it
+// the cards a fold crosses: on Place Card a card and its joined Names box are
+// one card (artOrder), folded at their shared edge
+const foldCards=()=>pcMode==='placecard'?artOrder():state.placeholders;
 function drawFoldLines(ctx,sc){
   if(!state.foldLine.enabled || state.placeholders.length===0) return;
   const off=state.refMark.offsetMm, len=state.refMark.lenMm;
   const EPS=0.01;
-  const minX=Math.min(...state.placeholders.map(ph=>ph.xMm));
-  const maxX=Math.max(...state.placeholders.map(ph=>ph.xMm+ph.wMm));
-  const minY=Math.min(...state.placeholders.map(ph=>ph.yMm));
-  const maxY=Math.max(...state.placeholders.map(ph=>ph.yMm+ph.hMm));
+  const cards=foldCards();
+  const minX=Math.min(...cards.map(ph=>ph.xMm));
+  const maxX=Math.max(...cards.map(ph=>ph.xMm+ph.wMm));
+  const minY=Math.min(...cards.map(ph=>ph.yMm));
+  const maxY=Math.max(...cards.map(ph=>ph.yMm+ph.hMm));
   ctx.save();
   ctx.strokeStyle='#E2231A';
   ctx.lineWidth=1;
@@ -9894,7 +9926,7 @@ function drawFoldLines(ctx,sc){
   ctx.beginPath();
   const seg=(x1,y1,x2,y2)=>{ ctx.moveTo(x1*sc,y1*sc); ctx.lineTo(x2*sc,y2*sc); };
 
-  state.placeholders.forEach(ph=>{
+  cards.forEach(ph=>{
     const x0=ph.xMm, y0=ph.yMm, x1=ph.xMm+ph.wMm, y1=ph.yMm+ph.hMm;
     const midX=(x0+x1)/2, midY=(y0+y1)/2;
     const onLeft=Math.abs(x0-minX)<EPS, onRight=Math.abs(x1-maxX)<EPS;
@@ -9923,7 +9955,7 @@ function drawFoldOverlay(ctx,sc){
   ctx.lineWidth=1;
   ctx.setLineDash([1.5*sc,1*sc]);
   ctx.beginPath();
-  state.placeholders.forEach(ph=>{
+  foldCards().forEach(ph=>{
     const x0=ph.xMm*sc, y0=ph.yMm*sc, x1=(ph.xMm+ph.wMm)*sc, y1=(ph.yMm+ph.hMm)*sc;
     const midX=(x0+x1)/2, midY=(y0+y1)/2;
     ctx.moveTo(x0,midY); ctx.lineTo(x1,midY); // fold line through mid-height
@@ -9937,6 +9969,106 @@ function drawFoldOverlay(ctx,sc){
 // ---------- drawing ----------
 // how far past its own box a picture may show, whatever size it is made
 const ART_REACH_MM=2.5;
+// Where a picture lands on its card: its footprint, bleed and turn — what
+// oneDraw draws with, and what a library text box is laid on (pcLibBoxFor),
+// so the words follow the picture rather than the bare card.
+function artGeom(side,img,ph,line){
+  const a=state.art[side];
+  // a Place Card card is its own box and its words together, and fills that
+  let wMm=ph.card?ph.wMm:a.wMm, hMm=ph.card?ph.hMm:a.hMm;
+  // Actual size: each design in the list at the size its own file gives;
+  // the single artwork at the WIDTH/HEIGHT box, which starts at that size
+  const real=state.artFit==='actual'?artRealMm(img):null;
+  // wMm × hMm is the footprint, after any quarter turn
+  const onSide=((((state.rotate[side]||0)+designRotOf(line))%360+360)%180)!==0;
+  // A PDF drawn with its bleed on is sized by its trim, and that bleed is
+  // what prints past the cut: the share of the page inside the trim, turned
+  // to the footprint's axes
+  const Lc=layoutMm(), cw=ph.card?ph.wMm:Lc.cardW, chh=ph.card?ph.hMm:Lc.cardH;
+  const tf0=artTrimFrac(img,onSide?chh:cw,onSide?cw:chh);
+  const tf=tf0&&(onSide?{x:tf0.y,y:tf0.x}:tf0);
+  const iw=(onSide?img.naturalHeight:img.naturalWidth)*(tf?tf.x:1),
+    ih=(onSide?img.naturalWidth:img.naturalHeight)*(tf?tf.y:1);
+  if(real&&line){
+    ({w:wMm,h:hMm}=real);
+    if(onSide) [wMm,hMm]=[hMm,wMm];
+    if(tf){ wMm*=tf.x; hMm*=tf.y; }
+  }else if(line&&(state.artFit==='original'||(state.artFit==='actual'&&!real))
+    &&img.naturalWidth&&img.naturalHeight){
+    // a design with no size of its own fits its card; the box may be another
+    // design's actual size. The single artwork has no per-design fit to redo —
+    // its WIDTH/HEIGHT box already is that size, so it's used as typed,
+    // whichever of the two boxes was last edited.
+    // On Original the box is the first design's fit, so each design fits its
+    // card on its own proportions instead, taking on any resize made to that box
+    let kx=1, ky=1;
+    if(state.artFit==='original'&&!ph.card){
+      const ref=artFitRef(side);
+      const rf=ref&&ref.naturalWidth&&ref.naturalHeight
+        ?artCardFit(ref,((state.rotate[side]||0)%180)!==0):null;
+      if(rf&&rf.wMm>0&&rf.hMm>0){ kx=a.wMm/rf.wMm; ky=a.hMm/rf.hMm; }
+    }
+    const bw=state.artFit==='original'&&!ph.card?cw:wMm, bh=state.artFit==='original'&&!ph.card?chh:hMm;
+    const L=line&&state.artFit==='actual'?layoutMm():null;
+    const f=Math.min((L?L.cardW:bw)/iw,(L?L.cardH:bh)/ih);
+    wMm=iw*f*kx; hMm=ih*f*ky;
+  }
+  // the sheet's bleed unless this design keeps its own
+  const bleedMm=bleedMmFor(line);
+  // The bleed grows from the artwork's own edges and no further, so artwork
+  // smaller than its placeholder keeps the paper round it. Unless the sheet
+  // says to carry it across: then the made-up edge fills that gap as well and
+  // still reaches its bleed past the placeholder, for a design sent at the
+  // wrong ratio. Stretching a picture across a gap would squash it out of
+  // shape, so a carried bleed is always made up from the edges instead.
+  // A page with its own bleed makes none up: the whole page is drawn, its
+  // trim on the footprint, and cut back to the bleed the sheet asks for.
+  // Bleed on always reaches its full depth past the cut, whatever shape the
+  // design came in: a wrong-ratio file has the gap made up from its edges
+  // too, so it no longer waits on its own switch.
+  // An Actual-size design already as big as its card and the bleed together
+  // brought its own bleed (a client's 94 × 59 for an 89 × 54 card): it prints
+  // at its own size, centred on the cut, with nothing stretched or made up —
+  // stretching it again made it 99 × 64 and cut its edges off.
+  const own=!tf&&state.artFit==='actual'&&artOwnBleed(wMm,hMm,ph.wMm,ph.hMm,bleedMm);
+  const fillGap=!tf&&!own&&bleedMm>0;
+  // a hair of gap is rounding, not a wrong-ratio design: it left Stretch
+  // making its bleed from the edges on cards that fill their box
+  const gapOf=v=>v>0.05?v:0;
+  const padX=fillGap?gapOf((ph.wMm-wMm)/2):0;
+  const padY=fillGap?gapOf((ph.hMm-hMm)/2):0;
+  const bX=tf?(wMm/tf.x-wMm)/2:own?0:bleedMm+padX, bY=tf?(hMm/tf.y-hMm)/2:own?0:bleedMm+padY;
+  const effW=wMm+bX*2, effH=hMm+bY*2;
+  // Mirror and Extend keep the artwork at its own size and make the bleed up
+  // from its edges; Stretch enlarges the picture into it as it always did —
+  // except across a gap, where stretching would squash the picture out of
+  // shape, so the gap is extended instead
+  const padded=padX>0||padY>0;
+  const bleedMode=bleedModeNow()==='stretch'?'extend':bleedModeNow();
+  const grow=!tf&&!own&&bleedMm>0&&(bleedModeNow()!=='stretch'||padded);
+  // the sheet's turn and the design's own, one on top of the other: the
+  // sheet turns everything printed on it, and a design that arrived on its
+  // side turns again inside its own box
+  const rotDeg=(((state.rotate[side]||0)+designRotOf(line))%360+360)%360;
+  const swapped=(rotDeg%180)!==0; // 90 or 270: image is drawn on its side
+  const boxW=swapped?effH:effW, boxH=swapped?effW:effH;   // the box before the turn
+  const trimW=swapped?hMm:wMm, trimH=swapped?wMm:hMm;
+  return {wMm,hMm,tf,bleedMm,own,bX,bY,effW,effH,bleedMode,grow,rotDeg,swapped,boxW,boxH,trimW,trimH};
+}
+// A design set up on a Magic Create line is drawn with its own bleed, fit,
+// size and turn in place of the sheet's; fn runs with those in place.
+function withLook(side,line,fn){
+  const lk=line&&line.look;
+  if(!lk) return fn();
+  const was={bleed:state.bleed,fit:state.artFit,art:state.art[side],rot:state.rotate[side]};
+  try{
+    state.bleed={...state.bleed,...lk.bleed};
+    state.artFit=lk.artFit||state.artFit;
+    if(lk.art&&lk.art.wMm&&lk.art.hMm) state.art[side]={...lk.art};
+    state.rotate[side]=Number(lk.rotate)||0;
+    return fn();
+  }finally{ state.bleed=was.bleed; state.artFit=was.fit; state.art[side]=was.art; state.rotate[side]=was.rot; }
+}
 function renderSide(side,canvas,maxDim,opts){
   opts=opts||{};
   const p=paperMm();
@@ -9994,102 +10126,17 @@ function renderSide(side,canvas,maxDim,opts){
   const one=(img,ph,line,key)=>{
     const lk=line&&line.look;
     if(!lk) return oneDraw(img,ph,line,key);
-    const was={bleed:state.bleed,fit:state.artFit,art:state.art[side],rot:state.rotate[side]};
     // its own shift, as the difference from the sheet's the canvas already has
     const sh=lk.shift&&side==='front'?lk.shift:null;
     const dx=sh?(Number(sh.xMm)||0)-shift.xMm:0, dy=sh?(Number(sh.yMm)||0)-shift.yMm:0;
     if(dx||dy){ ctx.save(); ctx.translate(dx*sc,dy*sc); artShift={xMm:shift.xMm+dx,yMm:shift.yMm+dy}; }
-    try{
-      state.bleed={...state.bleed,...lk.bleed};
-      state.artFit=lk.artFit||state.artFit;
-      if(lk.art&&lk.art.wMm&&lk.art.hMm) state.art[side]={...lk.art};
-      state.rotate[side]=Number(lk.rotate)||0;
-      return oneDraw(img,ph,line,key);
-    }finally{
-      state.bleed=was.bleed; state.artFit=was.fit; state.art[side]=was.art; state.rotate[side]=was.rot;
+    try{ return withLook(side,line,()=>oneDraw(img,ph,line,key)); }
+    finally{
       if(dx||dy){ ctx.restore(); artShift=shift; }
     }
   };
   const oneDraw=(img,ph,line,key)=>{
-    const a=state.art[side];
-    // a Place Card card is its own box and its words together, and fills that
-    let wMm=ph.card?ph.wMm:a.wMm, hMm=ph.card?ph.hMm:a.hMm;
-    // Actual size: each design in the list at the size its own file gives;
-    // the single artwork at the WIDTH/HEIGHT box, which starts at that size
-    const real=state.artFit==='actual'?artRealMm(img):null;
-    // wMm × hMm is the footprint, after any quarter turn
-    const onSide=((((state.rotate[side]||0)+designRotOf(line))%360+360)%180)!==0;
-    // A PDF drawn with its bleed on is sized by its trim, and that bleed is
-    // what prints past the cut: the share of the page inside the trim, turned
-    // to the footprint's axes
-    const Lc=layoutMm(), cw=ph.card?ph.wMm:Lc.cardW, chh=ph.card?ph.hMm:Lc.cardH;
-    const tf0=artTrimFrac(img,onSide?chh:cw,onSide?cw:chh);
-    const tf=tf0&&(onSide?{x:tf0.y,y:tf0.x}:tf0);
-    const iw=(onSide?img.naturalHeight:img.naturalWidth)*(tf?tf.x:1),
-      ih=(onSide?img.naturalWidth:img.naturalHeight)*(tf?tf.y:1);
-    if(real&&line){
-      ({w:wMm,h:hMm}=real);
-      if(onSide) [wMm,hMm]=[hMm,wMm];
-      if(tf){ wMm*=tf.x; hMm*=tf.y; }
-    }else if(line&&(state.artFit==='original'||(state.artFit==='actual'&&!real))
-      &&img.naturalWidth&&img.naturalHeight){
-      // a design with no size of its own fits its card; the box may be another
-      // design's actual size. The single artwork has no per-design fit to redo —
-      // its WIDTH/HEIGHT box already is that size, so it's used as typed,
-      // whichever of the two boxes was last edited.
-      // On Original the box is the first design's fit, so each design fits its
-      // card on its own proportions instead, taking on any resize made to that box
-      let kx=1, ky=1;
-      if(state.artFit==='original'&&!ph.card){
-        const ref=artFitRef(side);
-        const rf=ref&&ref.naturalWidth&&ref.naturalHeight
-          ?artCardFit(ref,((state.rotate[side]||0)%180)!==0):null;
-        if(rf&&rf.wMm>0&&rf.hMm>0){ kx=a.wMm/rf.wMm; ky=a.hMm/rf.hMm; }
-      }
-      const bw=state.artFit==='original'&&!ph.card?cw:wMm, bh=state.artFit==='original'&&!ph.card?chh:hMm;
-      const L=line&&state.artFit==='actual'?layoutMm():null;
-      const f=Math.min((L?L.cardW:bw)/iw,(L?L.cardH:bh)/ih);
-      wMm=iw*f*kx; hMm=ih*f*ky;
-    }
-    // the sheet's bleed unless this design keeps its own
-    const bleedMm=bleedMmFor(line);
-    // The bleed grows from the artwork's own edges and no further, so artwork
-    // smaller than its placeholder keeps the paper round it. Unless the sheet
-    // says to carry it across: then the made-up edge fills that gap as well and
-    // still reaches its bleed past the placeholder, for a design sent at the
-    // wrong ratio. Stretching a picture across a gap would squash it out of
-    // shape, so a carried bleed is always made up from the edges instead.
-    // A page with its own bleed makes none up: the whole page is drawn, its
-    // trim on the footprint, and cut back to the bleed the sheet asks for.
-    // Bleed on always reaches its full depth past the cut, whatever shape the
-    // design came in: a wrong-ratio file has the gap made up from its edges
-    // too, so it no longer waits on its own switch.
-    // An Actual-size design already as big as its card and the bleed together
-    // brought its own bleed (a client's 94 × 59 for an 89 × 54 card): it prints
-    // at its own size, centred on the cut, with nothing stretched or made up —
-    // stretching it again made it 99 × 64 and cut its edges off.
-    const own=!tf&&state.artFit==='actual'&&artOwnBleed(wMm,hMm,ph.wMm,ph.hMm,bleedMm);
-    const fillGap=!tf&&!own&&bleedMm>0;
-    // a hair of gap is rounding, not a wrong-ratio design: it left Stretch
-    // making its bleed from the edges on cards that fill their box
-    const gapOf=v=>v>0.05?v:0;
-    const padX=fillGap?gapOf((ph.wMm-wMm)/2):0;
-    const padY=fillGap?gapOf((ph.hMm-hMm)/2):0;
-    const bX=tf?(wMm/tf.x-wMm)/2:own?0:bleedMm+padX, bY=tf?(hMm/tf.y-hMm)/2:own?0:bleedMm+padY;
-    const effW=wMm+bX*2, effH=hMm+bY*2;
-    // Mirror and Extend keep the artwork at its own size and make the bleed up
-    // from its edges; Stretch enlarges the picture into it as it always did —
-    // except across a gap, where stretching would squash the picture out of
-    // shape, so the gap is extended instead
-    const padded=padX>0||padY>0;
-    const bleedMode=bleedModeNow()==='stretch'?'extend':bleedModeNow();
-    const grow=!tf&&!own&&bleedMm>0&&(bleedModeNow()!=='stretch'||padded);
-    // the sheet's turn and the design's own, one on top of the other: the
-    // sheet turns everything printed on it, and a design that arrived on its
-    // side turns again inside its own box
-    const rotDeg=(((state.rotate[side]||0)+designRotOf(line))%360+360)%360;
-    const swapped=(rotDeg%180)!==0; // 90 or 270: image is drawn on its side
-    const boxW=swapped?effH:effW, boxH=swapped?effW:effH;   // the box before the turn
+    const {wMm,hMm,tf,bleedMm,own,bX,bY,effW,effH,bleedMode,grow,rotDeg,swapped,boxW,boxH,trimW,trimH}=artGeom(side,img,ph,line);
     const srcW=boxW*sc, srcH=boxH*sc;
     const cx=(ph.xMm+ph.wMm/2)*sc, cy=(ph.yMm+ph.hMm/2)*sc;
     // Artwork whose own file is a PDF is not drawn here: the same box, turned
@@ -10099,7 +10146,6 @@ function renderSide(side,canvas,maxDim,opts){
     // A grown bleed places the page at the trim only and draws just the ring
     // of bleed around it, so the file's own colours still print everywhere
     // inside the cut and only the made-up edge is pixels.
-    const trimW=swapped?hMm:wMm, trimH=swapped?wMm:hMm;
     // Nothing of a picture reaches further than ART_REACH_MM past its own box,
     // however big it is made — on screen, in the PDF and at the printer — so an
     // enlarged picture never lies over the card beside it.
@@ -10331,12 +10377,11 @@ function drawCategoryText(ctx,sc,page,out){
       const bx=ph.xMm+p, by=ph.yMm+p;
       const bw=Math.max(1,ph.wMm-p*2), bh=Math.max(1,ph.hMm-p*2);
       if(out){
-        // the piece of sheet the words can reach: the box, or the square
-        // round its middle where they are turned off the straight, and a
-        // millimetre over for the tails of letters
-        const turned=((Number(c.rot)||0)%180+180)%180!==0;
-        const side=Math.max(ph.wMm,ph.hMm);
-        const w=(turned?side:ph.wMm)+2, h=(turned?side:ph.hMm)+2;
+        // the piece of sheet the words can reach: the box turned as they are
+        // turned, its bounding box round its middle, and a millimetre over for
+        // the tails of letters
+        const t=(Number(c.rot)||0)*Math.PI/180, co=Math.abs(Math.cos(t)), si=Math.abs(Math.sin(t));
+        const w=ph.wMm*co+ph.hMm*si+2, h=ph.wMm*si+ph.hMm*co+2;
         const x=ph.xMm+ph.wMm/2-w/2, y=ph.yMm+ph.hMm/2-h/2;
         out.push({x:x+shift.xMm,y:y+shift.yMm,w,h,draw:()=>{
           const k=PC_WORDS_DPI/25.4;
@@ -10371,7 +10416,10 @@ function pcLibBoxedCards(page){
     else{ const f=state.final.front; at=()=>f&&f.img?f:null; }
   }
   const out=[];
-  order.forEach((card,i)=>{ const b=pcLibBoxOf(at(i)); if(b) out.push({card,b}); });
+  // the picture and line too, so the box is laid where the picture is
+  const single=!usingPreset()&&!finalSplitList('front');
+  order.forEach((card,i)=>{ const d=at(i), b=pcLibBoxOf(d);
+    if(b) out.push({card,b,img:d&&d.img,line:single?null:d}); });
   return out.length?out:null;
 }
 // a design's box: by the path it was read from, or — a page lifted out of a
@@ -10391,8 +10439,28 @@ function pcLibBoxFor(boxed,ph){
   const cx=ph.xMm+ph.wMm/2, cy=ph.yMm+ph.hMm/2;
   const hit=boxed.find(({card:k})=>cx>=k.xMm&&cx<=k.xMm+k.wMm&&cy>=k.yMm&&cy<=k.yMm+k.hMm);
   if(!hit) return null;
-  const {card:k,b}=hit;
-  return {xMm:k.xMm+b.x*k.wMm, yMm:k.yMm+b.y*k.hMm, wMm:b.w*k.wMm, hMm:b.h*k.hMm};
+  const {card:k,b,img,line}=hit;
+  const a=state.art.front;
+  if(!img||!img.naturalWidth||!(a&&a.wMm&&a.hMm))
+    return {xMm:k.xMm+b.x*k.wMm, yMm:k.yMm+b.y*k.hMm, wMm:b.w*k.wMm, hMm:b.h*k.hMm};
+  // The box was drawn on the whole page (pcBoxOpen); the page is laid as
+  // oneDraw lays it — fitted, a PDF by its trim, turned — so the box is too
+  const g=withLook('front',line,()=>artGeom('front',img,k,line));
+  // the page in its own axes: a grown bleed keeps it at the trim, anything
+  // else fills the box before the turn
+  const PW=g.grow?g.trimW:g.boxW, PH=g.grow?g.trimH:g.boxH;
+  const t=g.rotDeg*Math.PI/180, co=Math.round(Math.cos(t)), si=Math.round(Math.sin(t));
+  const xs=[], ys=[];
+  [[b.x,b.y],[b.x+b.w,b.y],[b.x,b.y+b.h],[b.x+b.w,b.y+b.h]].forEach(([u,v])=>{
+    const x=(u-0.5)*PW, y=(v-0.5)*PH;
+    xs.push(x*co-y*si); ys.push(x*si+y*co);
+  });
+  // a line's own shift moves its picture off the sheet's
+  const lk=line&&line.look, sh=lk&&lk.shift, sf=state.shift.front||{xMm:0,yMm:0};
+  const dx=sh?(Number(sh.xMm)||0)-sf.xMm:0, dy=sh?(Number(sh.yMm)||0)-sf.yMm:0;
+  const mx=k.xMm+k.wMm/2+dx, my=k.yMm+k.hMm/2+dy;
+  const x0=Math.min(...xs), y0=Math.min(...ys);
+  return {xMm:mx+x0, yMm:my+y0, wMm:Math.max(...xs)-x0, hMm:Math.max(...ys)-y0};
 }
 function pcDrawWords(ctx,sc,c,words,bx,by,bw,bh,fam,align){
       const own=pcNameSize(c,words);
@@ -11116,9 +11184,13 @@ document.getElementById('alignTo').addEventListener('change',phSelSync);
 // say and how the words look; the boxes on the sheet say where. Nothing here is
 // placed by hand — the words are centred in whichever boxes carry the category's
 // name, and run onto further sheets when more are wanted than there are boxes.
+// a folder font that is not loaded is shown by name, not passed off as Plex
+const pcMissingOpt=sel=>{ const n=pcFontMissing(sel);
+  return n?`<option value="${escapeHtml(sel)}" selected>⚠ ${escapeHtml(n)} (not loaded)</option>`:''; };
 function pcFontOptions(sel){
-  const folder=(loadDesignFonts||[]);
-  return Object.keys(PC_FONTS).map(k=>
+  const folder=(loadDesignFonts||[]), miss=pcMissingOpt(sel);
+  if(miss) sel=null;
+  return miss+Object.keys(PC_FONTS).map(k=>
       `<option value="${k}"${k===sel?' selected':''}>${escapeHtml(PC_FONT_LABEL[k]||k)}</option>`).join('')
     +(folder.length?'<option disabled>── from your folder ──</option>':'')
     +folder.map(f=>
@@ -11126,8 +11198,9 @@ function pcFontOptions(sel){
 }
 function pcCjkOptions(sel){
   sel=sel||'yahei';
-  const folder=(loadDesignFonts||[]);
-  return Object.keys(PC_CJK_FONTS).map(k=>
+  const folder=(loadDesignFonts||[]), miss=pcMissingOpt(sel);
+  if(miss) sel=null;
+  return miss+Object.keys(PC_CJK_FONTS).map(k=>
       `<option value="${k}"${k===sel?' selected':''}>${escapeHtml(PC_CJK_LABEL[k])}</option>`).join('')
     +(folder.length?'<option disabled>── from your folder ──</option>':'')
     +folder.map(f=>
@@ -26165,7 +26238,7 @@ async function printArtReady(){ try{ await printArtLoading; }catch(e){} }
 // `whole` says this is a saved template from a library (a Place Card load, which
 // has no name to give the Custom Template's boxes): everything it leaves out is
 // the default, not what the last template happened to leave behind.
-function applyPrintState(meta,name,whole){
+function applyPrintState(meta,name,whole,keepArt){
   if(!meta) return;
   whole=!!whole||name!==undefined;
   // copies: a Magic Create line's stored design is handed in here, and the
@@ -26181,7 +26254,8 @@ function applyPrintState(meta,name,whole){
   // Whatever names its artwork — a template, a line — names all of it: a
   // picture it does not name is the last one's, and Save wrote it in as this
   // one's. A step back names none and keeps what is there.
-  const namesArt=whole||meta.design!==undefined||meta.designs!==undefined;
+  // keepArt: a saved sheet added onto this one, which only adds to its list
+  const namesArt=!keepArt&&(whole||meta.design!==undefined||meta.designs!==undefined);
   if(namesArt){
     ['front','back'].forEach(s=>{
       state.final[s]={data:null,img:null,name:'',source:null,file:null};
@@ -26283,7 +26357,7 @@ function applyPrintState(meta,name,whole){
   const single=meta.design&&meta.design.path?meta.design:null;
   // a step back names no artwork: the load in flight is still this sheet's,
   // and starting a new generation here dropped it half way
-  if(!namesArt) return;
+  if(!namesArt&&!keepArt) return;
   printArtLoading=null;
   const artGen=++printArtGen;
   if(designs&&designs.length){
@@ -27611,6 +27685,25 @@ function downloadBlob(blob,filename){
   setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},1500);
 }
 function safeName(s){return (s||'template').replace(/[^a-z0-9_\-]+/gi,'_');}
+// A file sent to print takes the time in its name, as gift tags do: the shop PC
+// sends whatever file bears the name as soon as it sees one, so a re-print under
+// last time's name could send last time's file while the NAS is still syncing.
+// Added at the end (after any -2), and swapped rather than stacked if it is there.
+const PRINT_STAMP_RE=/_\d{4}-\d{6}(?=\.[^.]+$|$)/;
+function printStamp(){
+  const d=new Date(), p2=n=>String(n).padStart(2,'0');
+  return `${p2(d.getMonth()+1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+}
+function printStamped(name,stamp){
+  const s=String(name||''), st='_'+(stamp||printStamp());
+  if(PRINT_STAMP_RE.test(s)) return s.replace(PRINT_STAMP_RE,st);
+  return /\.[^.]+$/.test(s)?s.replace(/(\.[^.]+)$/,st+'$1'):s+st;
+}
+// Front/back pairing by name: X_Back.pdf goes with X_Front.pdf, X_Back-2 with
+// X_Front-2, and a print time stamp on either is left out of it.
+const pdfIsBackName=n=>/_back(-\d+)?\.pdf$/i.test(String(n||'').replace(PRINT_STAMP_RE,''));
+const pdfPairKey=n=>String(n||'').replace(PRINT_STAMP_RE,'').toLowerCase()
+  .replace(/_back(-\d+)?(\.pdf)$/,'_front$1$2');
 
 // ---------- what the downloaded PDFs are called ----------
 // A pattern of {tokens} and literal text, kept per template. The default is
@@ -27984,10 +28077,24 @@ async function renderSidePdf(side,page){
 // button; the enlarged view passes its own so the result lands where you are.
 // print: after saving, the file is sent to the Fiery (see fieryAsk) — asked
 // for once the name is settled and before anything is rendered.
+// One export at a time, whichever button started it: two at once shared the
+// one bleedAsked set and the second cleared the first's, so its fills were
+// dropped. Every Download/Print button here and in the enlarged view is off
+// until it is done.
+let cptExportBusy=false;
+const CPT_EXPORT_BTNS=['exportFrontBtn','exportBackBtn','printFrontBtn','printBackBtn','modalDownload','modalPrint'];
+function cptExportBtnsOff(off){
+  CPT_EXPORT_BTNS.forEach(id=>{ const b=document.getElementById(id); if(b) b.disabled=off; });
+}
 async function exportSide(side,msgId,print){
+  if(side==='front'&&!pcFontsOkToPrint()) return;   // Place Card names in a missing font
   const out=msgId?document.getElementById(msgId):exportMsgEl(side);
-  const btn=document.getElementById(side==='front'?'exportFrontBtn':'exportBackBtn');
-  const other=document.getElementById(side==='front'?'exportBackBtn':'exportFrontBtn');
+  if(cptExportBusy){ showMsg(out,'An export is already running — wait for it to finish.',false); return; }
+  cptExportBusy=true; cptExportBtnsOff(true);
+  try{ await exportSideRun(side,out,print); }
+  finally{ cptExportBusy=false; cptExportBtnsOff(false); }
+}
+async function exportSideRun(side,out,print){
   // Whatever the name is built from is asked for before anything is rendered.
   // A file called 250820-01__Front.pdf tells the floor nothing, and by the
   // time anybody notices it is already on the drive. Only the tokens this
@@ -28007,16 +28114,18 @@ async function exportSide(side,msgId,print){
     document.getElementById(wantPaper?'artPaperType':'artGsm').focus();
     return;
   }
+  // settled once: what is asked about is what is saved and sent. Printed, it
+  // takes the time in its name (see printStamped).
+  const filename=print?printStamped(buildPdfFilename(side)):buildPdfFilename(side);
   let ans=null, session=null;
   if(print){
     session=await fieryReady(out); if(!session) return;
-    ans=await fieryAsk([{name:buildPdfFilename(side),
+    ans=await fieryAsk([{name:filename,
       it:{paper_type:state.paperType,gsm:state.gsm}}],sheetCount());
     if(!ans) return;
   }
   const dir=await exportFolderReady(true);
   if(print&&!dir){ fieryNoFolder(out); return; }
-  btn.disabled=true; other.disabled=true;
   const pages=sheetCount();
   showMsg(out,pages>1
     ? `Rendering ${pages} sheets at full resolution…`
@@ -28025,7 +28134,6 @@ async function exportSide(side,msgId,print){
     const hasArt=side==='front'
       ? (usingPreset()?designTotal()>0:!!state.final.front.data)
       : !!state.final.back.data;
-    const filename=buildPdfFilename(side);
     const pdfBytes=pages>1
       ? await renderSidePdfAll(side,pages,i=>
           showMsg(out,`Rendering sheet ${i+1} of ${pages}…`,true))
@@ -28045,8 +28153,6 @@ async function exportSide(side,msgId,print){
     if(print) await fieryQueue(session,dir,[filename],ans,[out.id]);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
-  }finally{
-    btn.disabled=false; other.disabled=false;
   }
 }
 document.getElementById('exportFrontBtn').addEventListener('click',()=>exportSide('front'));
@@ -33646,8 +33752,11 @@ async function gtApplyPickedDir(dir,msg,label){
   gtDir=dir; gtFolderPending=false;
   await gtIdbPut(gtDirKey(),dir);
   await gtLoadLib();
-  // a folder chosen with nothing in it takes over whatever was in the browser
-  if(!gtLib.designs.length&&!gtLib.fonts.length){
+  // a folder chosen with nothing in it takes over whatever was in the browser.
+  // One-offs put back for the order's lines are not the folder's own.
+  const own=gtLib.designs.filter(d=>!d.adhoc&&!gtOneOffKeep.has(d.id));
+  if(!own.length&&!gtLib.fonts.length){
+    const kept=gtLib.designs.filter(d=>!own.includes(d));
     const rec=await gtIdbGet(gtLibKey()).catch(()=>null);
     if(rec&&rec.manifest&&(rec.manifest.designs||[]).length){
       gtLib.designs=(rec.manifest.designs||[]).map(gtNormalizeDesign);
@@ -33656,6 +33765,8 @@ async function gtApplyPickedDir(dir,msg,label){
       if(rec.manifest.sheet) Object.assign(gtSheet,rec.manifest.sheet);
       Object.entries(rec.assets||{}).forEach(([k,v])=>gtAssets.set(k,v));
       await gtHydrate(); await gtSaveLib();
+      // and the order's one-offs back beside them, written nowhere
+      kept.forEach(d=>{ if(!gtDesign(d.id)) gtLib.designs.push(d); });
       showMsg(msg,`✓ ${label} — what was in this browser has been written into it.`,true);
     }else showMsg(msg,`✓ ${label}.`,true);
   }else{
@@ -35215,8 +35326,11 @@ function gtPltSheetName(at){
   if(!base){ const d=ls.length?gtDesign(ls[0].designId):null; base=(d&&d.name)||(ls[0]&&ls[0].sku)||'GT'; }
   return String(base).replace(/[\\/:*?"<>|\s]/g,'')||'GT';
 }
+// Names stay taken for the whole run: forgotten after two minutes, a long
+// batch's Matte and Gloss sheets of one order both came out 1234.plt. A run
+// starts over at exportFolderReady(true) or a fresh gift tag export.
 function gtPltUnique(base,fresh){
-  if(fresh||Date.now()-gtPltRun.at>120000) gtPltRun.used=new Set();
+  if(fresh) gtPltRun.used=new Set();
   gtPltRun.at=Date.now();
   let nm=base, k=1;
   while(gtPltRun.used.has(nm.toLowerCase())) nm=base+'-'+(++k);
@@ -39201,13 +39315,22 @@ async function mcAskStockFor(it){
     want,'Not now — leave it blank');
   if(!ans||mcWinItem!==it.id) return;
   const patch={};
-  if(ans.paper) patch.paper_type=it.paper_type=ans.paper;
-  if(ans.gsm) patch.gsm=it.gsm=ans.gsm;
+  if(ans.paper) patch.paper_type=ans.paper;
+  if(ans.gsm) patch.gsm=ans.gsm;
   if(!Object.keys(patch).length) return;
-  mcUseStock(ans);
-  await mcSave(it,patch);
+  // written first, and only then onto the line and the builder: a refused save
+  // left both saying a paper the row never took
+  const was={paper_type:it.paper_type,gsm:it.gsm};
+  Object.assign(it,patch);
+  const ok=await mcSave(it,patch);
+  if(ok) mcUseStock(ans);
+  else { Object.assign(it,was); mcStockAsked.delete(it.id); }
   mcRepaintRow(it); mcSyncBatchButtons();
   if(mcWinItem===it.id) mcWinRender();
+  // said after the redraw, which would otherwise wipe it
+  const msg=!ok&&document.getElementById('mcWinMsg');
+  if(msg) showMsg(msg,'Could not save the paper and weight'
+    +(mcLastSaveError?': '+escapeHtml(mcLastSaveError):'')+' — nothing was changed.',false);
 }
 document.querySelectorAll('[data-pp-add]').forEach(b=>
   b.addEventListener('click',()=>ppAdd(b.dataset.ppAdd)));
@@ -41581,12 +41704,12 @@ async function fieryAsk(entries,count,counts){
   // it only counts when its front is not in this send.
   const paperEl=document.getElementById('mcFieryPaper');
   let known=Array.isArray(counts)?counts:(count&&entries.length===1?[count]:null);
-  const isBack=e=>(e&&e.side==='back')||/_back\.pdf$/i.test((e&&e.name)||'');
-  const frontName=n=>String(n||'').replace(/_back(\.pdf)$/i,'_Front$1').toLowerCase();
+  const isBack=e=>(e&&e.side==='back')||pdfIsBackName(e&&e.name);
+  const frontName=pdfPairKey;
   const paper=()=>{
     if(!known){ paperEl.innerHTML='Paper to prepare: counting the sheets…'; return; }
     const n=Math.round(Number(copies.value));
-    const names=new Set(entries.filter(e=>!isBack(e)).map(e=>String(e.name||'').toLowerCase()));
+    const names=new Set(entries.filter(e=>!isBack(e)).map(e=>pdfPairKey(e.name)));
     let total=0, backs=0, unknown=false;
     entries.forEach((e,i)=>{
       const c=known[i];
@@ -41681,9 +41804,14 @@ async function mcFieryPrint(idx){
   if(!idx.length||mcBusy||mcPlanDrawing) return;
   const msg=document.getElementById('mcPlanMsg');
   const session=await fieryReady(msg); if(!session) return;
-  const entries=idx.map(i=>mcPlan[i]);
+  // the files sent are named with the time (see printStamped); the plan's own
+  // names, which ⬇ saves under, stay as they are
+  const stamp=printStamp();
+  const entries=idx.map(i=>({...mcPlan[i],name:printStamped(mcPlan[i].name,stamp)}));
   const count=(idx.length===1&&idx[0]===mcPlanAt)?mcPlanPages:0;
   const ans=await fieryAsk(entries,count,mcFieryCountSheets(entries));
+  // a count made for the copies is the plan's count too
+  entries.forEach((e,k)=>{ const o=mcPlan[idx[k]]; if(o&&e.sheets>0&&!(o.sheets>0)) o.sheets=e.sheets; });
   if(!ans) return;
   mcBusy=true; mcSyncBatchButtons(); mcRenderPlan(); mcPlanZoomApply();
   let dir=null;
@@ -41790,13 +41918,13 @@ async function mcPlanCountAll(){
 // Paper to get out for a set of files: each stock's sheets, a back riding on
 // its front's sheets when its front is among them. Null while any is uncounted.
 function mcPaperFor(list){
-  const isBack=e=>(e&&e.side==='back')||/_back\.pdf$/i.test((e&&e.name)||'');
-  const fronts=new Set(list.filter(e=>!isBack(e)).map(e=>String(e.name||'').toLowerCase()));
+  const isBack=e=>(e&&e.side==='back')||pdfIsBackName(e&&e.name);
+  const fronts=new Set(list.filter(e=>!isBack(e)).map(e=>pdfPairKey(e.name)));
   const by=new Map(); let pending=false;
   list.forEach(e=>{
     // a count that failed is not "no paper": the total is held back as unknown
     if(!(e.sheets>0)){ if(e.sheets!==0||e.countFailed) pending=true; return; }
-    if(isBack(e)&&fronts.has(String(e.name||'').replace(/_back(\.pdf)$/i,'_Front$1').toLowerCase())) return;
+    if(isBack(e)&&fronts.has(pdfPairKey(e.name))) return;
     const st=mcFieryStockOf(e);
     const k=[st.paper,st.gsm&&(/gsm/i.test(st.gsm)?st.gsm:st.gsm+'gsm')].filter(Boolean).join(' ')||'paper not set';
     by.set(k,(by.get(k)||0)+e.sheets);
@@ -42008,11 +42136,11 @@ function mcPaperRecord(rows){
 // Magic Create files: each file's sheets as its pages leave them, times the
 // copies; a back rides on its front's sheets when its front went too.
 function mcPaperRecordFiles(entries,ans,count){
-  const isBack=e=>(e&&e.side==='back')||/_back\.pdf$/i.test((e&&e.name)||'');
-  const fronts=new Set(entries.filter(e=>!isBack(e)).map(e=>String(e.name||'').toLowerCase()));
+  const isBack=e=>(e&&e.side==='back')||pdfIsBackName(e&&e.name);
+  const fronts=new Set(entries.filter(e=>!isBack(e)).map(e=>pdfPairKey(e.name)));
   let sheets=0, unsure=false;
   entries.forEach(e=>{
-    if(isBack(e)&&fronts.has(String(e.name||'').replace(/_back(\.pdf)$/i,'_Front$1').toLowerCase())) return;
+    if(isBack(e)&&fronts.has(pdfPairKey(e.name))) return;
     const spec=(ans.pagesFor&&ans.pagesFor[e.name]!=null)?ans.pagesFor[e.name]:ans.pages;
     const c=e.sheets>0?e.sheets:(entries.length===1?count:0);
     const got=c>0?mcFieryPagesCount(spec,c):null;
@@ -43439,14 +43567,16 @@ function mcRenderSummary(){
 // every line keeps at least one. That floor is not tidiness: the sheet reads
 // `sheet_item.qty || the ordered figure`, so a nought would fall straight
 // through and print the order in full — the opposite of what was asked.
-async function mcSetSkuQty(sku,want){
+// `only` narrows the lines it spreads over — the sheet's Save passes the ones on
+// that sheet, or a figure typed there cut a Custom line or another paper's
+async function mcSetSkuQty(sku,want,only){
   const out=document.getElementById('mcSummaryMsg');
   // the same guards as every other change to the batch's lines; the box is
   // redrawn so it does not go on showing a figure that was not saved
   if(!mcBatch||mcBatch.status!=='open'){
     showMsg(out,'This batch is completed — re-open it to change it.',false); mcRenderSummary(); return; }
   if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); mcRenderSummary(); return; }
-  const lines=mcItems.filter(it=>mcRowKey(it)===sku&&!mcMergedKey(it));
+  const lines=mcItems.filter(it=>mcRowKey(it)===sku&&!mcMergedKey(it)&&(!only||only(it)));
   if(!lines.length) return;
   // Two different figures, and they were one. `onSheet` is what this SKU is set
   // to print now — which is what the box shows and what a new share is worked
@@ -45302,8 +45432,17 @@ function mcDonePatch(it,on){
 // how many lines the last mcMarkPrintLines could not write, for a caller that
 // has to say "saved" and mean it
 let mcMarkFailed=0;
-async function mcMarkPrintLines(rows,template){
+// `onlyHere` (the sheet's Save): only lines already on this sheet or on no
+// tile — a line moved to Custom, a gift tag or a place card stays there, or it
+// printed twice
+// a print-sheet line on the sheet laid in the builder: its template, and its
+// paper where the laid sheet is one paper's
+const mcOnLaidSheet=(it,template)=>!!it&&it.tile==='sheetPrint'
+  &&[String(template||''),''].includes(String((it.sheet_item||{}).template||''))
+  &&(typeof mcLaidShared!=='string'||mcPrintSheetKey(it)===mcLaidShared);
+async function mcMarkPrintLines(rows,template,onlyHere){
   mcMarkFailed=0;
+  const here=it=>!it.tile||mcOnLaidSheet(it,template);
   if(!rows||!rows.length||!mcBatch||mcBatch.status!=='open') return 0;
   let n=0;
   for(const r of rows){
@@ -45313,7 +45452,7 @@ async function mcMarkPrintLines(rows,template){
       ? ((loadDesignFiles||[]).find(f=>f.path===r.path)||{path:r.path,name:r.name||String(r.path).split('/').pop()})
       : designFileForSku(r.sku);
     if(!pick) continue;
-    for(const it of mcItems.filter(i=>mcRowKey(i)===String(r.sku))){
+    for(const it of mcItems.filter(i=>mcRowKey(i)===String(r.sku)&&(!onlyHere||here(i)))){
       const was=it.sheet_item||{};
       // merged by its own Merge box with its own artwork: not the summary's
       if(it.tile==='sheetPrint'&&(was.merged||was.art)) continue;
@@ -48657,8 +48796,10 @@ async function mcApplyArt(it,live){
     if(!art[side]){
       // the front the layout named is already on the sheet; anything else is
       // the last line's artwork, and it does not belong on this one
-      // — a layout naming only a design list named no front of its own
-      if(!(side==='front'&&it.design&&it.design.design&&it.design.design.path))
+      // — applying a layout that names its artwork clears both sides first
+      // (applyPrintState), so a front still here is the one it, or the template
+      // just picked for it, put there
+      if(side!=='front'||!(it.design&&(it.design.design!==undefined||it.design.designs!==undefined)))
         state.final[side]={data:null,img:null,name:''};
       continue;
     }
@@ -49675,9 +49816,13 @@ function mcBaseName(it){
   if(sibs.length<2) return base;
   return base+'-'+safeName(it.design_name||it.sku||'line');
 }
-const mcFilename=(it,side)=>
-  `${mcBaseName(it)}_${safeName(it.paper_type)}_${safeName(it.gsm)}`
-  +`_${side==='front'?'Front':'Back'}.pdf`;
+// a blank paper or weight leaves a gap, as buildPdfFilename does — safeName
+// alone spelled "template" into the name
+const mcFilename=(it,side)=>{
+  const tok=v=>{ const s=String(v==null?'':v).trim(); return s?safeName(s):''; };
+  return [mcBaseName(it),tok(it.paper_type),tok(it.gsm),side==='front'?'Front':'Back']
+    .filter(Boolean).join('_')+'.pdf';
+};
 // One line's own sheet, named for the line first and the sheet second — it
 // lands in the same folder as the batch's sheet of the same kind, and the two
 // must never be mistaken for each other.
@@ -49868,6 +50013,9 @@ async function mcRenderLine(it,side){
       'live state.bleed:',JSON.parse(JSON.stringify(state.bleed)));
     state.orderId=it.order_id;
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
+    // names in a folder font that is not loaded would print in the fallback
+    const missFonts=side==='front'&&pcMode==='placecard'?pcMissingFonts():[];
+    if(missFonts.length) throw new Error(`font not loaded: ${missFonts.join(', ')} — reconnect the design folder in Load design`);
     await mcApplyArt(it);
     // artwork that would not load came out as blank paper, and was marked done
     if(it.art&&it.art[side]&&!(state.final[side]&&state.final[side].img))
@@ -50182,8 +50330,11 @@ function mcMergeLook(it){
   if(!(si.art||si.merged)||!d) return null;
   const b=d.bleed||{};
   const fit=d.artFit||'actual';
+  // with no bleed drawn its style is not part of the look, or two lines that
+  // print the same were two designs; invert is drawn with bleed off too, so stays
+  const bled=!!b.enabled||mcMergeBleedMm(it)!==0;
   return {bleed:{enabled:!!b.enabled,mm:b.enabled?Math.max(0,Number(b.mm)||0):0,
-      mode:b.mode||'stretch',fillGap:!!b.fillGap,trimPx:Number(b.trimPx)||0,invert:!!b.invert},
+      mode:bled&&b.mode||'stretch',fillGap:bled&&!!b.fillGap,trimPx:bled&&Number(b.trimPx)||0,invert:!!b.invert},
     artFit:fit,
     art:fit==='actual'?null:(d.art&&d.art.front?{wMm:Number(d.art.front.wMm)||0,
       hMm:Number(d.art.front.hMm)||0}:null),
@@ -50836,7 +50987,7 @@ const PJ_KINDS={
         // the layout stays as it is and the saved sheet's designs are added to
         // it: a sheet being added to on screen is one somebody has set up
         const here=PJ_KINDS.print.snap().data;
-        applyPrintState({...here,designs:(here.designs||[]).concat(meta.designs||[])});
+        applyPrintState({...here,designs:(here.designs||[]).concat(meta.designs||[])},undefined,false,true);
       }else{
         applyPrintState(meta);
         if(meta.template&&typeof setSelectedTemplate==='function')
@@ -51157,7 +51308,7 @@ async function mcSaveSharedSheet(){
     const d=(state.designs||[]).find(x=>x.sku===sku&&!x.mcKey&&x.source&&x.source.path);
     return {sku,path:d.source.path,name:d.name};
   });
-  const lines=rows.length?await mcMarkPrintLines(rows,selectedTemplate||''):0;
+  const lines=rows.length?await mcMarkPrintLines(rows,selectedTemplate||'',true):0;
   failed+=rows.length?mcMarkFailed:0;
   // What was done to the sheet on the builder reaches the lines too, or the
   // sheet is laid again from the lines the next time it is opened and every
@@ -51170,11 +51321,12 @@ async function mcSaveSharedSheet(){
   mine.filter(d=>!d.mcClaimed)
     .forEach(d=>want.set(d.sku,(want.get(d.sku)||0)+Math.max(0,Math.round(Number(d.qty)||0))));
   for(const [sku,q] of want){
-    const its=mcItems.filter(it=>mcRowKey(it)===sku&&!mcMergedKey(it)&&it.tile==='sheetPrint');
+    const onSheet=it=>mcOnLaidSheet(it,selectedTemplate);
+    const its=mcItems.filter(it=>mcRowKey(it)===sku&&!mcMergedKey(it)&&onSheet(it));
     if(!its.length||q<its.length) continue;       // one a line at the least; 0 is a design left for later
     const now=its.reduce((t,it)=>t+mcQty(it),0);
     if(q===now) continue;
-    await mcSetSkuQty(sku,q);
+    await mcSetSkuQty(sku,q,onSheet);
     if(its.reduce((t,it)=>t+mcQty(it),0)===q) qty++; else failed++;
   }
   // a design deleted from the sheet takes its lines off it: still marked, they
