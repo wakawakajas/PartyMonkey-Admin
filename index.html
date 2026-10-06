@@ -6702,7 +6702,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <div class="sect-label">Bleed</div>
             <div class="click-row" style="margin-bottom:8px;">
               <label class="click-tog"><input type="checkbox" id="gtBleedToggle"/>Add bleed to all sides</label>
-              <label class="click-tog"><input type="checkbox" id="gtBleedFillGap"/>Carry it across a too-small design</label>
+              <!-- always on now: bleed fills to its depth whatever the ratio -->
+              <label class="click-tog" hidden><input type="checkbox" id="gtBleedFillGap"/>Carry it across a too-small design</label>
               <label class="click-tog" title="Swaps every colour in the artwork for its opposite — black for white, and so on. The words keyed on a line keep their own colour."><input type="checkbox" id="gtInvertArt"/>Invert colours</label>
             </div>
             <div class="bleed-row">
@@ -30971,11 +30972,12 @@ function gtGrowArt(id,img,bpx){
 //   mirror — fold the edges of the box outward. What a full-bleed pattern wants.
 //   scale  — blow the whole picture up. What the sheet used to do.
 // gap: how much paper the fitted artwork leaves either side of its placeholder,
-// carried across when "Carry it across a too-small design" is on.
+// always carried across with bleed on, so a wrong-ratio design still bleeds
+// its full depth past the cut.
 function gtDrawArt(ctx,img,x,y,w,h,b,sc,mode,id,gap){
   const trim=Math.max(0,Math.round(Number(gtSheet.bleedTrimPx)||0));
-  const gx=(gap&&gtSheet.bleedFillGap&&mode!=='offset')?Math.max(0,gap.x||0):0;
-  const gy=(gap&&gtSheet.bleedFillGap&&mode!=='offset')?Math.max(0,gap.y||0):0;
+  const gx=(gap&&mode!=='offset')?Math.max(0,gap.x||0):0;
+  const gy=(gap&&mode!=='offset')?Math.max(0,gap.y||0):0;
   // Extend, Content-aware and AI fill — and Mirror or Stretch once there is an
   // edge to trim or a gap to cross — are made the Custom Print Template's way
   if(b>0&&w>0&&h>0&&(mode==='extend'||mode==='content'||mode==='ai'
@@ -31039,11 +31041,11 @@ function gtDrawTag(ctx,line,x,y,w,h,sc,forExport,vec){
     // page is placed under this render, at exactly this rectangle
     // Invert colours flips the artwork and its bleed alike; transparent stays
     // transparent, so a cut-out stays the shape it is
-    if(!(vec&&vec.take(d,r,b))){
+    const gap={x:Math.max(r.x-x,x+w-(r.x+r.w)),y:Math.max(r.y-y,y+h-(r.y+r.h))};
+    if(!(vec&&vec.take(d,r,b,gap))){
       ctx.save();
       if(gtSheet.invertArt) ctx.filter='invert(1)';
-      gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,d.id,
-        {x:Math.max(r.x-x,x+w-(r.x+r.w)),y:Math.max(r.y-y,y+h-(r.y+r.h))});
+      gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,d.id,gap);
       ctx.restore();
     }
   }
@@ -34239,10 +34241,12 @@ async function gtFillBleeds(pages,plan){
 // pixels, not to a page.
 function gtVecTaker(forms,place){
   const base=gtBaseRect();
-  return {take(d,r,b){
+  return {take(d,r,b,gap){
     if(!forms.has(d.id)) return false;
     if(gtSheet.invertArt) return false;     // a placed page cannot be inverted
-    if(b>0&&(gtSheet.bleedMode!=='scale'||gtSheet.bleedTrimPx>0||gtSheet.bleedFillGap)) return false;
+    // a gap to carry the bleed across is made up from pixels
+    const gapped=!!gap&&(gap.x>0.01||gap.y>0.01);
+    if(b>0&&(gtSheet.bleedMode!=='scale'||gtSheet.bleedTrimPx>0||gapped)) return false;
     const R=b>0?{x:r.x-b,y:r.y-b,w:r.w+b*2,h:r.h+b*2}:{x:r.x,y:r.y,w:r.w,h:r.h};
     if(base&&R.x<base.x+base.w&&base.x<R.x+R.w&&R.y<base.y+base.h&&base.y<R.y+R.h) return false;
     place.push({key:d.id,rect:R});
