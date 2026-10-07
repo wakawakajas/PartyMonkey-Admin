@@ -7370,6 +7370,20 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         </div>
       </div>
       <canvas id="canvasFront"></canvas>
+      <!-- PLACE CARD — the words, the way Gift Tag edits its texts: one panel
+           under the sheet for whichever text is picked, rather than scrolling
+           to its card further down. Click a card on the sheet to pick the
+           text it carries. Hidden unless pcMode==='placecard'. -->
+      <div class="al-panel" id="pcTextPanel" hidden>
+        <div class="al-head">
+          <span id="pcTextCount">no text selected</span>
+          <span class="al-to">
+            <button type="button" class="btn-outline btn-sm" id="pcAddTextBtn">+ Add text</button>
+          </span>
+        </div>
+        <p class="hint" id="pcTextHint" style="margin:0 0 8px;">Click a card on the sheet to select its text. Anything changed below is changed on every card that carries it.</p>
+        <div id="pcTextProps"></div>
+      </div>
       <div class="al-panel" id="alignPanel">
       <!-- The panel Illustrator puts this behind, doing the same arithmetic on
            the same kind of object: a list of boxes with an x, a y, a width and
@@ -8834,6 +8848,10 @@ const uid=()=>'p'+Math.random().toString(36).slice(2,9);
 // rendered / editable / saved while pcMode==='placecard', so Custom Template,
 // Magic Create and Saved sheets never see them.
 let pcMode='custom';                       // 'custom' | 'placecard'
+// the category the text panel under the sheet is showing, and which way each
+// category's words are being given (Numbering / List) while it is on screen
+let pcTextCat='';
+const pcListMode={};
 // how a category's boxes are marked on the builder preview, so which card
 // belongs to which group is visible at a glance. Preview only, never exported.
 const PC_CAT_TINTS=['#CCF344','#FF8A6B','#318CE7','#C08BFF','#F5C044','#BFEEEE'];
@@ -10953,6 +10971,7 @@ function pcPaintMode(){
   show('pcTemplateCard',placecard);
   show('pcCatsCard',placecard);
   show('pcLibCard',placecard);
+  show('pcTextPanel',placecard);
   const pj=document.getElementById('pjPrintBtn');
   if(pj) pj.style.display=placecard?'none':'';
   pcApplyOrder(placecard);
@@ -10960,35 +10979,30 @@ function pcPaintMode(){
   if(placecard&&typeof pcLibEnsure==='function') pcLibEnsure();
   if(typeof pcRenderCats==='function') pcRenderCats();
 }
-// ---------- the sections, in the order the work is done ----------
-// Place Card is not Custom Template's order: the sheet is set, the boxes are
-// laid, the words are given, and only then is there artwork to put behind them.
-// The cards are the same cards — they are moved, numbered by where they end up,
-// and listed in the bar at the top so none of it is a scroll away.
-const PC_CARD_ORDER=['sheetSizeCard','layoutCard','pcCatsCard','artworkCard','cutLineCard','refMarkCard'];
+// ---------- the sections ----------
+// Place Card keeps Custom Template's order, numbered by where each sits and
+// listed in the bar at the top so none of it is a scroll away.
 // What is open on the way in — the step the work starts at, not all seven at
 // once. Only when the mode actually changes: a section opened by hand after
 // that is left as it was found.
 function pcDefaultSections(placecard){
   const set=(id,open)=>{ const el=document.getElementById(id);
     if(el) el.classList.toggle('collapsed',!open); };
-  set('layoutCard',placecard);
+  // Place Card opens and reads exactly as Custom Template does; its words are
+  // edited in the panel under the sheet
+  set('layoutCard',false);
   set('pcCatsCard',false);
   set('pcLibCard',false);
-  set('artworkCard',!placecard);
+  set('artworkCard',true);
   set('cutLineCard',false); set('refMarkCard',false); set('sheetSizeCard',false);
-  cardSolo(document.getElementById(placecard?'layoutCard':'artworkCard'));
+  cardSolo(document.getElementById('artworkCard'));
 }
 let pcCardsWere=null;
 function pcApplyOrder(placecard){
   const wrap=document.getElementById('appScreen'); if(!wrap) return;
   if(!pcCardsWere) pcCardsWere=[...wrap.children];
-  if(placecard){
-    let at=wrap.querySelector('.preview-wrap');
-    if(!at) return;
-    PC_CARD_ORDER.forEach(id=>{ const el=document.getElementById(id); if(!el) return;
-      at.after(el); at=el; });
-  }else pcCardsWere.forEach(el=>wrap.appendChild(el));
+  // the same order as Custom Template in both modes, so the two navigate alike
+  pcCardsWere.forEach(el=>wrap.appendChild(el));
   pcNumberCards(); pcBuildNav();
   cardSolo(cardOpen());
 }
@@ -11309,6 +11323,12 @@ function phSelSync(){
       c.classList.toggle('sel',boxes.length>0&&boxes.every(q=>phSel.has(q.id)));
     }else c.classList.toggle('sel',phSel.has(c.dataset.id));
   });
+  // Place Card: a card clicked on the sheet points the text panel at its words
+  if(pcMode==='placecard'&&n){
+    const cats=new Set(phSelected().map(p=>p.cat||''));
+    const only=cats.size===1?[...cats][0]:'';
+    if(only&&only!==pcTextCat){ pcTextCat=only; pcTextPanelSync(); }
+  }
 }
 function phSelSet(ids){
   phSel.clear();
@@ -11451,8 +11471,10 @@ function pcAddCat(){
     :(first?state.placeholders.filter(p=>!p.cat):[]);
   take.forEach(p=>{ p.cat=c.id; });
   if(take.length) c.count=take.length;
+  pcTextCat=c.id;
   pcRenderCats(); renderPlaceholderList(); drawAll();
-  const box=document.querySelector(`#pcCatList [data-cid="${c.id}"] [data-cf="name"]`);
+  const box=document.querySelector(`#pcTextProps [data-cid="${c.id}"] [data-cf="pattern"]`)
+    ||document.querySelector(`#pcCatList [data-cid="${c.id}"] [data-cf="name"]`);
   if(box){ box.focus(); box.select(); }
 }
 function pcDeleteCat(id){
@@ -11477,11 +11499,13 @@ function pcCatTally(c){
 }
 // the tally only, so a field being typed into is not rebuilt under the caret
 function pcCatTallyOnly(c){
-  const card=document.querySelector(`#pcCatList [data-cid="${c.id}"]`);
-  const el=card&&card.querySelector('[data-ctally]');
-  if(el) el.textContent=pcCatTally(c);
+  document.querySelectorAll(`[data-cid="${c.id}"] [data-ctally]`)
+    .forEach(el=>{ el.textContent=pcCatTally(c); });
 }
 function pcRenderCats(){
+  pcRenderCatList(); pcTextPanelSync();
+}
+function pcRenderCatList(){
   const wrap=document.getElementById('pcCatList'); if(!wrap) return;
   pcFontNote(); pcBulkCatOptions();
   const cats=state.cats||[];
@@ -11489,8 +11513,28 @@ function pcRenderCats(){
     wrap.innerHTML='<p class="hint" style="margin:0;">No categories yet — add one and it takes the boxes on the sheet.</p>';
     return;
   }
-  wrap.innerHTML=cats.map(c=>{
-    const list=(c.lines||[]).length>0;
+  wrap.innerHTML=cats.map(pcCatHtml).join('');
+}
+// The text panel under the sheet: the one category picked, in the same card
+// the Categories section lists, so the two are edited by the same handlers.
+function pcTextPanelSync(){
+  const props=document.getElementById('pcTextProps');
+  const count=document.getElementById('pcTextCount');
+  if(!props||!count) return;
+  const c=pcTextCat?pcCatById(pcTextCat):null;
+  if(!c) pcTextCat='';
+  pcTextCountSync();
+  props.innerHTML=c?pcCatHtml(c):'';
+}
+// the panel's heading only, so a name being typed into is not rebuilt
+function pcTextCountSync(){
+  const count=document.getElementById('pcTextCount'); if(!count) return;
+  const c=pcTextCat?pcCatById(pcTextCat):null;
+  count.textContent=c?(c.name||'Text')+' selected'
+    :(state.cats||[]).length?'no text selected':'no text yet';
+}
+function pcCatHtml(c){
+    const list=pcListMode[c.id]!=null?pcListMode[c.id]:(c.lines||[]).length>0;
     return `
     <div class="ph-card" data-cid="${c.id}" style="border-left:4px solid ${pcCatTint(c)};">
       <div class="ph-card-head">
@@ -11553,10 +11597,10 @@ function pcRenderCats(){
       </div>
       <div class="calc" data-ctally style="margin-top:8px;">${escapeHtml(pcCatTally(c))}</div>
     </div>`;
-  }).join('');
 }
+const pcCatRoots=['pcCatList','pcTextProps'].map(id=>document.getElementById(id));
 const pcCatOf=el=>{ const card=el.closest('[data-cid]'); return card?pcCatById(card.dataset.cid):null; };
-document.getElementById('pcCatList').addEventListener('input',e=>{
+pcCatRoots.forEach(r=>r.addEventListener('input',e=>{
   const el=e.target.closest('[data-cf]'); if(!el) return;
   const c=pcCatOf(el); if(!c) return;
   const f=el.dataset.cf;
@@ -11580,11 +11624,11 @@ document.getElementById('pcCatList').addEventListener('input',e=>{
   else if(f==='cjkSizeMm') c.cjkSizeMm=isFinite(n)&&n?n:null;
   else if(f==='gapMm') c.gapMm=(el.value===''||!isFinite(n))?null:n;
   drawAll();
-});
+}));
 // which of its two ways a category's words are being given, as on screen
 const pcCatListOn=card=>{ const p=card&&card.querySelector('[data-cpane="list"]');
   return !!p&&p.style.display!=='none'; };
-document.getElementById('pcCatList').addEventListener('change',e=>{
+pcCatRoots.forEach(r=>r.addEventListener('change',e=>{
   // a saved phrase put back: on a list it is more lines on the end, on
   // numbering it is the pattern — and several lines are a list whichever it was
   const ph=e.target.closest('[data-cphrase]');
@@ -11596,6 +11640,7 @@ document.getElementById('pcCatList').addEventListener('change',e=>{
     if(!lines.length) return;
     if(pcCatListOn(ph.closest('[data-cid]'))||lines.length>1){
       c.lines=[...(c.lines||[]),...lines]; c.count=c.lines.length;
+      pcListMode[c.id]=true;
     }else c.pattern=lines[0];
     pcRenderCats(); drawAll();
     return;
@@ -11605,8 +11650,8 @@ document.getElementById('pcCatList').addEventListener('change',e=>{
   if(el.dataset.cf==='font'){ c.font=el.value; drawAll(); }
   else if(el.dataset.cf==='cjk'){ c.cjk=el.value; drawAll(); }
   else if(el.dataset.cf==='align'){ c.align=el.value; drawAll(); }
-});
-document.getElementById('pcCatList').addEventListener('click',e=>{
+}));
+pcCatRoots.forEach(r=>r.addEventListener('click',e=>{
   const del=e.target.closest('[data-cdel]');
   if(del){ pcDeleteCat(del.dataset.cdel); return; }
   const sv=e.target.closest('[data-csavephrase]');
@@ -11640,9 +11685,16 @@ document.getElementById('pcCatList').addEventListener('click',e=>{
     c.lines=[];
     const ta=card.querySelector('[data-cf="lines"]'); if(ta) ta.value='';
   }
+  pcListMode[c.id]=toList;
   pcCatTallyOnly(c); drawAll();
-});
+}));
+// what was changed in one copy redrawn in the other, which is not being typed in
+pcCatRoots.forEach(r=>['input','change','click'].forEach(ev=>r.addEventListener(ev,()=>{
+  if(r.id==='pcTextProps'){ pcRenderCatList(); pcTextCountSync(); }
+  else pcTextPanelSync();
+})));
 document.getElementById('pcAddCatBtn').addEventListener('click',pcAddCat);
+document.getElementById('pcAddTextBtn').addEventListener('click',pcAddCat);
 
 // ---------- the sheet as something to point at ----------
 // Click one, shift-click to add, drag a box round several; drag to move, drag
