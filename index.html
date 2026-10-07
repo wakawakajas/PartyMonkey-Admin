@@ -15250,6 +15250,9 @@ function showScreen(name,viaBack){
   // hidden with the other screens nor slid out from under the builder.
   const splitKeep=(mcSplitOn&&mcIsBuilderScreen(name)&&mcSplitFits()&&mcBatch)
     ?document.getElementById('magicBatchScreen'):null;
+  // Custom Template and Place Card are one builder: its work is kept aside
+  // under the mode it was done in as the builder is left (pcOpenMode)
+  if(moving&&currentScreen==='tool-custom'&&typeof pcLeaveBuilder==='function') pcLeaveBuilder();
   currentScreen=name;
   // clearing the inline value rather than forcing "block" lets the stylesheet
   // decide — the print tool becomes a grid on wide screens. The screen being
@@ -15615,11 +15618,11 @@ document.getElementById('navShipmentBtn').addEventListener('click',()=>showScree
 document.getElementById('goToToolBtn').addEventListener('click',()=>showScreen('tool'));
 // opens everything that used to be on the print template screen itself
 document.getElementById('goToCustomTemplateBtn')
-  .addEventListener('click',()=>{ pcSetMode('custom'); showScreen('tool-custom'); });
+  .addEventListener('click',()=>pcOpenMode('custom'));
 // Place Card is the same screen (#appScreen) in its own mode — its own title,
 // its own template list, plus the text layer
 document.getElementById('goToPlaceCardBtn')
-  .addEventListener('click',()=>{ pcSetMode('placecard'); showScreen('tool-custom'); });
+  .addEventListener('click',()=>pcOpenMode('placecard'));
 // each tile is its own library; the screen is the same screen
 document.getElementById('goToGiftTagBtn')
   .addEventListener('click',async()=>{ await gtSetMode('festive'); showScreen('tool-gift-tag'); });
@@ -51115,8 +51118,11 @@ let mcLaidShared=false;
 // does the builder hold this very shared sheet
 const mcHoldsSheet=k=>mcLaidShared===true||(!!mcLaidShared&&mcLaidShared===k);
 let mcBorrowing=0;   // >0 while an export/proof/count has the builder on loan
-async function mcBorrowBuilder(fn){
-  const keep={meta:mcSnapshot(),orderId:state.orderId,laidShared:mcLaidShared,
+// Everything that is somebody's place in their own work on the builder, kept
+// and put back whole: by a batch borrowing the builder, and by Custom Template
+// and Place Card, which share it — each tile comes back to its own sheet.
+function pcBuilderKeep(){
+  return {meta:mcSnapshot(),orderId:state.orderId,laidShared:mcLaidShared,
     paperType:state.paperType,gsm:state.gsm,
     // and which face the builder was wearing. A place card line in the run
     // turns it to Place Card to draw its words, and the operator was not
@@ -51125,9 +51131,11 @@ async function mcBorrowBuilder(fn){
     // the design list, the mode and the sheet being looked at are the
     // operator's place in their own work; a batch borrowing the builder
     // must not lose it
-    designs:state.designs,page:state.page,artMode:state.artMode,
+    // copies of the lists: the one left in the builder is added to in place
+    designs:[...(state.designs||[])],page:state.page,artMode:state.artMode,
     final:{front:state.final.front,back:state.final.back},
-    finalList:{front:state.finalList.front,back:state.finalList.back},finalSplit:state.finalSplit,
+    finalList:{front:state.finalList.front&&[...state.finalList.front],
+      back:state.finalList.back&&[...state.finalList.back]},finalSplit:state.finalSplit,
     // and so is the template they had picked. Without this a batch that loaded
     // its own template left it selected: the next look at the picker named the
     // batch's layout, and loading "the same one" quietly did nothing.
@@ -51138,6 +51146,65 @@ async function mcBorrowBuilder(fn){
     // layout over the shared one
     tplName:(document.getElementById('templateName')||{}).value||'',
     tplFolders:(document.getElementById('templateFolders')||{}).value||''};
+}
+async function pcBuilderRestore(keep){
+  applyPrintState(keep.meta);
+  // the layout starts its own artwork loading, and that landed after the
+  // design list was put back and replaced it — so it is waited for first
+  await printArtReady().catch(()=>{});
+  state.final.front=keep.final.front; state.final.back=keep.final.back;
+  state.finalList={front:keep.finalList.front&&[...keep.finalList.front],back:keep.finalList.back&&[...keep.finalList.back]}; state.finalSplit=keep.finalSplit;
+  // the toggle and its hints follow the setting: a split line's apply left the
+  // box ticked, and the next change read the box and flipped the operator's setting
+  { const tg=document.getElementById('finalSplitToggle'); if(tg) tg.checked=!!state.finalSplit;
+    const off=document.getElementById('finalSplitHintOff'), on=document.getElementById('finalSplitHintOn');
+    if(off) off.hidden=!!state.finalSplit; if(on) on.hidden=!state.finalSplit; }
+  state.designs=[...(keep.designs||[])]; state.page=keep.page;
+  setArtMode(keep.artMode,true);
+  mcSetOrderId(keep.orderId||'');
+  state.paperType=keep.paperType||''; state.gsm=keep.gsm||'';
+  setSelectedTemplate(keep.template);
+  ldSetTemplateFolder(keep.tplFolder||'');
+  const box=document.getElementById('templateSearch');
+  if(box) box.value=keep.search;
+  const nb=document.getElementById('templateName'); if(nb) nb.value=keep.tplName;
+  const fb=document.getElementById('templateFolders'); if(fb) fb.value=keep.tplFolders;
+  // the geometry just put back is the operator's, whatever the combo says —
+  // and it is a shared sheet exactly when it was one before the borrow
+  mcLaidTemplate=null;
+  mcLaidShared=keep.laidShared;
+  // the upload slots and the words list show what is on the sheet now
+  refreshSlots(); refreshArtInputs();
+  if(typeof pcRenderCats==='function') pcRenderCats();
+  ppFillSelects(); renderDesignLines(); drawAll();
+}
+// Custom Template and Place Card's own sheets. The builder's work is filed
+// under the mode it was done in when the builder is left; a tile opening the
+// other mode puts that mode's sheet back — or the builder as it first stood,
+// for a mode not yet opened — so Place Card's designs and words never turn up
+// on Custom Template, nor the other way round. Only the two tiles swap: every
+// other way in (a Magic Create line, a saved sheet) lays its own sheet anyway.
+const pcModeKeep={};
+let pcBootKeep=null, pcLeftAs='custom';
+// the builder as it stands before anybody has worked on it
+window.addEventListener('load',()=>{ if(!pcBootKeep) try{ pcBootKeep=pcBuilderKeep(); }catch(e){} });
+function pcLeaveBuilder(){
+  if(mcBorrowing) return;
+  try{ pcModeKeep[pcMode]=pcBuilderKeep(); pcLeftAs=pcMode; }catch(e){}
+}
+async function pcOpenMode(m){
+  const next=m==='placecard'?'placecard':'custom';
+  if(!pcBootKeep) try{ pcBootKeep=pcBuilderKeep(); }catch(e){}
+  const swap=pcLeftAs!==next;
+  pcSetMode(next);
+  showScreen('tool-custom');
+  if(!swap) return;
+  pcLeftAs=next;
+  const keep=pcModeKeep[next]||pcBootKeep;
+  if(keep) await pcBuilderRestore(keep).catch(()=>{});
+}
+async function mcBorrowBuilder(fn){
+  const keep=pcBuilderKeep();
   // whatever a window or plan left in mcLaidTemplate is not known to be this
   // builder's geometry: forced to load fresh rather than trusted
   mcLaidTemplate=null;
@@ -51146,34 +51213,10 @@ async function mcBorrowBuilder(fn){
   finally{
     mcBorrowing--;
     if(pcMode!==keep.pcWas) pcSetMode(keep.pcWas);
-    applyPrintState(keep.meta);
-    // the layout starts its own artwork loading, and that landed after the
-    // design list was put back and replaced it — so it is waited for first
-    await printArtReady().catch(()=>{});
-    state.final.front=keep.final.front; state.final.back=keep.final.back;
-    state.finalList={...keep.finalList}; state.finalSplit=keep.finalSplit;
-    // the toggle and its hints follow the setting: a split line's apply left the
-    // box ticked, and the next change read the box and flipped the operator's setting
-    { const tg=document.getElementById('finalSplitToggle'); if(tg) tg.checked=!!state.finalSplit;
-      const off=document.getElementById('finalSplitHintOff'), on=document.getElementById('finalSplitHintOn');
-      if(off) off.hidden=!!state.finalSplit; if(on) on.hidden=!state.finalSplit; }
-    state.designs=keep.designs; state.page=keep.page;
-    setArtMode(keep.artMode,true);
-    mcSetOrderId(keep.orderId||'');
-    state.paperType=keep.paperType||''; state.gsm=keep.gsm||'';
-    setSelectedTemplate(keep.template);
-    ldSetTemplateFolder(keep.tplFolder||'');
-    const box=document.getElementById('templateSearch');
-    if(box) box.value=keep.search;
-    const nb=document.getElementById('templateName'); if(nb) nb.value=keep.tplName;
-    const fb=document.getElementById('templateFolders'); if(fb) fb.value=keep.tplFolders;
-    // the geometry just put back is the operator's, whatever the combo says —
-    // and it is a shared sheet exactly when it was one before the borrow
-    mcLaidTemplate=null;
-    mcLaidShared=keep.laidShared;
-    ppFillSelects(); renderDesignLines(); drawAll();
+    await pcBuilderRestore(keep);
   }
 }
+
 // A line has gone out. The stamp, the count of how many times, and the tick:
 // a line that has been written to a PDF has been dealt with, which is the same
 // rule putting one on a sheet already follows. `run` is one export's worth of
