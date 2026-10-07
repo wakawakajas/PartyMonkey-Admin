@@ -8798,10 +8798,13 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
          says which category fills it — a Name box for the names, a Table box
          for "Table {n}". Font, size, colour and align left blank are the
          category's. -->
-    <p class="hint" style="color:#bdbdbd;">+ Add text puts a box on the design; say which category fills it. Drag a box to move it, its corner to size it, or drag across the design to draw the picked one again. Blank font, size, colour or align use the category's own.</p>
+    <p class="hint" style="color:#bdbdbd;">+ Add text puts a box on the design; say which category fills it. Drag a box to move it, its corner to size it, or drag across the design to draw the picked one again. Shift-click picks several; arrow keys nudge half a millimetre (Shift 2, Alt a tenth). Blank settings use the category's own.</p>
     <div style="text-align:center;">
       <div id="pcBoxStage" style="position:relative;display:inline-block;max-width:100%;touch-action:none;user-select:none;cursor:crosshair;">
         <img id="pcBoxImg" alt="" draggable="false" style="display:block;max-width:100%;max-height:56vh;background:#fff;"/>
+        <!-- the words as they will print: the font, size, colour, turn, curve
+             and outline, over the design they are being set against -->
+        <canvas id="pcBoxCanvas" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;"></canvas>
         <div id="pcBoxRects"></div>
       </div>
     </div>
@@ -8811,6 +8814,25 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         <span class="al-to"><button type="button" class="btn-outline btn-sm" id="pcBoxAddBtn">+ Add text</button></span>
       </div>
       <div class="chips" id="pcBoxChips" style="margin-bottom:8px;"></div>
+      <!-- Gift Tag's lining-up tools: the picked texts moved as one against
+           the design (Together), or each lined up on its own (Each) -->
+      <div class="bulkbar" style="margin-bottom:6px;">
+        <span class="n" id="pcBoxPickCount">none picked</span>
+        <div class="seg" id="pcBoxAlignSeg" style="max-width:180px;">
+          <button type="button" data-pcbam="together" class="on">Together</button>
+          <button type="button" data-pcbam="each">Each</button>
+        </div>
+      </div>
+      <div class="grid3e" style="margin-bottom:6px;">
+        <button type="button" class="btn-outline btn-sm" data-pcbalign="left">⇤ Left</button>
+        <button type="button" class="btn-outline btn-sm" data-pcbalign="cx">↔ Centre</button>
+        <button type="button" class="btn-outline btn-sm" data-pcbalign="right">Right ⇥</button>
+      </div>
+      <div class="grid3e" style="margin-bottom:10px;">
+        <button type="button" class="btn-outline btn-sm" data-pcbalign="top">⇧ Top</button>
+        <button type="button" class="btn-outline btn-sm" data-pcbalign="cy">↕ Middle</button>
+        <button type="button" class="btn-outline btn-sm" data-pcbalign="bottom">⇩ Bottom</button>
+      </div>
       <div id="pcBoxProps"></div>
       <datalist id="pcBoxCatNames"></datalist>
     </div>
@@ -8863,6 +8885,8 @@ let pcMode='custom';                       // 'custom' | 'placecard'
 // category's words are being given (Numbering / List) while it is on screen
 let pcTextCat='';
 const pcListMode={};
+// a library design text's number settings, blank where the category's is used
+const PC_BOX_NUM=['rot','curve','ow'];
 // how a category's boxes are marked on the builder preview, so which card
 // belongs to which group is visible at a glance. Preview only, never exported.
 const PC_CAT_TINTS=['#CCF344','#FF8A6B','#318CE7','#C08BFF','#F5C044','#BFEEEE'];
@@ -8900,8 +8924,10 @@ async function pcRegisterFolderFonts(){
   // once the browser confirms everything is ready
   if(added) document.fonts.ready.then(()=>{ if(currentScreen==='tool-custom') drawAll();
     // and a select still saying "not loaded" catches up, unless it is in use
-    const w=document.getElementById('pcCatList');
-    if(w&&!w.contains(document.activeElement)&&typeof pcRenderCats==='function') pcRenderCats(); });
+    // — the Words card or the text panel under the sheet
+    const busy=['pcCatList','pcTextProps'].some(id=>{ const w=document.getElementById(id);
+      return w&&w.contains(document.activeElement); });
+    if(!busy&&typeof pcRenderCats==='function') pcRenderCats(); });
 }
 // The Place Card folder's fonts loaded without the Place Card screen being
 // open — a Magic Create batch renders its lines from anywhere, where the active
@@ -10609,8 +10635,14 @@ function drawCategoryText(ctx,sc,page,out){
         // the piece of sheet the words can reach: the box turned as they are
         // turned, its bounding box round its middle, and a millimetre over for
         // the tails of letters
-        const t=(Number(c.rot)||0)*Math.PI/180, co=Math.abs(Math.cos(t)), si=Math.abs(Math.sin(t));
-        const w=ph.wMm*co+ph.hMm*si+2, h=ph.wMm*si+ph.hMm*co+2;
+        // (a curve or an outline reaches further still)
+        const t=(Number(cc.rot)||0)*Math.PI/180, co=Math.abs(Math.cos(t)), si=Math.abs(Math.sin(t));
+        // a line bent on a circle of radius r (its width over the arc) leaves
+        // its baseline by r(1−cos(arc/2)), or the whole 2r once past a half turn
+        const arc=Math.min(2*Math.PI,Math.abs(Number(cc.curve)||0)*Math.PI/180), cr=arc?ph.wMm/arc:0;
+        const bend=arc?(arc>=Math.PI?2*cr:cr*(1-Math.cos(arc/2))):0;
+        const more=2+(Number(cc.ow)||0)*2+bend*2;
+        const w=ph.wMm*co+ph.hMm*si+more, h=ph.wMm*si+ph.hMm*co+more;
         const x=ph.xMm+ph.wMm/2-w/2, y=ph.yMm+ph.hMm/2-h/2;
         out.push({x:x+shift.xMm,y:y+shift.yMm,w,h,draw:()=>{
           const k=PC_WORDS_DPI/25.4;
@@ -10693,6 +10725,8 @@ function pcLibBoxFor(boxed,ph,c){
   if(Number(b.sizeMm)>0) style.sizeMm=Number(b.sizeMm);
   if(b.color) style.color=b.color;
   if(b.align) style.align=b.align;
+  PC_BOX_NUM.forEach(f=>{ if(b[f]!=null&&b[f]!=='') style[f]=Number(b[f])||0; });
+  if(b.oc) style.oc=b.oc;
   const r=pcLibBoxRect(k,b,img,line);
   r.style=Object.keys(style).length?style:null;
   return r;
@@ -10729,6 +10763,12 @@ function pcDrawWords(ctx,sc,c,words,bx,by,bw,bh,fam,align){
       }
       ctx.fillStyle=c.color||'#232323';
       ctx.textBaseline='alphabetic';
+      // an outline, as Gift Tag draws one: stroked first at twice the width so
+      // what stands outside the letter is the thickness keyed in
+      const ow=Math.max(0,Number(c.ow)||0)*sc;
+      if(ow>0){ ctx.strokeStyle=c.oc||'#FFFFFF'; ctx.lineWidth=ow*2; ctx.lineJoin='round'; ctx.miterLimit=2; }
+      const put=(t,x,y)=>{ if(ow>0) ctx.strokeText(t,x,y); ctx.fillText(t,x,y); };
+      const curve=Number(c.curve)||0;
       // the Chinese can be given its own gap from the English and its own
       // size. A gap drops the spaces typed at each change-over and puts a mark
       // there instead; the size is kept as a ratio to SIZE so it shrinks with
@@ -10791,13 +10831,15 @@ function pcDrawWords(ctx,sc,c,words,bx,by,bw,bh,fam,align){
         }
         lines.forEach(ln=>{
           if(!runsOn){
-            ctx.textAlign=align; ctx.fillText(ln,tx*sc,ty*sc);
+            // a bent line is centred on its arc, as on a gift tag
+            if(curve) gtDrawCurved(ctx,ln,(bx+bw/2)*sc,ty*sc,curve,put);
+            else{ ctx.textAlign=align; put(ln,tx*sc,ty*sc); }
           } else {
             // run by run from the left edge the alignment puts the line at
             const w=measured(ln).width;
             const x0=tx*sc-(align==='left'?0:align==='right'?w:w/2);
             ctx.textAlign='left';
-            each(ln,(r,x)=>ctx.fillText(r.t,x0+x,ty*sc));
+            each(ln,(r,x)=>put(r.t,x0+x,ty*sc));
           }
           ty+=lh;
         });
@@ -27193,7 +27235,7 @@ function pcPhraseOptions(){
     }).join('');
 }
 function pcPhraseSelectsSync(){
-  document.querySelectorAll('#pcCatList [data-cphrase]').forEach(s=>{ s.innerHTML=pcPhraseOptions(); });
+  document.querySelectorAll('#pcCatList [data-cphrase],#pcTextProps [data-cphrase]').forEach(s=>{ s.innerHTML=pcPhraseOptions(); });
 }
 async function pcLibAddPhrase(text){
   text=String(text||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean).join('\n');
@@ -27349,12 +27391,19 @@ document.getElementById('pcPhraseList').addEventListener('click',async e=>{
 
 // the text box editor: a box drawn over the design, kept as fractions of it
 let pcBoxFor=null, pcBoxTexts=[], pcBoxSel=null, pcBoxDrag=null;
+// the texts picked together (shift-click), which the panel and Align act on
+const pcBoxPick=new Set();
+let pcBoxAlignMode='together';
 const PC_BOX_TINTS=['#B24C25','#318CE7','#7A4FD6','#2E8B57','#C08000','#D0457A'];
 async function pcBoxOpen(it){
   pcBoxFor=it;
   const rec=pcLib&&pcLib.boxes[it.path];
   pcBoxTexts=pcLibTexts(rec).map(t=>({...t,id:t.id||uid()}));
   pcBoxSel=pcBoxTexts.length?pcBoxTexts[0].id:null;
+  pcBoxPick.clear(); if(pcBoxSel) pcBoxPick.add(pcBoxSel);
+  // the folder's fonts loaded, so a text set in one is seen in it
+  if(typeof pcRegisterFolderFonts==='function')
+    pcRegisterFolderFonts().then(()=>document.fonts.ready).then(()=>{ if(pcBoxFor===it){ pcBoxPanel(); pcBoxPaint(); } });
   document.getElementById('pcBoxTitle').textContent='Texts — '+it.name;
   document.getElementById('pcBoxMsg').innerHTML='';
   // the categories on this sheet, offered by name
@@ -27372,26 +27421,84 @@ async function pcBoxOpen(it){
   }
 }
 function pcBoxClose(){ document.getElementById('pcBoxModal').classList.remove('open'); pcBoxFor=null; pcBoxDrag=null; }
+const pcBoxPicked=()=>pcBoxTexts.filter(x=>pcBoxPick.has(x.id));
+// picks one text, or with shift adds it to / takes it off the ones picked
+function pcBoxPickOne(id,add){
+  if(add){
+    if(pcBoxPick.has(id)&&pcBoxPick.size>1){ pcBoxPick.delete(id);
+      if(pcBoxSel===id) pcBoxSel=[...pcBoxPick][0]; }
+    else{ pcBoxPick.add(id); pcBoxSel=id; }
+  }else{ pcBoxPick.clear(); pcBoxPick.add(id); pcBoxSel=id; }
+}
+// How big the design is in mm, so a SIZE in mm is drawn at its real size over
+// it: the artwork's set size, else the card the words go on
+function pcBoxDesignMm(){
+  const img=document.getElementById('pcBoxImg');
+  const ar=img.naturalWidth&&img.naturalHeight?img.naturalHeight/img.naturalWidth:1;
+  const a=state.art&&state.art.front;
+  if(a&&a.wMm>0) return {w:a.wMm,h:a.wMm*ar};
+  const ph=(state.placeholders||[])[0];
+  if(ph&&ph.wMm>0) return {w:ph.wMm,h:ph.wMm*ar};
+  return {w:90,h:90*ar};
+}
+// the category a design text is filled by, by name — or the first on the sheet
+function pcBoxCatOf(t){
+  const key=pcCatKey(t.cat), cats=state.cats||[];
+  return (key&&cats.find(c=>pcCatKey(c.name)===key))||(!key&&cats[0])||null;
+}
+// the text drawn as it will print, with its own settings over the category's
+function pcBoxStyled(t){
+  const cat=pcBoxCatOf(t);
+  const cc={...(cat||{font:'plex',sizeMm:6,color:'#232323',align:'center',rot:0})};
+  if(t.font) cc.font=t.font;
+  if(Number(t.sizeMm)>0) cc.sizeMm=Number(t.sizeMm);
+  if(t.color) cc.color=t.color;
+  if(t.align) cc.align=t.align;
+  PC_BOX_NUM.forEach(f=>{ if(t[f]!=null&&t[f]!=='') cc[f]=Number(t[f])||0; });
+  if(t.oc) cc.oc=t.oc;
+  return {c:cc,cat};
+}
+function pcBoxPreview(){
+  const cv=document.getElementById('pcBoxCanvas'), img=document.getElementById('pcBoxImg');
+  if(!cv||!img) return;
+  const W=img.clientWidth, H=img.clientHeight, dpr=window.devicePixelRatio||1;
+  cv.width=Math.max(1,Math.round(W*dpr)); cv.height=Math.max(1,Math.round(H*dpr));
+  const ctx=cv.getContext('2d');
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(!img.getAttribute('src')||!W) return;
+  const D=pcBoxDesignMm(), sc=cv.width/D.w;
+  pcBoxTexts.forEach(t=>{
+    if(!(t.w>0&&t.h>0)) return;
+    const {c,cat}=pcBoxStyled(t);
+    const words=String(t.sample||'').trim()||(cat&&pcCatValue(cat,0))||(cat&&cat.name)||t.cat||'Sample Name';
+    try{ pcDrawWords(ctx,sc,c,words,t.x*D.w,t.y*D.h,t.w*D.w,t.h*D.h,pcCatFamily(c),c.align||'center'); }
+    catch(e){ console.warn('Place Card preview:',e); }
+  });
+}
 const pcBoxLabel=t=>t.cat?t.cat:'Any category';
 const pcBoxTint=t=>PC_BOX_TINTS[Math.max(0,pcBoxTexts.indexOf(t))%PC_BOX_TINTS.length];
 function pcBoxPaint(){
   const host=document.getElementById('pcBoxRects');
   host.innerHTML=pcBoxTexts.map(t=>{
-    const on=t.id===pcBoxSel, col=pcBoxTint(t);
+    const on=t.id===pcBoxSel, picked=pcBoxPick.has(t.id), col=pcBoxTint(t);
     return `<div data-pcbox="${t.id}" style="position:absolute;box-sizing:border-box;cursor:move;
       left:${t.x*100}%;top:${t.y*100}%;width:${t.w*100}%;height:${t.h*100}%;
-      border:2px ${on?'solid':'dashed'} ${col};background:${on?'rgba(204,243,68,.32)':'rgba(255,255,255,.18)'};box-shadow:0 0 0 1px rgba(255,255,255,.85);">
-      <span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-        font:600 12px 'IBM Plex Sans',sans-serif;color:${col};pointer-events:none;text-align:center;
-        overflow:hidden;"><b style="background:rgba(255,255,255,.9);padding:1px 7px;border-radius:6px;
-        font-weight:600;">${escapeHtml(pcBoxLabel(t))}</b></span>
+      border:${on?2:1.5}px ${picked?'solid':'dashed'} ${col};background:${picked?'rgba(204,243,68,.12)':'transparent'};">
+      <span style="position:absolute;left:-1px;bottom:100%;pointer-events:none;white-space:nowrap;
+        font:600 10px 'IBM Plex Sans',sans-serif;color:#fff;background:${col};padding:0 5px;border-radius:4px 4px 0 0;">${escapeHtml(pcBoxLabel(t))}</span>
       ${on?`<div data-pcbox-grip style="position:absolute;right:-7px;bottom:-7px;width:14px;height:14px;
         background:${col};border-radius:3px;cursor:nwse-resize;"></div>`:''}
     </div>`;
   }).join('');
+  pcBoxPreview();
 }
 // the panel under the design: a chip per text, and the picked one's settings
 function pcBoxPanel(){
+  pcBoxCountSync();
+  pcBoxPropsPaint();
+}
+// the heading only, so a category being typed is not rebuilt under the caret
+function pcBoxCountSync(){
   const t=pcBoxTexts.find(x=>x.id===pcBoxSel)||null;
   document.getElementById('pcBoxCount').textContent=pcBoxTexts.length
     ? `${pcBoxTexts.length} text${pcBoxTexts.length===1?'':'s'}`+(t?` · ${pcBoxLabel(t)} picked`:'')
@@ -27401,8 +27508,14 @@ function pcBoxPanel(){
   pcBoxTexts.forEach(x=>{ const k=pcCatKey(x.cat); if(seen.has(k)) dup.add(pcBoxLabel(x)); seen.add(k); });
   if(dup.size) document.getElementById('pcBoxCount').textContent+=
     ` · ⚠ ${[...dup].join(', ')} has two texts — only the first is filled`;
+}
+function pcBoxPropsPaint(){
+  const t=pcBoxTexts.find(x=>x.id===pcBoxSel)||null;
+  const np=pcBoxPicked().length;
+  document.getElementById('pcBoxPickCount').textContent=np?`${np} picked`:'none picked';
+  document.querySelectorAll('[data-pcbalign]').forEach(b=>{ b.disabled=!np; });
   document.getElementById('pcBoxChips').innerHTML=pcBoxTexts.map(x=>
-    `<button type="button" class="chip chip-state${x.id===pcBoxSel?' on':''}" data-pcbox-pick="${x.id}"
+    `<button type="button" class="chip chip-state${pcBoxPick.has(x.id)?' on':''}" data-pcbox-pick="${x.id}"
       style="border-color:${pcBoxTint(x)};">${escapeHtml(pcBoxLabel(x))}</button>`).join('');
   const el=document.getElementById('pcBoxProps');
   if(!t){ el.innerHTML='<p class="hint" style="margin:0;">+ Add text, then say which category fills it.</p>'; return; }
@@ -27423,8 +27536,18 @@ function pcBoxPanel(){
         <option value="center"${t.align==='center'?' selected':''}>Centre</option>
         <option value="right"${t.align==='right'?' selected':''}>Right</option>
       </select></label>
+      <label class="field"><span>ROTATE °</span>
+        <input type="number" step="1" data-pcb="rot" value="${t.rot==null?'':Number(t.rot)}" placeholder="category's"/></label>
+      <label class="field"><span>CURVE °</span>
+        <input type="number" step="5" data-pcb="curve" value="${t.curve==null?'':Number(t.curve)}" placeholder="0"/></label>
+      <label class="field"><span>OUTLINE</span>
+        <input type="text" data-pcb="oc" value="${escapeHtml(t.oc||'')}" placeholder="#FFFFFF"/></label>
+      <label class="field"><span>OUTLINE <span class="unitHint">mm</span></span>
+        <input type="number" step="0.1" min="0" data-pcb="ow" value="${t.ow==null?'':Number(t.ow)}" placeholder="0"/></label>
+      <label class="field" style="grid-column:span 2;"><span>PREVIEW WORDS</span>
+        <input type="text" data-pcb="sample" value="${escapeHtml(t.sample||'')}" placeholder="the category's first name"/></label>
     </div>
-    <button type="button" class="btn-outline btn-sm" data-pcbox-del style="width:100%;margin-top:8px;">🗑 Delete this text</button>`;
+    <button type="button" class="btn-outline btn-sm" data-pcbox-del style="width:100%;margin-top:8px;">🗑 Delete ${pcBoxPicked().length>1?'the picked texts':'this text'}</button>`;
 }
 document.getElementById('pcBoxAddBtn').addEventListener('click',()=>{
   // a little below the last one, so a second text is not laid on the first
@@ -27435,29 +27558,70 @@ document.getElementById('pcBoxAddBtn').addEventListener('click',()=>{
   const used=new Set(pcBoxTexts.map(x=>pcCatKey(x.cat)));
   const free=(state.cats||[]).find(c=>String(c.name||'').trim()&&!used.has(pcCatKey(c.name)));
   if(free) t.cat=String(free.name).trim();
-  pcBoxTexts.push(t); pcBoxSel=t.id;
+  pcBoxTexts.push(t); pcBoxPickOne(t.id,false);
   pcBoxPaint(); pcBoxPanel();
 });
 document.getElementById('pcBoxPanel').addEventListener('click',e=>{
   const pick=e.target.closest('[data-pcbox-pick]');
-  if(pick){ pcBoxSel=pick.dataset.pcboxPick; pcBoxPaint(); pcBoxPanel(); return; }
+  if(pick){ pcBoxPickOne(pick.dataset.pcboxPick,e.shiftKey); pcBoxPaint(); pcBoxPanel(); return; }
+  const al=e.target.closest('[data-pcbalign]');
+  if(al){ pcBoxAlign(al.dataset.pcbalign); return; }
+  const am=e.target.closest('[data-pcbam]');
+  if(am){ pcBoxAlignMode=am.dataset.pcbam;
+    document.querySelectorAll('#pcBoxAlignSeg button').forEach(b=>b.classList.toggle('on',b===am)); return; }
   if(e.target.closest('[data-pcbox-del]')){
-    pcBoxTexts=pcBoxTexts.filter(x=>x.id!==pcBoxSel);
+    pcBoxTexts=pcBoxTexts.filter(x=>!pcBoxPick.has(x.id)&&x.id!==pcBoxSel);
+    pcBoxPick.clear();
     pcBoxSel=pcBoxTexts.length?pcBoxTexts[pcBoxTexts.length-1].id:null;
+    if(pcBoxSel) pcBoxPick.add(pcBoxSel);
     pcBoxPaint(); pcBoxPanel();
   }
 });
+// Gift Tag's gtAlign, on the design's texts: Each lines every picked text up
+// against the design; Together moves the lot as one box
+function pcBoxAlign(how){
+  const picked=pcBoxPicked(); if(!picked.length) return;
+  if(pcBoxAlignMode==='each'){
+    picked.forEach(f=>{
+      if(how==='left') f.x=0;
+      else if(how==='cx') f.x=(1-f.w)/2;
+      else if(how==='right') f.x=1-f.w;
+      else if(how==='top') f.y=0;
+      else if(how==='cy') f.y=(1-f.h)/2;
+      else if(how==='bottom') f.y=1-f.h;
+    });
+  }else{
+    const x0=Math.min(...picked.map(f=>f.x)), y0=Math.min(...picked.map(f=>f.y));
+    const x1=Math.max(...picked.map(f=>f.x+f.w)), y1=Math.max(...picked.map(f=>f.y+f.h));
+    let dx=0,dy=0;
+    if(how==='left') dx=-x0;
+    else if(how==='cx') dx=(1-(x1-x0))/2-x0;
+    else if(how==='right') dx=1-x1;
+    else if(how==='top') dy=-y0;
+    else if(how==='cy') dy=(1-(y1-y0))/2-y0;
+    else if(how==='bottom') dy=1-y1;
+    picked.forEach(f=>{ f.x+=dx; f.y+=dy; });
+  }
+  pcBoxPaint();
+}
 // typing changes the picked text; the chips and labels follow without the
 // field being rebuilt under the caret
 const pcBoxEdit=e=>{
   const f=e.target.dataset&&e.target.dataset.pcb; if(!f) return;
-  const t=pcBoxTexts.find(x=>x.id===pcBoxSel); if(!t) return;
+  const set=pcBoxPicked(); if(!set.length) return;
   const v=e.target.value;
-  if(f==='sizeMm') t.sizeMm=Number(v)>0?Number(v):null;
-  else t[f]=String(v||'').trim();
+  // the words to preview and the category belong to the one text on show
+  (f==='sample'||f==='cat'?set.filter(t=>t.id===pcBoxSel):set).forEach(t=>{
+    if(f==='sizeMm') t.sizeMm=Number(v)>0?Number(v):null;
+    else if(PC_BOX_NUM.includes(f)) t[f]=String(v).trim()===''||!isFinite(Number(v))?null
+      :f==='ow'?Math.max(0,Number(v)):f==='curve'?Math.max(-350,Math.min(350,Number(v))):Number(v);
+    else if(f==='sample') t.sample=String(v||'');
+    else t[f]=String(v||'').trim();
+  });
   pcBoxPaint();
   document.querySelectorAll('#pcBoxChips [data-pcbox-pick]').forEach(b=>{
     const x=pcBoxTexts.find(y=>y.id===b.dataset.pcboxPick); if(x) b.textContent=pcBoxLabel(x); });
+  if(f==='cat') pcBoxCountSync();
 };
 document.getElementById('pcBoxProps').addEventListener('input',pcBoxEdit);
 document.getElementById('pcBoxProps').addEventListener('change',pcBoxEdit);
@@ -27474,14 +27638,19 @@ document.getElementById('pcBoxProps').addEventListener('change',pcBoxEdit);
     if(hit){
       t=pcBoxTexts.find(x=>x.id===hit.dataset.pcbox); if(!t) return;
       mode=e.target.closest('[data-pcbox-grip]')?'size':'move';
-      if(pcBoxSel!==t.id){ pcBoxSel=t.id; pcBoxPanel(); }
+      if(e.shiftKey){ pcBoxPickOne(t.id,true); pcBoxPaint(); pcBoxPanel(); e.preventDefault(); return; }
+      if(!pcBoxPick.has(t.id)||pcBoxSel!==t.id){
+        if(!pcBoxPick.has(t.id)) pcBoxPickOne(t.id,false); else pcBoxSel=t.id;
+        pcBoxPanel(); }
     }else{
       // across the bare design: the picked text drawn again, or a new one
       t=pcBoxTexts.find(x=>x.id===pcBoxSel);
-      if(!t){ t={id:uid(),cat:'',x:p.x,y:p.y,w:0,h:0}; pcBoxTexts.push(t); pcBoxSel=t.id; pcBoxPanel(); }
+      if(!t){ t={id:uid(),cat:'',x:p.x,y:p.y,w:0,h:0}; pcBoxTexts.push(t); pcBoxPickOne(t.id,false); pcBoxPanel(); }
       mode='draw';
     }
-    pcBoxDrag={mode,t,p0:p,r0:{x:t.x,y:t.y,w:t.w,h:t.h}};
+    pcBoxDrag={mode,t,p0:p,r0:{x:t.x,y:t.y,w:t.w,h:t.h},
+      // the others picked with it move with it
+      all:mode==='move'?pcBoxPicked().map(x=>({x,r:{x:x.x,y:x.y}})):[]};
     if(mode==='draw') Object.assign(t,{x:p.x,y:p.y,w:0,h:0});
     stage.setPointerCapture(e.pointerId);
     pcBoxPaint();
@@ -27493,7 +27662,11 @@ document.getElementById('pcBoxProps').addEventListener('change',pcBoxEdit);
     if(mode==='draw'){
       Object.assign(t,{x:Math.min(p0.x,p.x),y:Math.min(p0.y,p.y),w:Math.abs(p.x-p0.x),h:Math.abs(p.y-p0.y)});
     }else if(mode==='move'){
-      t.x=clamp(Math.min(1-r0.w,r0.x+p.x-p0.x)); t.y=clamp(Math.min(1-r0.h,r0.y+p.y-p0.y));
+      const all=pcBoxDrag.all.length?pcBoxDrag.all:[{x:t,r:r0}];
+      // held to the design by whichever of them reaches its edge first
+      let dx=p.x-p0.x, dy=p.y-p0.y;
+      all.forEach(({x,r})=>{ dx=Math.max(-r.x,Math.min(1-x.w-r.x,dx)); dy=Math.max(-r.y,Math.min(1-x.h-r.y,dy)); });
+      all.forEach(({x,r})=>{ x.x=r.x+dx; x.y=r.y+dy; });
     }else{
       t.w=Math.min(1-r0.x,Math.max(0.03,p.x-r0.x)); t.h=Math.min(1-r0.y,Math.max(0.03,p.y-r0.y));
     }
@@ -27506,7 +27679,9 @@ document.getElementById('pcBoxProps').addEventListener('change',pcBoxEdit);
     if(t.w<0.03||t.h<0.03){
       if(mode==='draw'&&!(r0.w>=0.03&&r0.h>=0.03)){
         pcBoxTexts=pcBoxTexts.filter(x=>x!==t);
+        pcBoxPick.delete(t.id);
         pcBoxSel=pcBoxTexts.length?pcBoxTexts[pcBoxTexts.length-1].id:null;
+        if(pcBoxSel) pcBoxPick.add(pcBoxSel);
       }else Object.assign(t,r0);
     }
     pcBoxDrag=null; pcBoxPaint(); pcBoxPanel();
@@ -27519,6 +27694,38 @@ document.getElementById('pcBoxCancelBtn').addEventListener('click',pcBoxClose);
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'&&document.getElementById('pcBoxModal').classList.contains('open')) pcBoxClose();
 });
+// arrow keys nudge the picked texts, as on a gift tag — caught first, so the
+// sheet underneath does not move its cards at the same time
+document.addEventListener('keydown',e=>{
+  if(!document.getElementById('pcBoxModal').classList.contains('open')) return;
+  const t=e.target;
+  if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.tagName==='SELECT'||t.isContentEditable)) return;
+  // Delete and Ctrl+A answer the texts here, never the cards on the sheet behind
+  if(e.key==='Delete'||e.key==='Backspace'){
+    e.preventDefault(); e.stopImmediatePropagation();
+    const del=document.querySelector('#pcBoxProps [data-pcbox-del]'); if(del) del.click();
+    return;
+  }
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'){
+    e.preventDefault(); e.stopImmediatePropagation();
+    pcBoxTexts.forEach(x=>pcBoxPick.add(x.id));
+    if(!pcBoxSel&&pcBoxTexts.length) pcBoxSel=pcBoxTexts[0].id;
+    pcBoxPaint(); pcBoxPanel();
+    return;
+  }
+  const mv={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]}[e.key];
+  if(!mv) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  const set=pcBoxPicked(); if(!set.length) return;
+  const D=pcBoxDesignMm(), mm=e.shiftKey?2:e.altKey?0.1:0.5;
+  set.forEach(f=>{
+    f.x=Math.max(0,Math.min(1-f.w,f.x+mv[0]*mm/D.w));
+    f.y=Math.max(0,Math.min(1-f.h,f.y+mv[1]*mm/D.h));
+  });
+  pcBoxPaint();
+},true);
+window.addEventListener('resize',()=>{
+  if(document.getElementById('pcBoxModal').classList.contains('open')) pcBoxPreview(); });
 async function pcBoxStore(texts){
   const it=pcBoxFor, msg=document.getElementById('pcBoxMsg'); if(!it) return;
   const r4=v=>+Number(v).toFixed(4);
@@ -27528,6 +27735,9 @@ async function pcBoxStore(texts){
     if(Number(t.sizeMm)>0) o.sizeMm=Number(t.sizeMm);
     if(t.color) o.color=t.color;
     if(t.align) o.align=t.align;
+    PC_BOX_NUM.forEach(f=>{ if(t[f]!=null&&t[f]!==''&&isFinite(Number(t[f]))) o[f]=Number(t[f]); });
+    if(t.oc) o.oc=t.oc;
+    if(String(t.sample||'').trim()) o.sample=String(t.sample).trim();
     return o;
   });
   try{
