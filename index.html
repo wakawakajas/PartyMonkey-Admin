@@ -6952,6 +6952,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <button class="btn-primary" id="gtGenGridBtn" style="width:100%;margin-top:12px;">Generate placeholder grid</button>
           <button class="btn-outline" id="gtDistributeBtn" style="width:100%;margin-top:8px;"
             title="The placeholders already there — picked ones, or all — put in this grid, keeping their own sizes">Arrange existing placeholders in this grid</button>
+          <button class="btn-outline" id="gtPackBtn" style="width:100%;margin-top:8px;"
+            title="The placeholders already there — picked ones, or all — packed close by their own sizes, with only the gutters between them, instead of every one in an equal cell">Pack placeholders by size (no equal cells)</button>
         </div>
 
         <div class="sect-label">Or use a cutting file</div>
@@ -35122,6 +35124,77 @@ document.getElementById('gtDistributeBtn').addEventListener('click',()=>{
     &&d.cy+d.r+pad>s.y&&d.cy-d.r-pad<s.y+s.h));
   gtSlotToolMsg(onDot?'⚠ A placeholder now covers a registration dot — the cutter will not find it. A bigger margin, fewer across or down, or smaller gutters.'
     :`✓ ${list.length} placeholder${list.length===1?'':'s'} in ${cols} across × ${rows} down`,!onDot);
+});
+// Placeholders of different sizes in an equal grid leave a cell's worth of paper
+// round each small one. This packs them by their real sizes instead — only the
+// gutters between them — the way a nesting program does: rectangles placed one
+// at a time at the lowest, then leftmost, free spot (MaxRects), tried in a few
+// orders with the shortest result kept. Measured from the bottom of the block,
+// as the grid is, so the first placeholders land where the grid's first do.
+function gtPackRects(items,W,H){
+  const E=1e-6;
+  let free=[{x:0,y:0,w:W,h:H}];
+  const out=new Map();
+  for(const it of items){
+    let best=null;
+    for(const f of free){
+      if(it.w>f.w+E||it.h>f.h+E) continue;
+      const top=f.y+it.h;
+      if(!best||top<best.top-E||(Math.abs(top-best.top)<=E&&f.x<best.x-E)) best={x:f.x,y:f.y,top};
+    }
+    if(!best) return null;
+    out.set(it.i,{x:best.x,y:best.y});
+    const P={x:best.x,y:best.y,w:it.w,h:it.h}, next=[];
+    for(const f of free){
+      if(P.x>=f.x+f.w-E||P.x+P.w<=f.x+E||P.y>=f.y+f.h-E||P.y+P.h<=f.y+E){ next.push(f); continue; }
+      if(P.x>f.x+E) next.push({x:f.x,y:f.y,w:P.x-f.x,h:f.h});
+      if(P.x+P.w<f.x+f.w-E) next.push({x:P.x+P.w,y:f.y,w:f.x+f.w-P.x-P.w,h:f.h});
+      if(P.y>f.y+E) next.push({x:f.x,y:f.y,w:f.w,h:P.y-f.y});
+      if(P.y+P.h<f.y+f.h-E) next.push({x:f.x,y:P.y+P.h,w:f.w,h:f.y+f.h-P.y-P.h});
+    }
+    free=next.filter((a,i)=>!next.some((b,j)=>j!==i&&a.x>=b.x-E&&a.y>=b.y-E
+      &&a.x+a.w<=b.x+b.w+E&&a.y+a.h<=b.y+b.h+E&&(j<i||a.w<b.w-E||a.h<b.h-E||a.x!==b.x||a.y!==b.y)));
+  }
+  return out;
+}
+document.getElementById('gtPackBtn').addEventListener('click',()=>{
+  const S=gtSheet, list=gtScopeSlots();
+  if(!list.length) return gtSlotToolMsg('No placeholders to arrange.',false);
+  const n=v=>Math.max(0,Number(v)||0), sg=v=>Number(v)||0;
+  const gx=sg(S.gap), gy=S.gapY==null||S.gapY===''?gx:sg(S.gapY), m=n(S.margin);
+  const manual=S.gridMode==='manual';
+  const availW=manual?S.paperW-n(S.sideTrim)-m:S.paperW-2*m;
+  const availH=manual?S.paperH-n(S.leadTrim)-m:S.paperH-2*m;
+  // each placeholder with its gutter on its right and top, in a bin as much bigger
+  const cells=list.map((s,i)=>({i,w:Math.max(0.1,s.w+gx),h:Math.max(0.1,s.h+gy),s}));
+  const orders=[
+    (a,b)=>b.h-a.h||b.w-a.w, (a,b)=>b.w-a.w||b.h-a.h,
+    (a,b)=>b.w*b.h-a.w*a.h, (a,b)=>Math.max(b.w,b.h)-Math.max(a.w,a.h)||b.w*b.h-a.w*a.h];
+  let best=null;
+  orders.forEach(cmp=>{
+    const r=gtPackRects([...cells].sort(cmp),availW+gx,availH+gy);
+    if(!r) return;
+    let uw=0,uh=0;
+    cells.forEach(c=>{ const q=r.get(c.i); uw=Math.max(uw,q.x+c.s.w); uh=Math.max(uh,q.y+c.s.h); });
+    if(!best||uh<best.uh-0.01||(Math.abs(uh-best.uh)<=0.01&&uw<best.uw)) best={r,uw,uh};
+  });
+  if(!best||best.uw>availW+0.01||best.uh>availH+0.01){
+    const area=list.reduce((t,s)=>t+s.w*s.h,0);
+    return gtSlotToolMsg(`⚠ Nothing moved — ${list.length} placeholders (${Math.round(area/100)} cm² of tag) do not pack into `
+      +`${round(availW)} × ${round(availH)} mm. Select fewer, make them smaller, or lower the gutters or margin.`,false);
+  }
+  const x0=manual?n(S.sideTrim):(S.paperW-best.uw)/2, y0=manual?n(S.leadTrim):(S.paperH-best.uh)/2;
+  cells.forEach(c=>{
+    const q=best.r.get(c.i);
+    c.s.x=round(x0+q.x);
+    c.s.y=round(y0+best.uh-q.y-c.s.h);               // measured up from the bottom of the block
+  });
+  gtSlotsChanged();
+  const dots=gtMarks(), pad=1;
+  const onDot=list.some(s=>dots.some(d=>d.cx+d.r+pad>s.x&&d.cx-d.r-pad<s.x+s.w
+    &&d.cy+d.r+pad>s.y&&d.cy-d.r-pad<s.y+s.h));
+  gtSlotToolMsg(onDot?'⚠ A placeholder now covers a registration dot — the cutter will not find it. A bigger margin, fewer placeholders, or smaller gutters.'
+    :`✓ ${list.length} placeholder${list.length===1?'':'s'} packed into ${round(best.uw)} × ${round(best.uh)} mm`,!onDot);
 });
 // Fine tune — bulk: the numbers typed once, onto every placeholder or the
 // selected ones. Blank leaves that one alone.
