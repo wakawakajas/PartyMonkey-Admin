@@ -30473,6 +30473,7 @@ async function gtLoadLib(){
   }
 }
 async function gtLoadLibRead(){
+  gtHydrateGen++;                     // pictures still being drawn are the old library's
   gtLib.designs=[]; gtLib.fonts=[]; gtLib.texts=[];
   // The stash of "the library's own designs", held while Pigu folders stand in
   // for them, belongs to the library being left. Carried into the next one it
@@ -30663,13 +30664,47 @@ function gtNormalizeDesign(d){
 // Images decoded and fonts registered — everything the canvas needs in hand
 // before anything is drawn, so a first paint never shows the wrong face.
 const gtFontsDone=new Set();
+// Drawing every design in a big library — a PDF each, drawn at 2600px — took
+// minutes before the page could be used, and Magic Create waits on that page
+// for every Add. Only the designs an order is using are drawn before the page
+// opens; the rest are drawn behind it, a few at a time, and the screen is
+// redrawn as they arrive. Anything that prints waits for them (gtHydrateWait).
+let gtHydrateBg=Promise.resolve(), gtHydrateGen=0;
+const gtHydrateWait=()=>gtHydrateBg;
+async function gtPool(list,n,fn){
+  let i=0;
+  await Promise.all(Array.from({length:Math.min(n,list.length)},async()=>{
+    while(i<list.length) await fn(list[i++]);
+  }));
+}
 async function gtHydrate(){
-  let at=0;
-  for(const d of gtLib.designs){
-    if(gtImgs.has(d.id)) continue;
-    const blob=gtAssets.get(d.file); if(!blob) continue;
-    gtTrace(`drawing the designs (${++at} of ${gtLib.designs.length})`);
-    try{ gtImgs.set(d.id,await loadImage(await gtArtURL(blob,d.file))); }catch(e){}
+  const gen=gtHydrateGen;
+  const used=new Set();
+  try{ [gtOrder,...Object.values(gtOrders||{})].forEach(list=>
+    (Array.isArray(list)?list:[]).forEach(l=>{ if(l&&l.designId) used.add(l.designId); })); }catch(e){}
+  const todo=gtLib.designs.filter(d=>!gtImgs.has(d.id)&&gtAssets.get(d.file));
+  const draw=async d=>{
+    if(gen!==gtHydrateGen||gtImgs.has(d.id)) return;
+    const blob=gtAssets.get(d.file); if(!blob) return;
+    try{
+      const img=await loadImage(await gtArtURL(blob,d.file));
+      if(gen===gtHydrateGen) gtImgs.set(d.id,img);
+    }catch(e){}
+  };
+  const first=todo.filter(d=>used.has(d.id)), rest=todo.filter(d=>!used.has(d.id));
+  gtTrace(`drawing the designs on the order (${first.length})`);
+  await gtPool(first,4,draw);
+  if(rest.length){
+    gtHydrateBg=gtHydrateBg.then(async()=>{
+      let n=0;
+      await gtPool(rest,3,async d=>{
+        await draw(d);
+        if(++n%25===0&&gen===gtHydrateGen&&currentScreen==='tool-gift-tag') gtDraw();
+      });
+      if(gen===gtHydrateGen&&(currentScreen==='tool-gift-tag'||currentScreen==='tool-gift-tag-design')){
+        gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+      }
+    }).catch(()=>{});
   }
   for(const f of gtLib.fonts){
     if(gtFontsDone.has(f.id)) continue;
@@ -36516,6 +36551,7 @@ function mtxMul(m,n){
           m[4]*n[0]+m[5]*n[2]+n[4], m[4]*n[1]+m[5]*n[3]+n[5]];
 }
 async function gtBuildPdf(count,render,sources){
+  await gtHydrateWait();              // every design's picture, drawn behind the page
   const enc=new TextEncoder();
   const parts=[],off=new Map(); let last=0,pos=0;
   const push=u8=>{ parts.push(u8); pos+=u8.length; };
