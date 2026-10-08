@@ -33158,6 +33158,34 @@ function gtShapeGroups(){
   return [...seen.entries()].map(([shape,lines])=>({shape,lines}));
 }
 // ---------- nest by design ----------
+// The free rectangles left once P is taken out of them.
+function gtCutFree(free,P){
+  const E=1e-6, next=[];
+  for(const f of free){
+    if(P.x>=f.x+f.w-E||P.x+P.w<=f.x+E||P.y>=f.y+f.h-E||P.y+P.h<=f.y+E){ next.push(f); continue; }
+    if(P.x>f.x+E) next.push({x:f.x,y:f.y,w:P.x-f.x,h:f.h});
+    if(P.x+P.w<f.x+f.w-E) next.push({x:P.x+P.w,y:f.y,w:f.x+f.w-P.x-P.w,h:f.h});
+    if(P.y>f.y+E) next.push({x:f.x,y:f.y,w:f.w,h:P.y-f.y});
+    if(P.y+P.h<f.y+f.h-E) next.push({x:f.x,y:P.y+P.h,w:f.w,h:f.y+f.h-P.y-P.h});
+  }
+  return next.filter((a,i)=>!next.some((b,j)=>j!==i&&a.x>=b.x-E&&a.y>=b.y-E
+    &&a.x+a.w<=b.x+b.w+E&&a.y+a.h<=b.y+b.h+E&&(j<i||a.w<b.w-E||a.h<b.h-E||a.x!==b.x||a.y!==b.y)));
+}
+// The four registration dots as boxes in a bin whose top-left is (x0,y0) on the
+// sheet, `pad` of clear paper round each: the cutter's camera has to see them,
+// so no placeholder — which is what the blade follows — may cover one.
+// flipY: the bin counts up from y0, as Pack does, rather than down.
+function gtDotBlocks(x0,y0,W,H,pad,flipY){
+  const out=[];
+  let dots=[]; try{ dots=gtMarks()||[]; }catch(e){}
+  dots.forEach(d=>{
+    const r=d.r+pad+0.05, bx=d.cx-r-x0, by=flipY?(y0-(d.cy+r)):(d.cy-r-y0), w=2*r, h=2*r;
+    if(bx>=W||by>=H||bx+w<=0||by+h<=0) return;
+    const ax=Math.max(0,bx), ay=Math.max(0,by);
+    out.push({x:ax,y:ay,w:Math.min(W,bx+w)-ax,h:Math.min(H,by+h)-ay});
+  });
+  return out;
+}
 // MaxRects: free rectangles kept as placements are made, each tag put at the
 // highest, then leftmost, free place it fits.
 // How a free place is judged for a tag, lowest score winning (compared in pairs):
@@ -33170,8 +33198,9 @@ const GT_NEST_SCORE={
   short:(f,w,h)=>[Math.min(f.w-w,f.h-h),Math.max(f.w-w,f.h-h)],
   long:(f,w,h)=>[Math.max(f.w-w,f.h-h),Math.min(f.w-w,f.h-h)]
 };
-function gtNestBin(W,H,mode){
+function gtNestBin(W,H,mode,blocks){
   const E=1e-6; let free=[{x:0,y:0,w:W,h:H}];
+  (blocks||[]).forEach(B=>{ free=gtCutFree(free,B); });
   const score=GT_NEST_SCORE[mode]||GT_NEST_SCORE.tl;
   return {add(w,h){
     let best=null, bs=null;
@@ -33262,7 +33291,7 @@ function gtNestMask(poly,w,h,gap,cell){
 // {pages:[{items:[{it,pos}]}],tooBig,fill}, pos being where the placeholder's
 // own top-left goes, in mm from the top-left of the printable area. scan 'row'
 // fills top to bottom, 'col' left to right. null if time ran out first.
-function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline){
+function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks){
   const cell=GT_NEST_CELL, gap=Math.max(0,gx,gy);
   const masks=new Map();
   const maskOf=it=>{
@@ -33275,7 +33304,16 @@ function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline){
   const Wc=Math.ceil(availW/cell)+2*ringMax, Hc=Math.ceil(availH/cell)+2*ringMax;
   const WW=Math.ceil(Wc/32)+2;
   const pages=[]; let tooBig=0, tick=0;
-  const newPage=()=>({occ:new Uint32Array(Hc*WW),failed:new Set(),from:new Map(),items:[]});
+  const newPage=()=>{
+    const pg={occ:new Uint32Array(Hc*WW),failed:new Set(),from:new Map(),items:[]};
+    // the registration dots are taken ground from the start
+    (blocks||[]).forEach(B=>{
+      const c0=Math.max(0,Math.floor(B.x/cell)+ringMax), c1=Math.min(Wc-1,Math.ceil((B.x+B.w)/cell)+ringMax);
+      const r0=Math.max(0,Math.floor(B.y/cell)+ringMax), r1=Math.min(Hc-1,Math.ceil((B.y+B.h)/cell)+ringMax);
+      for(let r=r0;r<=r1;r++) for(let c=c0;c<=c1;c++) pg.occ[r*WW+(c>>>5)]|=(1<<(c&31));
+    });
+    return pg;
+  };
   // The first place the shape fits on a page, or null. Masks carry their own
   // ring, which is the same for every design once the sheet is sized by the
   // biggest, so cell (cx,cy) of the grid is the tag's top-left plus nothing.
@@ -33387,9 +33425,11 @@ function gtNestPlan(){
     return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],
             t&&t.on&&t.loop?[t.out,t.sm,t.loop.length]:0];
   });
-  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal]);
+  let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,marks]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
   const size=new Map(ids.map(id=>[id,gtNestSizeOf(gtDesign(id))]));
+  const dotBlocks=gtDotBlocks(x0,y0,availW+gx,availH+gy,1+Math.max(0,-gx,-gy));
   // One heuristic leaves gaps another would have filled, so the order is packed
   // several ways — tags sorted by height, area, width or longest side, each
   // placed by topmost-leftmost or by tightest fit — and the packing with the
@@ -33409,7 +33449,7 @@ function gtNestPlan(){
       let pos=null, pg=null;
       for(const p of pages){ pos=p.bin.add(cw,ch); if(pos){ pg=p; break; } }
       if(!pos){
-        pg={bin:gtNestBin(availW+gx,availH+gy,mode),items:[]}; pages.push(pg);
+        pg={bin:gtNestBin(availW+gx,availH+gy,mode,dotBlocks),items:[]}; pages.push(pg);
         pos=pg.bin.add(cw,ch);
         if(!pos){ pos={x:0,y:0}; tooBig++; }
       }
@@ -33463,7 +33503,7 @@ function gtNestPlan(){
       try{
         for(const scan of ['row','col']) for(const cmp of byKey){
           if(Date.now()>deadline) throw 'late';
-          const r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,scan,deadline);
+          const r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,dotBlocks);
           if(!r) throw 'late';
           if(r.pages.length<packed.pages.length
             ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)){ packed=r; realUsed=true; }
@@ -33475,7 +33515,8 @@ function gtNestPlan(){
   const plan=pages.map((pg,at)=>{
     let uw=0,uh=0;
     pg.items.forEach(({it,pos})=>{ uw=Math.max(uw,pos.x+it.sz.w); uh=Math.max(uh,pos.y+it.sz.h); });
-    const ox=manual?x0:(S.paperW-uw)/2, oy=manual?y0:(S.paperH-uh)/2;
+    // centred, unless a dot is in the way: the sheet is then kept as packed
+    const ox=(manual||dotBlocks.length)?x0:(S.paperW-uw)/2, oy=(manual||dotBlocks.length)?y0:(S.paperH-uh)/2;
     const slots=[], queue=[];
     pg.items.forEach(({it,pos},k)=>{
       slots.push({id:'n'+at+'_'+k,shape:null,added:true,
@@ -35642,9 +35683,10 @@ document.getElementById('gtDistributeBtn').addEventListener('click',()=>{
 // at a time at the lowest, then leftmost, free spot (MaxRects), tried in a few
 // orders with the shortest result kept. Measured from the bottom of the block,
 // as the grid is, so the first placeholders land where the grid's first do.
-function gtPackRects(items,W,H){
+function gtPackRects(items,W,H,blocks){
   const E=1e-6;
   let free=[{x:0,y:0,w:W,h:H}];
+  (blocks||[]).forEach(B=>{ free=gtCutFree(free,B); });
   const out=new Map();
   for(const it of items){
     let best=null;
@@ -35710,9 +35752,12 @@ document.getElementById('gtPackBtn').addEventListener('click',()=>{
   const orders=[
     (a,b)=>b.h-a.h||b.w-a.w, (a,b)=>b.w-a.w||b.h-a.h,
     (a,b)=>b.w*b.h-a.w*a.h, (a,b)=>Math.max(b.w,b.h)-Math.max(a.w,a.h)||b.w*b.h-a.w*a.h];
+  // the registration dots are kept clear, counted up from the bottom as the rest is
+  const ax0=manual?n(S.sideTrim):m, bottom=S.paperH-m;
+  const blocks=gtDotBlocks(ax0,bottom,availW+gx,availH+gy,1+Math.max(0,-gx,-gy),true);
   let best=null;
   orders.forEach(cmp=>{
-    const r=gtPackRects([...cells].sort(cmp),availW+gx,availH+gy);
+    const r=gtPackRects([...cells].sort(cmp),availW+gx,availH+gy,blocks);
     if(!r) return;
     let uw=0,uh=0;
     cells.forEach(c=>{ const q=r.get(c.i); uw=Math.max(uw,q.x+c.s.w); uh=Math.max(uh,q.y+c.s.h); });
@@ -35726,8 +35771,12 @@ document.getElementById('gtPackBtn').addEventListener('click',()=>{
   const x0=manual?n(S.sideTrim):(S.paperW-best.uw)/2, y0=manual?n(S.leadTrim):(S.paperH-best.uh)/2;
   cells.forEach(c=>{
     const q=best.r.get(c.i);
-    c.s.x=round(x0+q.x);
-    c.s.y=round(y0+best.uh-q.y-c.s.h);               // measured up from the bottom of the block
+    if(blocks.length){                                // a dot in the way: kept where it was packed
+      c.s.x=round(ax0+q.x); c.s.y=round(bottom-q.y-c.s.h);
+    }else{
+      c.s.x=round(x0+q.x);
+      c.s.y=round(y0+best.uh-q.y-c.s.h);               // measured up from the bottom of the block
+    }
   });
   gtSlotsChanged();
   const dots=gtMarks(), pad=1;
