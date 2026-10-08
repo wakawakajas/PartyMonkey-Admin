@@ -6958,6 +6958,9 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <div class="click-row">
             <label class="click-tog" title="Every tag gets a placeholder the size of its design's cut line, packed across as many sheets as the order needs. More of a design means more placeholders on the same sheet where there is room — never the same sheet again."><input type="checkbox" id="gtNestOn"/>Nest the order — a placeholder per design</label>
           </div>
+          <div class="click-row">
+            <label class="click-tog" title="Packs each tag by its traced cut line instead of the box round it, so round and odd shapes sit in one another's gaps and fewer sheets are needed. Tags with no traced line stay boxes. Takes a few seconds on a big order."><input type="checkbox" id="gtNestRealOn"/>Fit the real cut lines (saves more paper)</label>
+          </div>
           <div class="calc" id="gtNestMsg" style="margin-top:8px;"></div>
         </div>
 
@@ -29970,7 +29973,7 @@ let gtSlotEdit=false, gtSelSlot=null;   // Contours on, and the placeholder in h
 const gtShapeSig=new Map();          // see gtKeepShape
 const gtSelSet=new Set();          // every placeholder picked, gtSelSlot among them
 let gtMarquee=null;                // the box being dragged out to pick several: {x0,y0,x1,y1} in mm
-const GT_SHEET_NEW={nestOn:false,paperW:317,paperH:449,pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{},marksFromBase:true,marksFromBaseV2:false,baseRemoved:false,backFile:''};
+const GT_SHEET_NEW={nestOn:false,nestReal:false,paperW:317,paperH:449,pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{},marksFromBase:true,marksFromBaseV2:false,baseRemoved:false,backFile:''};
 const gtSheet={paperW:317,paperH:449,tagW:60,tagH:40,margin:10,gap:3,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
   // null rather than a number: the layout centres itself until it is told
@@ -33145,6 +33148,152 @@ function gtNestBin(W,H,mode){
     return {x:P.x,y:P.y};
   }};
 }
+// ---------- nest by design: real cut lines ----------
+// Boxes leave paper between round or L-shaped tags that another tag could sit
+// in. This packs the cut lines themselves: each is drawn onto a fine grid of
+// cells (0.5 mm), grown by half the gutter so two of them never come closer than
+// the gutter, and a tag goes at the first place on the sheet — top, then left —
+// where none of its cells land on a taken one. The bits of a row are kept in
+// 32-bit words, so a try is a few ANDs and most fail on the first row.
+const GT_NEST_CELL=0.5;
+// poly: points in mm, or null for a plain w × h box. Answers the grown shape as
+// bit rows ready to be shifted to any column.
+function gtNestMask(poly,w,h,gap,cell){
+  const P=(poly&&poly.length>=3)?poly:[[0,0],[w,0],[w,h],[0,h]];
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  P.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); });
+  const radius=Math.max(0,gap)/2+cell*0.25, Rc=radius/cell, R=Math.ceil(Rc);
+  const ring=R+1;
+  const ox=x0-ring*cell, oy=y0-ring*cell;
+  const mw=Math.ceil((x1-x0)/cell)+2*ring+1, mh=Math.ceil((y1-y0)/cell)+2*ring+1;
+  // the shape itself: every cell a sample row of it touches, two rows a cell
+  const S=[], n=P.length;
+  for(let j=0;j<mh;j++){
+    const row=new Uint8Array(mw); let any=false;
+    for(const f of [0.25,0.75]){
+      const y=oy+(j+f)*cell, xs=[];
+      for(let a=0;a<n;a++){
+        const p=P[a], q=P[(a+1)%n];
+        if((p[1]<=y&&q[1]>y)||(q[1]<=y&&p[1]>y)) xs.push(p[0]+(y-p[1])/(q[1]-p[1])*(q[0]-p[0]));
+      }
+      xs.sort((a,b)=>a-b);
+      for(let k=0;k+1<xs.length;k+=2){
+        const a=Math.max(0,Math.floor((xs[k]-ox)/cell)), b=Math.min(mw-1,Math.floor((xs[k+1]-ox)/cell));
+        for(let c=a;c<=b;c++){ row[c]=1; any=true; }
+      }
+    }
+    S.push(any?row:null);
+  }
+  // grown by the radius: each run of a row spreads along the rows within reach
+  const D=[]; for(let j=0;j<mh;j++) D.push(new Uint8Array(mw));
+  const dxs=[]; for(let dy=-R;dy<=R;dy++) dxs.push(Math.floor(Math.sqrt(Math.max(0,Rc*Rc-dy*dy))+1e-9));
+  for(let j=0;j<mh;j++){
+    const row=S[j]; if(!row) continue;
+    let c=0;
+    while(c<mw){
+      if(!row[c]){ c++; continue; }
+      let e=c; while(e+1<mw&&row[e+1]) e++;
+      for(let dy=-R;dy<=R;dy++){
+        const jj=j+dy; if(jj<0||jj>=mh) continue;
+        const dx=dxs[dy+R], a=Math.max(0,c-dx), b=Math.min(mw-1,e+dx), dr=D[jj];
+        for(let k=a;k<=b;k++) dr[k]=1;
+      }
+      c=e+1;
+    }
+  }
+  const words=Math.ceil(mw/32)+1, rows=[];
+  for(let j=0;j<mh;j++){ if(D[j].some(v=>v)) rows.push({j,cells:D[j]}); }
+  const shifted=new Array(32);
+  const at=s=>shifted[s]||(shifted[s]=rows.map(({j,cells})=>{
+    const bits=new Uint32Array(words);
+    for(let c=0;c<mw;c++) if(cells[c]){ const p=c+s; bits[p>>>5]|=(1<<(p&31)); }
+    return {j,bits};
+  }));
+  return {mw,mh,ring,ox,oy,x0,y0,words,at};
+}
+// items: {i,sz:{w,h},key,poly}. Returns what packWith in gtNestPlan returns:
+// {pages:[{items:[{it,pos}]}],tooBig,fill}, pos being where the placeholder's
+// own top-left goes, in mm from the top-left of the printable area. scan 'row'
+// fills top to bottom, 'col' left to right. null if time ran out first.
+function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline){
+  const cell=GT_NEST_CELL, gap=Math.max(0,gx,gy);
+  const masks=new Map();
+  const maskOf=it=>{
+    let m=masks.get(it.key);
+    if(!m){ m=gtNestMask(it.poly,it.sz.w,it.sz.h,gap,cell); masks.set(it.key,m); }
+    return m;
+  };
+  let ringMax=0;
+  items.forEach(it=>{ ringMax=Math.max(ringMax,maskOf(it).ring); });
+  const Wc=Math.ceil(availW/cell)+2*ringMax, Hc=Math.ceil(availH/cell)+2*ringMax;
+  const WW=Math.ceil(Wc/32)+2;
+  const pages=[]; let tooBig=0, tick=0;
+  const newPage=()=>({occ:new Uint32Array(Hc*WW),failed:new Set(),from:new Map(),items:[]});
+  // The first place the shape fits on a page, or null. Masks carry their own
+  // ring, which is the same for every design once the sheet is sized by the
+  // biggest, so cell (cx,cy) of the grid is the tag's top-left plus nothing.
+  const find=(pg,m)=>{
+    const {occ}=pg, maxX=Wc-m.mw, maxY=Hc-m.mh;
+    if(maxX<0||maxY<0) return null;
+    const test=(cx,cy)=>{
+      const rows=m.at(cx&31), w0=cx>>>5;
+      for(let r=0;r<rows.length;r++){
+        const {j,bits}=rows[r], base=(cy+j)*WW+w0;
+        for(let k=0;k<bits.length;k++) if(occ[base+k]&bits[k]) return false;
+      }
+      return true;
+    };
+    // places only fill up, so nowhere before the last spot this shape got on
+    // this page can have opened since — it carries on from there
+    const from=pg.from.get(m)||{cx:0,cy:0};
+    let hit=null;
+    if(scan==='col'){
+      for(let cx=from.cx;cx<=maxX&&!hit;cx++){
+        if((++tick&255)===0&&Date.now()>deadline) throw 'late';
+        for(let cy=cx===from.cx?from.cy:0;cy<=maxY;cy++) if(test(cx,cy)){ hit={cx,cy}; break; }
+      }
+    }else{
+      for(let cy=from.cy;cy<=maxY&&!hit;cy++){
+        if((++tick&255)===0&&Date.now()>deadline) throw 'late';
+        for(let cx=cy===from.cy?from.cx:0;cx<=maxX;cx++) if(test(cx,cy)){ hit={cx,cy}; break; }
+      }
+    }
+    if(hit) pg.from.set(m,hit);
+    return hit;
+  };
+  const put=(pg,m,cx,cy)=>{
+    const rows=m.at(cx&31), w0=cx>>>5;
+    rows.forEach(({j,bits})=>{
+      const base=(cy+j)*WW+w0;
+      for(let k=0;k<bits.length;k++) pg.occ[base+k]|=bits[k];
+    });
+  };
+  try{
+    for(const it of items){
+      const m=maskOf(it); let spot=null, pg=null;
+      for(const p of pages){
+        if(p.failed.has(it.key)) continue;
+        spot=find(p,m);
+        if(spot){ pg=p; break; }
+        p.failed.add(it.key);
+      }
+      if(!spot){
+        pg=newPage(); pages.push(pg);
+        spot=find(pg,m);
+        if(!spot){ spot={cx:0,cy:0}; tooBig++; }
+        else put(pg,m,spot.cx,spot.cy);
+      }else put(pg,m,spot.cx,spot.cy);
+      // mask cell (0,0) sits ring cells before the shape's own top-left, and the
+      // grid ringMax before the printable area's — the difference is the shape's
+      // own position, from which the slot's origin is the shape's x0,y0 back
+      const px=(spot.cx+m.ring-ringMax)*cell-m.x0, py=(spot.cy+m.ring-ringMax)*cell-m.y0;
+      pg.items.push({it,pos:{x:px,y:py}});
+    }
+  }catch(e){ if(e==='late') return null; throw e; }
+  const last=pages[pages.length-1];
+  let fill=0; last.items.forEach(({it})=>{ fill+=it.sz.w*it.sz.h; });
+  return {pages,tooBig,fill};
+}
 // The placeholder a design asks for: its cut line — the traced outline with its
 // outset where it has one, the artwork itself where it has not — drawn as the
 // sheet will draw it. The picture sits in a placeholder by its own centre or by
@@ -33169,6 +33318,14 @@ function gtNestSizeOf(d){
   }
   return {w:Math.max(2,Math.round(slot.w*100)/100),h:Math.max(2,Math.round(slot.h*100)/100)};
 }
+// A design's cut line as points in mm, with the placeholder's top-left as the
+// origin — where the sheet will draw it — or null where it has no traced line.
+function gtNestPolyOf(d,sz){
+  const img=d&&gtImgGet(d.id);
+  if(!img||!img.naturalWidth||!sz) return null;
+  const r=gtArtRectOf(d,{x:0,y:0,w:sz.w,h:sz.h}), pts=gtTracePlace(d,r);
+  return pts&&pts.length>=4?pts.slice(0,-1):null;      // the loop repeats its first point
+}
 function gtNestPlan(){
   const S=gtSheet, q=gtQueue();
   if(!q.length) return [];
@@ -33183,7 +33340,7 @@ function gtNestPlan(){
     return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],
             t&&t.on&&t.loop?[t.out,t.sm,t.loop.length]:0];
   });
-  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode]);
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
   const size=new Map(ids.map(id=>[id,gtNestSizeOf(gtDesign(id))]));
   // One heuristic leaves gaps another would have filled, so the order is packed
@@ -33244,6 +33401,29 @@ function gtNestPlan(){
         ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)) packed=r;
     }
   }
+  // Real cut lines: the same order packed with each tag's traced outline in
+  // place of its box, several ways within a few seconds. The boxes' answer is
+  // kept if it is no worse, so turning this on can only save paper.
+  let realUsed=false;
+  if(S.nestReal&&all.length>1){
+    const poly=new Map(ids.map(id=>[id,gtNestPolyOf(gtDesign(id),size.get(id))]));
+    if([...poly.values()].some(Boolean)){
+      const rall=all.map(it=>({...it,key:it.line.designId,poly:poly.get(it.line.designId)}));
+      const deadline=Date.now()+2000;
+      const byKey=[(a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i,
+        (a,b)=>b.sz.w*b.sz.h-a.sz.w*a.sz.h||b.sz.h-a.sz.h||a.i-b.i,
+        (a,b)=>Math.max(b.sz.w,b.sz.h)-Math.max(a.sz.w,a.sz.h)||b.sz.h-a.sz.h||a.i-b.i];
+      try{
+        for(const scan of ['row','col']) for(const cmp of byKey){
+          if(Date.now()>deadline) throw 'late';
+          const r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,scan,deadline);
+          if(!r) throw 'late';
+          if(r.pages.length<packed.pages.length
+            ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)){ packed=r; realUsed=true; }
+        }
+      }catch(e){ if(e!=='late') throw e; }
+    }
+  }
   const pages=packed.pages, tooBig=packed.tooBig;
   const plan=pages.map((pg,at)=>{
     let uw=0,uh=0;
@@ -33258,7 +33438,7 @@ function gtNestPlan(){
     return {shape:S.layoutFile,slots,per:slots.length,queue,start:0,of:pages.length,at,
       lines:[...new Set(queue)],nest:true};
   });
-  plan.tooBig=tooBig;
+  plan.tooBig=tooBig; plan.real=realUsed;
   gtNestCache={sig,plan};
   return plan;
 }
@@ -35447,12 +35627,16 @@ function gtNestSync(){
   if(!on||!msg) return;
   on.checked=!!gtSheet.nestOn;
   on.disabled=!!gtLayout;
+  const real=document.getElementById('gtNestRealOn');
+  if(real){ real.checked=!!gtSheet.nestReal; real.disabled=!!gtLayout||!gtSheet.nestOn; }
   if(gtLayout){ msg.textContent='A cutting file is in use — nesting makes its own placeholders, so take the cutting file off first.'; return; }
   if(!gtSheet.nestOn){ msg.textContent='Off — the placeholders are the grid’s, the same on every sheet.'; return; }
   const plan=gtNestPlan(), tags=gtQueue().length;
   if(!plan.length){ msg.textContent='On — nothing on the order yet.'; return; }
   msg.innerHTML=`${tags} tag${tags===1?'':'s'} nested on ${plan.length} sheet${plan.length===1?'':'s'}, `
-    +'each design cut to its own size. Moving a placeholder keeps until the order, a design or the sheet changes; Reset placeholders nests again.'
+    +(gtSheet.nestReal?(plan.real?'packed by their real cut lines'
+        :'real cut lines tried — boxes were as good, or no design has a traced line')+'. ':'each design cut to its own size. ')
+    +'Moving a placeholder keeps until the order, a design or the sheet changes; Reset placeholders nests again.'
     +(plan.tooBig?` <span style="color:var(--amber)">⚠ ${plan.tooBig} tag${plan.tooBig===1?' is':'s are'} bigger than the sheet allows.</span>`:'');
 }
 document.getElementById('gtNestOn').addEventListener('change',e=>{
@@ -35460,6 +35644,10 @@ document.getElementById('gtNestOn').addEventListener('change',e=>{
   gtSheet.nestOn=e.target.checked; gtNestCache=null; gtPage=0; gtPickOnly(null);
   // back to the grid: its own placeholders are rebuilt in case the tag size or gutters moved meanwhile
   if(!gtSheet.nestOn) gtRebuildSlots(true);
+  gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
+});
+document.getElementById('gtNestRealOn').addEventListener('change',e=>{
+  gtSheet.nestReal=e.target.checked; gtNestCache=null; gtPage=0; gtPickOnly(null);
   gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
 });
 document.getElementById('gtPackBtn').addEventListener('click',()=>{
