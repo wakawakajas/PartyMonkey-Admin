@@ -453,6 +453,45 @@ To check it the first time, `POST /api/fiery/test` logs in and lists the
 presets without going near Supabase. `GET /api/fiery/status` shows the last
 error. `POST /api/fiery/send-now` runs one pass immediately.
 
+## Design folders for Pigu (no more "Connect the folder")
+
+A browser gives its permission to a chosen folder back only when somebody taps,
+every session. This agent is on the same PC as the NAS folders, so Pigu asks it
+for what it would have read from them: the gift tag libraries (Magic Create,
+Gift Tag) and the designs / Place Card folder. Nothing goes over the internet
+and nothing is polled -- the page asks when it opens a library.
+
+It is **read-only**: there is no route that writes, renames or deletes. A
+library is still saved through the folder the browser was given (Choose folder,
+or any upload, asks for it as before); if only the agent is supplying it, Pigu
+says the library is read-only and writes nothing, not even into the browser's
+own copy. With the agent off, or `enabled` false, Pigu behaves exactly as it did.
+
+Settings are in **`folders.json`** (written with its defaults the first time
+the agent starts; it is per PC and not committed):
+
+```json
+{
+  "enabled": true,
+  "origins": ["https://wakawakajas.github.io"],
+  "roots": ["C:\\NAS Folders\\Partymonkey NAS\\Pigu"]
+}
+```
+
+- `roots` are folders as *this* PC sees them. Pigu knows a folder only by its
+  name ("Custom Gift Tag"); the agent looks for that name as a root, a folder
+  inside a root, or one inside that. A name that matches **more than one**
+  folder is refused rather than picked between, so the wrong library never
+  appears -- Pigu then asks for the folder as before.
+- Only the `origins` listed (plus `http://localhost` / `http://127.0.0.1` pages)
+  may ask, and a request naming the wrong `Host` or coming from another site's
+  `<img>` is refused, so another page open in the same browser cannot read the
+  files. Every path is kept inside the folder it was asked under.
+- The first time Pigu reaches the agent, Chrome asks whether the site may
+  connect to apps on this PC. Allow it once; Chrome remembers.
+- `GET /api/folders/ping` says whether it is on. `list` and `file` are what Pigu
+  reads with; there is nothing else.
+
 ## Downloading a file
 
 A site that hands you a file -- a receipt, an invoice, an export -- gives you

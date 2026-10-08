@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import cdp, config, duoke, fiery, labels, library, macro_store, pickup_sync, run_reports, scheduler as scheduler_mod, settings, video
+from agent import cdp, config, duoke, fiery, folders, labels, library, macro_store, pickup_sync, run_reports, scheduler as scheduler_mod, settings, video
 from agent.macro_store import MacroNotFoundError
 from agent.panic import PanicWatcher
 from agent.recorder import Recorder
@@ -57,6 +57,9 @@ def _is_admin() -> bool:
 IS_ADMIN = _is_admin() if platform.system() == "Windows" else False
 
 app = FastAPI(title=config.APP_NAME)
+# Read-only design folders for the Pigu page (see folders.py). Included before
+# anything is mounted at "/", which would otherwise answer these routes first.
+app.include_router(folders.router)
 
 # -- live-update transport -------------------------------------------------
 MAIN_LOOP: asyncio.AbstractEventLoop | None = None
@@ -177,6 +180,10 @@ async def _on_startup() -> None:
         fiery.save({})
     if fiery.load().get("enabled"):
         fiery.watcher.start()
+    # The design folders Pigu reads from here rather than asking the browser
+    # for them. Written out with its defaults the first time, like the rest.
+    if not folders.CONFIG_PATH.exists():
+        folders.save({})
     # Store Pick Up's "From BigSeller" button: Pigu queues the press, this
     # reads BigSeller + DuoKe and ships. The loop always runs but does nothing
     # unless pickup-sync.json says enabled, so switching it on needs no restart.

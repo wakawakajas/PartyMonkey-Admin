@@ -9006,7 +9006,7 @@ async function pcRegisterFolderFonts(){
 // folder set is Custom Template's and holds no fonts. Asks for nothing: a
 // folder whose permission has lapsed stays unloaded, and the line says so.
 async function pcEnsureFolderFonts(){
-  const dir=await gtIdbGet('loadDesignDir:placecard').catch(()=>null);
+  const dir=await ldAgentFor(await gtIdbGet('loadDesignDir:placecard').catch(()=>null));
   if(!dir||!await loadDesignDirOk(dir,false)) return;
   const fonts=[];
   try{ await loadDesignScan(dir,'',fonts); }catch(e){ return; }
@@ -29412,7 +29412,7 @@ let mcRoutePickFor=null;
 async function loadDesignDirGet(){
   const m=ldActiveMode();
   if(!loadDesignDirRead||loadDesignDirMode!==m){
-    loadDesignDir=await gtIdbGet(ldDirKey()).catch(()=>null)||null;
+    loadDesignDir=await ldAgentFor(await gtIdbGet(ldDirKey()).catch(()=>null)||null);
     // the scanned set belonged to the other mode's folder
     loadDesignFiles=[]; loadDesignFonts=[]; loadDesignSelected=null;
     loadDesignDirRead=true; loadDesignDirMode=m;
@@ -29423,8 +29423,20 @@ async function loadDesignDirSet(dir){
   loadDesignDir=dir; loadDesignDirRead=true; loadDesignDirMode=ldActiveMode();
   await gtIdbPut(ldDirKey(),dir);
 }
+// The remembered designs folder, or — when the browser has not given its
+// permission back — the same folder read through Macro Studio on this PC, so
+// nothing has to be connected. Held in memory only: the handle in the database
+// is never replaced by it (a clone of it fails, see MsDir), and everything that
+// stores a folder stores one that was just picked. Without the agent, or with
+// no folder of that name there, this is the handle it was given, as before.
+async function ldAgentFor(h){
+  if(!h||h.__ro) return h;
+  try{ if(await h.queryPermission({mode:'read'})==='granted') return h; }catch(e){ return h; }
+  return (await msDirFor(h.name))||h;
+}
 // read-only — nothing here is ever written back into the presets folder
 async function loadDesignDirOk(handle,ask){
+  if(handle&&handle.__ro) return true;
   if(!handle) return false;
   try{
     const opts={mode:'read'};
@@ -30072,9 +30084,120 @@ async function gtIdbPut(k,v){
     q.onsuccess=()=>res(); q.onerror=()=>rej(q.error);
   });
 }
+// ---------- folders read from this PC's Macro Studio agent ----------
+// A browser gives its permission to a chosen folder back only when somebody
+// taps, every session — the "Connect the folder" button. The PC this page runs
+// on already has those folders on its disk and Macro Studio's agent already
+// runs on it, so the agent can hand the page what it would have read, with no
+// permission to give back and nothing sent over the internet.
+//
+// What the page gets is shaped like the folder handle it would otherwise hold
+// (getDirectoryHandle, getFileHandle, values, getFile), so everything that
+// reads a library reads it the same way. It is READ-ONLY, and that is the
+// whole point of the design: there is no write route on the agent, createWritable
+// here throws, and the places that save a library refuse to run against it
+// (gtSaveLib). The folder the browser was given stays the only way anything is
+// written, so there is no way for this to put a file anywhere or take one away.
+// `__ro` is what says so; gtEnsureDir treats a read-only folder as "not
+// connected" whenever something wants to write, which is when the real
+// permission is asked for, as it always was.
+const MS_AGENT='http://127.0.0.1:8756/api/folders';
+let msDownUntil=0;                      // the agent did not answer: not asked again for a few seconds
+async function msGet(route,params,ms){
+  if(Date.now()<msDownUntil) throw new Error('Macro Studio is not running');
+  const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),ms||5000);
+  try{
+    // targetAddressSpace: Chrome asks once, in words, whether this site may
+    // reach apps on this PC; the answer is remembered with the site's settings
+    return await fetch(MS_AGENT+route+'?'+new URLSearchParams(params).toString(),
+      {signal:ctl.signal,cache:'no-store',targetAddressSpace:'loopback'});
+  }catch(e){ msDownUntil=Date.now()+15000; throw e; }
+  finally{ clearTimeout(timer); }
+}
+const msErr=(name,msg)=>{ try{ return new DOMException(msg,name); }catch(e){ const x=new Error(msg); x.name=name; return x; } };
+const msJoin=(a,b)=>a?a+'/'+b:b;
+const msJsonCache=new Map();            // small library files, kept while their date and size are the same
+class MsFile{
+  constructor(dir,name,meta){ this.kind='file'; this.name=name; this._dir=dir; this._meta=meta||null; this.__ro=true; this.__noClone=()=>{}; }
+  async getFile(){
+    const path=msJoin(this._dir.path,this.name), m=this._meta;
+    const key=m&&/\.json$/i.test(this.name)&&m.size<2e6?this._dir.id+'|'+path+'|'+m.mtime+'|'+m.size:null;
+    if(key&&msJsonCache.has(key)) return msJsonCache.get(key);
+    const r=await msGet('/file',{id:this._dir.id,path},60000);
+    if(r.status===404) throw msErr('NotFoundError','not found');
+    if(!r.ok) throw new Error('Macro Studio could not read '+this.name+' ('+r.status+')');
+    const blob=await r.blob();
+    const mt=Number(r.headers.get('X-Mtime-Ms'))||(m&&m.mtime)||Date.now();
+    const file=new File([blob],this.name,{lastModified:mt,type:blob.type||''});
+    if(key){ if(msJsonCache.size>200) msJsonCache.clear(); msJsonCache.set(key,file); }
+    return file;
+  }
+  async createWritable(){ throw msErr('NotAllowedError','read-only'); }
+  async isSameEntry(o){ return !!o&&o.kind==='file'&&o.name===this.name&&o._dir&&o._dir.id===this._dir.id&&o._dir.path===this._dir.path; }
+  async queryPermission(){ return 'granted'; }
+  async requestPermission(){ return 'granted'; }
+}
+class MsDir{
+  constructor(id,path,name,entries){
+    this.kind='directory'; this.id=id; this.path=path; this.name=name; this.__ro=true;
+    this._entries=entries?{at:Date.now(),list:entries}:null;
+    // a structured clone drops methods, which would store this as a plain
+    // object where a folder handle was; a function property makes the clone fail
+    // instead, so it can never be saved in place of the real handle
+    this.__noClone=()=>{};
+  }
+  async _list(){
+    if(this._entries&&Date.now()-this._entries.at<3000) return this._entries.list;
+    const r=await msGet('/list',{id:this.id,path:this.path});
+    if(r.status===404) throw msErr('NotFoundError','not found');
+    if(!r.ok) throw new Error('Macro Studio could not list '+(this.name||'the folder')+' ('+r.status+')');
+    const list=(await r.json()).entries||[];
+    this._entries={at:Date.now(),list};
+    return list;
+  }
+  async *values(){
+    for(const e of await this._list()){
+      yield e.kind==='directory'?new MsDir(this.id,msJoin(this.path,e.name),e.name):new MsFile(this,e.name,e);
+    }
+  }
+  async *entries(){ for await(const h of this.values()) yield [h.name,h]; }
+  async *keys(){ for await(const h of this.values()) yield h.name; }
+  [Symbol.asyncIterator](){ return this.entries(); }
+  async getDirectoryHandle(name,opts){
+    if(opts&&opts.create) throw msErr('NotAllowedError','read-only');
+    const d=new MsDir(this.id,msJoin(this.path,name),name);
+    await d._list();                   // a missing folder is the NotFoundError callers expect
+    return d;
+  }
+  async getFileHandle(name,opts){
+    if(opts&&opts.create) throw msErr('NotAllowedError','read-only');
+    return new MsFile(this,name,null);
+  }
+  async removeEntry(){ throw msErr('NotAllowedError','read-only'); }
+  async isSameEntry(o){ return !!o&&o.kind==='directory'&&o.id===this.id&&o.path===this.path; }
+  async queryPermission(){ return 'granted'; }
+  async requestPermission(){ return 'granted'; }
+}
+// The folder called `name`, read through the agent — or null: the agent is not
+// running, switched off, has no such folder, or has more than one (nothing is
+// guessed between two). Every null leaves things exactly as they were.
+async function msDirFor(name){
+  name=String(name||'').trim();
+  if(!name) return null;
+  try{
+    const r=await msGet('/open',{name});
+    if(!r.ok) return null;
+    const j=await r.json();
+    if(!j||!j.ok||!j.id) return null;
+    const d=new MsDir(j.id,'',name);
+    await d._list();
+    return d;
+  }catch(e){ return null; }
+}
 const gtCanUseFolder=()=>typeof window.showDirectoryPicker==='function';
 async function gtDirOk(handle,ask){
   if(!handle) return false;
+  if(handle.__ro) return true;        // from the agent: readable, never writable
   try{
     const opts={mode:'readwrite'};
     if(await handle.queryPermission(opts)==='granted') return true;
@@ -30151,7 +30274,13 @@ async function gtDirRead(dir,path){
 // own copy, and the design looked as though it had been made up on the spot.
 let gtFolderPending=false;
 async function gtEnsureDir(ask){
-  if(gtDir) return await gtDirOk(gtDir,ask);
+  if(gtDir&&!gtDir.__ro) return await gtDirOk(gtDir,ask);
+  // The library is on screen read from Macro Studio. Whoever is asking to
+  // *write* (ask=true: an upload, Choose folder) needs the real folder, which
+  // is asked for exactly as it always was; whoever only wants to read has what
+  // it needs already, whatever the browser says about the real one.
+  const viaAgent=!!gtDir;
+  const fail=()=>viaAgent&&!ask;
   const viaRoot=await gtResolveFromRoot(ask);
   if(viaRoot){
     gtDir=viaRoot; gtFolderPending=false;
@@ -30160,10 +30289,10 @@ async function gtEnsureDir(ask){
     gtRefreshLibraryUi(); gtRenderOrder(); gtWriteSheetInputs(); gtRenderSlots(); gtDraw();
     return true;
   }
-  if(await gtDirNameGet()){ gtFolderPending=true; return false; }
+  if(await gtDirNameGet()){ if(!viaAgent) gtFolderPending=true; return fail(); }
   const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
-  if(!saved) return false;
-  if(!await gtDirOk(saved,ask)){ gtFolderPending=true; return false; }
+  if(!saved) return fail();
+  if(!await gtDirOk(saved,ask)){ if(!viaAgent) gtFolderPending=true; return fail(); }
   gtDir=saved; gtFolderPending=false;
   // the folder is the library, so what it holds is what is worked from — the
   // browser's copy is not written over it
@@ -30241,7 +30370,7 @@ async function gtBackupLib(){
       await gtDir.removeEntry(n).catch(()=>{});
   }catch(e){}
 }
-let gtSaveWarned=false;
+let gtSaveWarned=false, gtRoWarned=false;
 // Would this write empty a library that is not empty? Nothing in the app asks
 // for that — a design or a phrase is deleted one at a time, and a library with
 // nothing left in it is a library nobody was working in. It is the shape every
@@ -30278,6 +30407,19 @@ async function gtSaveLib(){
       const m=document.getElementById('gtLibMsg');
       if(m) showMsg(m,'Not saving: the library folder could not be read, and writing now '
         +'would put an empty library over it. Reconnect the folder under Choose folder.',false);
+    }
+    return;
+  }
+  // The library is being read through Macro Studio, which can only read. Nothing
+  // is written — not to the folder, and not to this browser's own copy either,
+  // which is the trap the checks above exist for. Connecting the real folder
+  // (Choose folder, or any upload) puts the library back into one that saves.
+  if(gtDir&&gtDir.__ro){
+    if(!gtRoWarned){
+      gtRoWarned=true;
+      const m=document.getElementById('gtLibMsg');
+      if(m) showMsg(m,'This library is open read-only (Macro Studio is supplying it). Changes are '
+        +'not saved — connect the folder under Choose folder to edit it.',false);
     }
     return;
   }
@@ -30708,7 +30850,7 @@ async function gtLoadLibRead(){
   // is the same trap as above, just without gtDir ever being set to catch it:
   // falling through to the browser's own copy here is exactly what the guard
   // above exists to prevent.
-  if(gtFolderPending) return;
+  if(gtFolderPending&&!(gtDir&&gtDir.__ro)) return;
   if(gtDir){
     // A folder with no library.json yet is a new library and saving into it is
     // right. A folder that has one and would not give it up is the dangerous
@@ -31512,10 +31654,19 @@ async function gtLoadSavedDir(){
   gtDir=null; gtFolderPending=false;
   const viaRoot=await gtResolveFromRoot(false);
   if(viaRoot){ gtDir=viaRoot; await gtIdbPut(gtDirKey(),viaRoot); return; }
-  if(await gtDirNameGet()){ gtFolderPending=true; return; }
+  const named=await gtDirNameGet();
+  if(named){ gtFolderPending=true; await gtReadViaAgent(named); return; }
   const saved=await gtIdbGet(gtDirKey()).catch(()=>null);
   if(saved&&await gtDirOk(saved)) gtDir=saved;
-  else if(saved) gtFolderPending=true;
+  else if(saved){ gtFolderPending=true; await gtReadViaAgent(saved.name); }
+}
+// The folder is remembered but the browser has not given it back. If the agent
+// on this PC can show the very same folder, the library is read from there and
+// nothing has to be connected; if it cannot, it is "not connected" as before.
+// Never stored: gtDirKey keeps the real handle, this only stands in for reading.
+async function gtReadViaAgent(name){
+  const d=await msDirFor(name);
+  if(d){ gtDir=d; gtFolderPending=false; gtRoWarned=false; }
 }
 async function gtPiguDirGet(){
   if(!gtPiguRead){ gtPiguDir=await gtIdbGet('piguDir').catch(()=>null)||null; gtPiguRead=true; }
@@ -36004,7 +36155,8 @@ function gtSyncFolderState(){
     const rootBit=root?` inside ${escapeHtml(root.name)}`:'';
     let body;
     if(gtDir) body=`Folder: <strong>${escapeHtml(gtDir.name)}</strong>`
-      +(name?` — named "${escapeHtml(name)}"${rootBit}`:'');
+      +(name?` — named "${escapeHtml(name)}"${rootBit}`:'')
+      +(gtDir.__ro?' — read-only, supplied by Macro Studio on this PC. Choose folder to edit it.':'');
     else if(gtFolderPending) body=name
       ? `⚠ Named "${escapeHtml(name)}"${rootBit||' — no shared root connected yet'} — `
         +'the browser needs permission again after a reload. Press Choose folder.'
