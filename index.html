@@ -12736,7 +12736,7 @@ function cropSides(){
 // The Crop sheet on a gift tag one-off: the same sheet, the design's own
 // picture in place of a Front / Back side.
 function cropOpenGt(d){
-  const img=d&&gtImgs.get(d.id);
+  const img=d&&gtImgGet(d.id);
   if(!img||!img.naturalWidth){ showMsg(document.getElementById('gtCropMsg'),'This design\'s picture is not loaded.',false); return; }
   cropUI={side:null,gt:d,img,P:null,box:{x:0,y:0,w:img.naturalWidth,h:img.naturalHeight},trim:null,mode:'none',drag:null,
     bg:false,bgC:null};
@@ -29844,7 +29844,11 @@ const gtDesignsInView=()=>gtLib.designs;
 const gtFont=id=>gtLib.fonts.find(f=>f.id===id)||null;
 // a font that failed to load, or a field left on the default, falls back to the
 // app's own face rather than to whatever the browser feels like
-const gtFamily=id=>gtFont(id)?`"gtf-${id}", 'IBM Plex Sans', sans-serif`:`'IBM Plex Sans', sans-serif`;
+const gtFamily=id=>{
+  if(!gtFont(id)) return `'IBM Plex Sans', sans-serif`;
+  gtFontAsk(id);
+  return `"gtf-${id}", 'IBM Plex Sans', sans-serif`;
+};
 const gtId=p=>p+Math.random().toString(36).slice(2,9);
 
 // ---------- where the library is kept ----------
@@ -30474,6 +30478,7 @@ async function gtLoadLib(){
 }
 async function gtLoadLibRead(){
   gtHydrateGen++;                     // pictures still being drawn are the old library's
+  gtImgQueue.length=0; gtImgFailed.clear();
   gtLib.designs=[]; gtLib.fonts=[]; gtLib.texts=[];
   // The stash of "the library's own designs", held while Pigu folders stand in
   // for them, belongs to the library being left. Carried into the next one it
@@ -30531,12 +30536,13 @@ async function gtLoadLibRead(){
       // and each design's own back picture, and the sheet's
       (man.designs||[]).forEach(x=>{ if(x&&x.back&&x.back.file) files.push(x.back.file); });
       if(man.sheet){ files.push(man.sheet.layoutFile,man.sheet.baseFile,man.sheet.backFile); }
+      // all at once, sixteen at a time: two thousand files read one by one
+      // was most of the wait for the page to open
       let at=0;
-      for(const f of files){
-        if(!f) continue;
+      await gtPool(files.filter(Boolean),16,async f=>{
         gtTrace(`reading the library files (${++at} of ${files.length})`);
         try{ gtAssets.set(f,await gtDirRead(gtDir,f)); }catch(e){}
-      }
+      });
     }
   }else{
     const rec=await gtIdbGet(gtLibKey()).catch(()=>null);
@@ -30663,58 +30669,125 @@ function gtNormalizeDesign(d){
 }
 // Images decoded and fonts registered — everything the canvas needs in hand
 // before anything is drawn, so a first paint never shows the wrong face.
-const gtFontsDone=new Set();
-// Drawing every design in a big library — a PDF each, drawn at 2600px — took
-// minutes before the page could be used, and Magic Create waits on that page
-// for every Add. Only the designs an order is using are drawn before the page
-// opens; the rest are drawn behind it, a few at a time, and the screen is
-// redrawn as they arrive. Anything that prints waits for them (gtHydrateWait).
-let gtHydrateBg=Promise.resolve(), gtHydrateGen=0;
-const gtHydrateWait=()=>gtHydrateBg;
+// A library of two thousand PDFs, each drawn at 2600px, took minutes to open —
+// and Magic Create waits on the page for every Add. Nothing is drawn up front
+// now but the designs an order is using. Any other design is drawn the first
+// time something asks to see it (gtImgGet), three at a time, newest ask first,
+// and the screen is redrawn as they arrive. Printing draws what it needs first.
+let gtHydrateGen=0;
+const gtImgQueue=[], gtImgFailed=new Set();
+let gtImgActive=0, gtImgTimer=0;
+function gtUsedDesignIds(){
+  const used=new Set();
+  try{ [gtOrder,...Object.values(gtOrders||{})].forEach(list=>
+    (Array.isArray(list)?list:[]).forEach(l=>{ if(l&&l.designId) used.add(l.designId); })); }catch(e){}
+  return used;
+}
 async function gtPool(list,n,fn){
   let i=0;
   await Promise.all(Array.from({length:Math.min(n,list.length)},async()=>{
     while(i<list.length) await fn(list[i++]);
   }));
 }
-async function gtHydrate(){
-  const gen=gtHydrateGen;
-  const used=new Set();
-  try{ [gtOrder,...Object.values(gtOrders||{})].forEach(list=>
-    (Array.isArray(list)?list:[]).forEach(l=>{ if(l&&l.designId) used.add(l.designId); })); }catch(e){}
-  const todo=gtLib.designs.filter(d=>!gtImgs.has(d.id)&&gtAssets.get(d.file));
-  const draw=async d=>{
-    if(gen!==gtHydrateGen||gtImgs.has(d.id)) return;
-    const blob=gtAssets.get(d.file); if(!blob) return;
-    try{
-      const img=await loadImage(await gtArtURL(blob,d.file));
-      if(gen===gtHydrateGen) gtImgs.set(d.id,img);
-    }catch(e){}
-  };
-  const first=todo.filter(d=>used.has(d.id)), rest=todo.filter(d=>!used.has(d.id));
-  gtTrace(`drawing the designs on the order (${first.length})`);
-  await gtPool(first,4,draw);
-  if(rest.length){
-    gtHydrateBg=gtHydrateBg.then(async()=>{
-      let n=0;
-      await gtPool(rest,3,async d=>{
-        await draw(d);
-        if(++n%25===0&&gen===gtHydrateGen&&currentScreen==='tool-gift-tag') gtDraw();
-      });
-      if(gen===gtHydrateGen&&(currentScreen==='tool-gift-tag'||currentScreen==='tool-gift-tag-design')){
-        gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
-      }
-    }).catch(()=>{});
+async function gtImgLoad(id){
+  const d=gtDesign(id), gen=gtHydrateGen;
+  const blob=d&&gtAssets.get(d.file);
+  if(!blob||gtImgs.has(id)) return;
+  try{
+    const img=await loadImage(await gtArtURL(blob,d.file));
+    if(gen===gtHydrateGen) gtImgs.set(id,img);
+  }catch(e){ gtImgFailed.add(id); }
+}
+// the picture of a design if it has been drawn; if not, it is asked for and the
+// screen redraws when it is there. low: a list row, behind what is being worked on.
+function gtImgGet(x,low){
+  const id=x&&typeof x==='object'?x.id:x;
+  const img=gtImgs.get(id);
+  if(img||!id||gtImgFailed.has(id)) return img;
+  const d=gtDesign(id);
+  if(!d||!gtAssets.get(d.file)) return undefined;
+  const at=gtImgQueue.indexOf(id);
+  if(at>=0&&low) return undefined;
+  if(at>=0) gtImgQueue.splice(at,1);
+  if(low) gtImgQueue.push(id); else gtImgQueue.unshift(id);
+  gtImgPump();
+  return undefined;
+}
+function gtImgPump(){
+  while(gtImgActive<3&&gtImgQueue.length){
+    const id=gtImgQueue.shift();
+    gtImgActive++;
+    gtImgLoad(id).finally(()=>{ gtImgActive--; gtImgRedrawSoon(); gtImgPump(); });
   }
-  for(const f of gtLib.fonts){
-    if(gtFontsDone.has(f.id)) continue;
-    const blob=gtAssets.get(f.file); if(!blob) continue;
-    gtFontsDone.add(f.id);
+}
+function gtImgRedrawSoon(){
+  if(gtImgTimer) return;
+  gtImgTimer=setTimeout(()=>{
+    gtImgTimer=0;
+    if(currentScreen!=='tool-gift-tag'&&currentScreen!=='tool-gift-tag-design') return;
+    try{ gtRefreshLibraryUi(); gtRenderOrder(); gtDraw(); }catch(e){}
+  },300);
+}
+// Fonts the same way: 649 of them were loaded one after another before the
+// page could open. A face is loaded the first time text is drawn in it
+// (gtFamily asks), the ones an order uses are loaded before the page opens, and
+// the rest follow behind it one at a time so the font lists show their faces.
+const gtFontsDone=new Set(), gtFontJobs=new Map();
+function gtFontLoad(id){
+  if(gtFontJobs.has(id)) return gtFontJobs.get(id);
+  if(gtFontsDone.has(id)) return Promise.resolve();
+  const f=gtFont(id), blob=f&&gtAssets.get(f.file);
+  if(!blob) return Promise.resolve();
+  gtFontsDone.add(id);
+  const job=(async()=>{
     try{
-      const face=new FontFace('gtf-'+f.id,await blob.arrayBuffer());
+      const face=new FontFace('gtf-'+id,await blob.arrayBuffer());
       await face.load(); document.fonts.add(face);
     }catch(e){}
-  }
+  })().finally(()=>gtFontJobs.delete(id));
+  gtFontJobs.set(id,job);
+  return job;
+}
+function gtFontAsk(id){
+  if(!id||gtFontsDone.has(id)||!gtFont(id)) return;
+  const job=gtFontLoad(id);
+  // redrawn only for a load that really started, or a face with no file behind
+  // it would redraw the screen for ever
+  if(gtFontJobs.has(id)) job.then(gtImgRedrawSoon);
+}
+function gtUsedFontIds(){
+  const ids=new Set();
+  try{ [gtOrder,...Object.values(gtOrders||{})].forEach(list=>
+    (Array.isArray(list)?list:[]).forEach(l=>{
+      if(!l) return;
+      const d=gtDesign(l.designId);
+      ((d&&d.fields)||[]).forEach(f=>{ if(f&&f.font) ids.add(f.font); });
+      Object.values(l.vals||{}).forEach(v=>{ if(v&&v.font) ids.add(v.font); });
+    })); }catch(e){}
+  return ids;
+}
+let gtFontsBgGen=-1;
+function gtFontsBgStart(){
+  const gen=gtHydrateGen;
+  if(gtFontsBgGen===gen) return;
+  gtFontsBgGen=gen;
+  setTimeout(async()=>{
+    for(const f of gtLib.fonts.slice()){
+      if(gen!==gtHydrateGen) return;
+      if(!gtFontsDone.has(f.id)) await gtFontLoad(f.id);
+      await new Promise(r=>setTimeout(r,15));
+    }
+    if(gen===gtHydrateGen) gtImgRedrawSoon();
+  },1500);
+}
+// every design and font an order uses, drawn now — for whatever cannot wait for a redraw
+const gtHydrateWait=async()=>{
+  await gtPool([...gtUsedDesignIds()].filter(id=>!gtImgs.has(id)&&!gtImgFailed.has(id)),4,gtImgLoad);
+  await Promise.all([...gtUsedFontIds()].map(gtFontLoad));
+};
+async function gtHydrate(){
+  await gtHydrateWait();
+  gtFontsBgStart();
   gtTrace('reading the sheet layout');
   if(gtSheet.layoutFile!==gtLayoutFrom){
     gtLayout=null; gtLayoutFrom=gtSheet.layoutFile;
@@ -32186,7 +32259,7 @@ function gtSmoothLoop(pts,passes){
 }
 // Traces the design open in the editor and keeps the loop on it.
 function gtTraceDesign(d,thr){
-  const img=gtImgs.get(d.id);
+  const img=gtImgGet(d.id);
   if(!img||!img.naturalWidth) return null;
   const mask=gtTraceMask(img,thr);
   const walk=gtTraceWalk(mask);
@@ -32294,7 +32367,7 @@ function gtTracePlace(d,r){
 // The picture fitted into a placeholder and nothing more — where the words and
 // the punch hole are laid out against, on the sheet and in the cut file alike.
 function gtFitRectOf(d,slot){
-  const img=d&&gtImgs.get(d.id);
+  const img=d&&gtImgGet(d.id);
   if(!img||!img.naturalWidth) return {x:slot.x,y:slot.y,w:slot.w,h:slot.h};
   const f=gtFit(img.naturalWidth,img.naturalHeight,slot.w,slot.h);
   return {x:slot.x+f.x,y:slot.y+f.y,w:f.w,h:f.h};
@@ -32303,7 +32376,7 @@ function gtFitRectOf(d,slot){
 // into, this design's own scale and nudge included, so a traced cut line
 // follows the artwork about rather than staying where it was first read.
 function gtArtRectOf(d,slot){
-  const img=d&&gtImgs.get(d.id);
+  const img=d&&gtImgGet(d.id);
   if(!img||!img.naturalWidth) return {x:slot.x,y:slot.y,w:slot.w,h:slot.h};
   return gtArtDraw(d,gtFit(img.naturalWidth,img.naturalHeight,slot.w,slot.h),slot.x,slot.y);
 }
@@ -32812,7 +32885,7 @@ function gtFit(iw,ih,bw,bh){
 // here so the pointer can be tested against them
 function gtTagArt(line,slot){
   const d=gtDesign(line.designId);
-  const img=d&&gtImgs.get(d.id);
+  const img=d&&gtImgGet(d.id);
   if(img&&img.naturalWidth){
     const f=gtFit(img.naturalWidth,img.naturalHeight,slot.w,slot.h);
     return {x:slot.x+f.x,y:slot.y+f.y,w:f.w,h:f.h};
@@ -33166,14 +33239,14 @@ function gtPunchMask(img,wpx,hpx){
 // so it is the same box seen from behind — and so do not move about when the
 // back picture changes.
 function gtTextRect(d,x,y,w,h){
-  const img=d&&gtImgs.get(d.id);
+  const img=d&&gtImgGet(d.id);
   if(!img||!img.naturalWidth) return {x,y,w,h};
   const f=gtFit(img.naturalWidth,img.naturalHeight,w,h);
   return {x:x+f.x,y:y+f.y,w:f.w,h:f.h};
 }
 function gtDrawTag(ctx,line,x,y,w,h,sc,forExport,vec){
   const d=gtDesign(line.designId); if(!d) return;
-  const img=gtImgs.get(d.id);
+  const img=gtImgGet(d.id);
   const A=gtTextRect(d,x,y,w,h);
   if(img&&img.naturalWidth)
     gtPutArt(ctx,img,d.id,d.art,x,y,w,h,gtBleedOf(d),sc,vec,!!gtSheet.invertArt);
@@ -33996,7 +34069,7 @@ gtWireCombo('gtTextSearch','gtTextCaret','gtTextPanel',()=>gtRenderTextList());
 // rather than scrolled, with the same picture beside every name and a way
 // straight through to the design to change it.
 function gtArt(id,cls){
-  const img=gtImgs.get(id);
+  const img=gtImgGet(id);
   return img&&img.src
     ? `<span class="gt-art ${cls||''}"><img src="${img.src}" alt=""/></span>`
     : `<span class="gt-art ${cls||''}">✐</span>`;
@@ -34015,7 +34088,7 @@ function gtDesignPanel(q,sel){
 // the artwork rect one tag gives a design, for turning the fractions a field is
 // held in into the millimetres the form is keyed in
 function gtArtBox(id){
-  const t=gtTagBox(), img=gtImgs.get(id);
+  const t=gtTagBox(), img=gtImgGet(id);
   if(img&&img.naturalWidth){
     const f=gtFit(img.naturalWidth,img.naturalHeight,t.w,t.h);
     return {w:f.w,h:f.h};
@@ -34970,8 +35043,8 @@ function gtRenderDesignList(){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing matches —</p>';
     return;
   }
-  el.innerHTML=shown.map(d=>{
-    const img=gtImgs.get(d.id);
+  el.innerHTML=shown.map((d,i)=>{
+    const img=i<60?gtImgGet(d.id,true):gtImgs.get(d.id);
     return `<div class="ph-card row-link" data-gt-design="${d.id}" data-id="${d.id}">
       <button class="del-btn" data-gt-del-design title="Take out of the library"
               style="float:right;">×</button>
@@ -35620,7 +35693,7 @@ function gtEditGeom(){
   // three quarters of the room it has, so the tag doesn't crowd the panel
   const sc=Math.max(220,Math.min(GT_EDIT_MAX,avail)*0.75)/Math.max(T.w,T.h);
   const w=Math.max(1,Math.round(T.w*sc)), h=Math.max(1,Math.round(T.h*sc));
-  const d=gtCurrentDesign, img=d&&gtImgs.get(d.id);
+  const d=gtCurrentDesign, img=d&&gtImgGet(d.id);
   // the artwork rect inside it — every field is a fraction of this, not of the tag
   let art={x:0,y:0,w:T.w,h:T.h}, draw=art;
   if(img&&img.naturalWidth){
@@ -50864,8 +50937,8 @@ function mcGiftWire(it){
     }
     // artwork on the row: a design is recognised by what it looks like long
     // before its name is read, and a library of a few hundred is all names
-    panel.innerHTML=rows.map(d=>{
-      const img=gtImgs.get(d.id);
+    panel.innerHTML=rows.map((d,i)=>{
+      const img=i<40?gtImgGet(d.id,true):gtImgs.get(d.id);
       const shot=img&&img.src
         ? `<img class="mc-gt-shot" src="${escapeHtml(img.src)}" alt="" loading="lazy"/>`
         : '<span class="mc-gt-shot blank">◻</span>';
