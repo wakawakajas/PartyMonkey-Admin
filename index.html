@@ -7183,6 +7183,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           </div>
           <p class="hint" style="margin:6px 0 0;">The cut line's size, outset included. Change either and the artwork is scaled with it, so the design stays where the line says.</p>
         </div>
+        <p class="hint" id="gtCutWarn" style="margin:8px 0 0;color:#B24C25;" hidden></p>
 
       </div>
     </div>
@@ -32425,9 +32426,11 @@ function gtOffsetLoop(pts,out){
   for(let i=0;i<N;i++) sd[i]=inn[i]?-(Math.sqrt(toOut[i])-0.5):Math.sqrt(toIn[i])-0.5;
   for(let x=0;x<W;x++){ sd[x]=sd[(H-1)*W+x]=1e9; }
   for(let y=0;y<H;y++){ sd[y*W]=sd[y*W+W-1]=1e9; }
-  const loop=gtBiggestLoop(gtContours(sd,W,H,out*R));
+  const ls=gtContours(sd,W,H,out*R), loop=gtBiggestLoop(ls);
   if(!loop) return null;
-  return loop.map(([x,y])=>[x/R+ox,y/R+oy]);
+  const res=loop.map(([x,y])=>[x/R+ox,y/R+oy]);
+  res.parts=ls.length;             // more than one: drawn in so far it came apart
+  return res;
 }
 // The loop a design carries, placed on a rect in millimetres, offset by its
 // outset and smoothed. Worked out once for each size it is drawn at and kept —
@@ -32443,19 +32446,24 @@ function gtTracePlace(d,r){
   let byLoop=gtTraceCache.get(t.loop);
   if(!byLoop){ byLoop=new Map(); gtTraceCache.set(t.loop,byLoop); }
   const key=`${r.w.toFixed(3)}|${r.h.toFixed(3)}|${out}|${sm}`;
-  let rel=byLoop.get(key);
-  if(rel===undefined){
-    let pts=t.loop.map(([u,v])=>[u*r.w,v*r.h]);
+  let hit=byLoop.get(key);
+  if(!hit){
+    let pts=t.loop.map(([u,v])=>[u*r.w,v*r.h]), rel=null;
     if(out){ try{ pts=gtOffsetLoop(pts,out); }catch(e){ pts=null; } }
     if(pts&&pts.length>3){
       const smooth=gtResample(gtSmoothMm(pts,sm),GT_PLT_STEP);
       rel=smooth.concat([smooth[0]]);
-    }else rel=null;
+    }
+    hit={rel,parts:pts?(pts.parts||1):0};
     if(byLoop.size>40) byLoop.delete(byLoop.keys().next().value);
-    byLoop.set(key,rel);
+    byLoop.set(key,hit);
   }
-  return rel?rel.map(([x,y])=>[x+r.x,y+r.y]):null;
+  gtTraceLast={d,parts:hit.parts};
+  return hit.rel?hit.rel.map(([x,y])=>[x+r.x,y+r.y]):null;
 }
+// how the last placing of a design's loop went: 0 pieces left, 1, or more —
+// read by the editor straight after it places the loop itself
+let gtTraceLast=null;
 // The picture fitted into a placeholder and nothing more — where the words and
 // the punch hole are laid out against, on the sheet and in the cut file alike.
 function gtFitRectOf(d,slot){
@@ -36644,6 +36652,15 @@ function gtCutSizeWrite(){
   const d=gtCurrentDesign, wrap=document.getElementById('gtCutSizeWrap');
   const b=d&&d.trace&&d.trace.on?gtCutBox(d):null;
   wrap.hidden=!b;
+  // An inset can go further than the artwork is wide. Rather than quietly cut
+  // to the placeholder, or quietly lose the smaller pieces, it says so.
+  const warn=document.getElementById('gtCutWarn');
+  const parts=d&&d.trace&&d.trace.on&&gtTraceLast&&gtTraceLast.d===d?gtTraceLast.parts:1;
+  warn.textContent=!d||!d.trace||!d.trace.on?''
+    :parts===0?`⚠ An outset of ${d.trace.out}mm draws the line in past the whole artwork, so there is nothing left to cut round — the placeholder is being cut instead. Bring the outset back toward 0.`
+    :parts>1?`⚠ Drawn in this far the artwork comes apart into ${parts} pieces, and only the biggest one is cut. Bring the outset back toward 0 to keep them joined.`
+    :'';
+  warn.hidden=!warn.textContent;
   if(!b) return;
   [['gtCutW','w'],['gtCutH','h']].forEach(([id,k])=>{
     const el=document.getElementById(id);
@@ -36659,8 +36676,9 @@ function gtCutSetSize(k,want){
   const slope=(b1-b0)/(s0*0.25);
   if(!isFinite(slope)||slope<=0){ a.s=s0; return; }
   let s=Math.max(0.05,Math.min(10,s0+(want-b0)/slope));
-  const b2=at(s);
-  if(isFinite(b2)&&Math.abs(b2-want)>0.05) s=Math.max(0.05,Math.min(10,s+(want-b2)/slope));
+  // a couple more steps where smoothing bends the straight line a little
+  for(let i=0,b=at(s);i<3&&isFinite(b)&&Math.abs(b-want)>0.005;i++,b=at(s))
+    s=Math.max(0.05,Math.min(10,s+(want-b)/slope));
   a.s=s;
   gtArtWriteInputs(); gtArtChanged();
 }
@@ -49666,6 +49684,8 @@ window.addEventListener('resize',()=>{ if(mcWinEl.classList.contains('open')) mc
 
 // ---------- what is inside it ----------
 function mcWinRender(){
+  { const pn=document.getElementById('mcGtPanel');
+    if(pn&&pn.classList.contains('open')&&typeof mcGtWhy==='function') mcGtWhy('window redrawn'); }
   mcGtLiveRefresh=null;          // whatever the last body registered goes with it
   const it=mcItem(mcWinItem);
   if(!it){ mcWinEl.classList.remove('open'); return; }
@@ -51060,6 +51080,7 @@ function mcGiftWire(it){
   const words=document.getElementById('mcGtWords');
 
   const openPanel=on=>{
+    if(!on&&panel.classList.contains('open')) mcGtWhy('closed');
     panel.classList.toggle('open',on);
     box.setAttribute('aria-expanded',on?'true':'false');
     if(on) drawPanel(box.value);
@@ -51473,6 +51494,21 @@ function mcGiftWire(it){
 // every render of the window — a refresh bound to a body that has been
 // replaced would be drawing into elements that are gone.
 let mcGtLiveRefresh=null;
+// Says on screen, for fifteen seconds, why the design dropdown shut — it was
+// closing under the pointer and nothing said what had done it.
+function mcGtWhy(what){
+  try{
+    const names=(new Error().stack||'').split('\n').slice(2,8)
+      .map(l=>(/at (?:async )?([\w$.]+)/.exec(l)||[])[1]).filter(Boolean).join(' ← ');
+    let el=document.getElementById('mcGtWhy');
+    if(!el){ el=document.createElement('div'); el.id='mcGtWhy';
+      el.style.cssText='position:fixed;left:8px;right:8px;bottom:8px;z-index:99999;background:#222;'
+        +'color:#ffd;font:12px/1.4 monospace;padding:8px 10px;border-radius:8px;opacity:.95;';
+      document.body.appendChild(el); }
+    el.textContent='Dropdown closed — '+what+': '+names;
+    clearTimeout(el._t); el._t=setTimeout(()=>el.remove(),15000);
+  }catch(e){}
+}
 function mcGtLiveSync(){
   try{
     if(!mcGtHome||!mcWinItem||typeof mcGtLiveRefresh!=='function') return;
