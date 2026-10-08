@@ -33110,13 +33110,26 @@ function gtShapeGroups(){
 // ---------- nest by design ----------
 // MaxRects: free rectangles kept as placements are made, each tag put at the
 // highest, then leftmost, free place it fits.
-function gtNestBin(W,H){
+// How a free place is judged for a tag, lowest score winning (compared in pairs):
+// the topmost-leftmost one, or the one it fits tightest — by the free place's
+// area, by its shorter leftover side, or by its longer. Different mixes of tag
+// sizes pack best under different ones, so gtNestPlan tries them all.
+const GT_NEST_SCORE={
+  tl:(f,w,h)=>[f.y,f.x],
+  area:(f,w,h)=>[f.w*f.h-w*h,Math.min(f.w-w,f.h-h)],
+  short:(f,w,h)=>[Math.min(f.w-w,f.h-h),Math.max(f.w-w,f.h-h)],
+  long:(f,w,h)=>[Math.max(f.w-w,f.h-h),Math.min(f.w-w,f.h-h)]
+};
+function gtNestBin(W,H,mode){
   const E=1e-6; let free=[{x:0,y:0,w:W,h:H}];
+  const score=GT_NEST_SCORE[mode]||GT_NEST_SCORE.tl;
   return {add(w,h){
-    let best=null;
+    let best=null, bs=null;
     for(const f of free){
       if(w>f.w+E||h>f.h+E) continue;
-      if(!best||f.y<best.y-E||(Math.abs(f.y-best.y)<=E&&f.x<best.x-E)) best=f;
+      const s=score(f,w,h);
+      if(!best||s[0]<bs[0]-E||(Math.abs(s[0]-bs[0])<=E&&(s[1]<bs[1]-E
+        ||(Math.abs(s[1]-bs[1])<=E&&(f.y<best.y-E||(Math.abs(f.y-best.y)<=E&&f.x<best.x-E)))))){ best=f; bs=s; }
     }
     if(!best) return null;
     const P={x:best.x,y:best.y,w,h}, next=[];
@@ -33173,22 +33186,45 @@ function gtNestPlan(){
   const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
   const size=new Map(ids.map(id=>[id,gtNestSizeOf(gtDesign(id))]));
-  // tallest first, so shelves fill evenly; ties keep the order they were asked in
-  const items=q.map((line,i)=>({i,line,sz:size.get(line.designId)}))
-    .sort((a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i);
-  const pages=[];
-  let tooBig=0;
-  items.forEach(it=>{
-    const cw=Math.max(0.1,it.sz.w+gx), ch=Math.max(0.1,it.sz.h+gy);
-    let pos=null, pg=null;
-    for(const p of pages){ pos=p.bin.add(cw,ch); if(pos){ pg=p; break; } }
-    if(!pos){
-      pg={bin:gtNestBin(availW+gx,availH+gy),items:[]}; pages.push(pg);
-      pos=pg.bin.add(cw,ch);
-      if(!pos){ pos={x:0,y:0}; tooBig++; }
-    }
-    pg.items.push({it,pos});
+  // One heuristic leaves gaps another would have filled, so the order is packed
+  // several ways — tags sorted by height, area, width or longest side, each
+  // placed by topmost-leftmost or by tightest fit — and the packing with the
+  // fewest sheets wins; of those, the one that leaves the last sheet emptiest
+  // (the most paper saved). Ties keep the first tried, which is the old way.
+  const all=q.map((line,i)=>({i,line,sz:size.get(line.designId)}));
+  const orders=[
+    (a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i,
+    (a,b)=>b.sz.w*b.sz.h-a.sz.w*a.sz.h||b.sz.h-a.sz.h||a.i-b.i,
+    (a,b)=>b.sz.w-a.sz.w||b.sz.h-a.sz.h||a.i-b.i,
+    (a,b)=>Math.max(b.sz.w,b.sz.h)-Math.max(a.sz.w,a.sz.h)||b.sz.h-a.sz.h||a.i-b.i
+  ];
+  const packWith=(items,mode)=>{
+    const pages=[]; let tooBig=0;
+    items.forEach(it=>{
+      const cw=Math.max(0.1,it.sz.w+gx), ch=Math.max(0.1,it.sz.h+gy);
+      let pos=null, pg=null;
+      for(const p of pages){ pos=p.bin.add(cw,ch); if(pos){ pg=p; break; } }
+      if(!pos){
+        pg={bin:gtNestBin(availW+gx,availH+gy,mode),items:[]}; pages.push(pg);
+        pos=pg.bin.add(cw,ch);
+        if(!pos){ pos={x:0,y:0}; tooBig++; }
+      }
+      pg.items.push({it,pos});
+    });
+    const last=pages[pages.length-1];
+    let fill=0; last.items.forEach(({it})=>{ fill+=it.sz.w*it.sz.h; });
+    return {pages,tooBig,fill};
+  };
+  let packed=null;
+  orders.forEach(cmp=>{
+    const items=all.slice().sort(cmp);
+    Object.keys(GT_NEST_SCORE).forEach(mode=>{
+      const r=packWith(items,mode);
+      if(!packed||r.pages.length<packed.pages.length
+        ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)) packed=r;
+    });
   });
+  const pages=packed.pages, tooBig=packed.tooBig;
   const plan=pages.map((pg,at)=>{
     let uw=0,uh=0;
     pg.items.forEach(({it,pos})=>{ uw=Math.max(uw,pos.x+it.sz.w); uh=Math.max(uh,pos.y+it.sz.h); });
