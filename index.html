@@ -7007,6 +7007,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         <div class="calc" id="gtSlotScope" style="margin-bottom:9px;"></div>
         <div class="click-row" style="margin-bottom:9px;">
           <label class="click-tog" title="With several picked, a new width or height — typed, or dragged by a corner — goes onto every picked placeholder. Off, it changes only the one you touched."><input type="checkbox" id="gtSizeTogether" checked/>Resize picked together</label>
+          <label class="click-tog" title="Changing a placeholder's width or height leaves the artwork in it the size it is, instead of refitting it to the new placeholder."><input type="checkbox" id="gtKeepArt" checked/>Keep artwork size</label>
         </div>
 
         <div class="sect-label">Fine tune — bulk (blank = unchanged)</div>
@@ -32637,7 +32638,7 @@ let gtTraceLast=null;
 function gtFitRectOf(d,slot){
   const img=d&&gtImgGet(d.id);
   if(!img||!img.naturalWidth) return {x:slot.x,y:slot.y,w:slot.w,h:slot.h};
-  const f=gtFit(img.naturalWidth,img.naturalHeight,slot.w,slot.h);
+  const f=gtFitD(d,img.naturalWidth,img.naturalHeight,slot.w,slot.h);
   return {x:slot.x+f.x,y:slot.y+f.y,w:f.w,h:f.h};
 }
 // Where a line's artwork actually sits — the same rect the picture is drawn
@@ -32646,7 +32647,7 @@ function gtFitRectOf(d,slot){
 function gtArtRectOf(d,slot){
   const img=d&&gtImgGet(d.id);
   if(!img||!img.naturalWidth) return {x:slot.x,y:slot.y,w:slot.w,h:slot.h};
-  return gtArtDraw(d,gtFit(img.naturalWidth,img.naturalHeight,slot.w,slot.h),slot.x,slot.y);
+  return gtArtDraw(d,gtFitD(d,img.naturalWidth,img.naturalHeight,slot.w,slot.h),slot.x,slot.y);
 }
 
 // ---------- the cut file ----------
@@ -33148,6 +33149,34 @@ function gtFit(iw,ih,bw,bh){
   const w=iw*s,h=ih*s;
   return {w,h,x:(bw-w)/2,y:(bh-h)/2};
 }
+// The same fit for a design, which is not the picture's box where the design
+// is cut to its own traced outline: the cut line — the artwork's edge plus its
+// outset — has to lie inside the placeholder, or it runs into the next tag's.
+// So the picture is fitted until that line just fits, and set so the line
+// sits in the middle of the placeholder.
+const gtTraceBoxes=new WeakMap();
+function gtTraceBox(loop){
+  let b=gtTraceBoxes.get(loop);
+  if(!b){
+    b={u0:Infinity,v0:Infinity,u1:-Infinity,v1:-Infinity};
+    loop.forEach(([u,v])=>{ b.u0=Math.min(b.u0,u); b.u1=Math.max(b.u1,u); b.v0=Math.min(b.v0,v); b.v1=Math.max(b.v1,v); });
+    gtTraceBoxes.set(loop,b);
+  }
+  return b;
+}
+function gtFitD(d,iw,ih,bw,bh){
+  const t=d&&d.trace;
+  if(t&&t.on&&t.loop&&t.loop.length>3){
+    const bb=gtTraceBox(t.loop), pad=Math.max(0,Number(t.out)||0)+0.05;   // a hair over, for the smoothing
+    const cw=(bb.u1-bb.u0)*iw, ch=(bb.v1-bb.v0)*ih;
+    if(cw>0&&ch>0&&bw-2*pad>0&&bh-2*pad>0){
+      const s=Math.min((bw-2*pad)/cw,(bh-2*pad)/ch);
+      const w=iw*s, h=ih*s;
+      return {w,h,x:bw/2-(bb.u0+bb.u1)/2*w,y:bh/2-(bb.v0+bb.v1)/2*h};
+    }
+  }
+  return gtFit(iw,ih,bw,bh);
+}
 // where a design's artwork lands inside one placeholder, and where one of its
 // text boxes lands inside that — the same sums the sheet is drawn with, kept
 // here so the pointer can be tested against them
@@ -33155,7 +33184,7 @@ function gtTagArt(line,slot){
   const d=gtDesign(line.designId);
   const img=d&&gtImgGet(d.id);
   if(img&&img.naturalWidth){
-    const f=gtFit(img.naturalWidth,img.naturalHeight,slot.w,slot.h);
+    const f=gtFitD(d,img.naturalWidth,img.naturalHeight,slot.w,slot.h);
     return {x:slot.x+f.x,y:slot.y+f.y,w:f.w,h:f.h};
   }
   return {x:slot.x,y:slot.y,w:slot.w,h:slot.h};
@@ -33460,7 +33489,7 @@ function gtClipToTrace(ctx,d,r,b,sc){
 }
 function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   const B=box||{x,y,w,h};
-  const f=gtFit(img.naturalWidth,img.naturalHeight,B.w,B.h);
+  const f=design?gtFitD(design,img.naturalWidth,img.naturalHeight,B.w,B.h):gtFit(img.naturalWidth,img.naturalHeight,B.w,B.h);
   const r=gtArtDraw({art},f,B.x,B.y);
   // artwork that came in as a PDF is not drawn on the sheet at all: its own
   // page is placed under this render, at exactly this rectangle
@@ -33523,7 +33552,7 @@ function gtPunchMask(img,wpx,hpx){
 function gtTextRect(d,x,y,w,h){
   const img=d&&gtImgGet(d.id);
   if(!img||!img.naturalWidth) return {x,y,w,h};
-  const f=gtFit(img.naturalWidth,img.naturalHeight,w,h);
+  const f=gtFitD(d,img.naturalWidth,img.naturalHeight,w,h);
   return {x:x+f.x,y:y+f.y,w:f.w,h:f.h};
 }
 function gtDrawTag(ctx,line,x,y,w,h,sc,forExport,vec){
@@ -34189,7 +34218,8 @@ function gtSheetDrag(c,side){
       // pulled by the corner, the others picked with it grow by the same amount
       const rgroup=s.corner&&document.getElementById('gtSizeTogether').checked
         ?gtSheet.slots.filter(x=>x!==s.slot&&gtSelSet.has(x.id)).map(x=>({s:x,w:x.w,h:x.h})):[];
-      sdrag={slot:s.slot,mode:s.corner?'resize':'move',group,rgroup,
+      const keep=s.corner?[s.slot,...rgroup.map(g=>g.s)].map(q=>({slot:q,w:q.w,h:q.h,s:gtScaleOf(q)})):[];
+      sdrag={slot:s.slot,mode:s.corner?'resize':'move',group,rgroup,keep,
              px:p.mx,py:p.my,x:s.slot.x,y:s.slot.y,w:s.slot.w,h:s.slot.h};
       try{ c.setPointerCapture(e.pointerId); }catch(err){}
       gtDraw();
@@ -34267,6 +34297,7 @@ function gtSheetDrag(c,side){
           g.s.w=Math.max(2,round(g.w+p.mx-sdrag.px));
           g.s.h=Math.max(2,round(g.h+p.my-sdrag.py));
         });
+        gtKeepArtSize(sdrag.keep);
       }
       gtDraw();
       return;
@@ -34431,7 +34462,7 @@ function gtDesignPanel(q,sel){
 function gtArtBox(id){
   const t=gtTagBox(), img=gtImgGet(id);
   if(img&&img.naturalWidth){
-    const f=gtFit(img.naturalWidth,img.naturalHeight,t.w,t.h);
+    const f=gtFitD(gtDesign(id),img.naturalWidth,img.naturalHeight,t.w,t.h);
     return {w:f.w,h:f.h};
   }
   return {w:t.w,h:t.h};
@@ -35206,6 +35237,35 @@ document.getElementById('gtPackBtn').addEventListener('click',()=>{
   gtSlotToolMsg(onDot?'⚠ A placeholder now covers a registration dot — the cutter will not find it. A bigger margin, fewer placeholders, or smaller gutters.'
     :`✓ ${list.length} placeholder${list.length===1?'':'s'} packed into ${round(best.uw)} × ${round(best.uh)} mm`,!onDot);
 });
+// The design a placeholder is holding on the sheet shown, if it holds one.
+function gtSlotDesign(slot){
+  const i=gtSheet.slots.indexOf(slot); if(i<0) return null;
+  const per=gtSheet.slots.length;
+  const at=gtPageAt(gtPage), q=at?at.queue:gtQueue(), start=at?at.start:gtPage*per;
+  const line=q[start+i];
+  return line?gtDesign(line.designId):null;
+}
+// How big the artwork is drawn in a placeholder of this size, as a width.
+function gtArtWidthIn(d,w,h){
+  const img=gtImgGet(d.id);
+  return img&&img.naturalWidth?gtFitD(d,img.naturalWidth,img.naturalHeight,w,h).w:null;
+}
+// Placeholders being made bigger or smaller refit their artwork to the new
+// size. With Keep artwork size on, the design's own scale takes up the
+// difference, so what is drawn stays the size it was. `was` is each placeholder
+// as it stood: {slot,w,h,s} with s the design's scale back then.
+function gtKeepArtSize(was){
+  if(!document.getElementById('gtKeepArt').checked) return;
+  const done=new Set();
+  was.forEach(k=>{
+    const d=gtSlotDesign(k.slot); if(!d||done.has(d.id)) return;
+    const a=gtArtWidthIn(d,k.w,k.h), b=gtArtWidthIn(d,k.slot.w,k.slot.h);
+    if(!(a>0&&b>0)) return;
+    done.add(d.id);
+    (d.art||(d.art={s:1,dx:0,dy:0})).s=(k.s!=null?k.s:(Number(d.art.s)||1))*a/b;
+  });
+}
+const gtScaleOf=slot=>{ const d=gtSlotDesign(slot); return d?(Number(d.art&&d.art.s)||1):null; };
 // Fine tune — bulk: the numbers typed once, onto every placeholder or the
 // selected ones. Blank leaves that one alone.
 function gtBulkApply(list){
@@ -35213,11 +35273,13 @@ function gtBulkApply(list){
   const X=v('gtBulkX'), Y=v('gtBulkY'), W=v('gtBulkW'), H=v('gtBulkH'), R=v('gtBulkR');
   if(X==null&&Y==null&&W==null&&H==null&&R==null) return gtSlotToolMsg('Type at least one of X, Y, W, H, corner R.',false);
   if(!list.length) return gtSlotToolMsg('Nothing selected — tick some placeholders first.',false);
+  const was=list.map(s=>({slot:s,w:s.w,h:s.h,s:gtScaleOf(s)}));
   list.forEach(s=>{
     if(X!=null) s.x=X; if(Y!=null) s.y=Y;
     if(W!=null) s.w=Math.max(1,W); if(H!=null) s.h=Math.max(1,H);
     if(R!=null) s.r=Math.max(0,R);
   });
+  if(W!=null||H!=null) gtKeepArtSize(was);
   gtSlotsChanged();
   const S=gtSheet, off=list.filter(s=>s.x<0||s.y<0||s.x+s.w>S.paperW||s.y+s.h>S.paperH).length;
   gtSlotToolMsg(off?`⚠ ${list.length} changed — ${off} now run${off===1?'s':''} off the sheet.`
@@ -35315,17 +35377,20 @@ document.getElementById('gtSlotList').addEventListener('input',e=>{
     gtDraw(); gtSaveSoon(); return;
   }
   const k=e.target.dataset.gts; if(!k) return;
+  const was=[{slot:s,w:s.w,h:s.h,s:gtScaleOf(s)}];
   if(isFinite(v)) s[k]=(k==='w'||k==='h')?Math.max(1,v):v;
   // a size typed on one picked card goes onto every picked one
   if(isFinite(v)&&(k==='w'||k==='h')&&gtSelSet.size>1&&gtSelSet.has(s.id)
      &&document.getElementById('gtSizeTogether').checked){
     gtSheet.slots.forEach(q=>{
       if(q===s||!gtSelSet.has(q.id)) return;
+      was.push({slot:q,w:q.w,h:q.h,s:gtScaleOf(q)});
       q[k]=s[k];
       const box=document.querySelector(`#gtSlotList [data-gt-slot="${q.id}"] [data-gts="${k}"]`);
       if(box) box.value=round(q[k]);
     });
   }
+  if(isFinite(v)&&(k==='w'||k==='h')) gtKeepArtSize(was);
   gtDraw(); gtSaveSoon();
 });
 document.getElementById('gtSlotList').addEventListener('click',e=>{
@@ -36123,7 +36188,7 @@ function gtEditGeom(){
   // the artwork rect inside it — every field is a fraction of this, not of the tag
   let art={x:0,y:0,w:T.w,h:T.h}, draw=art;
   if(img&&img.naturalWidth){
-    const f=gtFit(img.naturalWidth,img.naturalHeight,T.w,T.h);
+    const f=gtFitD(d,img.naturalWidth,img.naturalHeight,T.w,T.h);
     art={x:f.x,y:f.y,w:f.w,h:f.h};
     // where the picture goes once this design's own scale and nudge are in;
     // the words stay against `art`, exactly as they do on the sheet
