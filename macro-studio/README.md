@@ -474,7 +474,8 @@ the agent starts; it is per PC and not committed):
 {
   "enabled": true,
   "origins": ["https://wakawakajas.github.io"],
-  "roots": ["C:\\NAS Folders\\Partymonkey NAS\\Pigu"]
+  "roots": ["C:\\NAS Folders\\Partymonkey NAS\\Pigu"],
+  "dev_origins": false
 }
 ```
 
@@ -483,10 +484,17 @@ the agent starts; it is per PC and not committed):
   inside a root, or one inside that. A name that matches **more than one**
   folder is refused rather than picked between, so the wrong library never
   appears -- Pigu then asks for the folder as before.
-- Only the `origins` listed (plus `http://localhost` / `http://127.0.0.1` pages)
-  may ask, and a request naming the wrong `Host` or coming from another site's
-  `<img>` is refused, so another page open in the same browser cannot read the
-  files. Every path is kept inside the folder it was asked under.
+- Only the `origins` listed may ask (`dev_origins` also lets pages on
+  `http://localhost` / `http://127.0.0.1` ask -- for trying a change to Pigu
+  before it is pushed; leave it off otherwise), and a request naming the wrong
+  `Host` or coming from another site's `<img>` is refused, so another page open
+  in the same browser cannot read the files.
+- Pigu is handed a random token for the one folder it asked for, not a path, so
+  it can read inside that folder and nowhere else under `roots`. A junction or
+  shortcut that leads out of the folder is not listed and cannot be read.
+  Tokens are forgotten when the agent restarts; Pigu opens the folder again.
+- A `folders.json` that cannot be read switches the feature **off**, and the
+  agent will not overwrite it.
 - The first time Pigu reaches the agent, Chrome asks whether the site may
   connect to apps on this PC. Allow it once; Chrome remembers.
 - `GET /api/folders/ping` says whether it is on. `list` and `file` are what Pigu

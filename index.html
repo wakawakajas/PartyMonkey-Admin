@@ -29409,14 +29409,26 @@ let mcSummaryPickFor=null;
 // rather than to put a design on a sheet. The two are never both set: one adds
 // artwork to a sheet, the other writes a path onto the shop's routing.
 let mcRoutePickFor=null;
+// One read at a time: asking the agent takes a moment, and a second caller
+// arriving meanwhile used to start its own and then clear the list the first
+// caller's scan had just filled.
+let ldGetJob=null, ldGetFor='';
 async function loadDesignDirGet(){
   const m=ldActiveMode();
-  if(!loadDesignDirRead||loadDesignDirMode!==m){
-    loadDesignDir=await ldAgentFor(await gtIdbGet(ldDirKey()).catch(()=>null)||null);
-    // the scanned set belonged to the other mode's folder
-    loadDesignFiles=[]; loadDesignFonts=[]; loadDesignSelected=null;
-    loadDesignDirRead=true; loadDesignDirMode=m;
+  if(loadDesignDirRead&&loadDesignDirMode===m) return loadDesignDir;
+  if(!ldGetJob||ldGetFor!==m){
+    ldGetFor=m;
+    const job=ldGetJob=(async()=>{
+      const d=await ldAgentFor(await gtIdbGet(ldDirKey()).catch(()=>null)||null);
+      // a folder chosen while this was being read (loadDesignDirSet) is newer
+      if(loadDesignDirRead&&loadDesignDirMode===m) return;
+      loadDesignDir=d;
+      // the scanned set belonged to the other mode's folder
+      loadDesignFiles=[]; loadDesignFonts=[]; loadDesignSelected=null;
+      loadDesignDirRead=true; loadDesignDirMode=m;
+    })().finally(()=>{ if(ldGetJob===job) ldGetJob=null; });
   }
+  await ldGetJob;
   return loadDesignDir;
 }
 async function loadDesignDirSet(dir){
@@ -30102,28 +30114,54 @@ async function gtIdbPut(k,v){
 // connected" whenever something wants to write, which is when the real
 // permission is asked for, as it always was.
 const MS_AGENT='http://127.0.0.1:8756/api/folders';
-let msDownUntil=0;                      // the agent did not answer: not asked again for a few seconds
+let msDownUntil=0;                      // nobody answered: not asked again for a few seconds
 async function msGet(route,params,ms){
   if(Date.now()<msDownUntil) throw new Error('Macro Studio is not running');
-  const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),ms||5000);
+  const ctl=new AbortController(), timer=setTimeout(()=>ctl.abort(),ms||15000);
   try{
     // targetAddressSpace: Chrome asks once, in words, whether this site may
     // reach apps on this PC; the answer is remembered with the site's settings
     return await fetch(MS_AGENT+route+'?'+new URLSearchParams(params).toString(),
       {signal:ctl.signal,cache:'no-store',targetAddressSpace:'loopback'});
-  }catch(e){ msDownUntil=Date.now()+15000; throw e; }
-  finally{ clearTimeout(timer); }
+  }catch(e){
+    // only "nobody is there" switches it off for a while. A slow answer (the
+    // timer above) is one request's trouble, not every other read's.
+    if(!(e&&e.name==='AbortError')) msDownUntil=Date.now()+15000;
+    throw e;
+  }finally{ clearTimeout(timer); }
 }
 const msErr=(name,msg)=>{ try{ return new DOMException(msg,name); }catch(e){ const x=new Error(msg); x.name=name; return x; } };
 const msJoin=(a,b)=>a?a+'/'+b:b;
 const msJsonCache=new Map();            // small library files, kept while their date and size are the same
+// One opened folder: the agent's token for it, and the folders inside it already
+// met (so a hundred reads from designs/ share one listing, not a hundred).
+async function msOpen(name){
+  try{
+    const r=await msGet('/open',{name});
+    if(!r.ok) return null;
+    const j=await r.json();
+    return j&&j.ok&&j.id?{id:j.id,name,dirs:new Map()}:null;
+  }catch(e){ return null; }
+}
+// A request inside an opened folder. The agent forgets its tokens when it
+// restarts (410): the folder is opened again by name and the request repeated.
+async function msAsk(ref,route,params,ms){
+  let r=await msGet(route,{id:ref.id,...params},ms);
+  if(r.status===410){
+    const again=await msOpen(ref.name);
+    if(!again) return r;
+    ref.id=again.id;
+    r=await msGet(route,{id:ref.id,...params},ms);
+  }
+  return r;
+}
 class MsFile{
   constructor(dir,name,meta){ this.kind='file'; this.name=name; this._dir=dir; this._meta=meta||null; this.__ro=true; this.__noClone=()=>{}; }
   async getFile(){
-    const path=msJoin(this._dir.path,this.name), m=this._meta;
-    const key=m&&/\.json$/i.test(this.name)&&m.size<2e6?this._dir.id+'|'+path+'|'+m.mtime+'|'+m.size:null;
+    const path=msJoin(this._dir.path,this.name), m=this._meta, ref=this._dir.ref;
+    const key=m&&/\.json$/i.test(this.name)&&m.size<2e6?ref.name+'|'+path+'|'+m.mtime+'|'+m.size:null;
     if(key&&msJsonCache.has(key)) return msJsonCache.get(key);
-    const r=await msGet('/file',{id:this._dir.id,path},60000);
+    const r=await msAsk(ref,'/file',{path},60000);
     if(r.status===404) throw msErr('NotFoundError','not found');
     if(!r.ok) throw new Error('Macro Studio could not read '+this.name+' ('+r.status+')');
     const blob=await r.blob();
@@ -30133,31 +30171,42 @@ class MsFile{
     return file;
   }
   async createWritable(){ throw msErr('NotAllowedError','read-only'); }
-  async isSameEntry(o){ return !!o&&o.kind==='file'&&o.name===this.name&&o._dir&&o._dir.id===this._dir.id&&o._dir.path===this._dir.path; }
+  async isSameEntry(o){ return !!o&&o.kind==='file'&&o.name===this.name&&!!o._dir&&o._dir.ref===this._dir.ref&&o._dir.path===this._dir.path; }
   async queryPermission(){ return 'granted'; }
   async requestPermission(){ return 'granted'; }
 }
 class MsDir{
-  constructor(id,path,name,entries){
-    this.kind='directory'; this.id=id; this.path=path; this.name=name; this.__ro=true;
-    this._entries=entries?{at:Date.now(),list:entries}:null;
+  constructor(ref,path,name){
+    this.kind='directory'; this.ref=ref; this.path=path; this.name=name; this.__ro=true;
+    this._entries=null; this._job=null;
     // a structured clone drops methods, which would store this as a plain
     // object where a folder handle was; a function property makes the clone fail
     // instead, so it can never be saved in place of the real handle
     this.__noClone=()=>{};
   }
-  async _list(){
-    if(this._entries&&Date.now()-this._entries.at<3000) return this._entries.list;
-    const r=await msGet('/list',{id:this.id,path:this.path});
-    if(r.status===404) throw msErr('NotFoundError','not found');
-    if(!r.ok) throw new Error('Macro Studio could not list '+(this.name||'the folder')+' ('+r.status+')');
-    const list=(await r.json()).entries||[];
-    this._entries={at:Date.now(),list};
-    return list;
+  // the listing, kept three seconds and asked for once however many want it
+  _list(){
+    if(this._entries&&Date.now()-this._entries.at<3000) return Promise.resolve(this._entries.list);
+    if(this._job) return this._job;
+    const job=this._job=(async()=>{
+      const r=await msAsk(this.ref,'/list',{path:this.path});
+      if(r.status===404) throw msErr('NotFoundError','not found');
+      if(!r.ok) throw new Error('Macro Studio could not list '+(this.name||'the folder')+' ('+r.status+')');
+      const list=(await r.json()).entries||[];
+      this._entries={at:Date.now(),list};
+      return list;
+    })().finally(()=>{ if(this._job===job) this._job=null; });
+    return job;
+  }
+  _sub(name){
+    const path=msJoin(this.path,name);
+    let d=this.ref.dirs.get(path);
+    if(!d){ d=new MsDir(this.ref,path,name); this.ref.dirs.set(path,d); }
+    return d;
   }
   async *values(){
     for(const e of await this._list()){
-      yield e.kind==='directory'?new MsDir(this.id,msJoin(this.path,e.name),e.name):new MsFile(this,e.name,e);
+      yield e.kind==='directory'?this._sub(e.name):new MsFile(this,e.name,e);
     }
   }
   async *entries(){ for await(const h of this.values()) yield [h.name,h]; }
@@ -30165,7 +30214,7 @@ class MsDir{
   [Symbol.asyncIterator](){ return this.entries(); }
   async getDirectoryHandle(name,opts){
     if(opts&&opts.create) throw msErr('NotAllowedError','read-only');
-    const d=new MsDir(this.id,msJoin(this.path,name),name);
+    const d=this._sub(name);
     await d._list();                   // a missing folder is the NotFoundError callers expect
     return d;
   }
@@ -30174,7 +30223,13 @@ class MsDir{
     return new MsFile(this,name,null);
   }
   async removeEntry(){ throw msErr('NotAllowedError','read-only'); }
-  async isSameEntry(o){ return !!o&&o.kind==='directory'&&o.id===this.id&&o.path===this.path; }
+  async isSameEntry(o){
+    if(!o||o.kind!=='directory') return false;
+    if(o.ref) return o.ref===this.ref&&o.path===this.path;
+    // a real handle carries no path to compare. The agent opens a name only when
+    // exactly one folder under its roots has it, so the name is what there is.
+    return o.name===this.name;
+  }
   async queryPermission(){ return 'granted'; }
   async requestPermission(){ return 'granted'; }
 }
@@ -30184,12 +30239,10 @@ class MsDir{
 async function msDirFor(name){
   name=String(name||'').trim();
   if(!name) return null;
+  const ref=await msOpen(name);
+  if(!ref) return null;
   try{
-    const r=await msGet('/open',{name});
-    if(!r.ok) return null;
-    const j=await r.json();
-    if(!j||!j.ok||!j.id) return null;
-    const d=new MsDir(j.id,'',name);
+    const d=new MsDir(ref,'',name);
     await d._list();
     return d;
   }catch(e){ return null; }
@@ -30370,7 +30423,9 @@ async function gtBackupLib(){
       await gtDir.removeEntry(n).catch(()=>{});
   }catch(e){}
 }
-let gtSaveWarned=false, gtRoWarned=false;
+let gtSaveWarned=false;
+// true while the library on screen was read through Macro Studio (see gtSaveLib)
+let gtLibFromAgent=false;
 // Would this write empty a library that is not empty? Nothing in the app asks
 // for that — a design or a phrase is deleted one at a time, and a library with
 // nothing left in it is a library nobody was working in. It is the shape every
@@ -30414,13 +30469,14 @@ async function gtSaveLib(){
   // is written — not to the folder, and not to this browser's own copy either,
   // which is the trap the checks above exist for. Connecting the real folder
   // (Choose folder, or any upload) puts the library back into one that saves.
-  if(gtDir&&gtDir.__ro){
-    if(!gtRoWarned){
-      gtRoWarned=true;
-      const m=document.getElementById('gtLibMsg');
-      if(m) showMsg(m,'This library is open read-only (Macro Studio is supplying it). Changes are '
-        +'not saved — connect the folder under Choose folder to edit it.',false);
-    }
+  // gtLibFromAgent covers the moments gtDir has been let go of (Forget folder,
+  // the name box cleared, a page switch) while what is on screen is still the
+  // library the agent supplied: with no folder, the write below would put that
+  // whole library into this browser's own copy over whatever it held.
+  if((gtDir&&gtDir.__ro)||(gtLibFromAgent&&!(gtDir&&!gtDir.__ro))){
+    const m=document.getElementById('gtLibMsg');
+    if(m) showMsg(m,'This library is open read-only (Macro Studio is supplying it), so this change is '
+      +'NOT saved — connect the folder under Choose folder to edit it.',false);
     return;
   }
   try{ await gtPiguFieldsSave(); }catch(e){}
@@ -30838,7 +30894,7 @@ async function gtLoadLibRead(){
   Object.assign(gtSheet,JSON.parse(JSON.stringify(GT_SHEET_NEW)));
   gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
   let man=null;
-  gtLibLoaded=false; gtSaveWarned=false;
+  gtLibLoaded=false; gtSaveWarned=false; gtLibFromAgent=false;
   gtLibDiskText=null; gtLibBase=gtShapeMan({}); gtStamps={}; gtGone={}; gtBorn=0;
   // A folder is connected but will not open — permission not given back after
   // a reload, the NAS asleep. Falling through to the browser's own copy here
@@ -30863,6 +30919,7 @@ async function gtLoadLibRead(){
       gtLibDiskText=all.sig; gtLibBase=gtShapeMan(man); gtStamps=all.stamps; gtGone=all.gone;
       gtBorn=all.born;
       gtLibLoaded=true;
+      gtLibFromAgent=!!gtDir.__ro;
     }catch(e){
       man=null;
       gtLibLoaded=false;
@@ -30896,7 +30953,7 @@ async function gtLoadLibRead(){
     const onlyHere=Object.keys(local).some(k=>!(k in shared));
     Object.assign(local,shared);
     await gtIdbPut('piguFields',Object.assign({},local)).catch(()=>{});
-    if(onlyHere&&gtDir&&gtLibLoaded) gtSaveSoon();
+    if(onlyHere&&gtDir&&!gtDir.__ro&&gtLibLoaded) gtSaveSoon();
   }
   gtLib.designs=(man.designs||[]).map(gtNormalizeDesign);
   gtLib.fonts=man.fonts||[];
@@ -31666,7 +31723,7 @@ async function gtLoadSavedDir(){
 // Never stored: gtDirKey keeps the real handle, this only stands in for reading.
 async function gtReadViaAgent(name){
   const d=await msDirFor(name);
-  if(d){ gtDir=d; gtFolderPending=false; gtRoWarned=false; }
+  if(d){ gtDir=d; gtFolderPending=false; }
 }
 async function gtPiguDirGet(){
   if(!gtPiguRead){ gtPiguDir=await gtIdbGet('piguDir').catch(()=>null)||null; gtPiguRead=true; }
@@ -46809,8 +46866,11 @@ let mcGtShut={};                 // mode -> true where the folder would not open
 async function mcGtReadNames(page){
   mcGtShut[page.mode]=false;
   try{
-    const dir=await gtIdbGet(page.dir).catch(()=>null);
+    let dir=await gtIdbGet(page.dir).catch(()=>null);
     if(dir){
+      // not given back by the browser: the same folder through Macro Studio, if
+      // it can show it. Only its names are read here; nothing is kept or saved.
+      if(!await gtDirOk(dir)) dir=(await msDirFor(dir.name))||dir;
       if(await gtDirOk(dir)){
         const man=(await gtReadAll(dir)).man||{};
         return (man.designs||[]).map(d=>({id:d.id,name:d.name}));
