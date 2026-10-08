@@ -17,6 +17,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="theme-color" content="#191A1C" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <style>
@@ -6828,6 +6829,17 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
 
         <!-- Unlike the two above, these are printed: the camera on the cutter
              has to find them on the paper before it drops the blade. -->
+        <div class="sect-label">QR code for the cutter</div>
+        <p class="hint">A QR code of the sheet's number, with the number beside it, printed above the bottom-right dot. Every sheet takes the next number, and its cut file (.plt) is named by it.</p>
+        <div class="click-row">
+          <label class="click-tog"><input type="checkbox" id="gtQrOn"/>Print a QR code with each sheet's number</label>
+        </div>
+        <div class="grid2" style="margin-top:9px;">
+          <label class="field"><span>NEXT NUMBER</span><input type="number" step="1" min="0" id="gtQrNext" value="990001"/></label>
+          <label class="field"><span>ABOVE THE DOT (mm)</span><input type="number" step="0.5" min="2" id="gtQrDist" value="10"/></label>
+        </div>
+        <div class="calc" id="gtQrCalc" style="margin-top:8px;"></div>
+
         <div class="sect-label">Registration dots</div>
         <p class="hint">Four black dots, one inside each corner, printed on the sheet. The cutter's camera finds them and the .plt saved beside the PDF is measured from the bottom-right one — so what is printed and where the blade goes are the same number.</p>
         <!-- not offered: the dots are never printed by the app — the base layer
@@ -33234,6 +33246,15 @@ function gtDotBlocks(x0,y0,W,H,pad,flipY){
     const ax=Math.max(0,bx), ay=Math.max(0,by);
     out.push({x:ax,y:ay,w:Math.min(W,bx+w)-ax,h:Math.min(H,by+h)-ay});
   });
+  // the QR code and its number are kept clear the same way
+  const qb=gtQrBox();
+  if(qb){
+    const bx=qb.x-pad-x0, w=qb.w+2*pad, h=qb.h+2*pad, by=flipY?(y0-(qb.y+qb.h+pad)):(qb.y-pad-y0);
+    if(!(bx>=W||by>=H||bx+w<=0||by+h<=0)){
+      const ax=Math.max(0,bx), ay=Math.max(0,by);
+      out.push({x:ax,y:ay,w:Math.min(W,bx+w)-ax,h:Math.min(H,by+h)-ay});
+    }
+  }
   return out;
 }
 // MaxRects: free rectangles kept as placements are made, each tag put at the
@@ -33494,7 +33515,7 @@ function gtNestPlan(){
             t&&t.on&&t.loop?[t.out,t.sm,t.loop.length]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
-  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,marks]);
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,marks,S.qrOn?(Number(S.qrDist)||10):0]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
   const size=new Map(ids.map(id=>[id,gtNestSizeOf(gtDesign(id))]));
   const dotBlocks=gtDotBlocks(x0,y0,availW+gx,availH+gy,1+Math.max(0,-gx,-gy));
@@ -34175,6 +34196,72 @@ function gtDrawBack(ctx,line,x,y,w,h,sc,forExport,vec){
   }
 }
 // the sheet's base layer, drawn over the tags (see gtRenderPage)
+// ---------- the QR code the cutter reads ----------
+// The number of a sheet: the next free one, counting on from there page by page.
+// Spent when the sheets are exported, so what was printed is never printed again.
+const GT_QR_FIRST=990001, GT_QR_SIZE=10, GT_QR_TEXT=2.4;
+const gtQrNumber=page=>(Math.max(0,Math.floor(Number(gtSheet.qrNext))||GT_QR_FIRST))+Math.max(0,page|0);
+// Where it goes: centred above the bottom-right dot, that far from the dot's
+// centre, with the number turned up the page to the right of it. The box that
+// takes — code and number — in sheet millimetres, or null where it is off.
+function gtQrBox(){
+  const S=gtSheet; if(!S.qrOn) return null;
+  const m=gtMarks()||[], d=m[1]||{cx:S.paperW-(Number(S.markInset)||10),cy:S.paperH-(Number(S.markInset)||10),r:2.5};
+  // over the dot — moved in only as far as it takes to keep the number on the paper
+  const cx=Math.min(d.cx,S.paperW-(GT_QR_SIZE/2+2+GT_QR_TEXT*0.5+1)), cy=d.cy-Math.max(GT_QR_SIZE/2,Number(S.qrDist)||10);
+  const half=GT_QR_SIZE/2;
+  return {cx,cy,x:cx-half,y:cy-half,w:GT_QR_SIZE+2+GT_QR_TEXT*0.5+1.2,h:GT_QR_SIZE};
+}
+function gtDrawQr(ctx,sc,page){
+  const B=gtQrBox(); if(!B||typeof qrcode!=='function') return;
+  const num=String(gtQrNumber(page));
+  const qr=qrcode(0,'M'); qr.addData(num); qr.make();
+  const n=qr.getModuleCount(), mod=GT_QR_SIZE/n, x0=B.cx-GT_QR_SIZE/2, y0=B.cy-GT_QR_SIZE/2;
+  ctx.save();
+  ctx.fillStyle='#000';
+  for(let r=0;r<n;r++) for(let c=0;c<n;c++){
+    if(!qr.isDark(r,c)) continue;
+    // the code lies turned half way round, as the cutter's own sheets carry it: its
+    // three squares are at the top right, bottom left and bottom right
+    const rr=n-1-r, cc=n-1-c;
+    // edges snapped to whole device pixels, so neighbouring modules never leave a hairline
+    const xa=Math.floor((x0+cc*mod)*sc), xb=Math.ceil((x0+(cc+1)*mod)*sc);
+    const ya=Math.floor((y0+rr*mod)*sc), yb=Math.ceil((y0+(rr+1)*mod)*sc);
+    ctx.fillRect(xa,ya,xb-xa,yb-ya);
+  }
+  // the number, turned a quarter so it reads up the page, in the middle of the code's height
+  ctx.translate((B.cx+GT_QR_SIZE/2+2)*sc,B.cy*sc); ctx.rotate(-Math.PI/2);
+  ctx.font=`${GT_QR_TEXT*sc}px Arial, Helvetica, sans-serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(num,0,0);
+  ctx.restore();
+}
+function gtQrSync(){
+  const on=document.getElementById('gtQrOn'); if(!on) return;
+  on.checked=!!gtSheet.qrOn;
+  const nx=document.getElementById('gtQrNext'), ds=document.getElementById('gtQrDist');
+  if(document.activeElement!==nx) nx.value=Math.floor(Number(gtSheet.qrNext))||GT_QR_FIRST;
+  if(document.activeElement!==ds) ds.value=Number(gtSheet.qrDist)||10;
+  const calc=document.getElementById('gtQrCalc');
+  if(calc){
+    let pages=1; try{ pages=Math.max(1,gtPageCount()); }catch(e){}
+    const a=gtQrNumber(0), z=gtQrNumber(pages-1);
+    calc.textContent=gtSheet.qrOn
+      ? (typeof qrcode==='function'
+          ? `This order: ${pages===1?a:a+' to '+z}. Each cut file is saved as its number.`
+          : '⚠ The QR code library has not loaded — check the connection and reload.')
+      : 'Off — cut files are named by order, as before.';
+  }
+}
+document.getElementById('gtQrOn').addEventListener('change',e=>{ gtSheet.qrOn=e.target.checked; gtNestCache=null; gtQrSync(); gtRenderSlots(); gtDraw(); gtSaveSoon(); });
+document.getElementById('gtQrNext').addEventListener('input',e=>{
+  const v=Math.floor(parseFloat(e.target.value));
+  if(isFinite(v)&&v>=0){ gtSheet.qrNext=v; gtQrSync(); gtDraw(); gtSaveSoon(); }
+});
+document.getElementById('gtQrDist').addEventListener('input',e=>{
+  const v=parseFloat(e.target.value);
+  if(isFinite(v)&&v>=2){ gtSheet.qrDist=v; gtNestCache=null; gtDraw(); gtSaveSoon(); }
+});
 function gtDrawBase(ctx,sc){
   const base=gtBaseRect(); if(!base) return;
   ctx.save(); ctx.globalCompositeOperation='multiply';
@@ -34240,6 +34327,8 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   // With artwork placed under the render the base is the PDF's own layer over
   // it all instead (gtBaseOver), so it does not cover the placed pages.
   if(!vec&&!back) gtDrawBase(ctx,sc);
+  // the sheet's number, as a QR code, on the front only
+  if(!back) try{ gtDrawQr(ctx,sc,page); }catch(e){}
   // the boxes of the line being worked on, because they are dragged here —
   // the side's own boxes, where that side has its tag
   if(!forExport&&gtSelLine) SL.forEach((slot,i)=>{
@@ -35467,6 +35556,7 @@ document.getElementById('gtLayoutActualBtn').addEventListener('click',()=>{
 });
 function gtWriteSheetInputs(){
   try{ gtNestSync(); }catch(e){}
+  try{ gtQrSync(); }catch(e){}
   [...GT_SHEET_FIELDS,...GT_GRID_FIELDS].forEach(([id,key])=>{
     const v=gtSheet[key];
     document.getElementById(id).value=(key==='gridCols'||key==='gridRows')&&!v?''
@@ -38151,6 +38241,11 @@ function gtSheetLines(at){
 // A sheet with no order ID at all (made on the gift tag screen, not from a
 // Magic Create batch) is named for its first design instead, so it still saves.
 function gtPltSheetName(at){
+  // with the QR code on, a sheet's cut file is named by the number printed on it
+  if(gtSheet.qrOn&&at){
+    const pl=gtPagePlan(), i=pl.findIndex(p=>p.shape===at.shape&&p.at===at.at);
+    if(i>=0) return String(gtQrNumber(i));
+  }
   const ls=gtSheetLines(at);
   const ids=[...new Set(ls.map(gtLineOrderId).filter(Boolean))];
   let base=ids.map(x=>x.slice(-4)).join('_');
@@ -38332,6 +38427,8 @@ async function gtExport(print){
       else downloadBlob(new Blob([b],{type:'application/pdf'}),name);
     };
     await save(filename,bytes);
+    // these numbers are on paper now; the next export starts after them
+    if(S.qrOn){ S.qrNext=gtQrNumber(pages); gtQrSync(); gtSaveSoon(); }
     // spaced a little, as the cut files are: a browser drops the second of a burst
     if(backBytes){ if(!dir) await new Promise(r=>setTimeout(r,400)); await save(backName,backBytes); }
     // One cut file per sheet, because that is how the cutter is fed: a sheet is
