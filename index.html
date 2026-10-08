@@ -6712,7 +6712,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           </div>
         </div>
         <canvas id="gtCanvas"></canvas>
-        <p class="hint" id="gtContourHint" style="visibility:hidden;margin:6px 0 0;">Tap a cut line to pick it up, drag it to move it, drag its bottom-right corner to resize it. Shift-click picks several, which then drag, nudge (arrow keys) and delete together. Drag a punch hole and every hole moves with it. The numbers under <b>Placeholders on the sheet</b> follow along. Words are left alone while this is on.</p>
+        <p class="hint" id="gtContourHint" style="visibility:hidden;margin:6px 0 0;">Drag across the empty paper to pick every cut line the box touches (Shift adds to what is picked; zoomed in, Alt-drag moves the window). Tap a cut line to pick it up, drag it to move it, drag its bottom-right corner to resize it. Shift-click picks several, which then drag, nudge (arrow keys) and delete together. Drag a punch hole and every hole moves with it. The numbers under <b>Placeholders on the sheet</b> follow along. Words are left alone while this is on.</p>
       </div>
       <!-- the back, under the front, when Both is picked -->
       <div class="preview-card" data-side="back" id="gtBackPreview" style="display:none;">
@@ -29940,6 +29940,7 @@ let gtCurrentDesign=null;          // the design open in the editor
 let gtSlotEdit=false, gtSelSlot=null;   // Contours on, and the placeholder in hand
 const gtShapeSig=new Map();          // see gtKeepShape
 const gtSelSet=new Set();          // every placeholder picked, gtSelSlot among them
+let gtMarquee=null;                // the box being dragged out to pick several: {x0,y0,x1,y1} in mm
 const GT_SHEET_NEW={paperW:317,paperH:449,pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{},marksFromBase:true,marksFromBaseV2:false,baseRemoved:false,backFile:''};
 const gtSheet={paperW:317,paperH:449,tagW:60,tagH:40,margin:10,gap:3,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
@@ -33705,6 +33706,14 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
     if(slot.id===gtSelSlot){ ctx.fillStyle='#CCF344'; ctx.fillRect((slot.x+slot.w)*sc-7,(slot.y+slot.h)*sc-7,7,7); }
     ctx.restore();
   });
+  if(!forExport&&gtSlotEdit&&!back&&gtMarquee){
+    const M=gtMarquee, x=Math.min(M.x0,M.x1)*sc, y=Math.min(M.y0,M.y1)*sc;
+    const w=Math.abs(M.x1-M.x0)*sc, h=Math.abs(M.y1-M.y0)*sc;
+    ctx.save();
+    ctx.fillStyle='rgba(204,243,68,0.12)'; ctx.fillRect(x,y,w,h);
+    ctx.strokeStyle='#CCF344'; ctx.lineWidth=1; ctx.setLineDash([4,3]); ctx.strokeRect(x,y,w,h);
+    ctx.restore();
+  }
   if(back&&!forExport) ctx.restore();
   // and the dots over everything, on the preview and on the printed sheet
   // alike — artwork that ran over one would blind the camera. The front's.
@@ -34092,7 +34101,7 @@ function gtSheetDrag(c,side){
     }
     return null;
   };
-  let drag=null, pan=null, sdrag=null, hdrag=null;
+  let drag=null, pan=null, sdrag=null, hdrag=null, marq=null;
   // the placeholder whose punch hole is under the pointer, if any
   const hitHole=p=>{
     const g=gtGripMm();
@@ -34150,7 +34159,17 @@ function gtSheetDrag(c,side){
       const s=hitSlot(p);
       if(!s){
         if(!e.shiftKey) gtPickOnly(null);
-        gtSlotCardSync(); gtSlotScopeSync(); startPan(e); gtDraw(); return;
+        gtSlotCardSync(); gtSlotScopeSync();
+        // Dragging across the bare paper picks every contour the box touches;
+        // Shift keeps what was already picked. Zoomed in, Alt-drag moves the
+        // window instead, since a drag cannot mean both.
+        if(gtZoomOn&&e.altKey&&startPan(e)){ gtDraw(); return; }
+        if(p){
+          marq={x0:p.mx,y0:p.my,base:new Set(gtSelSet)};
+          gtMarquee={x0:p.mx,y0:p.my,x1:p.mx,y1:p.my};
+          try{ c.setPointerCapture(e.pointerId); }catch(err){}
+        }
+        gtDraw(); return;
       }
       // Shift adds to the picked ones or takes it back out; a plain press on
       // one already picked keeps the lot, so they can be dragged as one
@@ -34202,6 +34221,21 @@ function gtSheetDrag(c,side){
       gtDraw();
       return;
     }
+    if(marq){
+      const p=at(e); if(!p) return;
+      e.preventDefault();
+      gtMarquee.x1=p.mx; gtMarquee.y1=p.my;
+      const M=gtMarquee, x0=Math.min(M.x0,M.x1), x1=Math.max(M.x0,M.x1);
+      const y0=Math.min(M.y0,M.y1), y1=Math.max(M.y0,M.y1);
+      gtSelSet.clear(); marq.base.forEach(id=>gtSelSet.add(id));
+      gtSelSlot=null;
+      gtSheet.slots.forEach(q=>{
+        if(q.x<=x1&&q.x+q.w>=x0&&q.y<=y1&&q.y+q.h>=y0){ gtSelSet.add(q.id); gtSelSlot=q.id; }
+      });
+      gtSlotCardSync(); gtSlotScopeSync();
+      gtDraw();
+      return;
+    }
     if(sdrag){
       const p=at(e); if(!p) return;
       e.preventDefault();
@@ -34242,6 +34276,11 @@ function gtSheetDrag(c,side){
   });
   const stop=()=>{
     if(pan){ pan=null; c.style.cursor=''; }
+    if(marq){
+      marq=null; gtMarquee=null;
+      gtSlotCardSync(); gtSlotScopeSync(); gtDraw();
+      return;
+    }
     if(hdrag){
       const g=hdrag.was[0];
       if(g) gtSheet.slotHole={...g.s.hole};
