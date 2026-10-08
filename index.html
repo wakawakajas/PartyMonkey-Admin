@@ -6852,9 +6852,9 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         <p class="hint" style="margin-top:0;">The sheet everything prints on, in mm. A layout SVG carrying its own size sets it for you.</p>
         <div class="grid2">
               <label class="field" style="margin-bottom:6px;"><span>WIDTH (mm)</span>
-                <input type="number" step="0.1" id="gtPaperW" value="210"/></label>
+                <input type="number" step="0.1" id="gtPaperW" value="317"/></label>
               <label class="field"><span>HEIGHT (mm)</span>
-                <input type="number" step="0.1" id="gtPaperH" value="297"/></label>
+                <input type="number" step="0.1" id="gtPaperH" value="449"/></label>
         </div>
           <button class="btn-outline btn-sm" id="gtSwapOrientBtn" style="width:100%;margin-top:6px;">↕ Swap</button>
         <div class="sect-label">Base layer</div>
@@ -7168,12 +7168,21 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         <div class="click-row">
           <label class="click-tog"><input type="checkbox" id="gtTraceOn"/>Cut round the artwork, not the placeholder</label>
         </div>
-        <div class="grid2" style="margin-top:9px;">
+        <div class="grid3e" style="margin-top:9px;">
           <label class="field"><span>OUTSET (mm)</span><input type="number" step="0.1" id="gtTraceOut" value="1"/></label>
+          <label class="field"><span>SMOOTH (mm)</span><input type="number" step="0.1" min="0" id="gtTraceSm" value="0.3"/></label>
           <label class="field"><span>EDGE AT (%)</span><input type="number" step="1" min="1" max="99" id="gtTraceThr" value="50"/></label>
         </div>
+        <p class="hint" style="margin:6px 0 0;">A minus outset cuts inside the artwork instead — −1 takes the blade 1mm in from its edge. Smooth irons out wobbles narrower than that; 0 follows the edge exactly.</p>
         <button class="btn-outline btn-sm" id="gtTraceBtn" style="width:100%;margin-top:9px;">Trace the artwork</button>
         <div id="gtTraceMsg"></div>
+        <div id="gtCutSizeWrap" hidden>
+          <div class="grid2" style="margin-top:9px;">
+            <label class="field"><span>CUT WIDTH (mm)</span><input type="number" step="0.1" min="1" id="gtCutW"/></label>
+            <label class="field"><span>CUT HEIGHT (mm)</span><input type="number" step="0.1" min="1" id="gtCutH"/></label>
+          </div>
+          <p class="hint" style="margin:6px 0 0;">The cut line's size, outset included. Change either and the artwork is scaled with it, so the design stays where the line says.</p>
+        </div>
 
       </div>
     </div>
@@ -29796,8 +29805,8 @@ let gtCurrentDesign=null;          // the design open in the editor
 let gtSlotEdit=false, gtSelSlot=null;   // Contours on, and the placeholder in hand
 const gtShapeSig=new Map();          // see gtKeepShape
 const gtSelSet=new Set();          // every placeholder picked, gtSelSlot among them
-const GT_SHEET_NEW={pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{},marksFromBase:true,marksFromBaseV2:false,baseRemoved:false,backFile:''};
-const gtSheet={paperW:210,paperH:297,tagW:60,tagH:40,margin:10,gap:3,
+const GT_SHEET_NEW={paperW:317,paperH:449,pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{},marksFromBase:true,marksFromBaseV2:false,baseRemoved:false,backFile:''};
+const gtSheet={paperW:317,paperH:449,tagW:60,tagH:40,margin:10,gap:3,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
   // null rather than a number: the layout centres itself until it is told
   // where to go, and goes back to centring when it is told to forget
@@ -30660,6 +30669,7 @@ function gtNormalizeDesign(d){
     // own 0..1 box, so it survives being resized or moved.
     trace:(d.trace&&d.trace.loop&&d.trace.loop.length>2)
       ? {loop:d.trace.loop,out:Number(d.trace.out)||0,thr:Number(d.trace.thr)||50,
+         ...(d.trace.sm!=null&&isFinite(d.trace.sm)?{sm:Math.max(0,Number(d.trace.sm))}:{}),
          on:d.trace.on!==false} : null,
     // A picture of its own for the back, sized like the front's art. None means
     // the sheet's back picture (gtSheet.backFile), and with neither it is blank.
@@ -32133,7 +32143,7 @@ function gtDrawMarks(ctx,sc){
 // The result is kept as points in the picture's own 0..1 box rather than in
 // millimetres, so it survives the artwork being resized or nudged afterwards —
 // and the outset is applied when it is drawn, for the same reason.
-const GT_TRACE_PX=640;             // the longest side the picture is read at
+const GT_TRACE_PX=1000;             // the longest side the picture is read at
 
 // In or out, one flag per pixel. Alpha decides it where the picture has any;
 // where it is solid, the corner pixel is taken as the background and every
@@ -32187,39 +32197,63 @@ function gtTraceMask(img,thr){
   for(let i=0;i<W*H;i++) if(!seen[i]) inside[i]=1;
   return {inside,W,H};
 }
-// The boundary of that mask, walked as one closed loop. Moore-neighbour
-// tracing: stand on a filled pixel, turn about it from where you came until
-// the next filled one turns up, step onto it, repeat until you are back.
-function gtTraceWalk(mask){
-  const {inside,W,H}=mask;
-  const at=(x,y)=>x>=0&&y>=0&&x<W&&y<H&&!!inside[y*W+x];
-  let sx=-1,sy=-1;
-  for(let y=0;y<H&&sx<0;y++) for(let x=0;x<W;x++) if(inside[y*W+x]){ sx=x; sy=y; break; }
-  if(sx<0) return null;
-  const nb=[[-1,-1],[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0]];  // clockwise
-  const pts=[[sx,sy]];
-  let bx=sx,by=sy,px=sx-1,py=sy;      // came in from the west, which is background
-  let guard=W*H*4;
-  while(guard-->0){
-    let i=nb.findIndex(([dx,dy])=>bx+dx===px&&by+dy===py);
-    if(i<0) i=7;
-    let moved=false;
-    for(let k=1;k<=8;k++){
-      const j=(i+k)%8, nx=bx+nb[j][0], ny=by+nb[j][1];
-      if(!at(nx,ny)) continue;
-      // the cell just before it going round is where we came from next time
-      px=bx+nb[(j+7)%8][0]; py=by+nb[(j+7)%8][1];
-      bx=nx; by=ny; moved=true;
-      break;
+// Every closed line where a field crosses a level, at sub-pixel accuracy —
+// marching squares. `v` is W×H values on pixel centres, and "inside" is below
+// the level. The edge of the grid has to be outside for every line to close,
+// which the callers see to by padding. Each crossing sits on one grid edge and
+// is shared by the two cells either side of it, so the pieces are joined by
+// the edge they meet on rather than by comparing positions.
+function gtContours(v,W,H,L){
+  const N=W*H, nb1=new Int32Array(2*N).fill(-1), nb2=new Int32Array(2*N).fill(-1);
+  const px=new Float32Array(2*N), py=new Float32Array(2*N);
+  const hE=(x,y)=>y*W+x, vE=(x,y)=>N+y*W+x;
+  const at=(e)=>{
+    if(e<N){ const x=e%W, y=(e-x)/W, a=v[e], b=v[e+1];
+      px[e]=x+(L-a)/((b-a)||1e-9); py[e]=y; }
+    else{ const i=e-N, x=i%W, y=(i-x)/W, a=v[i], b=v[i+W];
+      px[e]=x; py[e]=y+(L-a)/((b-a)||1e-9); }
+  };
+  const join=(e,f)=>{
+    if(nb1[e]<0){ nb1[e]=f; at(e); } else nb2[e]=f;
+    if(nb1[f]<0){ nb1[f]=e; at(f); } else nb2[f]=e;
+  };
+  for(let y=0;y<H-1;y++) for(let x=0;x<W-1;x++){
+    const i=y*W+x, a=v[i]<L, b=v[i+1]<L, c=v[i+W+1]<L, d=v[i+W]<L;
+    const k=(a?1:0)|(b?2:0)|(c?4:0)|(d?8:0);
+    if(k===0||k===15) continue;
+    const T=hE(x,y), R=vE(x+1,y), B=hE(x,y+1), Lf=vE(x,y);
+    const mid=(v[i]+v[i+1]+v[i+W]+v[i+W+1])/4<L;
+    switch(k){
+      case 1: case 14: join(Lf,T); break;
+      case 2: case 13: join(T,R); break;
+      case 3: case 12: join(Lf,R); break;
+      case 4: case 11: join(R,B); break;
+      case 6: case 9: join(T,B); break;
+      case 7: case 8: join(Lf,B); break;
+      case 5: if(mid){ join(T,R); join(B,Lf); } else { join(Lf,T); join(R,B); } break;
+      case 10: if(mid){ join(Lf,T); join(R,B); } else { join(T,R); join(B,Lf); } break;
     }
-    if(!moved) break;                       // a lone pixel, nothing to walk
-    if(bx===sx&&by===sy) break;             // all the way round
-    pts.push([bx,by]);
-    if(pts.length>20000) break;
   }
-  return pts.length>8?pts:null;
+  const done=new Uint8Array(2*N), loops=[];
+  for(let s=0;s<2*N;s++){
+    if(nb1[s]<0||done[s]) continue;
+    const loop=[]; let prev=-1, cur=s;
+    while(cur>=0&&!done[cur]){
+      done[cur]=1; loop.push([px[cur],py[cur]]);
+      const n=nb1[cur]!==prev?nb1[cur]:nb2[cur];
+      prev=cur; cur=n;
+    }
+    if(loop.length>2) loops.push(loop);
+  }
+  return loops;
 }
-// The same loop with the points that say nothing taken out — a boundary walked
+const gtLoopArea=p=>{
+  let a=0;
+  for(let i=0;i<p.length;i++){ const q=p[i], r=p[(i+1)%p.length]; a+=q[0]*r[1]-r[0]*q[1]; }
+  return a/2;
+};
+const gtBiggestLoop=ls=>ls.reduce((m,l)=>!m||Math.abs(gtLoopArea(l))>Math.abs(gtLoopArea(m))?l:m,null);
+// The same loop with the points that say nothing taken out — a boundary read
 // pixel by pixel is one point per pixel, and the cutter has no use for that.
 function gtSimplify(pts,tol){
   if(pts.length<3) return pts;
@@ -32239,130 +32273,158 @@ function gtSimplify(pts,tol){
   seg(0,pts.length-1);
   return pts.filter((p,i)=>keep[i]);
 }
-// A boundary walked pixel by pixel is a staircase — every step is a whole
-// pixel across or down, and a blade following it chatters. Averaging each point
-// against its neighbours all the way round takes the steps off without moving
-// the line anywhere it was not: a corner stays a corner, because a corner is
-// where the neighbours agree, and only the stair treads, where they disagree by
-// one pixel each way, get pulled into line.
-function gtSmoothLoop(pts,passes){
-  let out=pts;
-  for(let p=0;p<(passes||1);p++){
-    const n=out.length, next=new Array(n);
-    for(let i=0;i<n;i++){
-      const a=out[(i+n-1)%n], b=out[i], c=out[(i+1)%n];
-      next[i]=[(a[0]+2*b[0]+c[0])/4,(a[1]+2*b[1]+c[1])/4];
-    }
-    out=next;
-  }
-  return out;
-}
-// Traces the design open in the editor and keeps the loop on it.
+// Traces the design open in the editor and keeps the loop on it. The mask is
+// softened a pixel or so and the line is taken where it crosses halfway, which
+// puts every point between pixels rather than on them — a pixel walk is a
+// staircase however much it is averaged afterwards.
 function gtTraceDesign(d,thr){
   const img=gtImgGet(d.id);
   if(!img||!img.naturalWidth) return null;
-  const mask=gtTraceMask(img,thr);
-  const walk=gtTraceWalk(mask);
-  if(!walk) return null;
-  // Read at 640px a tag's outline is a couple of thousand points, and six
-  // passes is enough to take the staircase off without rounding the corners of
-  // a shape that has real ones.
-  const smooth=gtSmoothLoop(walk,6);
-  // then only the points that say something. The tolerance is a fifth of a
-  // pixel at reading size — about 30 microns on a 40mm tag, far finer than the
-  // blade — so the curve keeps its shape on a tenth of the points.
-  const thin=gtSimplify(smooth,0.2);
+  const {inside,W,H}=gtTraceMask(img,thr);
+  // padded two pixels all round with background, so every line closes
+  const P=2, PW=W+2*P, PH=H+2*P;
+  let f=new Float32Array(PW*PH);
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++) f[(y+P)*PW+x+P]=inside[y*W+x];
+  for(let pass=0;pass<2;pass++){
+    const g=new Float32Array(PW*PH);
+    for(let y=1;y<PH-1;y++) for(let x=1;x<PW-1;x++){
+      let s=0;
+      for(let j=-1;j<=1;j++) for(let i=-1;i<=1;i++) s+=f[(y+j)*PW+x+i];
+      g[y*PW+x]=s/9;
+    }
+    f=g;
+  }
+  for(let i=0;i<f.length;i++) f[i]=1-f[i];
+  const loop=gtBiggestLoop(gtContours(f,PW,PH,0.5));
+  if(!loop||loop.length<8) return null;
+  // a tenth of a pixel at reading size is finer than any blade
+  // in two halves, since a loop simplified end to end has no length to measure from
+  const h=loop.length>>1;
+  const thin=gtSimplify(loop.slice(0,h+1),0.1)
+    .concat(gtSimplify(loop.slice(h).concat([loop[0]]),0.1).slice(1,-1));
   if(thin.length<4) return null;
-  // And one more pass over what is left. Thinning picks the points that stray
-  // furthest, which on a curve that was ever a staircase means it picks the
-  // last of the bumps — so the sparse loop has small kinks the dense one did
-  // not. Averaging the survivors takes those out, and at this spacing it moves
-  // each point by a fraction of a pixel.
-  const even=gtSmoothLoop(thin,2);
   // four figures is finer than a thousandth of a tag and keeps the loop from
   // filling library.json with digits nobody's blade can hold
   const r4=n=>Math.round(n*1e4)/1e4;
-  return even.map(([x,y])=>[r4(x/(mask.W-1)),r4(y/(mask.H-1))]);
+  return thin.map(([x,y])=>[r4((x-P)/(W-1)),r4((y-P)/(H-1))]);
 }
-// The stored points put back onto a curve. They are the corners of a polygon,
-// and a Catmull-Rom spline through them is the curve they were sampled off —
-// so what reaches the blade is a smooth line rather than the handful of points
-// that were small enough to keep.
-function gtSpline(pts,step){
-  const n=pts.length;
-  if(n<4) return pts;
-  // A curve drawn through every point rounds the corners off a shape that has
-  // real ones — a square comes back with soft edges nobody asked for. So the
-  // sharp turns are found first and the curve is broken at them: it leaves one
-  // straight and arrives at the next straight, which is a corner, and bends
-  // freely everywhere in between.
-  const CORNER=40;                      // degrees of turn before it counts as one
-  const sharp=new Uint8Array(n);
-  for(let i=0;i<n;i++){
-    const a=pts[(i+n-1)%n], b=pts[i], c=pts[(i+1)%n];
-    const l1=Math.hypot(b[0]-a[0],b[1]-a[1]), l2=Math.hypot(c[0]-b[0],c[1]-b[1]);
-    if(l1<1e-9||l2<1e-9) continue;
-    let t=Math.abs(Math.atan2(c[1]-b[1],c[0]-b[0])-Math.atan2(b[1]-a[1],b[0]-a[0]));
-    if(t>Math.PI) t=2*Math.PI-t;
-    if(t*180/Math.PI>=CORNER) sharp[i]=1;
-  }
-  const out=[];
-  for(let i=0;i<n;i++){
-    const p1=pts[i], p2=pts[(i+1)%n];
-    // at a corner the tangent is taken from this side alone, which is what
-    // duplicating the point does to a Catmull-Rom span
-    const p0=sharp[i]?p1:pts[(i+n-1)%n];
-    const p3=sharp[(i+1)%n]?p2:pts[(i+2)%n];
-    // as many steps along this span as its own length asks for
-    const len=Math.hypot(p2[0]-p1[0],p2[1]-p1[1]);
-    const k=Math.max(1,Math.min(24,Math.ceil(len/Math.max(0.01,step))));
-    for(let j=0;j<k;j++){
-      const t=j/k, t2=t*t, t3=t2*t;
-      out.push([
-        0.5*((2*p1[0])+(-p0[0]+p2[0])*t+(2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2+(-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
-        0.5*((2*p1[1])+(-p0[1]+p2[1])*t+(2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2+(-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
-      ]);
-    }
+// A closed polyline walked at an even spacing — what smoothing and the cut
+// file both want, rather than points bunched wherever the outline was busy.
+function gtResample(pts,step){
+  const n=pts.length; if(n<3) return pts;
+  let L=0; const seg=[];
+  for(let i=0;i<n;i++){ const a=pts[i], b=pts[(i+1)%n]; const l=Math.hypot(b[0]-a[0],b[1]-a[1]); seg.push(l); L+=l; }
+  const m=Math.max(8,Math.min(20000,Math.round(L/step))), ds=L/m, out=[];
+  let i=0, acc=0;
+  for(let k=0;k<m;k++){
+    const want=k*ds;
+    while(i<n-1&&acc+seg[i]<want){ acc+=seg[i]; i++; }
+    const a=pts[i], b=pts[(i+1)%n], t=seg[i]?(want-acc)/seg[i]:0;
+    out.push([a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t]);
   }
   return out;
 }
-// The loop a design carries, placed on a rect in millimetres and pushed outward
-// by its outset. Each point moves along the average of the two edge normals
-// either side of it, which is the bisector — near enough for a cut line, and
-// without the machinery a true offset would need.
+// Smoothed by a bell-shaped average along the line, `sig` mm wide. Every
+// wobble narrower than that is taken out; a curve wider than it keeps its
+// shape, and a corner comes out rounded to about that radius, which a drag
+// knife rounds it to anyway.
+function gtSmoothMm(pts,sig){
+  const ds=0.05, p=gtResample(pts,ds);
+  if(!(sig>0)) return p;
+  const n=p.length, s=sig/ds, R=Math.min(Math.floor(n/2)-1,Math.ceil(s*3));
+  if(R<1) return p;
+  const w=[]; let tot=0;
+  for(let k=-R;k<=R;k++){ const x=Math.exp(-k*k/(2*s*s)); w.push(x); tot+=x; }
+  return p.map((_,i)=>{
+    let x=0,y=0;
+    for(let k=-R;k<=R;k++){ const q=p[(i+k+n)%n], c=w[k+R]; x+=q[0]*c; y+=q[1]*c; }
+    return [x/tot,y/tot];
+  });
+}
+// Squared distance to the nearest zero, one line at a time — Felzenszwalb's
+// lower envelope of parabolas, run down the columns and then along the rows.
+function gtEdt(f,W,H){
+  const n=Math.max(W,H), d=new Float64Array(n), z=new Float64Array(n+1), vv=new Int32Array(n), g=new Float64Array(n);
+  const line=(len)=>{
+    let k=0; vv[0]=0; z[0]=-Infinity; z[1]=Infinity;
+    for(let q=1;q<len;q++){
+      let r=vv[k], s=((g[q]+q*q)-(g[r]+r*r))/(2*q-2*r);
+      while(s<=z[k]){ k--; r=vv[k]; s=((g[q]+q*q)-(g[r]+r*r))/(2*q-2*r); }
+      k++; vv[k]=q; z[k]=s; z[k+1]=Infinity;
+    }
+    k=0;
+    for(let q=0;q<len;q++){ while(z[k+1]<q) k++; const r=vv[k]; d[q]=(q-r)*(q-r)+g[r]; }
+  };
+  for(let x=0;x<W;x++){
+    for(let y=0;y<H;y++) g[y]=f[y*W+x];
+    line(H);
+    for(let y=0;y<H;y++) f[y*W+x]=d[y];
+  }
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++) g[x]=f[y*W+x];
+    line(W);
+    for(let x=0;x<W;x++) f[y*W+x]=d[x];
+  }
+  return f;
+}
+// The loop grown outward, or drawn inward for a minus figure, by `out` mm — a
+// true offset rather than each point pushed along its own normal, which knots
+// itself in every tight inside curve and comes out lumpy everywhere else. The
+// shape is filled onto a canvas, every pixel learns how far it is from the
+// edge, and the new line is taken where that distance equals the offset.
+// Drawn inward far enough, a shape can come apart; the biggest piece is kept.
+function gtOffsetLoop(pts,out){
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  pts.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); });
+  const pad=Math.max(0,out)+1;
+  const span=Math.max(x1-x0,y1-y0)+2*pad;
+  const R=Math.max(4,Math.min(20,1100/span));        // pixels per mm
+  const W=Math.ceil((x1-x0+2*pad)*R)+2, H=Math.ceil((y1-y0+2*pad)*R)+2;
+  const ox=x0-pad, oy=y0-pad;
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const ctx=c.getContext('2d',{willReadFrequently:true});
+  ctx.beginPath();
+  pts.forEach(([x,y],k)=>{ const X=(x-ox)*R, Y=(y-oy)*R; k?ctx.lineTo(X,Y):ctx.moveTo(X,Y); });
+  ctx.closePath(); ctx.fillStyle='#000'; ctx.fill();
+  const px=ctx.getImageData(0,0,W,H).data;
+  c.width=c.height=0;
+  const N=W*H, toIn=new Float64Array(N), toOut=new Float64Array(N), inn=new Uint8Array(N);
+  for(let i=0;i<N;i++){ inn[i]=px[i*4+3]>=128?1:0; toIn[i]=inn[i]?0:1e20; toOut[i]=inn[i]?1e20:0; }
+  gtEdt(toIn,W,H); gtEdt(toOut,W,H);
+  const sd=new Float32Array(N);
+  for(let i=0;i<N;i++) sd[i]=inn[i]?-(Math.sqrt(toOut[i])-0.5):Math.sqrt(toIn[i])-0.5;
+  for(let x=0;x<W;x++){ sd[x]=sd[(H-1)*W+x]=1e9; }
+  for(let y=0;y<H;y++){ sd[y*W]=sd[y*W+W-1]=1e9; }
+  const loop=gtBiggestLoop(gtContours(sd,W,H,out*R));
+  if(!loop) return null;
+  return loop.map(([x,y])=>[x/R+ox,y/R+oy]);
+}
+// The loop a design carries, placed on a rect in millimetres, offset by its
+// outset and smoothed. Worked out once for each size it is drawn at and kept —
+// the sheet redraws every tag on every drag, and the offset is a canvas's worth
+// of sums. Kept relative to the rect, so a tag moved about costs nothing.
+const gtTraceCache=new WeakMap();
+const GT_TRACE_SMOOTH=0.3;         // mm, unless the design says otherwise
 function gtTracePlace(d,r){
   const t=d&&d.trace;
   if(!t||!t.on||!t.loop||t.loop.length<4) return null;
-  const pts=t.loop.map(([u,v])=>[r.x+u*r.w,r.y+v*r.h]);
-  const out=Math.max(0,Number(t.out)||0);
-  // The offset happens on the stored points and the spline is drawn through
-  // the result, in that order. Offsetting a curve that has already been
-  // sampled puts a corner at every sample; offsetting first and curving after
-  // leaves one smooth line the width of the outset away from the artwork.
-  let base=pts;
-  if(out){
-    // which way is out: a positive signed area means one winding, negative the
-    // other, and the normal has to be turned to match or the loop shrinks
-    let a2=0;
-    for(let i=0;i<pts.length;i++){
-      const [x1,y1]=pts[i], [x2,y2]=pts[(i+1)%pts.length];
-      a2+=x1*y2-x2*y1;
-    }
-    const s=a2>0?1:-1;
-    base=pts.map((p,i)=>{
-      const q=pts[(i+pts.length-1)%pts.length], n=pts[(i+1)%pts.length];
-      const e1=[p[0]-q[0],p[1]-q[1]], e2=[n[0]-p[0],n[1]-p[1]];
-      const l1=Math.hypot(...e1)||1, l2=Math.hypot(...e2)||1;
-      // the normal of an edge is the edge turned a quarter turn
-      let nx=(e1[1]/l1+e2[1]/l2)*s, ny=-(e1[0]/l1+e2[0]/l2)*s;
-      const l=Math.hypot(nx,ny);
-      if(!l) return p.slice();
-      return [p[0]+nx/l*out,p[1]+ny/l*out];
-    });
+  const out=Number(t.out)||0;
+  const sm=t.sm!=null&&isFinite(t.sm)?Math.max(0,Number(t.sm)):GT_TRACE_SMOOTH;
+  let byLoop=gtTraceCache.get(t.loop);
+  if(!byLoop){ byLoop=new Map(); gtTraceCache.set(t.loop,byLoop); }
+  const key=`${r.w.toFixed(3)}|${r.h.toFixed(3)}|${out}|${sm}`;
+  let rel=byLoop.get(key);
+  if(rel===undefined){
+    let pts=t.loop.map(([u,v])=>[u*r.w,v*r.h]);
+    if(out){ try{ pts=gtOffsetLoop(pts,out); }catch(e){ pts=null; } }
+    if(pts&&pts.length>3){
+      const smooth=gtResample(gtSmoothMm(pts,sm),GT_PLT_STEP);
+      rel=smooth.concat([smooth[0]]);
+    }else rel=null;
+    if(byLoop.size>40) byLoop.delete(byLoop.keys().next().value);
+    byLoop.set(key,rel);
   }
-  // and the curve those points came off, sampled as finely as the cut file is
-  const smooth=gtSpline(base,GT_PLT_STEP);
-  return smooth.concat([smooth[0]]);
+  return rel?rel.map(([x,y])=>[x+r.x,y+r.y]):null;
 }
 // The picture fitted into a placeholder and nothing more — where the words and
 // the punch hole are laid out against, on the sheet and in the cut file alike.
@@ -36528,13 +36590,58 @@ function gtArtWriteInputs(){
   document.getElementById('gtTraceOn').disabled=!t;
   document.getElementById('gtTraceOut').value=t?round(t.out):1;
   document.getElementById('gtTraceThr').value=t?t.thr:50;
+  document.getElementById('gtTraceSm').value=t&&t.sm!=null?round(t.sm):GT_TRACE_SMOOTH;
   const msg=document.getElementById('gtTraceMsg');
   if(msg&&!t) msg.innerHTML='<p class="hint" style="margin:8px 0 0;">Not traced yet — the placeholder is what this design is cut to.</p>';
+  gtCutSizeWrite();
 }
+// The traced cut line's own width and height, outset in, as the editor's tag
+// has it — and set the other way round, by scaling the artwork until the line
+// comes out that size. The line is the artwork's outline plus a fixed outset,
+// so its size is a straight line in the scale: two readings find it, a third
+// checks it.
+function gtCutBox(d){
+  const t=gtTracePlace(d,gtEditGeom().draw);
+  if(!t) return null;
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  t.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); });
+  return {w:x1-x0,h:y1-y0};
+}
+function gtCutSizeWrite(){
+  const d=gtCurrentDesign, wrap=document.getElementById('gtCutSizeWrap');
+  const b=d&&d.trace&&d.trace.on?gtCutBox(d):null;
+  wrap.hidden=!b;
+  if(!b) return;
+  [['gtCutW','w'],['gtCutH','h']].forEach(([id,k])=>{
+    const el=document.getElementById(id);
+    if(document.activeElement!==el) el.value=round(b[k]);
+  });
+}
+function gtCutSetSize(k,want){
+  const d=gtCurrentDesign; if(!d||!(want>0)) return;
+  const a=d.art||(d.art={s:1,dx:0,dy:0});
+  const s0=Math.max(0.05,Number(a.s)||1);
+  const at=s=>{ a.s=s; const b=gtCutBox(d); return b?b[k]:NaN; };
+  const b0=at(s0), b1=at(s0*1.25);
+  const slope=(b1-b0)/(s0*0.25);
+  if(!isFinite(slope)||slope<=0){ a.s=s0; return; }
+  let s=Math.max(0.05,Math.min(10,s0+(want-b0)/slope));
+  const b2=at(s);
+  if(isFinite(b2)&&Math.abs(b2-want)>0.05) s=Math.max(0.05,Math.min(10,s+(want-b2)/slope));
+  a.s=s;
+  gtArtWriteInputs(); gtArtChanged();
+}
+[['gtCutW','w'],['gtCutH','h']].forEach(([id,k])=>{
+  document.getElementById(id).addEventListener('change',e=>{
+    gtCutSetSize(k,parseFloat(e.target.value));
+    e.target.blur(); gtCutSizeWrite();
+  });
+});
 // Everything here redraws the tag and the sheet both: the design editor is a
 // window onto the same sheet, and a scale set here is a scale the sheet has.
 function gtArtChanged(){
   gtDrawDesign(); gtDraw(); gtSaveSoon();
+  gtCutSizeWrite();
 }
 function gtArtSetScale(pct){
   const d=gtCurrentDesign; if(!d) return;
@@ -36594,6 +36701,12 @@ document.getElementById('gtTraceOut').addEventListener('input',e=>{
   d.trace.out=isFinite(v)?v:0;
   gtArtChanged();
 });
+document.getElementById('gtTraceSm').addEventListener('input',e=>{
+  const d=gtCurrentDesign; if(!d||!d.trace) return;
+  const v=parseFloat(e.target.value);
+  d.trace.sm=isFinite(v)&&v>=0?v:0;
+  gtArtChanged();
+});
 document.getElementById('gtTraceBtn').addEventListener('click',()=>{
   const d=gtCurrentDesign;
   const msg=document.getElementById('gtTraceMsg');
@@ -36610,7 +36723,8 @@ document.getElementById('gtTraceBtn').addEventListener('click',()=>{
         +'A picture on a plain background, or one with transparency, is what this reads.',false);
       return;
     }
-    d.trace={loop,out:isFinite(out)?out:1,thr,on:true};
+    const sm=parseFloat(document.getElementById('gtTraceSm').value);
+    d.trace={loop,out:isFinite(out)?out:1,thr,sm:isFinite(sm)&&sm>=0?sm:GT_TRACE_SMOOTH,on:true};
     gtArtWriteInputs();
     showMsg(msg,`✓ Traced — ${loop.length} points. The cut line follows the artwork now; `
       +'switch it off above to go back to the placeholder.',true);
