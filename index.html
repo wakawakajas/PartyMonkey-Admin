@@ -30792,10 +30792,33 @@ function gtFontsBgStart(){
     for(const f of gtLib.fonts.slice()){
       if(gen!==gtHydrateGen) return;
       if(!gtFontsDone.has(f.id)) await gtFontLoad(f.id);
-      await new Promise(r=>setTimeout(r,15));
+      // one at a time and only when the page is idle, so typing and clicking
+      // are never queued behind a font being decoded
+      await new Promise(r=>window.requestIdleCallback?requestIdleCallback(()=>r(),{timeout:400}):setTimeout(r,60));
+      await new Promise(r=>setTimeout(r,40));
     }
     if(gen===gtHydrateGen) gtImgRedrawSoon();
   },1500);
+}
+// A list row needs a thumbnail, not the 2600px picture: that picture as a data
+// URL is megabytes of text per row, and a few dozen rows of it made the
+// dropdowns and the design list crawl. A small copy is made once per picture.
+const gtThumbCache=new WeakMap();
+function gtThumbOf(img){
+  if(!img) return '';
+  let u=gtThumbCache.get(img);
+  if(u) return u;
+  try{
+    const w=img.naturalWidth||img.width, h=img.naturalHeight||img.height;
+    if(!w||!h) return img.src;
+    const sc=Math.min(1,160/Math.max(w,h));
+    const c=document.createElement('canvas');
+    c.width=Math.max(1,Math.round(w*sc)); c.height=Math.max(1,Math.round(h*sc));
+    c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+    u=c.toDataURL('image/webp',0.8);
+  }catch(e){ u=img.src; }
+  gtThumbCache.set(img,u);
+  return u;
 }
 // every design and font an order uses, drawn now — for whatever cannot wait for a redraw
 const gtHydrateWait=async()=>{
@@ -35112,14 +35135,17 @@ function gtRenderDesignList(){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing matches —</p>';
     return;
   }
-  el.innerHTML=shown.map((d,i)=>{
+  // a hundred and fifty at a time: two thousand cards in the page is what made
+  // it heavy, and the search box is how anybody finds one
+  const more=shown.length-150;
+  el.innerHTML=shown.slice(0,150).map((d,i)=>{
     const img=i<60?gtImgGet(d.id,true):gtImgs.get(d.id);
     return `<div class="ph-card row-link" data-gt-design="${d.id}" data-id="${d.id}">
       <button class="del-btn" data-gt-del-design title="Take out of the library"
               style="float:right;">×</button>
       <div class="item-main" style="margin-bottom:0;align-items:center;">
         <div class="item-photo-wrap">
-          <span class="item-photo${img?' has':''}">${img?`<img src="${img.src}" alt=""/>`:'🏷'}</span>
+          <span class="item-photo${img?' has':''}">${img?`<img src="${gtThumbOf(img)}" alt=""/>`:'🏷'}</span>
         </div>
         <div style="flex:1;min-width:0;">
           <div class="ph-card-head" style="margin-bottom:4px;"><span style="flex:1;">${escapeHtml(d.name)}</span></div>
@@ -35128,7 +35154,7 @@ function gtRenderDesignList(){
         </div>
       </div>
     </div>`;
-  }).join('');
+  }).join('')+(more>0?`<p class="hint" style="margin:6px 0 0;">… and ${more} more — type in the search box to find one.</p>`:'');
 }
 function gtRenderFontList(){
   const q=(document.getElementById('gtFontSearch').value||'').trim().toLowerCase();
@@ -51058,10 +51084,11 @@ function mcGiftWire(it){
     }
     // artwork on the row: a design is recognised by what it looks like long
     // before its name is read, and a library of a few hundred is all names
-    panel.innerHTML=rows.map((d,i)=>{
+    const left=rows.length-80;
+    panel.innerHTML=rows.slice(0,80).map((d,i)=>{
       const img=i<40?gtImgGet(d.id,true):gtImgs.get(d.id);
       const shot=img&&img.src
-        ? `<img class="mc-gt-shot" src="${escapeHtml(img.src)}" alt="" loading="lazy"/>`
+        ? `<img class="mc-gt-shot" src="${escapeHtml(gtThumbOf(img))}" alt="" loading="lazy"/>`
         : '<span class="mc-gt-shot blank">◻</span>';
       return `<div class="combo-opt${d.id===mcGtPick?' active':''}" role="option"
             data-mc-gtd="${d.id}" aria-selected="${d.id===mcGtPick?'true':'false'}">
@@ -51069,7 +51096,8 @@ function mcGiftWire(it){
          <span class="nm">${escapeHtml(d.name||'Design')}</span>
          <span class="mc-pick-mode">${(d.fields||[]).length} text${
            (d.fields||[]).length===1?'':'s'}</span>
-       </div>`;}).join('');
+       </div>`;}).join('')
+      +(left>0?`<div class="combo-empty">… ${left} more — keep typing to narrow it down.</div>`:'');
   }
   // What the other pages have of that name. Asked only once this page has
   // nothing to show, so the list an operator normally reads is untouched — and
@@ -51281,7 +51309,7 @@ function mcGiftWire(it){
       const blank=row.querySelector('.mc-gt-shot.blank'); if(!blank) return;
       const img=gtImgs.get(row.dataset.mcGtd); if(!img||!img.src) return;
       const el=document.createElement('img');
-      el.className='mc-gt-shot'; el.alt=''; el.src=img.src;
+      el.className='mc-gt-shot'; el.alt=''; el.src=gtThumbOf(img);
       blank.replaceWith(el);
     });
   };
