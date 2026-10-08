@@ -7782,6 +7782,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         <button class="btn-outline" id="phSelAllBtn">Select every box</button>
         <button class="btn-outline" id="phSelNoneBtn">Select none</button>
       </div>
+      <button class="btn-outline" id="phDupSelBtn" style="width:100%;margin-bottom:12px;" title="Ctrl+D">⧉ Duplicate selected</button>
 
       <div id="phListWrap"></div>
     </div>
@@ -11511,6 +11512,7 @@ function phSelSync(){
   // re-laying a set, or changing only what is picked, needs a pick first
   const rs=document.getElementById('resizeSetBtn'); if(rs) rs.disabled=n<1;
   const bs=document.getElementById('bulkApplySelBtn'); if(bs) bs.disabled=n<1;
+  const ds=document.getElementById('phDupSelBtn'); if(ds) ds.disabled=n<1;
   // a set row reads as picked when the whole set is
   document.querySelectorAll('#phListWrap .ph-card').forEach(c=>{
     if(c.dataset.set!=null){
@@ -12090,6 +12092,9 @@ document.addEventListener('keydown',e=>{
   const step=e.shiftKey?2:e.altKey?0.1:0.5;
   const move={ArrowLeft:[-step,0],ArrowRight:[step,0],ArrowUp:[0,-step],ArrowDown:[0,step]}[e.key];
   if(!phSel.size) return;
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='d'){
+    e.preventDefault(); phDuplicateSelected(); return;
+  }
   if(e.key==='Delete'||e.key==='Backspace'){
     e.preventDefault();
     state.placeholders=state.placeholders.filter(p=>!phSel.has(p.id));
@@ -12136,6 +12141,30 @@ function phSetSummary(no){
   }
   return `${list.length} card${list.length===1?'':'s'} · ${size}${cat}`;
 }
+// Copies of what is picked, 5 mm down and right of it. A whole set copied is a
+// new set of its own; a few cards of a set copied stay in that set. The copies
+// are left picked and the window opens on them, ready to be moved.
+function phDuplicateSelected(){
+  const picked=phSelected(); if(!picked.length) return;
+  const n0=state.placeholders.length;
+  let next=Math.max(...state.placeholders.map(phSetNo))+1;
+  const newNo=new Map();
+  phSetNumbers().forEach(no=>{
+    const boxes=phSetBoxes(no);
+    if(boxes.every(q=>phSel.has(q.id))) newNo.set(no,next++);
+  });
+  const copies=picked.map((p,i)=>{
+    const c={...p,id:uid(),label:'C'+(n0+i+1),xMm:p.xMm+5,yMm:p.yMm+5};
+    const no=newNo.get(phSetNo(p));
+    if(no!=null){ c.setNo=no; delete c.setName; }
+    return c;
+  });
+  state.placeholders.push(...copies);
+  renderPlaceholderList(); refreshArtInputs(); updateCalc(); renderDesignLines();
+  phSelSet(copies.map(c=>c.id));
+  phPopOpen(copies[0]);
+}
+document.getElementById('phDupSelBtn').addEventListener('click',phDuplicateSelected);
 function renderPlaceholderList(){
   const u=state.paper.unit;
   document.querySelectorAll('.unitHint').forEach(e=>e.textContent=u);
@@ -12146,38 +12175,17 @@ function renderPlaceholderList(){
   }
   wrap.innerHTML='<div class="ph-list">'+phSetNumbers().map(no=>`
     <div class="ph-card ph-setrow" data-set="${no}">
-      <div class="ph-card-head"><span>${escapeHtml(phSetLabel(no))}</span>
-        <span style="display:flex;gap:6px;">
-          <button type="button" class="btn-outline btn-sm" data-delset="${no}">Delete</button>
-          <button type="button" class="btn-outline btn-sm" data-openset="${no}">Open</button></span></div>
+      <div class="ph-card-head"><span>${escapeHtml(phSetLabel(no))}</span></div>
       <p class="hint" style="margin:0;">${escapeHtml(phSetSummary(no))}</p>
     </div>`).join('')+'</div>'
-    +'<p class="hint" style="margin:7px 0 0;">Click a card on the sheet, or Open, for the set in its own window.</p>';
-  wrap.querySelectorAll('[data-openset]').forEach(b=>{
-    b.addEventListener('click',e=>{
-      e.stopPropagation();
-      const first=phSetBoxes(Number(b.dataset.openset))[0];
-      if(first) phPopOpen(first);
-    });
-  });
-  wrap.querySelectorAll('[data-delset]').forEach(b=>{
-    b.addEventListener('click',e=>{
-      e.stopPropagation();
-      const no=Number(b.dataset.delset), ids=new Set(phSetBoxes(no).map(q=>q.id));
-      if(!ids.size||!confirm(`Delete ${phSetLabel(no)} (${ids.size} card${ids.size===1?'':'s'})?`)) return;
-      state.placeholders=state.placeholders.filter(q=>!ids.has(q.id));
-      ids.forEach(id=>phSel.delete(id));
-      if(phPop.no===no) phPopClose();
-      renderPlaceholderList(); refreshArtInputs(); updateCalc();
-      renderDesignLines(); phSelSync(); drawAll();
-    });
-  });
-  // the row picks the set out on the sheet, shift adds it to what is held
+    +'<p class="hint" style="margin:7px 0 0;">Click a set, or a card on the sheet, for the set in its own window — delete it from there.</p>';
+  // the row picks the set out and opens its window; shift adds it to what is
+  // held and leaves the window alone
   wrap.querySelectorAll('.ph-setrow').forEach(row=>{
     row.addEventListener('click',e=>{
-      if(e.target.closest('button')) return;
-      const ids=phSetBoxes(Number(row.dataset.set)).map(q=>q.id);
+      const list=phSetBoxes(Number(row.dataset.set)), ids=list.map(q=>q.id);
       phSelSet(e.shiftKey?[...phSel,...ids]:ids);
+      if(!e.shiftKey&&list[0]) phPopOpen(list[0],e);
     });
   });
   phSelSync(); phPopSync();
@@ -12770,14 +12778,22 @@ async function cropApplyGt(){
     gtImgs.set(d.id,cut.img);
     // the Offset bleed grown off the old picture is kept by id
     [...gtGrown.keys()].forEach(k=>{ if(k.startsWith(d.id+'@')) gtGrown.delete(k); });
-    // a cut line traced off the old picture no longer lies on this one
-    if(d.trace) d.trace=null;
+    // a cut line traced off the old picture no longer lies on this one — it is
+    // traced again off the new one with the same settings
+    const old=d.trace; let retraced=false;
+    d.trace=null;
+    if(old){
+      let loop=null;
+      try{ loop=gtTraceDesign(d,old.thr||50); }catch(e){ loop=null; }
+      if(loop){ d.trace={...old,loop}; retraced=true; }
+    }
     await gtSaveLib();
     gtArtWriteInputs(); gtArtChanged();
     if(typeof gtRenderOrder==='function') gtRenderOrder();
     cropClose();
+    const done=cropped&&bg?'Cropped and removed the background.':bg?'Removed the background.':'Cropped.';
     showMsg(document.getElementById('gtCropMsg'),
-      cropped&&bg?'Cropped and removed the background.':bg?'Removed the background.':'Cropped.',true);
+      done+(retraced?' The cut line was traced again.':old?' The cut line could not be traced again — press Trace the artwork.':''),true);
   }catch(err){
     showMsg(msg,'Crop failed: '+escapeHtml((err&&err.message)||'unknown error'),false);
   }finally{ go.disabled=false; }
