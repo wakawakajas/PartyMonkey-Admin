@@ -6954,6 +6954,11 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             title="The placeholders already there — picked ones, or all — put in this grid, keeping their own sizes">Arrange existing placeholders in this grid</button>
           <button class="btn-outline" id="gtPackBtn" style="width:100%;margin-top:8px;"
             title="The placeholders already there — picked ones, or all — packed close by their own sizes, with only the gutters between them, instead of every one in an equal cell">Pack placeholders by size (no equal cells)</button>
+          <div class="sect-label">Nest by design</div>
+          <div class="click-row">
+            <label class="click-tog" title="Every tag gets a placeholder the size of its design's cut line, packed across as many sheets as the order needs. More of a design means more placeholders on the same sheet where there is room — never the same sheet again."><input type="checkbox" id="gtNestOn"/>Nest the order — a placeholder per design</label>
+          </div>
+          <div class="calc" id="gtNestMsg" style="margin-top:8px;"></div>
         </div>
 
         <div class="sect-label">Or use a cutting file</div>
@@ -29961,7 +29966,7 @@ let gtSlotEdit=false, gtSelSlot=null;   // Contours on, and the placeholder in h
 const gtShapeSig=new Map();          // see gtKeepShape
 const gtSelSet=new Set();          // every placeholder picked, gtSelSlot among them
 let gtMarquee=null;                // the box being dragged out to pick several: {x0,y0,x1,y1} in mm
-const GT_SHEET_NEW={paperW:317,paperH:449,pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{},marksFromBase:true,marksFromBaseV2:false,baseRemoved:false,backFile:''};
+const GT_SHEET_NEW={nestOn:false,paperW:317,paperH:449,pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:10,sideTrim:10,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{},marksFromBase:true,marksFromBaseV2:false,baseRemoved:false,backFile:''};
 const gtSheet={paperW:317,paperH:449,tagW:60,tagH:40,margin:10,gap:3,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
   // null rather than a number: the layout centres itself until it is told
@@ -30002,6 +30007,18 @@ const gtSheet={paperW:317,paperH:449,tagW:60,tagH:40,margin:10,gap:3,
   baseFile:'',backFile:'',guideOver:false,slots:[]};
 let gtLayout=null;                 // {vb,mm,shapes:[{path,bbox}]} read off the SVG
 let gtBaseImg=null;                // the sheet's base layer, printed over the tags
+// Nest by design: with it on, the sheets on screen and in the export are laid
+// out from the order itself — a placeholder for every tag, the size of its
+// design's cut line, packed across as many sheets as it takes — and each sheet
+// owns its placeholders. gtSheet.slots then answers with the sheet on screen's
+// own, so everything that edits or draws placeholders works on it unchanged;
+// the placeholders of the plain grid wait in gtSlotsBase meanwhile, and are
+// what is saved.
+let gtSlotsBase=gtSheet.slots;
+let gtNestCache=null;              // {sig,plan}
+Object.defineProperty(gtSheet,'slots',{configurable:true,enumerable:true,
+  get(){ const e=gtNestEntry(); return e?e.slots:gtSlotsBase; },
+  set(v){ gtSlotsBase=v; }});
 let gtLayoutFrom='', gtBaseFrom=''; // which file each was built from, so neither is rebuilt for nothing
 const gtDesign=id=>gtLib.designs.find(d=>d.id===id)||null;
 // The page's library is the whole of what it offers: the two do not share one.
@@ -30097,7 +30114,7 @@ const gtManDesign=d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.ho
 function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
   gtKeepShape();
-  return {version:2,sheet:{...gtSheet},
+  return {version:2,sheet:{...gtSheet,slots:gtSlotsBase},
     designs:own.filter(d=>!d.adhoc).map(gtManDesign),
     fonts:gtLib.fonts.map(f=>({id:f.id,name:f.name,file:f.file})),
     texts:gtLib.texts.map(t=>({id:t.id,name:t.name,text:t.text,font:t.font||undefined})),
@@ -32094,6 +32111,8 @@ function gtLayoutFitted(){
 // holes stay on their placeholders and the ones added by hand stay on the sheet.
 // Reset and a freshly uploaded file build without it.
 function gtRebuildSlots(keep){
+  // nested sheets are made from the order, not from the grid
+  if(gtSheet.nestOn&&!gtLayout){ gtNestCache=null; return; }
   const old=keep?(gtSheet.slots||[]):null;
   gtRebuildSlotsFresh();
   if(!old||!old.length) return;
@@ -33084,9 +33103,125 @@ function gtShapeGroups(){
   if(!seen.size) seen.set(gtBaseShape(),[]);
   return [...seen.entries()].map(([shape,lines])=>({shape,lines}));
 }
+// ---------- nest by design ----------
+// MaxRects: free rectangles kept as placements are made, each tag put at the
+// highest, then leftmost, free place it fits.
+function gtNestBin(W,H){
+  const E=1e-6; let free=[{x:0,y:0,w:W,h:H}];
+  return {add(w,h){
+    let best=null;
+    for(const f of free){
+      if(w>f.w+E||h>f.h+E) continue;
+      if(!best||f.y<best.y-E||(Math.abs(f.y-best.y)<=E&&f.x<best.x-E)) best=f;
+    }
+    if(!best) return null;
+    const P={x:best.x,y:best.y,w,h}, next=[];
+    for(const f of free){
+      if(P.x>=f.x+f.w-E||P.x+P.w<=f.x+E||P.y>=f.y+f.h-E||P.y+P.h<=f.y+E){ next.push(f); continue; }
+      if(P.x>f.x+E) next.push({x:f.x,y:f.y,w:P.x-f.x,h:f.h});
+      if(P.x+P.w<f.x+f.w-E) next.push({x:P.x+P.w,y:f.y,w:f.x+f.w-P.x-P.w,h:f.h});
+      if(P.y>f.y+E) next.push({x:f.x,y:f.y,w:f.w,h:P.y-f.y});
+      if(P.y+P.h<f.y+f.h-E) next.push({x:f.x,y:P.y+P.h,w:f.w,h:f.y+f.h-P.y-P.h});
+    }
+    free=next.filter((a,i)=>!next.some((b,j)=>j!==i&&a.x>=b.x-E&&a.y>=b.y-E
+      &&a.x+a.w<=b.x+b.w+E&&a.y+a.h<=b.y+b.h+E&&(j<i||a.w<b.w-E||a.h<b.h-E||a.x!==b.x||a.y!==b.y)));
+    return {x:P.x,y:P.y};
+  }};
+}
+// The placeholder a design asks for: its cut line — the traced outline with its
+// outset where it has one, the artwork itself where it has not — drawn as the
+// sheet will draw it. The picture sits in a placeholder by its own centre or by
+// its traced outline's, so the box is found by placing, measuring, and placing
+// again on what was measured.
+function gtNestSizeOf(d){
+  const S=gtSheet, img=d&&gtImgGet(d.id);
+  const tag={w:Math.max(5,Number(S.tagW)||60),h:Math.max(5,Number(S.tagH)||40)};
+  if(!img||!img.naturalWidth) return {w:tag.w,h:tag.h};
+  let slot={x:0,y:0,w:tag.w,h:tag.h};
+  for(let k=0;k<4;k++){
+    const r=gtArtRectOf(d,slot), pts=gtTracePlace(d,r);
+    let b;
+    if(pts&&pts.length){
+      let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+      pts.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); });
+      b={x:x0,y:y0,w:x1-x0,h:y1-y0};
+    }else b={x:r.x,y:r.y,w:r.w,h:r.h};
+    const done=Math.abs(b.w-slot.w)<0.01&&Math.abs(b.h-slot.h)<0.01;
+    slot=b;
+    if(done) break;
+  }
+  return {w:Math.max(2,Math.round(slot.w*100)/100),h:Math.max(2,Math.round(slot.h*100)/100)};
+}
+function gtNestPlan(){
+  const S=gtSheet, q=gtQueue();
+  if(!q.length) return [];
+  const n=v=>Math.max(0,Number(v)||0), sg=v=>Number(v)||0;
+  const gx=sg(S.gap), gy=S.gapY==null||S.gapY===''?gx:sg(S.gapY), m=n(S.margin);
+  const manual=S.gridMode==='manual';
+  const x0=manual?n(S.sideTrim):m, y0=manual?n(S.leadTrim):m;
+  const availW=S.paperW-x0-m, availH=S.paperH-y0-m;
+  const ids=[...new Set(q.map(l=>l.designId))];
+  const dsig=ids.map(id=>{
+    const d=gtDesign(id), img=gtImgs.get(id), t=d&&d.trace;
+    return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],
+            t&&t.on&&t.loop?[t.out,t.sm,t.loop.length]:0];
+  });
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode]);
+  if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
+  const size=new Map(ids.map(id=>[id,gtNestSizeOf(gtDesign(id))]));
+  // tallest first, so shelves fill evenly; ties keep the order they were asked in
+  const items=q.map((line,i)=>({i,line,sz:size.get(line.designId)}))
+    .sort((a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i);
+  const pages=[];
+  let tooBig=0;
+  items.forEach(it=>{
+    const cw=Math.max(0.1,it.sz.w+gx), ch=Math.max(0.1,it.sz.h+gy);
+    let pos=null, pg=null;
+    for(const p of pages){ pos=p.bin.add(cw,ch); if(pos){ pg=p; break; } }
+    if(!pos){
+      pg={bin:gtNestBin(availW+gx,availH+gy),items:[]}; pages.push(pg);
+      pos=pg.bin.add(cw,ch);
+      if(!pos){ pos={x:0,y:0}; tooBig++; }
+    }
+    pg.items.push({it,pos});
+  });
+  const plan=pages.map((pg,at)=>{
+    let uw=0,uh=0;
+    pg.items.forEach(({it,pos})=>{ uw=Math.max(uw,pos.x+it.sz.w); uh=Math.max(uh,pos.y+it.sz.h); });
+    const ox=manual?x0:(S.paperW-uw)/2, oy=manual?y0:(S.paperH-uh)/2;
+    const slots=[], queue=[];
+    pg.items.forEach(({it,pos},k)=>{
+      slots.push({id:'n'+at+'_'+k,shape:null,added:true,
+        x:Math.round((ox+pos.x)*100)/100,y:Math.round((oy+pos.y)*100)/100,w:it.sz.w,h:it.sz.h});
+      queue.push(it.line);
+    });
+    return {shape:S.layoutFile,slots,per:slots.length,queue,start:0,of:pages.length,at,
+      lines:[...new Set(queue)],nest:true};
+  });
+  plan.tooBig=tooBig;
+  gtNestCache={sig,plan};
+  return plan;
+}
+// the nested sheet on screen, if the sheets are nested
+function gtNestEntry(){
+  if(!gtSheet.nestOn||gtLayout) return null;
+  const plan=gtNestPlan();
+  return plan.length?plan[Math.max(0,Math.min(plan.length-1,gtPage))]:null;
+}
+// A new list of the sheet's placeholders — one left out, say. A nested sheet
+// keeps each tag with the placeholder it was in; a tag whose placeholder went
+// has nowhere to print.
+function gtSetSlotsList(v){
+  const e=gtNestEntry();
+  if(!e){ gtSheet.slots=v; return; }
+  const old=e.slots, q=e.queue;
+  e.queue=v.map(s=>{ const i=old.indexOf(s); return i>=0?q[i]:undefined; });
+  e.slots=v; e.per=v.length;
+}
 // what is on each sheet of the whole order: its shape, its placeholders, and
 // the slice of that shape's queue it carries
 function gtPagePlan(){
+  if(gtSheet.nestOn&&!gtLayout){ const np=gtNestPlan(); if(np.length) return np; }
   const out=[];
   gtShapeGroups().forEach(g=>{
     const sh=gtShapeSlots.get(g.shape);
@@ -33195,7 +33330,16 @@ function gtFitD(d,iw,ih,bw,bh){
   // placeholder it lands in — the placeholder is where it sits, not how big it
   // is. Only a file that says nothing of its size is fitted to the placeholder.
   const img=d&&gtImgGet(d.id), real=img&&img.naturalWidth===iw?artRealMm(img):null;
-  if(real&&real.w>0&&real.h>0) return {w:real.w,h:real.h,x:(bw-real.w)/2,y:(bh-real.h)/2};
+  if(real&&real.w>0&&real.h>0){
+    // cut to its own outline, it is the outline that is centred in the
+    // placeholder, which is what makes a placeholder the size of the cut line
+    const tt=d&&d.trace;
+    if(tt&&tt.on&&tt.loop&&tt.loop.length>3){
+      const bb=gtTraceBox(tt.loop);
+      return {w:real.w,h:real.h,x:bw/2-(bb.u0+bb.u1)/2*real.w,y:bh/2-(bb.v0+bb.v1)/2*real.h};
+    }
+    return {w:real.w,h:real.h,x:(bw-real.w)/2,y:(bh-real.h)/2};
+  }
   const t=d&&d.trace;
   if(t&&t.on&&t.loop&&t.loop.length>3){
     const bb=gtTraceBox(t.loop), pad=Math.max(0,Number(t.out)||0)+0.05;   // a hair over, for the smoothing
@@ -33676,10 +33820,13 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   // this sheet's own shape and its own slice of that shape's queue — the page
   // number counts across the whole order, not within one shape
   const plan=gtPageAt(page);
-  const per=S.slots.length; if(!per){ if(!vec&&!back) gtDrawBase(ctx,sc); return; }
+  // the placeholders of this sheet: its own where the sheets are nested, and a
+  // sheet other than the one on screen is being drawn (the export)
+  const SL=(plan&&plan.nest&&plan.slots)||S.slots;
+  const per=SL.length; if(!per){ if(!vec&&!back) gtDrawBase(ctx,sc); return; }
   const q=plan?plan.queue:gtQueue();
   const start=plan?plan.start:page*per;
-  S.slots.forEach((slot,i)=>{
+  SL.forEach((slot,i)=>{
     const line=q[start+i]; if(!line) return;
     const at=onSide(slot);
     (back?gtDrawBack:gtDrawTag)(ctx,line,at.x,at.y,at.w,at.h,sc,forExport,vec);
@@ -33692,7 +33839,7 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   if(!vec&&!back) gtDrawBase(ctx,sc);
   // the boxes of the line being worked on, because they are dragged here —
   // the side's own boxes, where that side has its tag
-  if(!forExport&&gtSelLine) S.slots.forEach((slot,i)=>{
+  if(!forExport&&gtSelLine) SL.forEach((slot,i)=>{
     const line=q[start+i]; if(!line||line.id!==gtSelLine) return;
     const d=gtDesign(line.designId); if(!d) return;
     const art=gtTagArt(line,onSide(slot));
@@ -33724,7 +33871,7 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   // paper, which is exactly where each one lands seen from behind.
   if(back&&!forExport){ ctx.save(); ctx.translate(S.paperW*sc,0); ctx.scale(-1,1); }
   // the outlines last, over every tag — the cut is what you read the sheet by
-  if(!forExport&&S.showCut) S.slots.forEach((slot,i)=>{
+  if(!forExport&&S.showCut) SL.forEach((slot,i)=>{
     // a design cut to its own traced outline is drawn as that outline, so what
     // is on screen is what will be in the .plt rather than a stand-in for it
     const line=q[start+i], d=line&&gtDesign(line.designId);
@@ -33749,7 +33896,7 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   // the placeholders' own punch holes — preview only, like the design's; the
   // blade gets them from the cut file
   // an empty placeholder is not cut, so its hole is only shown in Contours
-  if(!forExport&&(S.showHole||gtSlotEdit)) S.slots.forEach((slot,i)=>{
+  if(!forExport&&(S.showHole||gtSlotEdit)) SL.forEach((slot,i)=>{
     if(!slot.hole) return;
     if(!gtSlotEdit&&!q[start+i]) return;
     const h=gtSlotHoleAt(slot);
@@ -33758,7 +33905,7 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
     ctx.beginPath(); ctx.arc(h.cx*sc,h.cy*sc,h.r*sc,0,Math.PI*2); ctx.stroke();
     ctx.restore();
   });
-  if(!forExport&&gtSlotEdit&&!back) S.slots.forEach(slot=>{
+  if(!forExport&&gtSlotEdit&&!back) SL.forEach(slot=>{
     const on=slot.id===gtSelSlot||gtSelSet.has(slot.id);
     ctx.save();
     ctx.strokeStyle=on?'#CCF344':'rgba(204,243,68,0.35)';
@@ -34028,8 +34175,10 @@ function gtDraw(){
   document.getElementById('gtPrevPageBtn').disabled=gtPage<=0;
   document.getElementById('gtNextPageBtn').disabled=gtPage>=pages-1;
   const per=S.slots.length, q=gtQueue().length;
-  document.getElementById('gtOrderCalc').innerHTML=
-    `${q} tag${q===1?'':'s'} · ${per} per sheet · ${pages} sheet${pages===1?'':'s'}`
+  const nested=S.nestOn&&!gtLayout&&q>0;
+  document.getElementById('gtOrderCalc').innerHTML=nested
+    ? `${q} tag${q===1?'':'s'} · nested on ${pages} sheet${pages===1?'':'s'} · ${per} on this one`
+    : `${q} tag${q===1?'':'s'} · ${per} per sheet · ${pages} sheet${pages===1?'':'s'}`
     +(groups.length>1?` · ${groups.length} shapes`:'');
   const sc=document.getElementById('gtSheetCalc');
   sc.innerHTML=per
@@ -34905,6 +35054,7 @@ document.getElementById('gtLayoutActualBtn').addEventListener('click',()=>{
   if(gtLayout) gtSetLayoutSize(gtLayoutNatural());
 });
 function gtWriteSheetInputs(){
+  try{ gtNestSync(); }catch(e){}
   [...GT_SHEET_FIELDS,...GT_GRID_FIELDS].forEach(([id,key])=>{
     const v=gtSheet[key];
     document.getElementById(id).value=(key==='gridCols'||key==='gridRows')&&!v?''
@@ -35062,7 +35212,7 @@ function gtPickAll(){
 function gtPickNone(){ gtPickOnly(null); gtSlotCardSync(); gtSlotScopeSync(); gtDraw(); }
 function gtDeletePicked(){
   const n=gtSheet.slots.filter(s=>gtSelSet.has(s.id)).length; if(!n) return;
-  gtSheet.slots=gtSheet.slots.filter(s=>!gtSelSet.has(s.id));
+  gtSetSlotsList(gtSheet.slots.filter(s=>!gtSelSet.has(s.id)));
   gtPickOnly(null);
   gtSlotsChanged();
   gtSlotToolMsg(`✓ ${n} placeholder${n===1?'':'s'} deleted`);
@@ -35145,6 +35295,7 @@ document.getElementById('gtGridModeSeg').addEventListener('click',e=>{
 // Generate replaces what is on the sheet with the grid — a cutting file too,
 // after asking, since its shapes are what is being given up.
 document.getElementById('gtGenGridBtn').addEventListener('click',async()=>{
+  if(gtSheet.nestOn&&!gtLayout) return gtSlotToolMsg('Nest by design is on — the placeholders come from the order. Turn it off to use the grid.',false);
   const G=gtGridPlan();
   if(!G.cols||!G.rows) return gtSlotToolMsg('No tag fits — a smaller tag, smaller gutters or margin.',false);
   if(gtLayout){
@@ -35163,6 +35314,7 @@ document.getElementById('gtGenGridBtn').addEventListener('click',async()=>{
 // The placeholders already there — a cutting file's, or ones added by hand —
 // laid out in the grid above, each keeping its own size.
 document.getElementById('gtDistributeBtn').addEventListener('click',()=>{
+  if(gtSheet.nestOn&&!gtLayout) return gtSlotToolMsg('Nest by design is on — the placeholders come from the order. Turn it off to use the grid.',false);
   const S=gtSheet, list=gtScopeSlots();
   if(!list.length) return gtSlotToolMsg('No placeholders to arrange.',false);
   const n=v=>Math.max(0,Number(v)||0);
@@ -35229,6 +35381,27 @@ function gtPackRects(items,W,H){
   }
   return out;
 }
+// ---------- nest by design: the switch ----------
+function gtNestSync(){
+  const on=document.getElementById('gtNestOn'), msg=document.getElementById('gtNestMsg');
+  if(!on||!msg) return;
+  on.checked=!!gtSheet.nestOn;
+  on.disabled=!!gtLayout;
+  if(gtLayout){ msg.textContent='A cutting file is in use — nesting makes its own placeholders, so take the cutting file off first.'; return; }
+  if(!gtSheet.nestOn){ msg.textContent='Off — the placeholders are the grid’s, the same on every sheet.'; return; }
+  const plan=gtNestPlan(), tags=gtQueue().length;
+  if(!plan.length){ msg.textContent='On — nothing on the order yet.'; return; }
+  msg.innerHTML=`${tags} tag${tags===1?'':'s'} nested on ${plan.length} sheet${plan.length===1?'':'s'}, `
+    +'each design cut to its own size. Moving a placeholder keeps until the order, a design or the sheet changes; Reset placeholders nests again.'
+    +(plan.tooBig?` <span style="color:var(--amber)">⚠ ${plan.tooBig} tag${plan.tooBig===1?' is':'s are'} bigger than the sheet allows.</span>`:'');
+}
+document.getElementById('gtNestOn').addEventListener('change',e=>{
+  if(e.target.checked&&gtLayout){ e.target.checked=false; gtNestSync(); return; }
+  gtSheet.nestOn=e.target.checked; gtNestCache=null; gtPage=0; gtPickOnly(null);
+  // back to the grid: its own placeholders are rebuilt in case the tag size or gutters moved meanwhile
+  if(!gtSheet.nestOn) gtRebuildSlots(true);
+  gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
+});
 document.getElementById('gtPackBtn').addEventListener('click',()=>{
   const S=gtSheet, list=gtScopeSlots();
   if(!list.length) return gtSlotToolMsg('No placeholders to arrange.',false);
@@ -35449,12 +35622,14 @@ document.getElementById('gtSlotList').addEventListener('click',e=>{
     return;
   }
   const id=card.dataset.gtSlot;
-  gtSheet.slots=gtSheet.slots.filter(s=>s.id!==id);
+  gtSetSlotsList(gtSheet.slots.filter(s=>s.id!==id));
   gtSelSet.delete(id);
   if(gtSelSlot===id) gtSelSlot=null;
   gtSlotsChanged();
 });
 document.getElementById('gtResetSlotsBtn').addEventListener('click',async()=>{
+  // nested, Reset nests the order again, forgetting any placeholder moved by hand
+  if(gtSheet.nestOn&&!gtLayout){ gtNestCache=null; gtPickOnly(null); gtRenderSlots(); gtDraw(); gtNestSync(); return; }
   if(gtSheet.shapeSlots&&gtSheet.layoutFile) delete gtSheet.shapeSlots[gtSheet.layoutFile];
   gtRebuildSlots();
   gtPickOnly(null);
@@ -37904,7 +38079,7 @@ undoDef('print',{
     cats:pcMode==='placecard'?state.cats:undefined}),
   put:v=>applyPrintState(v)});
 undoDef('gift',{
-  snap:()=>({order:gtOrder,sheet:{...gtSheet},designs:gtLib.designs,
+  snap:()=>({order:gtOrder,sheet:{...gtSheet,slots:gtSlotsBase},designs:gtLib.designs,
     fonts:gtLib.fonts,texts:gtLib.texts,base:gtDefaultShape,jobBack:gtJobBack}),
   put:v=>{
     gtOrder=v.order||[];
