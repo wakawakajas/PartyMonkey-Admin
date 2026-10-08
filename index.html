@@ -6958,6 +6958,9 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <div class="click-row">
             <label class="click-tog" title="Every tag gets a placeholder the size of its design's cut line, packed across as many sheets as the order needs. More of a design means more placeholders on the same sheet where there is room — never the same sheet again."><input type="checkbox" id="gtNestOn"/>Nest the order — a placeholder per design</label>
           </div>
+          <div class="click-row" style="margin-top:6px;">
+            <label class="click-tog" title="While nesting, a tag may be turned a quarter where that fits more on the sheet. The artwork and words turn with it."><input type="checkbox" id="gtNestRotate" checked/>Turn tags a quarter to fit more</label>
+          </div>
           <div class="click-row">
             <label class="click-tog" title="Packs each tag by its traced cut line instead of the box round it, so round and odd shapes sit in one another's gaps and fewer sheets are needed. Tags with no traced line stay boxes. Takes a few seconds on a big order."><input type="checkbox" id="gtNestRealOn"/>Fit the real cut lines (saves more paper)</label>
           </div>
@@ -32799,7 +32802,33 @@ function gtFlatten(d,m,stepVb){
 // the outline stretched onto the placeholder the way gtStrokeSlot draws it, and
 // the holes punched out of it. A slot with no shape behind it is a plain
 // rectangle, which is what the grid layout gives.
+// A placeholder can be turned a quarter (slot.rot, in degrees, clockwise as seen
+// on the front): x, y, w, h are then the box it fills on the sheet, and the tag
+// itself is drawn in the box before the turn — same centre, width and height
+// swapped — and turned about that centre. The back sees it from the other side,
+// so it turns the other way.
+function gtUnrotSlot(slot){
+  if(!slot||!slot.rot) return slot;
+  const cx=slot.x+slot.w/2, cy=slot.y+slot.h/2;
+  return {...slot,x:cx-slot.h/2,y:cy-slot.w/2,w:slot.h,h:slot.w,rot:0};
+}
+// fn is called with the placeholder as it is before the turn, with the canvas
+// turned to match.
+function gtWithTurn(ctx,slot,sc,back,fn){
+  if(!slot||!slot.rot){ fn(slot); return; }
+  const cx=(slot.x+slot.w/2)*sc, cy=(slot.y+slot.h/2)*sc;
+  ctx.save();
+  ctx.translate(cx,cy); ctx.rotate((back?-1:1)*slot.rot*Math.PI/180); ctx.translate(-cx,-cy);
+  try{ fn(gtUnrotSlot(slot)); } finally{ ctx.restore(); }
+}
 function gtSlotLoops(slot,opts){
+  // a turned placeholder is cut where it is drawn: its loops worked out before
+  // the turn, then turned about its centre
+  if(slot&&slot.rot){
+    const cx=slot.x+slot.w/2, cy=slot.y+slot.h/2, a=slot.rot*Math.PI/180, c=Math.cos(a), sn=Math.sin(a);
+    return gtSlotLoops(gtUnrotSlot(slot),opts).map(L=>L.map(([x,y])=>
+      [cx+(x-cx)*c-(y-cy)*sn, cy+(x-cx)*sn+(y-cy)*c]));
+  }
   const o=opts||{}, d=o.design||null;
   const holes=o.holes!==false;
   const out=[];
@@ -33202,26 +33231,21 @@ function gtNestBin(W,H,mode,blocks){
   const E=1e-6; let free=[{x:0,y:0,w:W,h:H}];
   (blocks||[]).forEach(B=>{ free=gtCutFree(free,B); });
   const score=GT_NEST_SCORE[mode]||GT_NEST_SCORE.tl;
-  return {add(w,h){
-    let best=null, bs=null;
-    for(const f of free){
-      if(w>f.w+E||h>f.h+E) continue;
-      const s=score(f,w,h);
+  // alt: {w,h} the tag takes turned a quarter (its gutters are on the same sides
+  // of the sheet, not of the tag), where it may be put in that way.
+  // Answers {x,y,rot} with the width and height it took, w and h.
+  return {add(w,h,alt){
+    let best=null, bs=null, bw=w, bh=h, br=0;
+    const tries=alt?[[w,h,0],[alt.w,alt.h,1]]:[[w,h,0]];
+    for(const [tw,th,tr] of tries) for(const f of free){
+      if(tw>f.w+E||th>f.h+E) continue;
+      const s=score(f,tw,th);
       if(!best||s[0]<bs[0]-E||(Math.abs(s[0]-bs[0])<=E&&(s[1]<bs[1]-E
-        ||(Math.abs(s[1]-bs[1])<=E&&(f.y<best.y-E||(Math.abs(f.y-best.y)<=E&&f.x<best.x-E)))))){ best=f; bs=s; }
+        ||(Math.abs(s[1]-bs[1])<=E&&(f.y<best.y-E||(Math.abs(f.y-best.y)<=E&&f.x<best.x-E)))))){ best=f; bs=s; bw=tw; bh=th; br=tr; }
     }
     if(!best) return null;
-    const P={x:best.x,y:best.y,w,h}, next=[];
-    for(const f of free){
-      if(P.x>=f.x+f.w-E||P.x+P.w<=f.x+E||P.y>=f.y+f.h-E||P.y+P.h<=f.y+E){ next.push(f); continue; }
-      if(P.x>f.x+E) next.push({x:f.x,y:f.y,w:P.x-f.x,h:f.h});
-      if(P.x+P.w<f.x+f.w-E) next.push({x:P.x+P.w,y:f.y,w:f.x+f.w-P.x-P.w,h:f.h});
-      if(P.y>f.y+E) next.push({x:f.x,y:f.y,w:f.w,h:P.y-f.y});
-      if(P.y+P.h<f.y+f.h-E) next.push({x:f.x,y:P.y+P.h,w:f.w,h:f.y+f.h-P.y-P.h});
-    }
-    free=next.filter((a,i)=>!next.some((b,j)=>j!==i&&a.x>=b.x-E&&a.y>=b.y-E
-      &&a.x+a.w<=b.x+b.w+E&&a.y+a.h<=b.y+b.h+E&&(j<i||a.w<b.w-E||a.h<b.h-E||a.x!==b.x||a.y!==b.y)));
-    return {x:P.x,y:P.y};
+    free=gtCutFree(free,{x:best.x,y:best.y,w:bw,h:bh});
+    return {x:best.x,y:best.y,rot:br,w:bw,h:bh};
   }};
 }
 // ---------- nest by design: real cut lines ----------
@@ -33291,7 +33315,7 @@ function gtNestMask(poly,w,h,gap,cell){
 // {pages:[{items:[{it,pos}]}],tooBig,fill}, pos being where the placeholder's
 // own top-left goes, in mm from the top-left of the printable area. scan 'row'
 // fills top to bottom, 'col' left to right. null if time ran out first.
-function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks){
+function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks,rotate){
   const cell=GT_NEST_CELL, gap=Math.max(0,gx,gy);
   const masks=new Map();
   const maskOf=it=>{
@@ -33355,24 +33379,47 @@ function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks){
   };
   try{
     for(const it of items){
-      const m=maskOf(it); let spot=null, pg=null;
+      // the tag as it is, and — where the sheet may turn it a quarter — as it would
+      // lie turned: its outline's points (x,y) in a box w × h go to (h−y, x)
+      const m0=maskOf(it);
+      const itR=(rotate&&Math.abs(it.sz.w-it.sz.h)>0.01)
+        ?{...it,key:it.key+'|r',sz:{w:it.sz.h,h:it.sz.w},poly:it.poly?it.poly.map(([x,y])=>[it.sz.h-y,x]):null}:null;
+      const mR=itR?maskOf(itR):null;
+      let spot=null, pg=null, m=m0, rot=0;
+      // the earlier place wins, the one not turned on a tie
+      const before=(a,b)=>scan==='col'?(a.cx<b.cx||(a.cx===b.cx&&a.cy<b.cy)):(a.cy<b.cy||(a.cy===b.cy&&a.cx<b.cx));
+      const choose=(p,s0,sR)=>{
+        // looking is not taking: the turned try's progress is kept only if it is the one used
+        const turned=sR&&(!s0||before(sR,s0));
+        if(turned){ if(f0===undefined) p.from.delete(m0); else p.from.set(m0,f0); }
+        else if(mR){ if(fR===undefined) p.from.delete(mR); else p.from.set(mR,fR); }
+        return turned;
+      };
+      let f0, fR;
       for(const p of pages){
-        if(p.failed.has(it.key)) continue;
-        spot=find(p,m);
-        if(spot){ pg=p; break; }
-        p.failed.add(it.key);
+        const try0=!p.failed.has(it.key), tryR=itR&&!p.failed.has(itR.key);
+        if(!try0&&!tryR) continue;
+        f0=p.from.get(m0); fR=mR?p.from.get(mR):undefined;
+        const s0=try0?find(p,m0):null, sR=tryR?find(p,mR):null;
+        if(try0&&!s0) p.failed.add(it.key);
+        if(tryR&&!sR) p.failed.add(itR.key);
+        if(!s0&&!sR) continue;
+        if(choose(p,s0,sR)){ spot=sR; m=mR; rot=1; } else { spot=s0; m=m0; }
+        pg=p; break;
       }
       if(!spot){
         pg=newPage(); pages.push(pg);
-        spot=find(pg,m);
-        if(!spot){ spot={cx:0,cy:0}; tooBig++; }
-        else put(pg,m,spot.cx,spot.cy);
+        f0=undefined; fR=undefined;
+        const s0=find(pg,m0), sR=itR?find(pg,mR):null;
+        if(!s0&&!sR){ spot={cx:0,cy:0}; tooBig++; }
+        else if(choose(pg,s0,sR)){ spot=sR; m=mR; rot=1; } else { spot=s0; m=m0; }
+        if(s0||sR) put(pg,m,spot.cx,spot.cy);
       }else put(pg,m,spot.cx,spot.cy);
       // mask cell (0,0) sits ring cells before the shape's own top-left, and the
       // grid ringMax before the printable area's — the difference is the shape's
       // own position, from which the slot's origin is the shape's x0,y0 back
       const px=(spot.cx+m.ring-ringMax)*cell-m.x0, py=(spot.cy+m.ring-ringMax)*cell-m.y0;
-      pg.items.push({it,pos:{x:px,y:py}});
+      pg.items.push({it,pos:{x:px,y:py,rot}});
     }
   }catch(e){ if(e==='late') return null; throw e; }
   const last=pages[pages.length-1];
@@ -33426,7 +33473,7 @@ function gtNestPlan(){
             t&&t.on&&t.loop?[t.out,t.sm,t.loop.length]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
-  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,marks]);
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,marks]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
   const size=new Map(ids.map(id=>[id,gtNestSizeOf(gtDesign(id))]));
   const dotBlocks=gtDotBlocks(x0,y0,availW+gx,availH+gy,1+Math.max(0,-gx,-gy));
@@ -33446,12 +33493,14 @@ function gtNestPlan(){
     const pages=[]; let tooBig=0;
     items.forEach(it=>{
       const cw=Math.max(0.1,it.sz.w+gx), ch=Math.max(0.1,it.sz.h+gy);
+      const alt=(S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)
+        ?{w:Math.max(0.1,it.sz.h+gx),h:Math.max(0.1,it.sz.w+gy)}:null;
       let pos=null, pg=null;
-      for(const p of pages){ pos=p.bin.add(cw,ch); if(pos){ pg=p; break; } }
+      for(const p of pages){ pos=p.bin.add(cw,ch,alt); if(pos){ pg=p; break; } }
       if(!pos){
         pg={bin:gtNestBin(availW+gx,availH+gy,mode,dotBlocks),items:[]}; pages.push(pg);
-        pos=pg.bin.add(cw,ch);
-        if(!pos){ pos={x:0,y:0}; tooBig++; }
+        pos=pg.bin.add(cw,ch,alt);
+        if(!pos){ pos={x:0,y:0,rot:0}; tooBig++; }
       }
       pg.items.push({it,pos});
     });
@@ -33503,7 +33552,7 @@ function gtNestPlan(){
       try{
         for(const scan of ['row','col']) for(const cmp of byKey){
           if(Date.now()>deadline) throw 'late';
-          const r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,dotBlocks);
+          const r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,dotBlocks,S.nestRotate!==false);
           if(!r) throw 'late';
           if(r.pages.length<packed.pages.length
             ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)){ packed=r; realUsed=true; }
@@ -33514,13 +33563,17 @@ function gtNestPlan(){
   const pages=packed.pages, tooBig=packed.tooBig;
   const plan=pages.map((pg,at)=>{
     let uw=0,uh=0;
-    pg.items.forEach(({it,pos})=>{ uw=Math.max(uw,pos.x+it.sz.w); uh=Math.max(uh,pos.y+it.sz.h); });
+    // what each tag fills on the sheet: its width and height, swapped where it went in turned
+    const box=({it,pos})=>pos.rot?{w:it.sz.h,h:it.sz.w}:{w:it.sz.w,h:it.sz.h};
+    pg.items.forEach(a=>{ const b=box(a); uw=Math.max(uw,a.pos.x+b.w); uh=Math.max(uh,a.pos.y+b.h); });
     // centred, unless a dot is in the way: the sheet is then kept as packed
     const ox=(manual||dotBlocks.length)?x0:(S.paperW-uw)/2, oy=(manual||dotBlocks.length)?y0:(S.paperH-uh)/2;
     const slots=[], queue=[];
-    pg.items.forEach(({it,pos},k)=>{
+    pg.items.forEach((a,k)=>{
+      const {it,pos}=a, b=box(a);
       slots.push({id:'n'+at+'_'+k,shape:null,added:true,
-        x:Math.round((ox+pos.x)*100)/100,y:Math.round((oy+pos.y)*100)/100,w:it.sz.w,h:it.sz.h});
+        x:Math.round((ox+pos.x)*100)/100,y:Math.round((oy+pos.y)*100)/100,w:b.w,h:b.h,
+        ...(pos.rot?{rot:90}:{})});
       queue.push(it.line);
     });
     return {shape:S.layoutFile,slots,per:slots.length,queue,start:0,of:pages.length,at,
@@ -34157,7 +34210,8 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   SL.forEach((slot,i)=>{
     const line=q[start+i]; if(!line) return;
     const at=onSide(slot);
-    (back?gtDrawBack:gtDrawTag)(ctx,line,at.x,at.y,at.w,at.h,sc,forExport,vec);
+    // a turned tag is drawn as a picture: an artwork page placed as it is cannot be turned here
+    gtWithTurn(ctx,at,sc,back,u=>(back?gtDrawBack:gtDrawTag)(ctx,line,u.x,u.y,u.w,u.h,sc,forExport,at.rot?null:vec));
   });
   // The base layer goes over the tags, so its dots and template lines are
   // never hidden by artwork — on screen and in the PDF alike. Multiplied, so
@@ -34168,7 +34222,7 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   // the boxes of the line being worked on, because they are dragged here —
   // the side's own boxes, where that side has its tag
   if(!forExport&&gtSelLine) SL.forEach((slot,i)=>{
-    const line=q[start+i]; if(!line||line.id!==gtSelLine) return;
+    const line=q[start+i]; if(!line||line.id!==gtSelLine||slot.rot) return;
     const d=gtDesign(line.designId); if(!d) return;
     const art=gtTagArt(line,onSide(slot));
     gtFieldsOf(d,line).forEach(f=>{
@@ -34203,20 +34257,22 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
     // a design cut to its own traced outline is drawn as that outline, so what
     // is on screen is what will be in the .plt rather than a stand-in for it
     const line=q[start+i], d=line&&gtDesign(line.designId);
-    const traced=d&&gtTracePlace(d,gtArtRectOf(d,slot));
-    if(traced){
+    gtWithTurn(ctx,slot,sc,false,u=>{
+      const traced=d&&gtTracePlace(d,gtArtRectOf(d,u));
+      if(traced){
+        ctx.save();
+        ctx.strokeStyle='#B24C25'; ctx.lineWidth=1;
+        ctx.beginPath();
+        traced.forEach(([x,y],k)=>k?ctx.lineTo(x*sc,y*sc):ctx.moveTo(x*sc,y*sc));
+        ctx.stroke(); ctx.restore();
+        return;
+      }
+      if(gtStrokeSlot(ctx,u,sc)) return;
       ctx.save();
       ctx.strokeStyle='#B24C25'; ctx.lineWidth=1;
-      ctx.beginPath();
-      traced.forEach(([x,y],k)=>k?ctx.lineTo(x*sc,y*sc):ctx.moveTo(x*sc,y*sc));
-      ctx.stroke(); ctx.restore();
-      return;
-    }
-    if(gtStrokeSlot(ctx,slot,sc)) return;
-    ctx.save();
-    ctx.strokeStyle='#B24C25'; ctx.lineWidth=1;
-    ctx.strokeRect(slot.x*sc,slot.y*sc,slot.w*sc,slot.h*sc);
-    ctx.restore();
+      ctx.strokeRect(u.x*sc,u.y*sc,u.w*sc,u.h*sc);
+      ctx.restore();
+    });
   });
   // In contour mode every placeholder is something to take hold of, whether a
   // tag has landed on it or not — an empty one is still a line the blade will
@@ -34601,15 +34657,22 @@ function gtSheetDrag(c,side){
       if(!line) continue;
       // on the back the tag is where it lands once the sheet is turned over,
       // and only the back's words are there to be taken hold of
-      const slot=back?{...s0,x:gtSheet.paperW-s0.x-s0.w}:s0;
-      if(p.mx<slot.x||p.my<slot.y||p.mx>slot.x+slot.w||p.my>slot.y+slot.h) continue;
+      const slot0=back?{...s0,x:gtSheet.paperW-s0.x-s0.w}:s0;
+      if(p.mx<slot0.x||p.my<slot0.y||p.mx>slot0.x+slot0.w||p.my>slot0.y+slot0.h) continue;
+      // a turned tag is hit where it is before the turn: the pointer is turned back to meet it
+      let P=p, slot=slot0;
+      if(slot0.rot){
+        const cx=slot0.x+slot0.w/2, cy=slot0.y+slot0.h/2, ang=-(back?-1:1)*slot0.rot*Math.PI/180;
+        const c=Math.cos(ang), sn=Math.sin(ang), dx=p.mx-cx, dy=p.my-cy;
+        P={mx:cx+dx*c-dy*sn,my:cy+dx*sn+dy*c}; slot=gtUnrotSlot(slot0);
+      }
       const d=gtDesign(line.designId); if(!d) return {line};
       const art=gtTagArt(line,slot);
       // topmost first, so a box drawn over another takes the tap
       const fs=gtFieldsOf(d,line).filter(f=>gtSideOf(f)===(back?'back':'front'));
       for(let k=fs.length-1;k>=0;k--){
         const f=fs[k], b=gtFieldRect(line,f,art);
-        let dx=p.mx-(b.x+b.w/2), dy=p.my-(b.y+b.h/2);
+        let dx=P.mx-(b.x+b.w/2), dy=P.my-(b.y+b.h/2);
         if(b.rot){
           const a=-b.rot*Math.PI/180, cs=Math.cos(a), sn=Math.sin(a);
           [dx,dy]=[dx*cs-dy*sn,dx*sn+dy*cs];
@@ -35714,6 +35777,8 @@ function gtPackRects(items,W,H,blocks){
 function gtNestSync(){
   const on=document.getElementById('gtNestOn'), msg=document.getElementById('gtNestMsg');
   if(!on||!msg) return;
+  const rb=document.getElementById('gtNestRotate');
+  if(rb){ rb.checked=gtSheet.nestRotate!==false; rb.disabled=!gtSheet.nestOn; }
   on.checked=!!gtSheet.nestOn;
   on.disabled=!!gtLayout;
   const real=document.getElementById('gtNestRealOn');
@@ -35728,6 +35793,10 @@ function gtNestSync(){
     +'Moving a placeholder keeps until the order, a design or the sheet changes; Reset placeholders nests again.'
     +(plan.tooBig?` <span style="color:var(--amber)">⚠ ${plan.tooBig} tag${plan.tooBig===1?' is':'s are'} bigger than the sheet allows.</span>`:'');
 }
+document.getElementById('gtNestRotate').addEventListener('change',e=>{
+  gtSheet.nestRotate=e.target.checked; gtNestCache=null; gtPickOnly(null);
+  gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
+});
 document.getElementById('gtNestOn').addEventListener('change',e=>{
   if(e.target.checked&&gtLayout){ e.target.checked=false; gtNestSync(); return; }
   gtSheet.nestOn=e.target.checked; gtNestCache=null; gtPage=0; gtPickOnly(null);
