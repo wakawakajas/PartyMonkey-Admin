@@ -45425,15 +45425,31 @@ async function mcGtReadNames(page){
 }
 // Read on the way into the summary and again after anything is added, so the
 // rows say what is true of both pages rather than of the last one visited.
+// A read that never comes back (a folder on a sleeping NAS, an image that
+// never finishes decoding) stalled the whole summary on "Reading the gift tag
+// libraries…". Each read is given 8 seconds; past that the answer from the last
+// look is kept, and the step that stalled is named in mcGtStalled.
+let mcGtStalled=[];
+function mcPatient(label,job,fallback){
+  return new Promise(res=>{
+    const t=setTimeout(()=>{
+      console.warn('Magic Create — gave up waiting on: '+label);
+      mcGtStalled.push(label); res(fallback);
+    },8000);
+    Promise.resolve(job).then(v=>{ clearTimeout(t); res(v); },
+      e=>{ clearTimeout(t); console.warn('Magic Create — '+label,e); res(fallback); });
+  });
+}
 async function mcGtIndex(){
   const out={};
+  mcGtStalled=[];
   // the other page is read off its folder below; the one in hand was read
   // once and kept, so a colleague's new design never matched a SKU here
-  if(typeof gtCatchUp==='function') await gtCatchUp();
+  if(typeof gtCatchUp==='function') await mcPatient('catching up with the library folder',gtCatchUp(),false);
   for(const p of GT_PAGES){
     out[p.mode]=(gtLoaded&&p.mode===gtMode)
       ? ((typeof gtLib!=='undefined'&&gtLib.designs)||[]).map(d=>({id:d.id,name:d.name}))
-      : await mcGtReadNames(p);
+      : await mcPatient('reading the '+p.name+' folder',mcGtReadNames(p),mcGtNames[p.mode]||[]);
   }
   mcGtNames=out;
   return out;
@@ -46919,10 +46935,33 @@ function mcToolFor(row){
   if(tag) return 'gift';
   return '';
 }
+// "Looking in the gift tag libraries…" used to stay on screen for ever when
+// one step under it threw or never came back, with nothing to say which. Each
+// step now names itself, a failure is said in the message, and a step that has
+// not answered in 20 seconds says which one it is waiting on.
+function mcStage(out,text){
+  showMsg(out,text,true);
+  const g={text,t:setTimeout(()=>{
+    if(g.done) return;
+    showMsg(out,`Still waiting on: ${text.replace(/…$/,'')} — if this does not move, `
+      +'say which step it is stuck on.',false);
+  },20000)};
+  return g;
+}
+async function mcGuarded(out,what,fn){
+  try{ return await fn(); }
+  catch(e){
+    console.error('Magic Create — '+what,e);
+    showMsg(out,`${what} stopped: ${escapeHtml(String((e&&e.message)||e))}`,false);
+  }
+}
 // Sends each SKU to the tool its artwork says, and does not come back to ask.
 // Where a batch is of both kinds the tags go on quietly and the print sheet —
 // the one being looked at — is what opens, saying both.
-async function mcRouteRows(rows){
+function mcRouteRows(rows){
+  return mcGuarded(document.getElementById('mcSummaryMsg'),'Adding',()=>mcRouteRowsRun(rows));
+}
+async function mcRouteRowsRun(rows){
   if(!rows||!rows.length) return;
   const out=document.getElementById('mcSummaryMsg');
   // the ones the shop says are a copy and nothing else. Done first and taken
@@ -46937,8 +46976,10 @@ async function mcRouteRows(rows){
   // a SKU with no PNG may still be a tag, and both pages' libraries are read
   // before anything is sorted — the page that is open is not the whole answer
   if(rows.some(r=>!designFileForSku(r.sku))){
-    showMsg(out,'Looking in the gift tag libraries…',true);
-    await mcGtIndex();
+    const st=mcStage(out,'Reading the gift tag libraries…');
+    try{ await mcGtIndex(); } finally{ st.done=true; clearTimeout(st.t); }
+    if(mcGtStalled.length) showMsg(out,'Could not finish '+mcGtStalled.join(' and ')
+      +' — matching with what was read last time.',false);
   }
   // The designs folder is read once and kept, so a file put in it after that
   // read — or a scan that was cut short — answers "nothing called" for a card
@@ -47336,11 +47377,20 @@ async function mcMarkLinesOnSheet(laid,page){
 // Custom is two orders, and each SKU goes on the page its design is on — the
 // operator is never asked which, because the library already answered.
 async function mcAddSkusToGiftTag(rows,opts){
+  const out=document.getElementById('mcSummaryMsg');
+  let st=null;
+  const stage=t=>{ if(st){ st.done=true; clearTimeout(st.t); } st=t?mcStage(out,t):null; };
+  try{ return await mcAddSkusToGiftTagRun(rows,opts,stage); }
+  finally{ stage(''); }
+}
+async function mcAddSkusToGiftTagRun(rows,opts,stage){
   const o=opts||{};
   const out=document.getElementById('mcSummaryMsg');
-  showMsg(out,'Looking in the gift tag libraries…',true);
+  stage('Opening the gift tag page…');
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
+  stage('Reading the gift tag libraries…');
   await mcGtIndex();
+  stage('');
   const missing=[], byPage=new Map();
   rows.forEach(r=>{
     // a route that names a page decides the page as well as the tool
@@ -47364,7 +47414,11 @@ async function mcAddSkusToGiftTag(rows,opts){
   for(const m of modes){
     // switching loads that page's library and swaps in its own order; the
     // order left behind is kept, not merged
-    if(m!==gtMode) await gtSetMode(m);
+    if(m!==gtMode){
+      stage(`Switching to the ${mcGtPage(m).name} gift tag page…`);
+      await gtSetMode(m);
+      stage('');
+    }
     // The library is in hand now, so each design is taken from it by the name
     // that matched — the id read off disk is only the index's shorthand —
     // and with the design comes the shape its folder cuts it to.
@@ -47377,7 +47431,9 @@ async function mcAddSkusToGiftTag(rows,opts){
     // one press of Add, and the shape folder being read is this page's own.
     const loose=here.filter(x=>!x.shape);
     if(loose.length){
+      stage('Waiting for the cutting shape to be picked…');
       const pick=await mcAskShape(loose.length,m);
+      stage('');
       if(pick===null){ stopped=true; break; }
       if(pick) loose.forEach(x=>{ x.shape=pick; });
     }
@@ -47416,8 +47472,10 @@ async function mcAddSkusToGiftTag(rows,opts){
     });
     // read in before anything counts the sheets: a shape nobody has opened yet
     // is laid out on the cuts of the sheet that is open, which is the wrong die
+    stage('Laying the tags on the sheet…');
     await mcGtShapesInHand();
     await mcMarkLinesOnSheet(laid,m);
+    stage('');
     // and the lines just marked that are on the lent run but not on its sheet
     if(lentHere){
       const keys=new Set(laid.map(x=>String(x.sku)));
