@@ -32391,6 +32391,40 @@ const GT_TRACE_PX=1000;             // the longest side the picture is read at
 // In or out, one flag per pixel. Alpha decides it where the picture has any;
 // where it is solid, the corner pixel is taken as the background and every
 // pixel judged against that.
+// How strong the artwork's own silhouette is against what is round it: the
+// background is whatever is almost nothing (below lim0) reached from the edge of
+// the picture, and the silhouette is the thin shell just inside it. Read there
+// rather than over the whole picture, so a small dark detail — the eyes of a
+// pale grey skull — cannot set a level the grey outline never reaches.
+// null where there is no background to speak of.
+function gtEdgeLevel(v,W,H,lim0){
+  const N=W*H, bg=new Uint8Array(N), st=[];
+  const push=i=>{ if(!bg[i]&&v[i]<lim0){ bg[i]=1; st.push(i); } };
+  for(let x=0;x<W;x++){ push(x); push((H-1)*W+x); }
+  for(let y=0;y<H;y++){ push(y*W); push(y*W+W-1); }
+  while(st.length){
+    const i=st.pop(), x=i%W, y=(i-x)/W;
+    if(x>0) push(i-1);
+    if(x<W-1) push(i+1);
+    if(y>0) push(i-W);
+    if(y<H-1) push(i+W);
+  }
+  let d=bg.slice();
+  for(let pass=0;pass<3;pass++){
+    const n=d.slice();
+    for(let y=1;y<H-1;y++) for(let x=1;x<W-1;x++){
+      const i=y*W+x; if(d[i]) continue;
+      if(d[i-1]||d[i+1]||d[i-W]||d[i+W]||d[i-W-1]||d[i-W+1]||d[i+W-1]||d[i+W+1]) n[i]=1;
+    }
+    d=n;
+  }
+  const hist=new Uint32Array(512); let cnt=0;
+  for(let i=0;i<N;i++) if(d[i]&&!bg[i]){ hist[Math.min(511,v[i]|0)]++; cnt++; }
+  if(cnt<8) return null;
+  let acc=0; const want=cnt*0.9;
+  for(let k=0;k<512;k++){ acc+=hist[k]; if(acc>=want) return k; }
+  return null;
+}
 function gtTraceMask(img,thr){
   const n=img.naturalWidth, m=img.naturalHeight;
   const s=Math.min(1,GT_TRACE_PX/Math.max(n,m));
@@ -32414,7 +32448,10 @@ function gtTraceMask(img,thr){
     for(let i=3;i<px.length;i+=4) ah[px[i]]++;
     let atop=255, atail=Math.ceil(W*H*0.005);
     for(; atop>0&&atail>ah[atop]; atop--) atail-=ah[atop];
-    const alim=Math.max(2,t*Math.min(255,atop));
+    const av=new Float32Array(W*H);
+    for(let i=0;i<W*H;i++) av[i]=px[i*4+3];
+    const aedge=gtEdgeLevel(av,W,H,8);
+    const alim=Math.max(2,t*Math.min(255,aedge!=null?aedge:atop));
     for(let i=0;i<W*H;i++) inside[i]=px[i*4+3]>=alim?1:0;
   }else{
     // the four corners, which on a tag are background wherever the art is not
@@ -32437,7 +32474,8 @@ function gtTraceMask(img,thr){
     }
     let top=449, tail=Math.ceil(W*H*0.005);
     for(; top>0&&tail>hist[top]; top--) tail-=hist[top];
-    const lim=Math.max(6,t*Math.min(195,top));
+    const cedge=gtEdgeLevel(dist,W,H,10);
+    const lim=Math.max(6,t*Math.min(195,cedge!=null?cedge:top));
     for(let i=0;i<W*H;i++) inside[i]=dist[i]>=lim?1:0;
   }
   // Everything the background cannot reach from the edge of the picture counts
