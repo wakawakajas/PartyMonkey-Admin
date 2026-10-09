@@ -7376,7 +7376,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
               <label class="field"><span>CUT WIDTH (mm)</span><input type="number" step="0.1" min="1" id="gtCutW"/></label>
               <label class="field"><span>CUT HEIGHT (mm)</span><input type="number" step="0.1" min="1" id="gtCutH"/></label>
             </div>
-            <p class="hint" style="margin:6px 0 0;">The cut line's size, outset included. Change either and the artwork is scaled with it, so the design stays where the line says.</p>
+            <p class="hint" style="margin:6px 0 0;">The cut line's size, outset included. Change either one on its own and the artwork is stretched with it — the other side stays put, so the design stays where the line says. Scale (%) above still resizes both together; Back to original size undoes the stretch.</p>
           </div>
           <p class="hint" id="gtCutWarn" style="margin:8px 0 0;color:#B24C25;" hidden></p>
           <details class="gt-why"><summary>How the cut line works</summary>
@@ -31167,7 +31167,8 @@ function gtNormalizeDesign(d){
     // as the new kind it came up as 70-odd percent — so it comes in at 100%.
     artV:2,
     art:d.artV===2
-      ?{s:Number(d.art&&d.art.s)||1,dx:Number(d.art&&d.art.dx)||0,dy:Number(d.art&&d.art.dy)||0}
+      ?{s:Number(d.art&&d.art.s)||1,dx:Number(d.art&&d.art.dx)||0,dy:Number(d.art&&d.art.dy)||0,
+        ...(d.art&&Number(d.art.st)>0&&Number(d.art.st)!==1?{st:Number(d.art.st)}:{})}
       :{s:1,dx:0,dy:0},
     // and its own bleed, where it has one. No `on` at all means it follows the
     // sheet — which is a different instruction from "no bleed on this one".
@@ -33797,7 +33798,7 @@ function gtNestPlan(){
   const ids=[...new Set(q.map(l=>l.designId))];
   const dsig=ids.map(id=>{
     const d=gtDesign(id), img=gtImgs.get(id), t=d&&d.trace;
-    return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],
+    return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy,d.art.st],
             t&&t.on&&t.loop?[t.out,t.sm,t.loop.length]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
@@ -34245,7 +34246,10 @@ function gtBleedOf(d){
 function gtArtDraw(d,f,x,y){
   const a=(d&&d.art)||{};
   const s=Math.max(0.05,Number(a.s)||1);
-  const w=f.w*s, h=f.h*s;
+  // st: how much taller than wide the picture has been pulled on top of the
+  // scale — 1 (or none) keeps its proportions
+  const st=Math.max(0.05,Number(a.st)||1);
+  const w=f.w*s, h=f.h*s*st;
   return {x:x+f.x-(w-f.w)/2+(Number(a.dx)||0),
           y:y+f.y-(h-f.h)/2+(Number(a.dy)||0), w, h};
 }
@@ -37222,8 +37226,6 @@ function gtEditGeom(){
   // the whole width the card gives it, held to most of the window's height so a
   // tall tag still fits on screen
   const availH=Math.max(360,(window.innerHeight||900)*0.8);
-  const sc=Math.max(220/Math.max(T.w,T.h),Math.min(GT_EDIT_MAX/T.w,GT_EDIT_MAX/T.h,availW/T.w,availH/T.h));
-  const w=Math.max(1,Math.round(T.w*sc)), h=Math.max(1,Math.round(T.h*sc));
   const d=gtCurrentDesign, img=d&&gtImgGet(d.id);
   // the artwork rect inside it — every field is a fraction of this, not of the tag
   let art={x:0,y:0,w:T.w,h:T.h}, draw=art;
@@ -37234,7 +37236,18 @@ function gtEditGeom(){
     // the words stay against `art`, exactly as they do on the sheet
     draw=gtArtDraw(d,f,0,0);
   }
-  return {c,img,sc,w,h,art,draw,tag:T};
+  // The view is the tag, and wider than it wherever the picture runs past it —
+  // a design that comes in bigger than its placeholder is still a design to be
+  // seen whole, not a corner of it. On the back the picture is turned over, so
+  // what hangs over turns with it.
+  let ex0=draw.x, ex1=draw.x+draw.w;
+  if(gtEditSide==='back'){ const a=T.w-ex1, b=T.w-ex0; ex0=a; ex1=b; }
+  const vx0=Math.min(0,ex0), vx1=Math.max(T.w,ex1);
+  const vy0=Math.min(0,draw.y), vy1=Math.max(T.h,draw.y+draw.h);
+  const vw=vx1-vx0, vh=vy1-vy0;
+  const sc=Math.max(220/Math.max(vw,vh),Math.min(GT_EDIT_MAX/vw,GT_EDIT_MAX/vh,availW/vw,availH/vh));
+  const w=Math.max(1,Math.round(vw*sc)), h=Math.max(1,Math.round(vh*sc));
+  return {c,img,sc,w,h,art,draw,tag:T,vx0,vy0,vw,vh,over:vw>T.w+1e-6||vh>T.h+1e-6};
 }
 // the texts on the side of the tag being worked on — everything the editor
 // picks, drags, lines up and lists answers to these and leaves the other
@@ -37251,10 +37264,15 @@ function gtDrawDesign(){
     lbl.textContent='ONE TAG'+(back?' · BACK':'')+(h?` · HELD TO ${(h.name||'THAT TEXT').toUpperCase()}`:'');
   }
   const d=gtCurrentDesign; if(!d) return;
-  const {c,img,sc,w,h,art,draw,tag}=gtEditGeom();
+  const {c,img,sc,w,h,art,draw,tag,vx0,vy0,over}=gtEditGeom();
   c.width=w; c.height=h;
   const ctx=c.getContext('2d');
-  ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h);
+  // the tag is white; where the picture runs past it the rest is grey, so the
+  // placeholder can still be told from the artwork hanging over it
+  ctx.fillStyle=over?'#d4d4d4':'#fff'; ctx.fillRect(0,0,w,h);
+  ctx.save(); ctx.translate(-vx0*sc,-vy0*sc);
+  const tw=tag.w*sc, th=tag.h*sc;
+  if(over){ ctx.fillStyle='#fff'; ctx.fillRect(0,0,tw,th); }
   // Not the whole base layer but the piece of it this tag lands on — the tag is
   // one window onto a sheet-wide image, and showing the lot would line the
   // words up against something the tag never sees. Drawn solid underneath,
@@ -37269,7 +37287,7 @@ function gtDrawDesign(){
     ctx.save();
     if(gtSheet.guideOver) ctx.globalAlpha=0.55;
     try{
-      ctx.drawImage(gtBaseImg,(ox-base.x)*px,(oy-base.y)*py,tag.w*px,tag.h*py,0,0,w,h);
+      ctx.drawImage(gtBaseImg,(ox-base.x)*px,(oy-base.y)*py,tag.w*px,tag.h*py,0,0,tw,th);
     }catch(e){}
     ctx.restore();
   };
@@ -37337,7 +37355,7 @@ function gtDrawDesign(){
     ctx.restore();
   });
   // seen from the back, the hole and the cut shape are the front's turned over
-  if(back){ ctx.save(); ctx.translate(w,0); ctx.scale(-1,1); }
+  if(back){ ctx.save(); ctx.translate(tw,0); ctx.scale(-1,1); }
   if(d.hole.on){
     ctx.save(); ctx.strokeStyle='#B24C25'; ctx.lineWidth=1.5;
     ctx.beginPath();
@@ -37346,8 +37364,9 @@ function gtDrawDesign(){
   }
   // and the cut line over everything, as the sheet draws it — the design's own
   // traced outline where it has one, and the placeholder's where it has not
-  gtDrawDesignCut(ctx,d,draw,slot,sc,w,h);
+  gtDrawDesignCut(ctx,d,draw,slot,sc,tw,th);
   if(back) ctx.restore();
+  ctx.restore();
 }
 function gtDrawDesignCut(ctx,d,draw,slot,sc,w,h){
   const traced=gtTracePlace(d,draw);
@@ -37469,8 +37488,8 @@ let gtNudgeDrawT=0;
   // inside it — so the tap is measured in mm first and then handed over
   const at=e=>{
     const r=c.getBoundingClientRect(), g=gtEditGeom();
-    const mx=(e.clientX-r.left)/r.width*g.tag.w;
-    const my=(e.clientY-r.top)/r.height*g.tag.h;
+    const mx=(e.clientX-r.left)/r.width*g.vw+g.vx0;
+    const my=(e.clientY-r.top)/r.height*g.vh+g.vy0;
     return {x:(mx-g.art.x)/g.art.w,y:(my-g.art.y)/g.art.h,mx,my,g};
   };
   // A turned box is still a box from its own point of view, so the tap is
@@ -37501,7 +37520,7 @@ let gtNudgeDrawT=0;
       if(!inside) continue;
       // anywhere in the box moves it; the corner square, and only that, resizes
       const bw=f.w*p.g.art.w, bh=f.h*p.g.art.h;
-      const g=Math.max(0.8,c.width?8*p.g.tag.w/c.width:2);
+      const g=Math.max(0.8,c.width?8*p.g.vw/c.width:2);
       const near=bw&&bh&&(bw-l.u*bw)<=Math.min(g,bw*0.35)
                       &&(bh-l.v*bh)<=Math.min(g,bh*0.35);
       gtEditSel=f;
@@ -38110,19 +38129,26 @@ function gtCutSizeWrite(){
     if(document.activeElement!==el) el.value=round(b[k]);
   });
 }
+// Width and height are set one at a time: the width moves the scale across and
+// pulls the stretch back by the same amount, so the height stays exactly where
+// it was; the height moves the stretch alone.
 function gtCutSetSize(k,want){
   const d=gtCurrentDesign; if(!d||!(want>0)) return;
   const a=d.art||(d.art={s:1,dx:0,dy:0});
-  const s0=Math.max(0.05,Number(a.s)||1);
-  const at=s=>{ a.s=s; const b=gtCutBox(d); return b?b[k]:NaN; };
-  const b0=at(s0), b1=at(s0*1.25);
-  const slope=(b1-b0)/(s0*0.25);
-  if(!isFinite(slope)||slope<=0){ a.s=s0; return; }
-  let s=Math.max(0.05,Math.min(10,s0+(want-b0)/slope));
+  const s0=Math.max(0.05,Number(a.s)||1), st0=Math.max(0.05,Number(a.st)||1);
+  const put=k==='w' ? x=>{ a.s=x; a.st=st0*s0/x; } : x=>{ a.st=x; };
+  const x0=k==='w'?s0:st0;
+  const lim=x=>Math.max(0.05,Math.min(k==='w'?10:20,x));
+  const at=x=>{ put(x); const b=gtCutBox(d); return b?b[k]:NaN; };
+  const b0=at(x0), b1=at(x0*1.25);
+  const slope=(b1-b0)/(x0*0.25);
+  if(!isFinite(slope)||slope<=0){ a.s=s0; a.st=st0; return; }
+  let x=lim(x0+(want-b0)/slope);
   // a couple more steps where smoothing bends the straight line a little
-  for(let i=0,b=at(s);i<3&&isFinite(b)&&Math.abs(b-want)>0.005;i++,b=at(s))
-    s=Math.max(0.05,Math.min(10,s+(want-b)/slope));
-  a.s=s;
+  for(let i=0,b=at(x);i<3&&isFinite(b)&&Math.abs(b-want)>0.005;i++,b=at(x))
+    x=lim(x+(want-b)/slope);
+  put(x);
+  if(Math.abs((Number(a.st)||1)-1)<1e-6) delete a.st;
   gtArtWriteInputs(); gtArtChanged();
 }
 [['gtCutW','w'],['gtCutH','h']].forEach(([id,k])=>{
