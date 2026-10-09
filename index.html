@@ -7384,7 +7384,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
               <label class="field"><span>CUT WIDTH (mm)</span><input type="number" step="0.1" min="1" id="gtCutW"/></label>
               <label class="field"><span>CUT HEIGHT (mm)</span><input type="number" step="0.1" min="1" id="gtCutH"/></label>
             </div>
-            <p class="hint" style="margin:6px 0 0;">The cut line's size, outset included. Change either one on its own and the artwork is stretched with it — the other side stays put, so the design stays where the line says. Scale (%) above still resizes both together; Back to original size undoes the stretch.</p>
+            <p class="hint" style="margin:6px 0 0;">The cut line's size, outset included. Change either one on its own and only the cut line moves — it is pulled wider or taller about its middle, and the artwork stays the size it is. Trace the artwork again to bring the line back to the artwork's own outline.</p>
           </div>
           <p class="hint" id="gtCutWarn" style="margin:8px 0 0;color:#B24C25;" hidden></p>
           <details class="gt-why"><summary>How the cut line works</summary>
@@ -31175,8 +31175,7 @@ function gtNormalizeDesign(d){
     // as the new kind it came up as 70-odd percent — so it comes in at 100%.
     artV:2,
     art:d.artV===2
-      ?{s:Number(d.art&&d.art.s)||1,dx:Number(d.art&&d.art.dx)||0,dy:Number(d.art&&d.art.dy)||0,
-        ...(d.art&&Number(d.art.st)>0&&Number(d.art.st)!==1?{st:Number(d.art.st)}:{})}
+      ?{s:Number(d.art&&d.art.s)||1,dx:Number(d.art&&d.art.dx)||0,dy:Number(d.art&&d.art.dy)||0}
       :{s:1,dx:0,dy:0},
     // and its own bleed, where it has one. No `on` at all means it follows the
     // sheet — which is a different instruction from "no bleed on this one".
@@ -31188,6 +31187,9 @@ function gtNormalizeDesign(d){
     trace:(d.trace&&d.trace.loop&&d.trace.loop.length>2)
       ? {loop:d.trace.loop,out:Number(d.trace.out)||0,thr:Number(d.trace.thr)||50,
          ...(d.trace.sm!=null&&isFinite(d.trace.sm)?{sm:Math.max(0,Number(d.trace.sm))}:{}),
+         // the cut line pulled wider or taller than the artwork's outline, each on its own
+         ...(Number(d.trace.cx)>0&&Number(d.trace.cx)!==1?{cx:Number(d.trace.cx)}:{}),
+         ...(Number(d.trace.cy)>0&&Number(d.trace.cy)!==1?{cy:Number(d.trace.cy)}:{}),
          on:d.trace.on!==false} : null,
     // A picture of its own for the back, sized like the front's art. None means
     // the sheet's back picture (gtSheet.backFile), and with neither it is blank.
@@ -33039,7 +33041,8 @@ function gtTracePlace(d,r,extra){
   const sm=t.sm!=null&&isFinite(t.sm)?Math.max(0,Number(t.sm)):GT_TRACE_SMOOTH;
   let byLoop=gtTraceCache.get(t.loop);
   if(!byLoop){ byLoop=new Map(); gtTraceCache.set(t.loop,byLoop); }
-  const key=`${r.w.toFixed(3)}|${r.h.toFixed(3)}|${out}|${sm}`;
+  const cx=Number(t.cx)>0?Number(t.cx):1, cy=Number(t.cy)>0?Number(t.cy):1;
+  const key=`${r.w.toFixed(3)}|${r.h.toFixed(3)}|${out}|${sm}|${cx}|${cy}`;
   let hit=byLoop.get(key);
   if(!hit){
     let pts=t.loop.map(([u,v])=>[u*r.w,v*r.h]), rel=null;
@@ -33047,6 +33050,14 @@ function gtTracePlace(d,r,extra){
     if(pts&&pts.length>3){
       const smooth=gtResample(gtSmoothMm(pts,sm),GT_PLT_STEP);
       rel=smooth.concat([smooth[0]]);
+      // The cut line made wider or taller than the artwork's outline plus its
+      // outset, about its own middle: the picture stays the size it is.
+      if(cx!==1||cy!==1){
+        let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+        rel.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); });
+        const mx=(x0+x1)/2, my=(y0+y1)/2;
+        rel=rel.map(([x,y])=>[mx+(x-mx)*cx,my+(y-my)*cy]);
+      }
     }
     hit={rel,parts:pts?(pts.parts||1):0};
     if(byLoop.size>40) byLoop.delete(byLoop.keys().next().value);
@@ -33806,8 +33817,8 @@ function gtNestPlan(){
   const ids=[...new Set(q.map(l=>l.designId))];
   const dsig=ids.map(id=>{
     const d=gtDesign(id), img=gtImgs.get(id), t=d&&d.trace;
-    return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy,d.art.st],
-            t&&t.on&&t.loop?[t.out,t.sm,t.loop.length]:0];
+    return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],
+            t&&t.on&&t.loop?[t.out,t.sm,t.loop.length,t.cx,t.cy]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
   const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,marks,S.qrOn?(Number(S.qrDist)||10):0]);
@@ -34060,7 +34071,10 @@ function gtFitD(d,iw,ih,bw,bh){
   }
   const t=d&&d.trace;
   if(t&&t.on&&t.loop&&t.loop.length>3){
-    const bb=gtTraceBox(t.loop), pad=Math.max(0,Number(t.out)||0)+0.05;   // a hair over, for the smoothing
+    // A hair over, for the smoothing — and not the outset as well: the picture
+    // is fitted to the placeholder by its outline, so changing the cut line's
+    // outset must not change how big the picture is.
+    const bb=gtTraceBox(t.loop), pad=0.05;
     const cw=(bb.u1-bb.u0)*iw, ch=(bb.v1-bb.v0)*ih;
     if(cw>0&&ch>0&&bw-2*pad>0&&bh-2*pad>0){
       const s=Math.min((bw-2*pad)/cw,(bh-2*pad)/ch);
@@ -34254,10 +34268,7 @@ function gtBleedOf(d){
 function gtArtDraw(d,f,x,y){
   const a=(d&&d.art)||{};
   const s=Math.max(0.05,Number(a.s)||1);
-  // st: how much taller than wide the picture has been pulled on top of the
-  // scale — 1 (or none) keeps its proportions
-  const st=Math.max(0.05,Number(a.st)||1);
-  const w=f.w*s, h=f.h*s*st;
+  const w=f.w*s, h=f.h*s;
   return {x:x+f.x-(w-f.w)/2+(Number(a.dx)||0),
           y:y+f.y-(h-f.h)/2+(Number(a.dy)||0), w, h};
 }
@@ -38137,26 +38148,17 @@ function gtCutSizeWrite(){
     if(document.activeElement!==el) el.value=round(b[k]);
   });
 }
-// Width and height are set one at a time: the width moves the scale across and
-// pulls the stretch back by the same amount, so the height stays exactly where
-// it was; the height moves the stretch alone.
+// The cut line's width and height are set one at a time, and only the line
+// moves: it is pulled wider or taller about its own middle, and the artwork stays
+// exactly the size it is. The stretch is a straight multiple, so one reading of
+// the line's size finds the figure.
 function gtCutSetSize(k,want){
-  const d=gtCurrentDesign; if(!d||!(want>0)) return;
-  const a=d.art||(d.art={s:1,dx:0,dy:0});
-  const s0=Math.max(0.05,Number(a.s)||1), st0=Math.max(0.05,Number(a.st)||1);
-  const put=k==='w' ? x=>{ a.s=x; a.st=st0*s0/x; } : x=>{ a.st=x; };
-  const x0=k==='w'?s0:st0;
-  const lim=x=>Math.max(0.05,Math.min(k==='w'?10:20,x));
-  const at=x=>{ put(x); const b=gtCutBox(d); return b?b[k]:NaN; };
-  const b0=at(x0), b1=at(x0*1.25);
-  const slope=(b1-b0)/(x0*0.25);
-  if(!isFinite(slope)||slope<=0){ a.s=s0; a.st=st0; return; }
-  let x=lim(x0+(want-b0)/slope);
-  // a couple more steps where smoothing bends the straight line a little
-  for(let i=0,b=at(x);i<3&&isFinite(b)&&Math.abs(b-want)>0.005;i++,b=at(x))
-    x=lim(x+(want-b)/slope);
-  put(x);
-  if(Math.abs((Number(a.st)||1)-1)<1e-6) delete a.st;
+  const d=gtCurrentDesign; if(!d||!d.trace||!(want>0)) return;
+  const b=gtCutBox(d); if(!b||!(b[k]>0)) return;
+  const key=k==='w'?'cx':'cy';
+  const v=(Number(d.trace[key])||1)*want/b[k];
+  if(!isFinite(v)||v<=0) return;
+  if(Math.abs(v-1)<1e-6) delete d.trace[key]; else d.trace[key]=v;
   gtArtWriteInputs(); gtArtChanged();
 }
 [['gtCutW','w'],['gtCutH','h']].forEach(([id,k])=>{
