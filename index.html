@@ -30590,7 +30590,11 @@ function gtCutLift(blob){
       try{
         const bytes=new Uint8Array(await blob.arrayBuffer());
         const file=await pdfPageFile(bytes,0,blob.name||'art.pdf','',{cut:true});
-        return file&&file.cutFound&&file.cutFound.outline.length>3?{clean:file,cut:file.cutFound}:null;
+        if(!file||!file.cutFound||file.cutFound.outline.length<=3) return null;
+        const c=file.cutFound, p=c.outline[0];
+        // enough to tell one export of the line from the next
+        c.sig=[c.outline.length,Math.round(p[0]*1e4),Math.round(p[1]*1e4),(c.extras||[]).length].join('|');
+        return {clean:file,cut:c};
       }catch(e){ return null; }
     })();
     gtCutLifted.set(blob,p);
@@ -30606,9 +30610,17 @@ function gtCutTake(d){
   const f=gtCutFound.get(d.file); gtCutPending.delete(d.file);
   let changed=false;
   const give=x=>{
-    if(x.trace&&!x.trace.auto) return;
-    if(!f){ if(x.trace){ x.trace=null; changed=true; } return; }   // the line is no longer in the file
-    const fresh=!x.trace;
+    if(!f){                                    // the line is no longer in the file
+      if(x.trace&&x.trace.auto){ x.trace=null; changed=true; }
+      return;
+    }
+    // A line somebody traced by hand stays — unless this is a line from a file
+    // that has not been taken before: a new export of the design brings its own,
+    // and that is the one meant. Once taken it is marked, so tracing again by
+    // hand afterwards is not undone the next time the file is read.
+    if(x.trace&&!x.trace.auto&&x.cutSeen===f.sig) return;
+    const fresh=!x.trace||!x.trace.auto;
+    x.cutSeen=f.sig;
     if(fresh) x.trace={loop:f.outline,out:0,thr:50,sm:0,on:true,auto:true};
     else x.trace.loop=f.outline;
     if(f.extras&&f.extras.length) x.trace.extra=f.extras; else delete x.trace.extra;
@@ -30641,7 +30653,8 @@ let gtOwnDesigns=null;
 // one-off is filtered out of the manifest and keeps none of it, which is what
 // one-off means.
 const gtManDesign=d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.hole,
-  artV:2,art:d.art,bleed:d.bleed,trace:d.trace,...(d.back?{back:d.back}:{})});
+  artV:2,art:d.art,bleed:d.bleed,trace:d.trace,...(d.cutSeen?{cutSeen:d.cutSeen}:{}),
+  ...(d.back?{back:d.back}:{})});
 function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
   gtKeepShape();
@@ -30717,7 +30730,7 @@ async function gtPiguFieldsSave(){
     // line are kept with the words: a folder design is read afresh every visit,
     // and a size set on it went back to the default each time
     const keep={fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
-      artV:2,art:d.art||null,bleed:d.bleed||null,trace:d.trace||null};
+      artV:2,art:d.art||null,bleed:d.bleed||null,trace:d.trace||null,cutSeen:d.cutSeen||null};
     const now=JSON.stringify(keep);
     if(JSON.stringify(map[d.file]||null)!==now){ map[d.file]=JSON.parse(now); changed=true; }
   });
@@ -31383,6 +31396,7 @@ function gtNormalizeDesign(d){
     // of the fit to the placeholder, which means something else entirely — read
     // as the new kind it came up as 70-odd percent — so it comes in at 100%.
     artV:2,
+    ...(d.cutSeen?{cutSeen:String(d.cutSeen)}:{}),
     art:d.artV===2
       ?{s:Number(d.art&&d.art.s)||1,dx:Number(d.art&&d.art.dx)||0,dy:Number(d.art&&d.art.dy)||0}
       :{s:1,dx:0,dy:0},
@@ -31652,12 +31666,18 @@ async function gtScanRun(){
   const jobs=[['designs',GT_ART,takeDesign],['fonts',GT_FACE,takeFont],
               ['',GT_ART,takeDesign],['',GT_FACE,takeFont]];
   let added=0;
+  // what is in the folder right now, and whether both places a design can sit
+  // were read through to the end — a drive that dropped out half way is not a
+  // folder with nothing in it
+  const present=new Set(); const listed={designs:false,root:false};
   for(const [folder,wanted,take] of jobs){
     let dh=gtDir;
     if(folder){ try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; } }
     const found=[];
     try{ for await (const entry of dh.values())
       if(entry.kind==='file'&&wanted.test(entry.name)) found.push(entry); }catch(e){ continue; }
+    if(wanted===GT_ART) listed[folder?'designs':'root']=true;
+    found.forEach(en=>present.add((folder?folder+'/':'')+en.name));
     // in the order the folder reads them, so a numbered set lands in its order
     found.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
     for(const entry of found){
@@ -31671,8 +31691,31 @@ async function gtScanRun(){
   added+=await gtScanShape(known);
   await Promise.all([gtShapeList(),gtLibList()]);
   if(gtDedupeLib()) added=Math.max(added,1);
+  if(listed.designs&&listed.root&&present.size) added+=gtDropMissing(present);
   if(added){ await gtHydrate(); await gtSaveLib(); }
   return added;
+}
+// A design whose file has been deleted from the folder is dropped from the
+// library, and with it any order line that was using it. It is not remembered as
+// one taken out by hand, so a file put back under the same name comes straight
+// back in. A line lent by a Magic Create batch is not this sheet's to drop, so
+// a design one of those is using stays until the batch is done with it.
+function gtDropMissing(present){
+  const own=gtOwnDesigns||gtLib.designs;
+  const lent=new Set();
+  [gtOrder,...Object.values(gtOrders||{})].forEach(list=>(Array.isArray(list)?list:[]).forEach(l=>{
+    if(l&&String(l.id||'').startsWith('mc-')) lent.add(l.designId); }));
+  const gone=new Set(own.filter(d=>!d.adhoc&&d.file&&!present.has(d.file)
+    &&(/^designs\//.test(d.file)||!d.file.includes('/'))&&!lent.has(d.id)).map(d=>d.id));
+  if(!gone.size) return 0;
+  gone.forEach(id=>{ gtImgs.delete(id); gtOneOffKeep.delete(id); });
+  gtLib.designs=gtLib.designs.filter(d=>!gone.has(d.id));
+  if(gtOwnDesigns) gtOwnDesigns=gtOwnDesigns.filter(d=>!gone.has(d.id));
+  gtOrder=gtOrder.filter(l=>!gone.has(l.designId));
+  Object.keys(gtOrders||{}).forEach(k=>{
+    if(Array.isArray(gtOrders[k])) gtOrders[k]=gtOrders[k].filter(l=>!gone.has(l.designId)); });
+  if(gtCurrentDesign&&gone.has(gtCurrentDesign.id)) gtCurrentDesign=null;
+  return gone.size;
 }
 // Two entries for one file are two of the same design, however they got there.
 // The first is kept, and anything an order line was pointing at is moved onto
@@ -32133,7 +32176,8 @@ async function gtReadPiguFolder(dir,folderName,keep){
     const was=saved[path]||null;
     const d=gtNormalizeDesign({id,name:f.entry.name.replace(/\.[^.]+$/,''),file:path,
       adhoc:true,fields:(was&&was.fields)||[],hole:was&&was.hole,back:was&&was.back,
-      artV:was&&was.artV,art:was&&was.art,bleed:was&&was.bleed,trace:was&&was.trace});
+      artV:was&&was.artV,art:was&&was.art,bleed:was&&was.bleed,trace:was&&was.trace,
+      cutSeen:was&&was.cutSeen});
     try{ gtImgs.set(id,await loadImage(await gtArtURL(blob,path,true))); }catch(err){}
     made.push(d);
   }
