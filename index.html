@@ -30775,12 +30775,33 @@ function gtManifest(){
     // other computer; in the library they go wherever the library goes.
     piguFields:gtPiguFields||{}};
 }
+// The Pigu folder itself — the one the page folders sit inside — is not any page's
+// library. A page pointed at it (Choose folder picked Pigu instead of "Custom Gift
+// Tag") wrote designs/ and library files straight into Pigu, which is where a
+// stray Pigu\designs folder came from. Told apart by holding two page folders.
+const gtRootCheck=new WeakMap();
+async function gtDirIsPiguRoot(dir){
+  if(!dir) return false;
+  if(gtRootCheck.has(dir)) return gtRootCheck.get(dir);
+  let hit=0;
+  for(const n of ['Festive Gift Tag','Custom Gift Tag','Sticker']){
+    try{ await dir.getDirectoryHandle(n); hit++; }catch(e){}
+  }
+  const root=hit>=2;
+  gtRootCheck.set(dir,root);
+  return root;
+}
 async function gtDirWrite(dir,path,blob){
   const [folder,name]=path.includes('/')?path.split('/'):[null,path];
+  // read before anything is made: a blob whose file has gone from the disk used
+  // to fail the write after the folder and the empty file had been created,
+  // leaving a 0-byte copy of the design in the folder
+  const bytes=blob.size!=null?await blob.arrayBuffer():blob;
   const target=folder?await dir.getDirectoryHandle(folder,{create:true}):dir;
   const fh=await target.getFileHandle(name,{create:true});
   const w=await fh.createWritable();
-  await w.write(blob); await w.close();
+  try{ await w.write(bytes); await w.close(); }
+  catch(e){ try{ await w.abort(); }catch(_){} throw e; }
 }
 async function gtDirRead(dir,path){
   const [folder,name]=path.includes('/')?path.split('/'):[null,path];
@@ -30938,6 +30959,13 @@ async function gtSaveLib(){
       +'holds library.backup-… files, each the whole library as it was then.',false);
     return;
   }
+  if(gtDir&&await gtDirOk(gtDir)&&await gtDirIsPiguRoot(gtDir)){
+    const m=document.getElementById('gtLibMsg');
+    if(m) showMsg(m,`Not saving: “${escapeHtml(gtDir.name)}” holds the page folders (Festive Gift Tag, `
+      +'Custom Gift Tag, Sticker) — it is not this page’s own folder. Choose this page’s own folder under '
+      +'Choose folder, or type its name in the box beside it. Nothing was written.',false);
+    return;
+  }
   if(gtDir&&await gtDirOk(gtDir)){
     // A folder that will not take the write — permission dropped, the drive
     // pulled, a file held open — threw from here into whoever called it, and
@@ -30945,8 +30973,17 @@ async function gtSaveLib(){
     // never heard about it. The failure is said out loud instead.
     try{
       await gtBackupLib();
+      // The design files the library still lists. A design taken out of the
+      // library (the ×) or deleted from the folder leaves its bytes in gtAssets
+      // for the rest of the session, and the loop below treats anything not on
+      // disk as "new" — so the file was written straight back every save, and
+      // came back as a design on the next scan. Only a listed design is written.
+      const listed=new Set();
+      (man.designs||[]).forEach(x=>{ if(x&&x.file) listed.add(x.file); if(x&&x.back&&x.back.file) listed.add(x.back.file); });
       for(const [file,blob] of gtAssets){
         if(gtIsAdhoc(file)) continue;            // a one-off is nobody's file but this session's
+        if(/^designs\//i.test(file)&&GT_ART.test(file)&&!listed.has(file)) continue;
+        if(blob&&blob.size===0) continue;        // nothing to write; an empty file would only be left behind
         // already on disk is the normal case — only what is new gets written
         try{ await gtDirRead(gtDir,file); continue; }catch(e){}
         await gtDirWrite(gtDir,file,blob);
