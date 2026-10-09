@@ -27944,7 +27944,12 @@ document.getElementById('pcLibFolderBtn').addEventListener('click',async()=>{
       await loadDesignDirSet(dir);
     }
     showMsg(msg,`Reading ${dir.name}… (a network drive can take a few minutes)`,true);
-    await loadDesignRescan();
+    let last=0;
+    await loadDesignRescan((folders,found)=>{
+      if(performance.now()-last<150) return;
+      last=performance.now();
+      showMsg(msg,`Reading ${dir.name}… ${folders} folder${folders===1?'':'s'}, ${found} design${found===1?'':'s'} so far`,true);
+    });
     pcLibFolderState(); pcLibRenderList(); loadDesignFolderState(); drawAll();
     showMsg(msg,`✓ Looking in ${dir.name} — ${loadDesignFiles.length} design(s) found`
       +(loadDesignFonts.length?`, ${loadDesignFonts.length} font(s)`:'')+'.',true);
@@ -30037,11 +30042,15 @@ function loadDesignFolderState(){
 }
 // recursive: "a few folders" of presets sit under the chosen root. Font files
 // found alongside the artwork go in their own list for the Place Card text panel.
+// Subfolders are read side by side rather than one after another: every folder
+// listing on a network drive is a round trip, and a tree of a few hundred of
+// them one at a time is minutes. ldScanTick, when set, is told each folder read.
+let ldScanTick=null;
 async function loadDesignScan(dir,prefix,fonts){
-  const out=[];
+  const out=[], subs=[];
   for await (const entry of dir.values()){
     if(entry.kind==='directory'){
-      out.push(...await loadDesignScan(entry,prefix+entry.name+'/',fonts));
+      subs.push(entry);
     }else if(entry.kind==='file'&&LOAD_DESIGN_ART.test(entry.name)){
       out.push({name:entry.name,path:prefix+entry.name,folder:prefix.replace(/\/$/,'')||'—',handle:entry});
     }else if(fonts&&entry.kind==='file'&&LOAD_DESIGN_FACE.test(entry.name)){
@@ -30050,6 +30059,9 @@ async function loadDesignScan(dir,prefix,fonts){
         key:'file:'+path, family:'pcf-'+pcHash(path), handle:entry});
     }
   }
+  if(ldScanTick) ldScanTick(out.length);
+  const lower=await Promise.all(subs.map(e=>loadDesignScan(e,prefix+e.name+'/',fonts)));
+  for(const l of lower) out.push(...l);
   return out;
 }
 // small deterministic hash → a stable, CSS-safe FontFace family name, so a
@@ -30080,22 +30092,28 @@ async function loadDesignFileByPath(path){
   const otherKey=ldActiveMode()==='placecard'?'loadDesignDir':'loadDesignDir:placecard';
   return await under(await gtIdbGet(otherKey).catch(()=>null));
 }
-async function loadDesignRescan(){
+async function loadDesignRescan(onProgress){
   loadDesignFiles=[]; loadDesignFonts=[];
   const dir=await loadDesignDirGet();
   if(!dir||!await loadDesignDirOk(dir,false)) return;
   // fonts are only Place Card's concern — don't scan or register them otherwise
   const wantFonts=ldActiveMode()==='placecard';
   const fonts=wantFonts?[]:null;
-  const out=await loadDesignScan(dir,'',fonts);
+  let folders=0, found=0;
+  ldScanTick=onProgress?(n=>{ folders++; found+=n; onProgress(folders,found); }):null;
+  let out;
+  try{ out=await loadDesignScan(dir,'',fonts); } finally { ldScanTick=null; }
   out.sort((a,b)=>a.path.localeCompare(b.path,undefined,{numeric:true,sensitivity:'base'}));
   loadDesignFiles=out;
   if(wantFonts){
     fonts.sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'}));
     loadDesignFonts=fonts;
-    await pcRegisterFolderFonts();
-    if(typeof pcRenderCats==='function') pcRenderCats();
-    if(typeof pcLibRenderList==='function') pcLibRenderList();
+    // each font is read whole off the drive; the designs are usable now and the
+    // sheet redraws itself when the faces arrive, so this is not waited for
+    pcRegisterFolderFonts().then(()=>{
+      if(typeof pcRenderCats==='function') pcRenderCats();
+      if(typeof pcLibRenderList==='function') pcLibRenderList();
+    }).catch(()=>{});
   }
   fillTemplateFolderOptions();
 }
@@ -30250,7 +30268,13 @@ document.getElementById('loadDesignPickFolderBtn').addEventListener('click',asyn
     await loadDesignDirSet(dir); loadDesignFolderState();
     // a network drive can take minutes to read — say so rather than sit silent
     showMsg(out,`Reading ${dir.name}… (a network drive can take a few minutes)`,true);
-    await loadDesignRescan(); loadDesignRenderList();
+    let last=0;
+    await loadDesignRescan((folders,found)=>{
+      if(performance.now()-last<150) return;
+      last=performance.now();
+      showMsg(out,`Reading ${dir.name}… ${folders} folder${folders===1?'':'s'}, ${found} design${found===1?'':'s'} so far`,true);
+    });
+    loadDesignRenderList();
     showMsg(out,`✓ Looking in ${dir.name} — ${loadDesignFiles.length} design(s) found`
       +(ldActiveMode()==='placecard'&&loadDesignFonts.length?`, ${loadDesignFonts.length} font(s)`:'')+'.',true);
   }catch(e){
