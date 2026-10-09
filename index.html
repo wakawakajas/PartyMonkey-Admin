@@ -9708,13 +9708,13 @@ async function pdfSides(file){
   if(!back) return null;
   return {front:await pdfPageFile(bytes,0,file.name,'front')||file,back};
 }
-async function pdfPageFile(bytes,index,fileName,label){
+async function pdfPageFile(bytes,index,fileName,label,opts){
   const enc=new TextEncoder();
   let last=0; const alloc=()=>++last;
   const catalog=alloc(), kids=alloc(), page=alloc(), content=alloc();
   // a file with no second page simply has none to lift
   let em;
-  try{ em=await pdfLift.embedPage(bytes,index,alloc); }catch(e){ return null; }
+  try{ em=await pdfLift.embedPage(bytes,index,alloc,opts); }catch(e){ return null; }
   const f=n=>(Math.round(n*1e4)/1e4).toString();
   const draw=enc.encode(`q 1 0 0 1 ${f(-em.x)} ${f(-em.y)} cm /Fm0 Do Q`);
   // the source page's TrimBox/BleedBox/ArtBox, put through the same turn and
@@ -9747,8 +9747,10 @@ async function pdfPageFile(bytes,index,fileName,label){
   let xref=`xref\n0 ${last+1}\n0000000000 65535 f \n`;
   for(let n=1;n<=last;n++) xref+=off.has(n)?String(off.get(n)).padStart(10,'0')+' 00000 n \n':'0000000000 65535 f \n';
   parts.push(enc.encode(xref+`trailer\n<< /Size ${last+1} /Root ${catalog} 0 R >>\nstartxref\n${pos}\n%%EOF\n`));
-  const name=String(fileName||'artwork.pdf').replace(/\.pdf$/i,'')+` (${label}).pdf`;
-  return new File(parts,name,{type:'application/pdf'});
+  const name=label?String(fileName||'artwork.pdf').replace(/\.pdf$/i,'')+` (${label}).pdf`:String(fileName||'artwork.pdf');
+  const file=new File(parts,name,{type:'application/pdf'});
+  if(em.cut) file.cutFound=em.cut;
+  return file;
 }
 // Every page of a PDF, each lifted into its own one-page file the same way a
 // two-page one is split into its front and back — used for Split, where a
@@ -28992,7 +28994,7 @@ const pdfLift=(function(){
   // The page dictionary itself is not copied — its contents become the form's
   // stream and its resources the form's resources; what hangs off it (the fonts,
   // the images, the colour spaces, the transparency groups) comes as it is.
-  async function embedPage(bytes, pageIndex, alloc) {
+  async function embedPage(bytes, pageIndex, alloc, opts) {
     const src = new PdfSrc(bytes);
     if (src.encrypted()) throw new Error('the file is encrypted');
     await src.loadObjStms(inflateBytes);
@@ -29025,8 +29027,14 @@ const pdfLift=(function(){
       chunks.push(new Uint8Array([10]));            // a newline between them, as the spec asks
     }
     let contentLen = chunks.reduce((a, c) => a + c.length, 0);
-    const content = new Uint8Array(contentLen);
+    let content = new Uint8Array(contentLen);
     { let o = 0; chunks.forEach(c => { content.set(c, o); o += c.length; }); }
+    // a cut line drawn on the page is read off and left out of what is kept
+    let cutScan = null;
+    if (opts && opts.cut) {
+      try { cutScan = pdfCutScan(content, bbox); } catch (e) { cutScan = null; }
+      if (cutScan) content = cutScan.content;
+    }
 
     // ---- the objects it draws with ----
     const map = new Map();                          // old number -> new number
@@ -29115,7 +29123,24 @@ const pdfLift=(function(){
     objs.push({ num: formNum, parts: fparts });
     drain();                                        // anything the form dictionary itself reached
 
+    // the cut line as fractions of the box the form draws in, top left at 0,0 —
+    // the same terms a traced cut line is held in
+    let cut = null;
+    if (cutScan) {
+      const toUV = ([px, py]) => {
+        const X = a * px + c * py + e, Y = b * px + d * py + f;
+        return [(X - tbox[0]) / (tbox[2] - tbox[0]), 1 - (Y - tbox[1]) / (tbox[3] - tbox[1])];
+      };
+      const mm = 25.4 / 72;
+      cut = {
+        outline: cutScan.outline.map(toUV),
+        holes: cutScan.holes.map(h => { const cc = toUV([(h.b.x0 + h.b.x1) / 2, (h.b.y0 + h.b.y1) / 2]);
+          return { u: cc[0], v: cc[1], mm: Math.max(h.b.w, h.b.h) * mm }; }),
+        extras: cutScan.extras.map(e => ({ pts: e.pts.map(toUV), closed: e.closed })),
+      };
+    }
     return {
+      cut,
       form: formNum, objs,
       // the box the form actually draws in, in the space that places it
       x: tbox[0], y: tbox[1], w: tbox[2] - tbox[0], h: tbox[3] - tbox[1],
@@ -29128,6 +29153,123 @@ const pdfLift=(function(){
   }
     return { embedPage, PdfSrc };
 })();
+
+// ---------- a cut line drawn inside the artwork's own PDF ----------
+// A design exported with its cut line on the page — a red outline stroked round
+// the artwork, and a small red circle where the punch goes — carries its own cut
+// line, so nothing has to be traced. This walks the page's drawing, finds those
+// strokes, and says where they sit and which bytes of the page draw them, so the
+// page can be put back without them and nothing red is ever printed.
+//
+// Only a stroke with no fill, in a plain red (CMYK 0/100/100/0, RGB red), is
+// taken: the outline has to cover most of the page, and a circle has to be small
+// and inside it. Any other red line in the artwork is left exactly as it is.
+function pdfCutScan(content,box){
+  let s=''; for(let i=0;i<content.length;i+=8192) s+=String.fromCharCode.apply(null,content.subarray(i,i+8192));
+  const n=s.length, WS=/[\0\t\n\f\r ]/, DL=/[\0\t\n\f\r ()<>\[\]{}\/%]/;
+  const mul=(m,c)=>[m[0]*c[0]+m[1]*c[2],m[0]*c[1]+m[1]*c[3],m[2]*c[0]+m[3]*c[2],m[2]*c[1]+m[3]*c[3],
+                    m[4]*c[0]+m[5]*c[2]+c[4],m[4]*c[1]+m[5]*c[3]+c[5]];
+  let ctm=[1,0,0,1,0,0], stroke=null; const stack=[];
+  const isCut=c=>!!c&&(c.k==='cmyk'?(c.v[0]<=0.15&&c.v[3]<=0.15&&c.v[1]>=0.85&&c.v[2]>=0.75)
+                    :c.k==='rgb'?(c.v[0]>=0.8&&c.v[1]<=0.3&&c.v[2]<=0.3):false);
+  let args=[], argStart=-1, path=[], cur=null, pathStart=-1;
+  const cands=[];
+  const pt=(x,y)=>[ctm[0]*x+ctm[2]*y+ctm[4],ctm[1]*x+ctm[3]*y+ctm[5]];
+  const begin=at=>{ if(pathStart<0) pathStart=at; };
+  const seg=()=>path[path.length-1];
+  let i=0;
+  while(i<n){
+    const ch=s[i];
+    if(WS.test(ch)){ i++; continue; }
+    if(ch==='%'){ while(i<n&&s[i]!=='\n'&&s[i]!=='\r') i++; continue; }
+    const at=i;
+    if(ch==='('){ let d=0; while(i<n){ const c=s[i++]; if(c==='\\') i++; else if(c==='(') d++; else if(c===')'&&--d===0) break; }
+      if(argStart<0) argStart=at; args.push(null); continue; }
+    if(ch==='<'){ if(s[i+1]==='<'){ i+=2; } else { while(i<n&&s[i]!=='>') i++; i++; if(argStart<0) argStart=at; args.push(null); } continue; }
+    if(ch==='>'){ i+=(s[i+1]==='>')?2:1; continue; }
+    if(ch==='['||ch===']'){ i++; if(argStart<0) argStart=at; args.push(null); continue; }
+    if(ch==='/'){ i++; while(i<n&&!DL.test(s[i])) i++; if(argStart<0) argStart=at; args.push(null); continue; }
+    while(i<n&&!DL.test(s[i])) i++;
+    if(i===at){ i++; continue; }
+    const tok=s.slice(at,i);
+    const num=/^[+-]?(\d+\.?\d*|\.\d+)$/.test(tok)?parseFloat(tok):NaN;
+    if(!isNaN(num)){ if(argStart<0) argStart=at; args.push(num); continue; }
+    const a=args, from=argStart<0?at:argStart;
+    switch(tok){
+      case 'q': stack.push({ctm:ctm.slice(),stroke}); break;
+      case 'Q': { const t=stack.pop(); if(t){ ctm=t.ctm; stroke=t.stroke; } break; }
+      case 'cm': if(a.length>=6) ctm=mul(a.slice(-6),ctm); break;
+      case 'K': if(a.length>=4) stroke={k:'cmyk',v:a.slice(-4)}; break;
+      case 'RG': if(a.length>=3) stroke={k:'rgb',v:a.slice(-3)}; break;
+      case 'G': if(a.length>=1) stroke={k:'gray',v:a.slice(-1)}; break;
+      case 'SC': case 'SCN': {
+        const nums=a.filter(x=>typeof x==='number');
+        stroke=nums.length===a.length&&nums.length===4?{k:'cmyk',v:nums}:nums.length===a.length&&nums.length===3?{k:'rgb',v:nums}:{k:'other',v:nums}; break; }
+      case 'm': if(a.length>=2){ begin(from); cur=pt(a[a.length-2],a[a.length-1]); path.push({pts:[cur],closed:false}); } break;
+      case 'l': if(a.length>=2&&seg()){ begin(from); cur=pt(a[a.length-2],a[a.length-1]); seg().pts.push(cur); } break;
+      case 'c': case 'v': case 'y': if(seg()&&cur){
+        begin(from);
+        const q=a.slice(tok==='c'?-6:-4), p0=cur; let p1,p2,p3;
+        if(tok==='c'){ p1=pt(q[0],q[1]); p2=pt(q[2],q[3]); p3=pt(q[4],q[5]); }
+        else if(tok==='v'){ p1=p0; p2=pt(q[0],q[1]); p3=pt(q[2],q[3]); }
+        else { p1=pt(q[0],q[1]); p3=pt(q[2],q[3]); p2=p3; }
+        for(let k=1;k<=12;k++){ const t=k/12, u=1-t;
+          seg().pts.push([u*u*u*p0[0]+3*u*u*t*p1[0]+3*u*t*t*p2[0]+t*t*t*p3[0],
+                          u*u*u*p0[1]+3*u*u*t*p1[1]+3*u*t*t*p2[1]+t*t*t*p3[1]]); }
+        cur=p3; } break;
+      case 're': if(a.length>=4){ begin(from);
+        const [x,y,w,h]=a.slice(-4);
+        path.push({pts:[pt(x,y),pt(x+w,y),pt(x+w,y+h),pt(x,y+h)],closed:true}); cur=pt(x,y); } break;
+      case 'h': if(seg()) seg().closed=true; break;
+      case 'S': case 's': case 'f': case 'F': case 'f*': case 'B': case 'B*': case 'b': case 'b*': case 'n':
+        if((tok==='S'||tok==='s')&&pathStart>=0&&isCut(stroke)){
+          if(tok==='s'&&seg()) seg().closed=true;
+          cands.push({start:pathStart,end:i,loops:path.filter(p=>p.pts.length>=3)});
+        }
+        path=[]; cur=null; pathStart=-1; break;
+      case 'BI': { const id=s.indexOf('ID',i); if(id<0){ i=n; break; }
+        const re=/[\0\t\n\f\r ]EI(?=[\0\t\n\f\r ]|$)/g; re.lastIndex=id+2; const m=re.exec(s); i=m?m.index+m[0].length:n; break; }
+      default: break;
+    }
+    args=[]; argStart=-1;
+  }
+  if(!cands.length) return null;
+  const bb=pts=>{ let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+    pts.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); });
+    return {x0,y0,x1,y1,w:x1-x0,h:y1-y0}; };
+  const pageA=(box[2]-box[0])*(box[3]-box[1]);
+  // a punch hole is a small circle — a curve or a slit is something else, and is
+  // left in the artwork rather than guessed at
+  const isRound=b=>b.w<=57&&b.h<=57&&b.w>=3&&Math.abs(b.w-b.h)<=0.15*Math.max(b.w,b.h);
+  let outline=null;
+  cands.forEach(c=>c.loops.forEach(l=>{ const b=bb(l.pts);
+    if(b.w*b.h>=0.4*pageA&&(!outline||b.w*b.h>outline.b.w*outline.b.h)) outline={c,l,b}; }));
+  if(!outline) return null;
+  // Everything else red inside the outline is cut as well: a small circle is the
+  // punch hole, and any other shape — a slit, a notch — is a cut of its own.
+  const holes=[], extras=[], take=new Set([outline.c]);
+  const inside=b=>b.x0>=outline.b.x0&&b.x1<=outline.b.x1&&b.y0>=outline.b.y0&&b.y1<=outline.b.y1;
+  const sort=l=>{ const b=bb(l.pts);
+    if(isRound(b)) holes.push({pts:l.pts,b});
+    else{ const p=l.pts, a=p[0], z=p[p.length-1];
+      extras.push({pts:p,closed:!!l.closed||Math.hypot(a[0]-z[0],a[1]-z[1])<0.5}); } };
+  cands.forEach(c=>{ if(c===outline.c) return;
+    if(!c.loops.every(l=>inside(bb(l.pts)))) return;
+    take.add(c); c.loops.forEach(sort); });
+  // a compound path carrying the outline and the rest together goes whole
+  outline.c.loops.forEach(l=>{ if(l!==outline.l) sort(l); });
+  const ranges=[...take].map(c=>[c.start,c.end]).sort((x,y)=>x[0]-y[0]);
+  const out=[]; let from=0;
+  ranges.forEach(([a,b])=>{ out.push(content.subarray(from,a)); out.push(new Uint8Array([10])); from=b; });
+  out.push(content.subarray(from));
+  const stripped=new Uint8Array(out.reduce((t,x)=>t+x.length,0));
+  { let o=0; out.forEach(x=>{ stripped.set(x,o); o+=x.length; }); }
+  const dedupe=pts=>{ const p=pts.slice(); const a=p[0], z=p[p.length-1];
+    if(p.length>3&&Math.hypot(a[0]-z[0],a[1]-z[1])<1e-3) p.pop(); return p; };
+  return {content:stripped,outline:dedupe(outline.l.pts),
+          holes:holes.map(h=>({pts:dedupe(h.pts),b:h.b})),
+          extras:extras.map(e=>({pts:e.closed?dedupe(e.pts):e.pts,closed:e.closed}))};
+}
 
 async function inflateBytes(bytes){
   // zlib-wrapped is what /FlateDecode means; files written by tools that got
@@ -30415,13 +30557,80 @@ async function gtLooksPdf(blob){
 // with it. A PDF is drawn by the reader first, larger than a preview needs —
 // it stands in for the artwork wherever the export cannot place the file
 // itself, and that stand-in is what gets printed then.
-async function gtArtURL(blob,name){
+async function gtArtURL(blob,name,asDesign){
   const looksPdf=gtIsPdfFile(name||(blob&&blob.name))
     ||(blob&&blob.type==='application/pdf')||await gtLooksPdf(blob);
   if(!looksPdf) return await fileToDataURL(blob);
   if(!window.pdfjsLib) throw new Error('the PDF reader has not loaded');
+  // A design whose PDF has its cut line drawn on the page is drawn without it,
+  // and the line is kept to cut to — see gtCutLift
+  if(asDesign&&name){
+    const lift=await gtCutLift(blob);
+    // either way the designs on this file are told what was found, so a line
+    // taken from an earlier version of the file does not outlive it
+    if(lift) gtCutFound.set(name,lift.cut); else gtCutFound.delete(name);
+    gtCutPending.add(name);
+    if(lift) return await pdfFileToDataURL(lift.clean,2600,true);
+  }
   return await pdfFileToDataURL(blob,2600,true);
 }
+// A design's PDF with its own cut line on the page — a red outline round the
+// artwork and a small red circle for the punch — read once per file. clean is
+// the same page without them, which is what is drawn and what is printed; cut
+// is where they were, in fractions of the page. null where there is none, and
+// then the file is used exactly as it came.
+const gtCutLifted=new WeakMap();
+const gtCutFound=new Map();        // design file -> the cut line found on its page
+const gtCutPending=new Set();      // files whose line has not been given to their designs yet
+function gtCutLift(blob){
+  if(!blob||typeof blob.arrayBuffer!=='function') return Promise.resolve(null);
+  let p=gtCutLifted.get(blob);
+  if(!p){
+    p=(async()=>{
+      try{
+        const bytes=new Uint8Array(await blob.arrayBuffer());
+        const file=await pdfPageFile(bytes,0,blob.name||'art.pdf','',{cut:true});
+        return file&&file.cutFound&&file.cutFound.outline.length>3?{clean:file,cut:file.cutFound}:null;
+      }catch(e){ return null; }
+    })();
+    gtCutLifted.set(blob,p);
+  }
+  return p;
+}
+// Gives a design the cut line its PDF carries, unless it has one of its own that
+// somebody traced by hand. A line taken from the file is marked so the next look
+// at the file can update it; the hole is only set the first time, so one the
+// design was already given, or turned off, is left alone.
+function gtCutTake(d){
+  if(!d||!gtCutPending.has(d.file)) return;
+  const f=gtCutFound.get(d.file); gtCutPending.delete(d.file);
+  let changed=false;
+  const give=x=>{
+    if(x.trace&&!x.trace.auto) return;
+    if(!f){ if(x.trace){ x.trace=null; changed=true; } return; }   // the line is no longer in the file
+    const fresh=!x.trace;
+    if(fresh) x.trace={loop:f.outline,out:0,thr:50,sm:0,on:true,auto:true};
+    else x.trace.loop=f.outline;
+    if(f.extras&&f.extras.length) x.trace.extra=f.extras; else delete x.trace.extra;
+    changed=true;
+    const h=f.holes&&f.holes[0];
+    if(fresh&&h&&!(x.hole&&x.hole.on))
+      x.hole={on:true,x:h.u,y:h.v,d:Math.round(h.mm*10)/10};
+  };
+  give(d);
+  (gtLib.designs||[]).forEach(x=>{ if(x!==d&&x.file===d.file) give(x); });
+  if(!changed) return;
+  // one redraw for however many designs have just been given a line, not one each
+  clearTimeout(gtCutRedrawT);
+  gtCutRedrawT=setTimeout(()=>{
+    try{
+      gtDraw();
+      const scr=document.getElementById('giftTagDesignScreen');
+      if(gtCurrentDesign&&scr&&scr.style.display!=='none'){ gtArtWriteInputs(); gtDrawDesign(); }
+    }catch(e){}
+  },50);
+}
+let gtCutRedrawT=0;
 // The library's own designs, stashed while a shape's folder is showing in
 // their place. The manifest is written from this rather than from what is on
 // screen: swapping the visible list must never be able to write a manifest
@@ -30965,7 +31174,7 @@ async function gtOneOffRestore(lines){
     }
     if(!d||!blob) continue;
     gtAssets.set(d.file,blob);
-    try{ gtImgs.set(d.id,await loadImage(await gtArtURL(blob,d.file))); }catch(e){}
+    try{ gtImgs.set(d.id,await loadImage(await gtArtURL(blob,d.file,true))); }catch(e){}
     gtLib.designs.push(d);
     gtOneOffKeep.set(d.id,{d,blob});
     n++;
@@ -31187,6 +31396,11 @@ function gtNormalizeDesign(d){
     trace:(d.trace&&d.trace.loop&&d.trace.loop.length>2)
       ? {loop:d.trace.loop,out:Number(d.trace.out)||0,thr:Number(d.trace.thr)||50,
          ...(d.trace.sm!=null&&isFinite(d.trace.sm)?{sm:Math.max(0,Number(d.trace.sm))}:{}),
+         ...(d.trace.auto?{auto:true}:{}),
+         // further cuts inside the outline — slits and notches — in the same fractions
+         ...(Array.isArray(d.trace.extra)&&d.trace.extra.length
+             ?{extra:d.trace.extra.filter(e=>e&&Array.isArray(e.pts)&&e.pts.length>1)
+                 .map(e=>({pts:e.pts,closed:!!e.closed}))}:{}),
          // the cut line pulled wider or taller than the artwork's outline, each on its own
          ...(Number(d.trace.cx)>0&&Number(d.trace.cx)!==1?{cx:Number(d.trace.cx)}:{}),
          ...(Number(d.trace.cy)>0&&Number(d.trace.cy)!==1?{cy:Number(d.trace.cy)}:{}),
@@ -31224,7 +31438,7 @@ async function gtImgLoad(id){
   const blob=d&&gtAssets.get(d.file);
   if(!blob||gtImgs.has(id)) return;
   try{
-    const img=await loadImage(await gtArtURL(blob,d.file));
+    const img=await loadImage(await gtArtURL(blob,d.file,true));
     if(gen===gtHydrateGen) gtImgs.set(id,img);
   }catch(e){ gtImgFailed.add(id); }
 }
@@ -31233,6 +31447,7 @@ async function gtImgLoad(id){
 function gtImgGet(x,low){
   const id=x&&typeof x==='object'?x.id:x;
   const img=gtImgs.get(id);
+  if(img&&gtCutPending.size){ gtCutTake(x&&typeof x==='object'?x:gtDesign(id)); return img; }
   if(img||!id||gtImgFailed.has(id)) return img;
   const d=gtDesign(id);
   if(!d||!gtAssets.get(d.file)) return undefined;
@@ -31919,7 +32134,7 @@ async function gtReadPiguFolder(dir,folderName,keep){
     const d=gtNormalizeDesign({id,name:f.entry.name.replace(/\.[^.]+$/,''),file:path,
       adhoc:true,fields:(was&&was.fields)||[],hole:was&&was.hole,back:was&&was.back,
       artV:was&&was.artV,art:was&&was.art,bleed:was&&was.bleed,trace:was&&was.trace});
-    try{ gtImgs.set(id,await loadImage(await gtArtURL(blob,path))); }catch(err){}
+    try{ gtImgs.set(id,await loadImage(await gtArtURL(blob,path,true))); }catch(err){}
     made.push(d);
   }
   return {ok:true,made};
@@ -33066,6 +33281,25 @@ function gtTracePlace(d,r,extra){
   if(!extra) gtTraceLast={d,parts:hit.parts};
   return hit.rel?hit.rel.map(([x,y])=>[x+r.x,y+r.y]):null;
 }
+// The cuts inside the outline that came with the design's PDF, placed on the same
+// rect the outline is — as drawn, with no outset and no smoothing, and open
+// where they were open.
+function gtTraceExtras(d,r){
+  const t=d&&d.trace;
+  if(!t||!t.on||!t.loop||t.loop.length<4||!t.extra||!t.extra.length||!r) return [];
+  return t.extra.map(e=>{
+    const p=e.pts.map(([u,v])=>[r.x+u*r.w,r.y+v*r.h]);
+    p.open=!e.closed; return p;
+  });
+}
+function gtStrokeExtras(ctx,d,r,sc){
+  gtTraceExtras(d,r).forEach(p=>{
+    ctx.beginPath();
+    p.forEach(([x,y],k)=>k?ctx.lineTo(x*sc,y*sc):ctx.moveTo(x*sc,y*sc));
+    if(!p.open) ctx.closePath();
+    ctx.stroke();
+  });
+}
 // how the last placing of a design's loop went: 0 pieces left, 1, or more —
 // read by the editor straight after it places the loop itself
 let gtTraceLast=null;
@@ -33160,8 +33394,11 @@ function gtSlotLoops(slot,opts){
   // the turn, then turned about its centre
   if(slot&&slot.rot){
     const cx=slot.x+slot.w/2, cy=slot.y+slot.h/2, a=slot.rot*Math.PI/180, c=Math.cos(a), sn=Math.sin(a);
-    return gtSlotLoops(gtUnrotSlot(slot),opts).map(L=>L.map(([x,y])=>
-      [cx+(x-cx)*c-(y-cy)*sn, cy+(x-cx)*sn+(y-cy)*c]));
+    return gtSlotLoops(gtUnrotSlot(slot),opts).map(L=>{
+      const m=L.map(([x,y])=>[cx+(x-cx)*c-(y-cy)*sn, cy+(x-cx)*sn+(y-cy)*c]);
+      if(L.open) m.open=true;
+      return m;
+    });
   }
   const o=opts||{}, d=o.design||null;
   const holes=o.holes!==false;
@@ -33170,8 +33407,10 @@ function gtSlotLoops(slot,opts){
   // the whole reason for tracing one. The placeholder still says where on the
   // sheet it lands; it just stops saying what shape it is.
   const traced=d?gtTracePlace(d,gtArtRectOf(d,slot)):null;
-  if(traced) out.push(traced);
-  else{
+  if(traced){
+    out.push(traced);
+    gtTraceExtras(d,gtArtRectOf(d,slot)).forEach(l=>out.push(l));
+  }else{
     const sh=(slot.shape!=null&&gtLayout&&gtLayout.shapes[slot.shape])||null;
     if(!sh){
       out.push(gtRoundRectLoop(slot.x,slot.y,slot.w,slot.h,gtSlotR(slot)));
@@ -33249,11 +33488,11 @@ function gtPltSheet(at){
     // left hanging by that hair.
     const pts=raw.slice();
     const [fx,fy]=pts[0], [lx,ly]=pts[pts.length-1];
-    if(Math.hypot(lx-fx,ly-fy)>0.01) pts.push([fx,fy]);
+    if(!raw.open&&Math.hypot(lx-fx,ly-fy)>0.01) pts.push([fx,fy]);
     // And carried on past where it started, as the cutter's own files do: a
     // drag blade trails its tip, so a cut that stops exactly on its start
     // leaves the last of the curve uncut. The overcut follows the outline.
-    let need=Math.max(0,Number(S.pltOvercut));
+    let need=raw.open?0:Math.max(0,Number(S.pltOvercut));
     if(!isFinite(need)) need=0;
     for(let k=1;k<pts.length&&need>1e-6;k++){
       const [ax,ay]=pts[k-1], [bx,by]=pts[k], seg=Math.hypot(bx-ax,by-ay);
@@ -34683,7 +34922,9 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
         ctx.strokeStyle='#B24C25'; ctx.lineWidth=1;
         ctx.beginPath();
         traced.forEach(([x,y],k)=>k?ctx.lineTo(x*sc,y*sc):ctx.moveTo(x*sc,y*sc));
-        ctx.stroke(); ctx.restore();
+        ctx.stroke();
+        gtStrokeExtras(ctx,d,gtArtRectOf(d,u),sc);
+        ctx.restore();
         return;
       }
       if(gtStrokeSlot(ctx,u,sc)) return;
@@ -36906,7 +37147,7 @@ async function gtAdhocDesign(blob,filename){
   gtAssets.set(path,blob);
   const d=gtNormalizeDesign({id,name,file:path,adhoc:true,fields:[]});
   gtLib.designs.push(d);
-  try{ gtImgs.set(id,await loadImage(await gtArtURL(blob,path))); }catch(e){}
+  try{ gtImgs.set(id,await loadImage(await gtArtURL(blob,path,true))); }catch(e){}
   await gtSaveLib();
   return d;
 }
@@ -37394,7 +37635,9 @@ function gtDrawDesignCut(ctx,d,draw,slot,sc,w,h){
     ctx.strokeStyle='#B24C25'; ctx.lineWidth=1.5;
     ctx.beginPath();
     traced.forEach(([x,y],k)=>k?ctx.lineTo(x*sc,y*sc):ctx.moveTo(x*sc,y*sc));
-    ctx.stroke(); ctx.restore();
+    ctx.stroke();
+    gtStrokeExtras(ctx,d,draw,sc);
+    ctx.restore();
   }else if(!(slot&&gtStrokeSlot(ctx,{...slot,x:0,y:0},sc))){
     ctx.save();
     ctx.strokeStyle='#B24C25'; ctx.setLineDash([2,4]); ctx.lineWidth=1;
@@ -37975,7 +38218,7 @@ document.getElementById('gtReplaceArtBtn').addEventListener('click',async()=>{
   const path=await gtAssetPath('designs',file);
   gtAssets.set(path,file);
   d.file=path;
-  try{ gtImgs.set(d.id,await loadImage(await gtArtURL(file))); }catch(e){}
+  try{ gtImgs.set(d.id,await loadImage(await gtArtURL(file,path,true))); }catch(e){}
   // as with a crop: bleed grown and a cut line traced off the old picture go
   [...gtGrown.keys()].forEach(k=>{ if(k.startsWith(d.id+'@')) gtGrown.delete(k); });
   if(d.trace) d.trace=null;
@@ -38468,7 +38711,10 @@ async function gtVectorSources(side){
     const key=side==='back'?(bk&&bk.key):d.id, file=side==='back'?(bk&&bk.file):d.file;
     if(!key||out.has(key)||!gtIsPdfFile(file)) continue;
     const blob=gtAssets.get(file); if(!blob) continue;
-    try{ out.set(key,{bytes:new Uint8Array(await blob.arrayBuffer()),page:0}); }catch(e){}
+    try{
+      const lift=side==='back'?null:await gtCutLift(blob);
+      out.set(key,{bytes:new Uint8Array(await (lift?lift.clean:blob).arrayBuffer()),page:0});
+    }catch(e){}
   }
   return out;
 }
@@ -52503,7 +52749,7 @@ async function mcGtRehydrate(lines){
       const d=gtNormalizeDesign({id:one.id,name:one.name||'One-off',
         file:one.file||one.path,adhoc:true,fields:one.fields||[],hole:one.hole,back:one.back});
       gtAssets.set(d.file,data);
-      try{ gtImgs.set(d.id,await loadImage(await gtArtURL(data,d.file))); }catch(e){}
+      try{ gtImgs.set(d.id,await loadImage(await gtArtURL(data,d.file,true))); }catch(e){}
       gtLib.designs.push(d);
       // its back picture, by path, off the library folder
       if(d.back) await gtHydrateBacks().catch(()=>{});
