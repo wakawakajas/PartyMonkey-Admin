@@ -29224,7 +29224,7 @@ function pdfCutScan(content,box){
       case 'S': case 's': case 'f': case 'F': case 'f*': case 'B': case 'B*': case 'b': case 'b*': case 'n':
         if((tok==='S'||tok==='s')&&pathStart>=0&&isCut(stroke)){
           if(tok==='s'&&seg()) seg().closed=true;
-          cands.push({start:pathStart,end:i,loops:path.filter(p=>p.pts.length>=3)});
+          cands.push({start:pathStart,end:i,loops:path.filter(p=>p.pts.length>=2)});
         }
         path=[]; cur=null; pathStart=-1; break;
       case 'BI': { const id=s.indexOf('ID',i); if(id<0){ i=n; break; }
@@ -29240,7 +29240,7 @@ function pdfCutScan(content,box){
   const pageA=(box[2]-box[0])*(box[3]-box[1]);
   // a punch hole is a small circle — a curve or a slit is something else, and is
   // left in the artwork rather than guessed at
-  const isRound=b=>b.w<=57&&b.h<=57&&b.w>=3&&Math.abs(b.w-b.h)<=0.15*Math.max(b.w,b.h);
+  const isRound=(b,l)=>l.pts.length>=8&&b.w<=57&&b.h<=57&&b.w>=3&&Math.abs(b.w-b.h)<=0.15*Math.max(b.w,b.h);
   let outline=null;
   cands.forEach(c=>c.loops.forEach(l=>{ const b=bb(l.pts);
     if(b.w*b.h>=0.4*pageA&&(!outline||b.w*b.h>outline.b.w*outline.b.h)) outline={c,l,b}; }));
@@ -29250,7 +29250,7 @@ function pdfCutScan(content,box){
   const holes=[], extras=[], take=new Set([outline.c]);
   const inside=b=>b.x0>=outline.b.x0&&b.x1<=outline.b.x1&&b.y0>=outline.b.y0&&b.y1<=outline.b.y1;
   const sort=l=>{ const b=bb(l.pts);
-    if(isRound(b)) holes.push({pts:l.pts,b});
+    if(isRound(b,l)) holes.push({pts:l.pts,b});
     else{ const p=l.pts, a=p[0], z=p[p.length-1];
       extras.push({pts:p,closed:!!l.closed||Math.hypot(a[0]-z[0],a[1]-z[1])<0.5}); } };
   cands.forEach(c=>{ if(c===outline.c) return;
@@ -38928,8 +38928,12 @@ async function gtPltUnique(base,fresh,dir){
   return nm+'.plt';
 }
 // items: [{text,name}] — name without .plt
-async function gtSavePlts(items,fresh){
-  const dir=await gtThumbReady(false);
+async function gtSavePlts(items,fresh,fallbackDir){
+  // The thumb drive where there is one and it is allowed; otherwise the folder
+  // the PDF was just written into, which the batch has already been given
+  // permission for — a download started this long after the tap is one a browser
+  // is free to drop, and the cut file then never arrived.
+  const dir=await gtThumbReady(false)||fallbackDir||null;
   const names=[]; let onDrive=0;
   for(let i=0;i<items.length;i++){
     const nm=await gtPltUnique(items[i].name,fresh&&i===0,dir);
@@ -38940,7 +38944,7 @@ async function gtSavePlts(items,fresh){
     if(!ok) await new Promise(r=>setTimeout(()=>{ downloadBlob(b,nm); r(); },i?400:0));
     names.push(nm);
   }
-  return {names,drive:onDrive?dir.name:'',all:onDrive===items.length};
+  return {names,drive:onDrive?dir.name:'',all:onDrive===items.length,failed:items.length-onDrive};
 }
 document.getElementById('gtThumbPickBtn').addEventListener('click',async()=>{
   if(!canPickFolder()){ alert('This browser cannot write onto a drive — use Chrome or Edge on a PC.'); return; }
@@ -45147,7 +45151,7 @@ async function mcDownloadPlanSel(){
   const msg=document.getElementById('mcPlanMsg');
   mcBusy=true; mcSyncBatchButtons(); mcRenderPlan();   // before the picker: one run at a time
   let dir=null;
-  try{ dir=await exportFolderReady(true); }     // first, while the tap is still ours
+  try{ dir=await exportFolderReady(true); if(typeof gtThumbReady==='function') await gtThumbReady(true).catch(()=>null); }     // first, while the tap is still ours
   catch(e){ mcBusy=false; mcSyncBatchButtons(); mcRenderPlan(); throw e; }
   let done=0; const failed=[];
   const run=new Set();            // one press of Download is one download
@@ -45187,7 +45191,7 @@ async function mcDownloadPlanEntry(i){
   const msg=document.getElementById('mcPlanMsg');
   mcBusy=true; mcSyncBatchButtons(); mcRenderPlan();   // before the picker: one run at a time
   let dir=null;
-  try{ dir=await exportFolderReady(true); }      // first, while the tap is still ours
+  try{ dir=await exportFolderReady(true); if(typeof gtThumbReady==='function') await gtThumbReady(true).catch(()=>null); }      // first, while the tap is still ours
   catch(e){ mcBusy=false; mcSyncBatchButtons(); mcRenderPlan(); throw e; }
   showMsg(msg,'Rendering at print resolution…',true);
   await new Promise(r=>setTimeout(r));           // let that message actually paint
@@ -45474,7 +45478,7 @@ async function mcFieryPrint(idx){
   if(!ans) return;
   mcBusy=true; mcSyncBatchButtons(); mcRenderPlan(); mcPlanZoomApply();
   let dir=null;
-  try{ dir=await exportFolderReady(true); }     // first, while the tap is still ours
+  try{ dir=await exportFolderReady(true); if(typeof gtThumbReady==='function') await gtThumbReady(true).catch(()=>null); }     // first, while the tap is still ours
   catch(e){ dir=null; }
   if(!dir){
     mcBusy=false; mcSyncBatchButtons(); mcRenderPlan(); mcPlanZoomApply();
@@ -53683,7 +53687,7 @@ async function mcPut(dir,name,bytes){
   else downloadBlob(blob,name);
   if(!cuts||!cuts.length) return;
   // onto the thumb drive as GT1.plt, GT2.plt …, carrying on through the run
-  await gtSavePlts(cuts,false);
+  await gtSavePlts(cuts,false,dir);
 }
 // Around anything that renders: the builder is one global object, and a batch
 // that borrows it has to hand it back the way it was found.
@@ -53938,7 +53942,7 @@ async function mcDownloadOne(id){
   const t=mcTile(it); if(!t) return;
   mcBusy=true; mcSyncBatchButtons();             // before the picker, or a second press runs too
   let dir=null;
-  try{ dir=await exportFolderReady(true); }       // first, while the tap is still ours
+  try{ dir=await exportFolderReady(true); if(typeof gtThumbReady==='function') await gtThumbReady(true).catch(()=>null); }       // first, while the tap is still ours
   catch(e){ mcBusy=false; mcSyncBatchButtons(); throw e; }
   showMsg(out,'Rendering at print resolution…',true);
   try{
@@ -54093,7 +54097,7 @@ async function mcDownloadAll(){
   // open ran the whole export twice, both borrowing the one builder
   mcBusy=true; mcSyncBatchButtons();
   let dir=null;
-  try{ dir=await exportFolderReady(true); }   // first, while the tap is still ours
+  try{ dir=await exportFolderReady(true); if(typeof gtThumbReady==='function') await gtThumbReady(true).catch(()=>null); }   // first, while the tap is still ours
   catch(e){ mcBusy=false; mcSyncBatchButtons(); throw e; }
   const guard=e=>{ e.preventDefault(); e.returnValue=''; };
   window.addEventListener('beforeunload',guard);
