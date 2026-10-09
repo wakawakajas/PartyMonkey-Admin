@@ -690,18 +690,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   padding:0 16px;font-family:'IBM Plex Sans',sans-serif;font-size:14px;color:var(--ink);cursor:pointer;min-height:var(--tap);}
 .nav-item:hover{background:var(--nest);}
 .nav-item.danger{color:var(--rust);border-top:1px solid var(--border);padding-top:12px;}
-/* the gauge sits at the foot of the drawer, above Sign out */
-.nav-storage{margin-top:auto;padding:12px 16px 4px;}
-.nav-storage-top{display:flex;align-items:baseline;justify-content:space-between;
-  font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;
-  letter-spacing:.06em;margin-bottom:6px;}
-.nav-storage .prog{margin-top:0;}
-.nav-storage .prog i.warn-fill{background:var(--amber);}
-.nav-storage .prog i.full-fill{background:var(--rust);}
-/* stray files, under the gauge that counts them among the rest */
-.nav-orphan{display:flex;align-items:center;gap:8px;padding:8px 16px 4px;}
-.nav-orphan .hint{margin:0;flex:1;min-width:0;}
-.nav-orphan button{white-space:nowrap;flex:none;}
+/* pushes everything below it to the foot of the drawer, above Sign out */
+.nav-spacer{margin-top:auto;}
 /* ---- mobile-app-style back button on sub-screens ---- */
 .back-btn{display:flex;align-items:center;gap:2px;background:none;border:none;color:var(--blueprint);
   font-family:'IBM Plex Sans',sans-serif;font-weight:600;font-size:14px;cursor:pointer;padding:0;
@@ -4467,21 +4457,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
     <button class="nav-item" id="navWarehouseBtn">🔎 Search Warehouse</button>
     <button class="nav-item" id="navRepliesBtn" style="display:none">💬 Replies</button>
     <button class="nav-item" id="navUsersBtn" style="display:none;">👤 Users &amp; access</button>
-    <div class="nav-storage" id="navStorage" style="display:none;">
-      <div class="nav-storage-top">
-        <span id="navStorageLbl">Photos</span>
-        <span id="navStoragePct" class="hint" style="margin:0;"></span>
-      </div>
-      <div class="prog"><i id="navStorageBar" style="width:0"></i></div>
-      <p class="hint" id="navStorageSub" style="margin:5px 0 0;"></p>
-    </div>
-    <!-- Photos nothing points at any more. Not there at all when there are
-         none, which is what it should say most days. -->
-    <div class="nav-orphan" id="navOrphan" hidden>
-      <span class="hint" id="navOrphanTxt">—</span>
-      <button class="btn-outline btn-sm" id="navOrphanBtn"
-              title="Delete files nothing points at any more">Clear</button>
-    </div>
+    <div class="nav-spacer"></div>
     <button class="nav-item danger" id="navSignOutBtn">↪ Sign out</button>
   </nav>
 
@@ -15525,6 +15501,18 @@ function showMsg(el,t,ok){
 // every one of those background re-checks, so switching tabs and back no
 // longer knocks you back to the home screen.
 let hasEverAuthed=false;
+// Supabase fires an auth event on every tab focus and token refresh; each one
+// used to redo all of the sign-in reads below. Same person within ten minutes
+// means they are already loaded.
+let authedWorkAt=0, authedWorkFor='';
+// The same for the template lists and design bleeds, which are also read on
+// sign-in: the startup check and the auth event both ask, so one is enough.
+let authReadsAt=0, authReadsFor='';
+function authReadsDue(email){
+  if(email===authReadsFor&&Date.now()-authReadsAt<600000) return false;
+  authReadsFor=email; authReadsAt=Date.now();
+  return true;
+}
 function setAuthedUI(signedIn,email){
   document.getElementById('authScreen').style.display=signedIn?'none':'flex';
   document.getElementById('postAuthChrome').style.display=signedIn?'block':'none';
@@ -15532,9 +15520,10 @@ function setAuthedUI(signedIn,email){
     document.getElementById('signedInAs').textContent=email;
     // the part before the @ is what people call themselves
     document.getElementById('homeWho').textContent=String(email||'').split('@')[0]||'there';
+    const alreadyLoaded=email===authedWorkFor&&Date.now()-authedWorkAt<600000;
+    if(!alreadyLoaded){
+    authedWorkFor=email; authedWorkAt=Date.now();
     loadAccess();
-    refreshStorage(true);   // the drawer is always open on a wide screen
-    refreshOrphans(true);
     // Once on the way in. Whether it actually runs is the database's decision,
     // not this device's — see sweep_orphan_photos.
     sweepOrphanPhotos();
@@ -15555,6 +15544,7 @@ function setAuthedUI(signedIn,email){
     // keeps getting the previous user's notifications — and they never open
     // the pick up screen, which is the only other place this ran.
     resumePush();
+    }
     // opened from a notification, so that request wins over the home screen
     const wanted=requestIdFromAddress();
     if(wanted){ hasEverAuthed=true; openRequestById(wanted); }
@@ -15564,6 +15554,7 @@ function setAuthedUI(signedIn,email){
     }
   }else{
     hasEverAuthed=false; // so a future sign-in also lands on home
+    authedWorkFor=''; authedWorkAt=0;
   }
 }
 // which build this is, for the routing check; the ETag moves whenever the file does
@@ -16185,56 +16176,12 @@ document.addEventListener('keydown',e=>{
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-// ---------- how much of the photo allowance is gone ----------
-// Supabase gives 1GB free. At the budgets these photos are held to that is
-// tens of thousands of them, but the gauge is there so it is never a surprise.
-const STORAGE_LIMIT_BYTES=1024*1024*1024;
-const humanBytes=b=>b>=1048576?(b/1048576).toFixed(b>=10485760?0:1)+' MB'
-                  :b>=1024?Math.round(b/1024)+' KB':b+' B';
-let storageCheckedAt=0;
-async function refreshStorage(force){
-  const box=document.getElementById('navStorage');
-  if(!sb) return;
-  // it is a scan of every object, so once every few minutes is plenty
-  if(!force&&Date.now()-storageCheckedAt<300000) return;
-  const {data,error}=await sb.rpc('storage_usage');
-  if(error||!data){ box.style.display='none'; return; }   // migration not run
-  storageCheckedAt=Date.now();
-  const row=Array.isArray(data)?data[0]:data;
-  const bytes=Number((row&&row.bytes)||0), files=Number((row&&row.files)||0);
-  const pct=Math.min(100,(bytes/STORAGE_LIMIT_BYTES)*100);
-  box.style.display='';
-  document.getElementById('navStoragePct').textContent=
-    (pct<0.1&&bytes>0?'<0.1':pct.toFixed(pct<10?1:0))+'%';
-  const bar=document.getElementById('navStorageBar');
-  bar.style.width=Math.max(pct,bytes>0?1.5:0)+'%';
-  bar.classList.toggle('warn-fill',pct>=70&&pct<90);
-  bar.classList.toggle('full-fill',pct>=90);
-  document.getElementById('navStorageSub').textContent=
-    `${humanBytes(bytes)} of 1 GB · ${files} photo${files===1?'':'s'}`;
-}
 // ---------- photos nothing points at any more ----------
 // A photo is deleted in two halves — the row that names it, then the file —
 // and they cannot be one transaction, so anything that interrupts the pair
 // leaves a file no screen will ever show again. The database is what finds
 // them (supabase-migration-ORPHAN-SWEEP.sql); only the storage API can
 // actually remove them, so the removing is done from here.
-let orphanCheckedAt=0, orphanFiles=0, orphanBytes=0;
-async function refreshOrphans(force){
-  if(!sb) return;
-  const box=document.getElementById('navOrphan');
-  // another scan of every object, so the same few minutes as the gauge
-  if(!force&&Date.now()-orphanCheckedAt<300000) return;
-  const {data,error}=await sb.rpc('orphan_photo_usage');
-  if(error||!data){ box.hidden=true; return; }        // migration not run
-  orphanCheckedAt=Date.now();
-  const row=Array.isArray(data)?data[0]:data;
-  orphanFiles=Number((row&&row.files)||0);
-  orphanBytes=Number((row&&row.bytes)||0);
-  box.hidden=!orphanFiles;
-  document.getElementById('navOrphanTxt').textContent=
-    `${orphanFiles} stray file${orphanFiles===1?'':'s'} · ${humanBytes(orphanBytes)}`;
-}
 // In blocks: the storage API takes a list, not a thousand of them.
 //
 // What comes back is what it actually deleted, which is not always what was
@@ -16267,33 +16214,11 @@ async function sweepOrphanPhotos(force){
     if(error) return {gone:0,missed:0,why:error.message||''};
     if(!data||!data.length) return none;     // nothing stray, or not due yet
     const out=await removePhotoFiles(data.map(r=>r.path).filter(Boolean));
-    orphanCheckedAt=0; storageCheckedAt=0;   // both gauges have just moved
     return out;
   }catch(e){ return none; }                  // a stranded file is not a banner
   finally{ orphanSweeping=false; }
 }
-document.getElementById('navOrphanBtn').addEventListener('click',async e=>{
-  const btn=e.currentTarget;
-  if(!confirm(`Delete ${orphanFiles} stray file${orphanFiles===1?'':'s'}`
-    +` (${humanBytes(orphanBytes)})?\n\nThese are photos that no order, box, `
-    +'pick up, SKU, announcement, request or pick list line points at any '
-    +'more. Nothing on screen uses them, and there is no way back.')) return;
-  btn.disabled=true; btn.textContent='Clearing…';
-  const {gone,missed,why}=await sweepOrphanPhotos(true);
-  btn.disabled=false; btn.textContent='Clear';
-  await refreshOrphans(true);
-  await refreshStorage(true);
-  // The row disappearing is the answer when it worked. When some of them stayed
-  // it is still sitting there saying nearly the same number, which needs a word
-  // — and the usual reason is a storage rule, not a stuck file.
-  if(missed) alert(`${gone?gone+' cleared, but ':''}${missed} could not be `
-    +'deleted' + (why?': '+why:'.')
-    + (why?'':'\n\nThe storage rules would not show them. Run '
-      +'supabase-migration-ORPHAN-SWEEP.sql again — the version that clears '
-      +'files packed by somebody else adds a second rule for it.'));
-});
 function openDrawer(){
-  refreshStorage(); refreshOrphans();
   document.getElementById('navDrawer').classList.add('open'); document.getElementById('navBackdrop').classList.add('open'); }
 function closeDrawer(){ document.getElementById('navDrawer').classList.remove('open'); document.getElementById('navBackdrop').classList.remove('open'); }
 document.getElementById('menuBtn').addEventListener('click',openDrawer);
@@ -19959,7 +19884,6 @@ document.getElementById('skuWipeBtn').addEventListener('click',async()=>{
       +(paths.length?` and ${paths.length} photo(s)`:'')+' deleted.',true);
     pickedSkus.clear(); skuSelectMode=false;
     await refreshSkus();
-    refreshStorage(true);   // a wipe is exactly when the gauge should move
   }catch(err){
     showMsg(msg,'Could not empty it: '+((err&&err.message)||'unknown error'),false);
     await refreshSkus();
@@ -26271,7 +26195,19 @@ const myName=()=>{
   return String((el&&el.textContent)||'').split('@')[0]||'there';
 };
 
-async function refreshRequests(){
+// A burst of realtime events (a reminder sweep touches many rows at once) used
+// to start one 200-row read per event. While one is running, further asks are
+// folded into a single re-read after it, so the latest change is never missed.
+let requestsInFlight=null, requestsDirty=false, requestsReadAt=0;
+function refreshRequests(){
+  if(requestsInFlight){ requestsDirty=true; return requestsInFlight; }
+  requestsInFlight=(async()=>{
+    try{ do{ requestsDirty=false; await refreshRequestsNow(); }while(requestsDirty); }
+    finally{ requestsInFlight=null; requestsReadAt=Date.now(); }
+  })();
+  return requestsInFlight;
+}
+async function refreshRequestsNow(){
   if(!sb) return;
   const {data:{session}}=await sb.auth.getSession();
   if(!session) return;
@@ -27013,7 +26949,9 @@ function ringDueRequests(){
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden||!requestsReady) return;
   // the row may have been snoozed or completed from another phone while this
-  // one was asleep, so re-read before deciding what to ring
+  // one was asleep, so re-read before deciding what to ring — unless it was
+  // read a minute ago, which is as fresh as a re-read would be
+  if(Date.now()-requestsReadAt<60000) return;
   refreshRequests();
 });
 
@@ -28503,11 +28441,14 @@ document.getElementById('authForm').addEventListener('submit',async(e)=>{
 if(sb){
   sb.auth.onAuthStateChange((event,session)=>{
     if(session){
-      setAuthedUI(true,session.user.email); refreshTemplateList();
-      if(typeof pcRefreshTemplateList==='function') pcRefreshTemplateList();
-      designBleedLoad(true).then(designBleedRefreshLines).catch(()=>{});
+      setAuthedUI(true,session.user.email);
+      if(authReadsDue(session.user.email)){
+        refreshTemplateList();
+        if(typeof pcRefreshTemplateList==='function') pcRefreshTemplateList();
+        designBleedLoad(true).then(designBleedRefreshLines).catch(()=>{});
+      }
     }
-    else{ setAuthedUI(false); templateRows=[]; document.getElementById('templateList').innerHTML='<p class="hint" style="margin:4px 0 0;">— none saved —</p>';
+    else{ authReadsFor=''; setAuthedUI(false); templateRows=[]; document.getElementById('templateList').innerHTML='<p class="hint" style="margin:4px 0 0;">— none saved —</p>';
       pcTemplateRows=[]; const pl=document.getElementById('pcTemplateList'); if(pl) pl.innerHTML='<p class="hint" style="margin:4px 0 0;">— none saved —</p>'; }
   });
 }else{
@@ -42806,11 +42747,14 @@ if(sb){
   setInterval(()=>sweepOrphanPhotos(),6*60*60*1000);
   sb.auth.getSession().then(({data:{session}})=>{
     if(session){
-      setAuthedUI(true,session.user.email); refreshTemplateList();
-      if(typeof pcRefreshTemplateList==='function') pcRefreshTemplateList();
-      designBleedLoad(true).then(designBleedRefreshLines).catch(()=>{});
+      setAuthedUI(true,session.user.email);
+      if(authReadsDue(session.user.email)){
+        refreshTemplateList();
+        if(typeof pcRefreshTemplateList==='function') pcRefreshTemplateList();
+        designBleedLoad(true).then(designBleedRefreshLines).catch(()=>{});
+      }
     }
-    else{ setAuthedUI(false); }
+    else{ authReadsFor=''; setAuthedUI(false); }
   });
 }
 

@@ -3301,7 +3301,10 @@ def sync_once() -> dict:
     if not duoke_web.available() and not in_use(hwnd, cfg):
         clear_answered_by_hand(cloud, hwnd, window, reader, cfg, report)
     try:
-        if not cfg.get("catalog_when_quiet") or quiet:
+        # Both the catalogue ask and the history ask come from Pigu Replies, so
+        # with Replies off there is nobody to ask and nothing to check -- each
+        # check is a request to Supabase on every pass.
+        if upload and (not cfg.get("catalog_when_quiet") or quiet):
             if not in_use(hwnd, cfg) and cloud.catalog_due(int(cfg.get("catalog_hours") or 12)):
                 listings, part = read_catalog(warm_tree(hwnd), window, reader, hwnd)
                 if listings:
@@ -3322,7 +3325,7 @@ def sync_once() -> dict:
     # looking at the screen right now, while a reply that has been approved has
     # already been decided and can wait another twenty seconds.
     try:
-        wanted = cloud.history_wanted()
+        wanted = cloud.history_wanted() if upload else []
     except CloudError as exc:
         wanted = []
         report["notes"].append(str(exc))
