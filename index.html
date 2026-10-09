@@ -34921,12 +34921,106 @@ function gtDrawQr(ctx,sc,page){
     const ya=Math.floor((y0+rr*mod)*sc), yb=Math.ceil((y0+(rr+1)*mod)*sc);
     ctx.fillRect(xa,ya,xb-xa,yb-ya);
   }
-  // the number, turned a quarter so it reads up the page, in the middle of the code's height
-  ctx.translate((B.cx+GT_QR_SIZE/2+2)*sc,B.cy*sc); ctx.rotate(-Math.PI/2);
+  // the number, in the middle of the code's side, on whichever side is clear
+  const at=gtQrNumSpot(B,num,page);
+  ctx.translate(at.cx*sc,at.cy*sc); if(at.turn) ctx.rotate(-Math.PI/2);
   ctx.font=`${GT_QR_TEXT*sc}px Arial, Helvetica, sans-serif`;
   ctx.textAlign='center'; ctx.textBaseline='middle';
   ctx.fillText(num,0,0);
   ctx.restore();
+}
+// Where the number goes: somewhere nothing is printed or cut — no placeholder,
+// filled or empty, no cut line, nothing dark in the base layer, clear of the
+// code and the dots. Beside the code where it can: the right first, turned to
+// read up the page as the cutter's own sheets carry it, then the left, then
+// flat over the top. Where all three are taken, the nearest clear place to the
+// code, either way round. Only where the sheet has none, the least covered.
+const gtQrSpotCache=new Map();
+let gtQrInk=null;   // the base layer, small, with its dark pixels summed for looking under the number
+function gtQrNumSpot(B,num,page){
+  const S=gtSheet, T=GT_QR_TEXT, half=GT_QR_SIZE/2, gap=2;
+  const mc=document.createElement('canvas').getContext('2d');
+  mc.font=`${T*10}px Arial, Helvetica, sans-serif`;
+  const L=mc.measureText(num).width/10;
+  const box=s=>{ const w=s.turn?T:L, h=s.turn?L:T; return {...s,x:s.cx-w/2,y:s.cy-h/2,w,h}; };
+  const near=[
+    {cx:B.cx+half+gap,cy:B.cy,turn:true},
+    {cx:B.cx-half-gap,cy:B.cy,turn:true},
+    {cx:B.cx,cy:B.cy-half-gap,turn:false},
+  ].map(box);
+  // every placeholder on this sheet, filled or empty, as the render lays them
+  // out — and a filled one's cut line, which can reach past its box
+  const keep=[];
+  try{
+    const plan=gtPageAt(page), SL=(plan&&plan.nest&&plan.slots)||S.slots;
+    const q=plan?plan.queue:gtQueue(), start=plan?plan.start:page*SL.length;
+    SL.forEach((sl,i)=>{
+      keep.push(sl);
+      const line=q[start+i]; if(!line) return;
+      try{
+        let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+        gtSlotLoops(sl,{design:gtDesign(line.designId)}).forEach(lp=>lp.forEach(([x,y])=>{
+          x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); }));
+        if(x1>x0) keep.push({x:x0,y:y0,w:x1-x0,h:y1-y0});
+      }catch(e){}
+    });
+  }catch(e){}
+  // the code itself, and the dots, a hundred times over anything else
+  const hard=[{x:B.cx-half,y:B.cy-half,w:GT_QR_SIZE,h:GT_QR_SIZE}];
+  try{ (gtMarks()||[]).forEach(d=>hard.push({x:d.cx-d.r,y:d.cy-d.r,w:2*d.r,h:2*d.r})); }catch(e){}
+  const over=(a,b)=>Math.max(0,Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x))*Math.max(0,Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y));
+  // the base layer at 4 pixels a millimetre, its dark pixels summed so any
+  // box's count is four lookups — made once for each picture
+  const base=gtBaseRect(), K=4;
+  if(base&&(!gtQrInk||gtQrInk.img!==gtBaseImg||gtQrInk.pw!==S.paperW||gtQrInk.ph!==S.paperH)){
+    const c=document.createElement('canvas'); c.width=Math.max(1,Math.round(S.paperW*K)); c.height=Math.max(1,Math.round(S.paperH*K));
+    const cx=c.getContext('2d'); cx.fillStyle='#fff'; cx.fillRect(0,0,c.width,c.height);
+    cx.drawImage(gtBaseImg,base.x*K,base.y*K,base.w*K,base.h*K);
+    let sum=null;
+    try{
+      const D=cx.getImageData(0,0,c.width,c.height).data, W=c.width+1;
+      sum=new Uint32Array(W*(c.height+1));
+      for(let y=0;y<c.height;y++){ let row=0;
+        for(let x=0;x<c.width;x++){ const o=(y*c.width+x)*4; if(D[o]+D[o+1]+D[o+2]<690) row++;
+          sum[(y+1)*W+x+1]=sum[y*W+x+1]+row; } }
+    }catch(e){}
+    gtQrInk={img:gtBaseImg,pw:S.paperW,ph:S.paperH,w:c.width,h:c.height,sum};
+  }
+  const ink=r=>{
+    if(!base||!gtQrInk||!gtQrInk.sum) return 0;
+    const I=gtQrInk, W=I.w+1, cl=(v,m)=>Math.max(0,Math.min(m,v));
+    const x0=cl(Math.floor(r.x*K),I.w), x1=cl(Math.ceil((r.x+r.w)*K),I.w);
+    const y0=cl(Math.floor(r.y*K),I.h), y1=cl(Math.ceil((r.y+r.h)*K),I.h);
+    return (I.sum[y1*W+x1]-I.sum[y0*W+x1]-I.sum[y1*W+x0]+I.sum[y0*W+x0])/(K*K);
+  };
+  const cost=s=>{
+    // half a millimetre clear all round
+    const r={x:s.x-0.5,y:s.y-0.5,w:s.w+1,h:s.h+1};
+    let c=0;
+    if(r.x<0.5-1e-6||r.y<0.5-1e-6||r.x+r.w>S.paperW-0.5+1e-6||r.y+r.h>S.paperH-0.5+1e-6) c+=1e6;
+    hard.forEach(h=>{ c+=over(r,h)*100; });
+    keep.forEach(t=>{ c+=over(r,t); });
+    return c+ink(r);
+  };
+  let best=null;
+  const tryAt=s=>{ s.cost=cost(s); if(!best||s.cost<best.cost-1e-6) best=s; return s.cost<1e-6; };
+  for(const s of near) if(tryAt(s)) return s;
+  // then the nearest clear place to the code, looked for every millimetre and
+  // a half across the sheet — kept for the sheet as it stands, as a sheet with
+  // nothing clear near the code is looked over whole
+  const key=JSON.stringify([num,B.cx,B.cy,S.paperW,S.paperH,keep,hard])+'|'+(base?gtBaseImg.src.length+':'+gtBaseImg.src.slice(-64):'');
+  if(gtQrSpotCache.has(key)) return gtQrSpotCache.get(key);
+  const pts=[];
+  for(let y=0.75;y<S.paperH;y+=1.5) for(let x=0.75;x<S.paperW;x+=1.5) pts.push([x,y,Math.hypot(x-B.cx,y-B.cy)]);
+  pts.sort((a,b)=>a[2]-b[2]);
+  let hit=null;
+  for(const [cx,cy] of pts){
+    for(const turn of [true,false]){ const s=box({cx,cy,turn}); if(tryAt(s)){ hit=s; break; } }
+    if(hit) break;
+  }
+  if(gtQrSpotCache.size>50) gtQrSpotCache.clear();
+  gtQrSpotCache.set(key,hit||best);
+  return hit||best;
 }
 function gtQrSync(){
   const on=document.getElementById('gtQrOn'); if(!on) return;
