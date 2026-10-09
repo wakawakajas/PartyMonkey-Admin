@@ -46835,9 +46835,26 @@ async function mcSumSetPreset(){
     updated_at:new Date().toISOString()})),{onConflict:'sku'});
   if(error){ showMsg(out,'Could not save that: '+escapeHtml(error.message),false); return; }
   skus.forEach(sku=>mcSumSkuPreset.set(sku,String(p.id)));
+  await mcGtFinishFollow(skus,p.name);
   showMsg(out,`✓ ${skus.length===1?escapeHtml(skus[0]):skus.length+' SKUs'} print on ${
     escapeHtml(p.name)} from now on.`,true);
   mcRenderSummary();
+}
+// A gift tag line already on a sheet carries its run (Matte / Gloss / Sticker)
+// on the line, and that run is what names and splits the sheets. A paper type
+// set for the SKU afterwards moves its lines to that run — left alone, the line
+// stayed on the Matte it was first given and the SKU came out on two sheets.
+async function mcGtFinishFollow(skus,name){
+  const fin=mcFinishOfPaper(name); if(!fin||!mcBatch||mcBatch.status!=='open') return;
+  const want=new Set(skus.map(String));
+  for(const it of mcItems.filter(i=>i.tile==='giftTag'&&want.has(String(mcRowKey(i))))){
+    const was=it.sheet_item||{};
+    if(was.finish===fin) continue;
+    const si={...was,finish:fin};
+    it.sheet_item=si;
+    if(!await mcSave(it,{sheet_item:si})) it.sheet_item=was;
+    else mcRepaintRow(it);
+  }
 }
 // ---------- one paper at a time ----------
 // What a row is printed on: the paper type set for the SKU, and where none
@@ -49561,9 +49578,13 @@ async function mcMarkLinesOnSheet(laid,page){
         // the old design's shape goes with the old design: swapping to another left
         // the line cut to the first one's die
         shape:String(shape||(was.designId&&was.designId!==designId?'':was.shape)||''),
-        finish:was.finish||(typeof gtFinish!=='undefined'?gtFinish:'Matte')};
+        // the paper the line was given decides the run before the gift tag
+        // screen's switch does, so a gloss line is not stamped Matte here
+        finish:mcPaperFinishOf(it)||was.finish
+          ||(typeof gtFinish!=='undefined'?gtFinish:'Matte')};
       if(it.tile==='giftTag'&&was.designId===designId&&was.qty===si.qty
-        &&String(was.page||'')===si.page&&String(was.shape||'')===si.shape){
+        &&String(was.page||'')===si.page&&String(was.shape||'')===si.shape
+        &&String(was.finish||'')===si.finish){
         const undo=mcUndoOf(it,MC_MARK_KEYS);
         const tick=mcDonePatch(it,true);
         if(Object.keys(tick).length&&await mcSaveOrUndo(it,tick,undo,it.sku||'That line')) n++;
@@ -52988,7 +53009,7 @@ const mcGtLine=it=>({id:'mc-'+it.id,
   // the cutting file this one was put on, so a sheet built from these rows is
   // grouped by shape exactly as the sheet it was built on
   shape:(it.sheet_item&&it.sheet_item.shape)||'',
-  finish:(it.sheet_item&&it.sheet_item.finish)||'Matte',
+  finish:mcGtFinishOf(it),
   extra:(((it.sheet_item&&it.sheet_item.extra)||[]).map(f=>({...f})))});
 
 function mcGiftWire(it){
@@ -53521,7 +53542,24 @@ const mcGtLent=l=>String((l&&l.id)||'').startsWith('mc-');
 // is built on and the stock it is run on. Matte and gloss are two runs through
 // the machine and come out as two PDFs, so they are two sheets — and a sheet
 // that shows both is not a picture of anything that will ever be printed.
-const mcGtFinishOf=it=>((it&&it.sheet_item&&it.sheet_item.finish)||'Matte');
+// The paper the line was given says which run it is on as plainly as the
+// finish does — a line asked "which paper?" and answered Gloss is a gloss tag.
+// Without this a gift tag put on by the SKU summary took whatever the gift tag
+// screen's own switch was left on (Matte), and one SKU came out as two sheets.
+function mcFinishOfPaper(p){
+  const s=String(p||'').toLowerCase();
+  return /sticker/.test(s)?'Sticker':/gloss/.test(s)?'Gloss':/matt/.test(s)?'Matte':'';
+}
+// What the line has been told it prints on, by the two people who can say:
+// the SKU summary's 📄 Paper type (the shared Fiery preset for the SKU) first,
+// then the paper the line itself was given.
+function mcPaperFinishOf(it){
+  if(!it) return '';
+  const p=typeof mcSumPresetOf==='function'?mcSumPresetOf(mcRowKey(it)):null;
+  return mcFinishOfPaper(p&&p.name)||mcFinishOfPaper(it.paper_type);
+}
+const mcGtFinishOf=it=>((it&&it.sheet_item&&it.sheet_item.finish)
+  ||mcPaperFinishOf(it)||'Matte');
 async function mcGtOpenFull(page,finish){
   // Said where it was asked from: opened off the download list, the line
   // window's strip is not on screen and the batch's is behind the list.
@@ -54774,7 +54812,7 @@ async function mcPrintPreview(lines,template,canvas,dim,page){
 function mcGiftBundles(lines){
   const by=new Map();
   lines.forEach(it=>{
-    const f=(it.sheet_item&&it.sheet_item.finish)||'Matte';
+    const f=mcGtFinishOf(it);
     // what the line was told it is on comes before what its design looks like
     const m=mcLinePage(it)||gtMode;
     const k=m+'|'+f;
