@@ -33666,9 +33666,18 @@ function gtPltSheet(at){
   };
   // Cut from the bottom of the sheet up, a row at a time and left to right —
   // wherever a tag sits, whatever design it is, rather than design by design.
-  // A tag is placed by where its lower edge is.
-  const cutOrder=slots.map((slot,i)=>({slot,i}))
+  // A row is every tag whose middle lies within the height of the lowest tag
+  // not yet given a row, so tags a hair higher or lower than their neighbours
+  // (nested sheets, odd shapes) stay in their row instead of the blade
+  // jumping back and forth across the sheet by their lower edges.
+  const rest=slots.map((slot,i)=>({slot,i}))
     .sort((a,b)=>(b.slot.y+b.slot.h)-(a.slot.y+a.slot.h)||a.slot.x-b.slot.x||a.i-b.i);
+  const cutOrder=[];
+  while(rest.length){
+    const low=rest[0].slot, top=low.y, bot=low.y+low.h;
+    const row=rest.filter(o=>{ const m=o.slot.y+o.slot.h/2; return m>=top&&m<=bot; });
+    row.sort((a,b)=>a.slot.x-b.slot.x||a.i-b.i).forEach(o=>{ cutOrder.push(o); rest.splice(rest.indexOf(o),1); });
+  }
   cutOrder.forEach(({slot,i})=>{
     // a placeholder with nothing on it is not cut — an empty half sheet goes
     // back through the printer, and a blade through it is what stops that
@@ -34929,6 +34938,40 @@ function gtDrawQr(ctx,sc,page){
   ctx.fillText(num,0,0);
   ctx.restore();
 }
+// The same code and number as PDF drawing rather than pixels, so the cutter's
+// camera reads clean square edges at any print resolution: dark modules as
+// filled rectangles (a row's run as one), the number in Helvetica. hMm: the
+// page height, as the PDF counts up from the bottom.
+let gtQrVecPass=false;
+function gtQrPdfOps(page,hMm){
+  const B=gtQrBox(); if(!B||typeof qrcode!=='function') return '';
+  const num=String(gtQrNumber(page));
+  const qr=qrcode(0,'M'); qr.addData(num); qr.make();
+  const n=qr.getModuleCount(), mod=GT_QR_SIZE/n, x0=B.cx-GT_QR_SIZE/2, y0=B.cy-GT_QR_SIZE/2;
+  const f=v=>(Math.round(v*1e4)/1e4).toString();
+  let ops='q 0 g\n';
+  for(let rr=0;rr<n;rr++){
+    // turned half way round, as on screen: row rr of the sheet is row n-1-rr of the code
+    let run=-1;
+    for(let cc=0;cc<=n;cc++){
+      const dark=cc<n&&qr.isDark(n-1-rr,n-1-cc);
+      if(dark&&run<0) run=cc;
+      if(!dark&&run>=0){
+        const x=x0+run*mod, y=y0+rr*mod, w=(cc-run)*mod;
+        ops+=`${f(mmToPt(x))} ${f(mmToPt(hMm-(y+mod)))} ${f(mmToPt(w))} ${f(mmToPt(mod))} re\n`;
+        run=-1;
+      }
+    }
+  }
+  ops+='f\n';
+  // the number: Helvetica's figures are all 0.556 em wide, and 0.359 em is
+  // half their height, so it centres where the screen centres it
+  const at=gtQrNumSpot(B,num,page), size=mmToPt(GT_QR_TEXT), w=num.length*0.556*size;
+  const cx=mmToPt(at.cx), cy=mmToPt(hMm-at.cy), lift=0.359*size;
+  const M=at.turn?[0,1,-1,0,cx+lift,cy-w/2]:[1,0,0,1,cx-w/2,cy-lift];
+  ops+=`BT /Fq ${f(size)} Tf ${M.map(f).join(' ')} Tm (${num}) Tj ET\nQ`;
+  return ops;
+}
 // Where the number goes: somewhere nothing is printed or cut — no placeholder,
 // filled or empty, no cut line, nothing dark in the base layer, clear of the
 // code and the dots. Beside the code where it can: the left first, turned to
@@ -35114,7 +35157,8 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   // it all instead (gtBaseOver), so it does not cover the placed pages.
   if(!vec&&!back) gtDrawBase(ctx,sc);
   // the sheet's number, as a QR code, on the front only
-  if(!back) try{ gtDrawQr(ctx,sc,page); }catch(e){}
+  // (in a PDF it goes in as vector instead — gtQrPdfOps)
+  if(!back&&!gtQrVecPass) try{ gtDrawQr(ctx,sc,page); }catch(e){}
   // the boxes of the line being worked on, because they are dragged here —
   // the side's own boxes, where that side has its tag
   if(!forExport&&gtSelLine) SL.forEach((slot,i)=>{
@@ -38794,7 +38838,7 @@ async function gtBuildPdf(count,render,sources){
   }
   const kids=[];
   for(let i=0;i<count;i++){
-    const {imgData,wMm,hMm,place,clear,over}=await render(i,forms);
+    const {imgData,wMm,hMm,place,clear,over,ink}=await render(i,forms);
     const W=mmToPt(wMm).toFixed(2), H=mmToPt(hMm).toFixed(2);
     const put=(place||[]).map(p=>({em:forms.get(p.key),r:p.rect,c:p.clip})).filter(u=>u.em);
     // A render made without paper under it has to let what is beneath show
@@ -38857,13 +38901,16 @@ async function gtBuildPdf(count,render,sources){
       cs+=`\nq ${gs}${f(mmToPt(o.w))} 0 0 ${f(mmToPt(o.h))} ${f(mmToPt(o.x))} ${f(mmToPt(hMm-(o.y+o.h)))} cm /${nm} Do Q`;
       layers.push([nm,num]);
     }
+    // drawing that goes in as vector, over everything (the cutter's QR code)
+    if(ink) cs+='\n'+ink;
     const content=enc.encode(cs);
     const xo=['/Im0 '+imgNum+' 0 R']
       .concat([...names].map(([form,nm])=>`/${nm} ${form} 0 R`))
       .concat(layers.map(([nm,num])=>`/${nm} ${num} 0 R`)).join(' ');
     mark(pageNum); push(enc.encode(`${pageNum} 0 obj\n<< /Type /Page /Parent ${pages} 0 R `
       +`/MediaBox [0 0 ${W} ${H}] /Resources << /XObject << ${xo} >> `
-      +(multiply?'/ExtGState << /Gm << /Type /ExtGState /BM /Multiply >> >> ':'')+`>> `
+      +(multiply?'/ExtGState << /Gm << /Type /ExtGState /BM /Multiply >> >> ':'')
+      +(ink&&ink.includes('/Fq')?'/Font << /Fq << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> ':'')+`>> `
       +`/Contents ${contentNum} 0 R >>\nendobj\n`));
     mark(contentNum); push(enc.encode(`${contentNum} 0 obj\n<< /Length ${content.length} >>\nstream\n`));
     push(content); push(enc.encode('\nendstream\nendobj\n'));
@@ -38991,11 +39038,13 @@ async function gtBuildSide(side,pages,plan,cuts){
     const c=document.createElement('canvas');
     const place=[];
     const vec=forms.size?gtVecTaker(forms,place):null;
-    gtRenderPage(c,i,px,true,null,vec,side);  // cut lines and holes are preview furniture
+    gtQrVecPass=true;
+    try{ gtRenderPage(c,i,px,true,null,vec,side); } finally{ gtQrVecPass=false; }  // cut lines and holes are preview furniture
     placed+=place.length;
     const ctx=c.getContext('2d');
     const out={imgData:ctx.getImageData(0,0,c.width,c.height),
                wMm:S.paperW,hMm:S.paperH,place,clear:!!vec,
+               ink:back?'':gtQrPdfOps(i,S.paperH),
                // the base layer is the front's
                over:(vec&&!back)?gtBaseOver(px/Math.max(S.paperW,S.paperH)):[]};
     setTimeout(()=>{ c.width=c.height=0; },0);
@@ -55030,11 +55079,13 @@ async function mcGiftBundle(lines,mode,side){
       const c=document.createElement('canvas');
       const place=[];
       const vec=forms.size?gtVecTaker(forms,place):null;
-      gtRenderPage(c,i,px,true,null,vec,back?'back':'front');
+      gtQrVecPass=true;
+      try{ gtRenderPage(c,i,px,true,null,vec,back?'back':'front'); } finally{ gtQrVecPass=false; }
       const ctx=c.getContext('2d');
       const imgData=ctx.getImageData(0,0,c.width,c.height);
       // the base layer is the front's
       return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH,place,clear:!!vec,
+              ink:back?'':gtQrPdfOps(i,gtSheet.paperH),
               over:(vec&&!back)?gtBaseOver(px/Math.max(gtSheet.paperW,gtSheet.paperH)):[]};
     },sources);
     // handed to mcPut, which every caller saves this PDF through next
