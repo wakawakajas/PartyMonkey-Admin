@@ -233,6 +233,10 @@ class Fiery:
             if exc.code in (401, 403) and path == "/login":
                 # the Fiery says which half it did not like; the two are fixed
                 # in different places, so the message names the right one
+                if "license expired" in detail.lower():
+                    raise FieryError("The Fiery API key's licence has run out -- get a "
+                                     "new key from developer.fiery.com and put it in "
+                                     "api_key in fiery.json.") from exc
                 if "accessrights" in detail:
                     raise FieryError("The Fiery turned the API key down -- check "
                                      "api_key in fiery.json.") from exc
