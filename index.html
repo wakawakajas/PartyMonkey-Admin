@@ -34935,7 +34935,7 @@ function gtNestPlan(){
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
   const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
-    S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,marks,S.qrOn?(Number(S.qrDist)||10):0]);
+    S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,S.nestHole||0,marks,S.qrOn?(Number(S.qrDist)||10):0]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
   // A figure being typed (a gap, a size, a scale) changes the sheet on every
   // keystroke, and packing a sheet by its cut lines takes seconds: the page
@@ -35110,6 +35110,8 @@ function gtNestPlan(){
       slots.push({id:'n'+at+'_'+k,shape:fl?NC.shape:null,...(fl?{nestCut:NC.file}:{}),added:true,
         x:Math.round((ox+pos.x+(pos.bw>0?0:(it.bl||0)))*100)/100,y:Math.round((oy+pos.y+(pos.bw>0?0:(it.bl||0)))*100)/100,w:b.w,h:b.h,
         ...(turnOf(pos)?{rot:turnOf(pos)}:{}),
+        // Add holes on a nested sheet: every tag punched, from its own top
+        ...(S.nestHole?{hole:{...S.nestHole}}:{}),
         // turned off the quarter, the tag's own size goes with it - see gtUnrotSlot
         ...(turnOf(pos)%90?{tw:it.sz.w,th:it.sz.h}:{})});
       queue.push(it.line);
@@ -35691,7 +35693,19 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // so the side with no gap never runs on over the next tag.
   const gl=r.x-x, gr=x+w-(r.x+r.w), gt=r.y-y, gb=y+h-(r.y+r.h);
   const gap={x:Math.max(gl,gr),y:Math.max(gt,gb)};
-  const clip={x:x-b,y:y-b,w:w+b*2,h:h+b*2};
+  let clip={x:x-b,y:y-b,w:w+b*2,h:h+b*2};
+  // Cut to its own line, a tag prints to that line plus its bleed, wherever the
+  // line runs - not to the placeholder it was put in. Clipped to the box, a
+  // one-off bigger than its placeholder came out cropped.
+  if(design&&!box&&gtOwnCut(design)){
+    const keep=gtTraceLast, p=gtTracePlace(design,r,b>0?b:0);
+    gtTraceLast=keep;                 // the editor's own reading of its loop
+    if(p&&p.length){
+      let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+      p.forEach(([u,v])=>{ x0=Math.min(x0,u); y0=Math.min(y0,v); x1=Math.max(x1,u); y1=Math.max(y1,v); });
+      clip={x:x0,y:y0,w:x1-x0,h:y1-y0};
+    }
+  }
   // a placed page with a made-up bleed: its page goes in at the trim and only
   // the ring of bleed around it is drawn here, the way the Custom Print
   // Template does it
@@ -37841,6 +37855,14 @@ function gtHoleFields(){
 }
 document.getElementById('gtAddHolesBtn').addEventListener('click',()=>{
   const list=gtScopeSlots(), h=gtHoleFields();
+  // A nested sheet is made from the order, not from these placeholders: the
+  // holes go on every tag it packs
+  if(gtSheet.nestOn&&!gtLayout){
+    gtSheet.nestHole={...h}; gtSheet.slotHole=h;
+    if(!gtSheet.showHole){ gtSheet.showHole=true; document.getElementById('gtHoleToggle').checked=true; }
+    gtNestCache=null; gtDraw(); gtSaveSoon();
+    return gtSlotToolMsg('✓ Hole on every nested tag — it goes in the cut file');
+  }
   if(!list.length) return gtSlotToolMsg('No placeholders to punch.',false);
   list.forEach(s=>{ s.hole={...h}; });
   gtSheet.slotHole=h;
@@ -37849,6 +37871,10 @@ document.getElementById('gtAddHolesBtn').addEventListener('click',()=>{
   gtSlotToolMsg(`✓ Hole on ${list.length} placeholder${list.length===1?'':'s'} — it goes in the cut file`);
 });
 document.getElementById('gtDelHolesBtn').addEventListener('click',()=>{
+  if(gtSheet.nestOn&&!gtLayout&&gtSheet.nestHole){
+    delete gtSheet.nestHole; gtNestCache=null; gtDraw(); gtSaveSoon();
+    return gtSlotToolMsg('✓ Holes taken off the nested tags');
+  }
   const list=gtScopeSlots().filter(s=>s.hole);
   list.forEach(s=>{ delete s.hole; });
   gtSlotsChanged();
@@ -37859,6 +37885,7 @@ document.getElementById('gtDelHolesBtn').addEventListener('click',()=>{
   document.getElementById(id).addEventListener('input',()=>{
     const h=gtHoleFields();
     gtSheet.slotHole=h;
+    if(gtSheet.nestHole){ gtSheet.nestHole={...h}; gtNestCache=null; }
     const list=gtScopeSlots().filter(s=>s.hole);
     if(!list.length) return;
     list.forEach(s=>{ s.hole={...h}; });
@@ -37876,7 +37903,14 @@ function gtSlotToolFieldsWrite(){
   gtSlotHoleFieldsWrite();
 }
 // the centre of a placeholder's hole on the sheet, in mm
-const gtSlotHoleAt=s=>({cx:s.x+s.w/2+s.hole.x, cy:s.y+s.hole.y, r:Math.max(0.25,s.hole.d/2)});
+// - a turned one (nested) has it on the tag's own top, turned with the tag
+const gtSlotHoleAt=s=>{
+  const r=Math.max(0.25,s.hole.d/2);
+  if(!s.rot) return {cx:s.x+s.w/2+s.hole.x, cy:s.y+s.hole.y, r};
+  const u=gtUnrotSlot(s), x=u.x+u.w/2+s.hole.x, y=u.y+s.hole.y;
+  const cx=s.x+s.w/2, cy=s.y+s.h/2, a=s.rot*Math.PI/180, c=Math.cos(a), sn=Math.sin(a);
+  return {cx:cx+(x-cx)*c-(y-cy)*sn, cy:cy+(x-cx)*sn+(y-cy)*c, r};
+};
 document.getElementById('gtContourBtn').addEventListener('click',()=>gtSetSlotEdit(!gtSlotEdit));
 // A placeholder dropped is one fewer tag on the sheet — which is how a run is
 // made room in for a one-off. Delete takes the ones in hand, so it can be done
@@ -56520,7 +56554,7 @@ async function mcGiftBundle(lines,mode,side){
 // the library happens to be on.
 const GT_JOB_SHEET_KEYS=['paperW','paperH','tagW','tagH','margin','gap','gapY','gridMode',
   'leadTrim','sideTrim','gridCols','gridRows','slotRadius','bleedOn','bleed','bleedMode',
-  'nestOn','nestReal','nestRotate','nestRotStep','nestCut','layoutFile','cutRemoved'];
+  'nestOn','nestReal','nestRotate','nestRotStep','nestCut','nestHole','layoutFile','cutRemoved'];
 const PJ_KINDS={
   giftTag:{
     label:'Gift tag sheet',
