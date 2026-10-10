@@ -7354,6 +7354,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <label class="click-tog"><input type="checkbox" id="gtTraceOn"/>Cut round the artwork, not the placeholder</label>
           </div>
           <div class="chips" id="gtCutShapeSeg" style="margin:9px 0 0;">
+            <button type="button" class="chip chip-state" data-gtcs="none" title="No cut line of its own - the tag is cut to its placeholder">None</button>
             <button type="button" class="chip chip-state on" data-gtcs="trace" title="Follow the edge of the artwork">Traced</button>
             <button type="button" class="chip chip-state" data-gtcs="rect" title="A rectangle the size of the artwork — resize it below">▭ Rectangle</button>
             <button type="button" class="chip chip-state" data-gtcs="circle" title="A circle (or oval) the size of the artwork — resize it below">◯ Circle</button>
@@ -33804,6 +33805,22 @@ function gtTraceExtras(d,r){
 // held in. The circle's points are close enough together that the cutter's own
 // step is what it is cut at.
 const GT_CUT_MAX=10;               // cut lines on one design, the main one included
+// Where the artwork actually is in its picture, as 0..1 fractions of it: read
+// the same way Trace reads the edge (transparency, or where it meets its
+// background). null where there is no picture, or nothing to tell apart.
+function gtArtInkBox(d,thr){
+  const img=d&&gtImgGet(d.id);
+  if(!img||!img.naturalWidth) return null;
+  let m=null; try{ m=gtTraceMask(img,thr); }catch(e){ return null; }
+  if(!m||!m.inside) return null;
+  const {inside,W,H}=m;
+  let x0=W,y0=H,x1=-1,y1=-1;
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++) if(inside[y*W+x]){
+    if(x<x0) x0=x; if(x>x1) x1=x; if(y<y0) y0=y; if(y>y1) y1=y;
+  }
+  if(x1<x0||y1<y0) return null;
+  return {u0:x0/W,v0:y0/H,u1:(x1+1)/W,v1:(y1+1)/H};
+}
 function gtShapeLoop(shape){
   if(shape==='circle'){
     const n=180, out=[];
@@ -34991,7 +35008,10 @@ function gtFitD(d,iw,ih,bw,bh){
     return {w:real.w,h:real.h,x:(bw-real.w)/2,y:(bh-real.h)/2};
   }
   const t=d&&d.trace;
-  if(t&&t.on&&t.loop&&t.loop.length>3){
+  // A rectangle or circle is drawn on the artwork, not read off it: the picture
+  // keeps the size it has without one, and the shape is sized from there. Fitted
+  // by the shape instead, picking Rectangle made the whole design jump in size.
+  if(t&&t.on&&t.loop&&t.loop.length>3&&!t.shape){
     // A hair over, for the smoothing — and not the outset as well: the picture
     // is fitted to the placeholder by its outline, so changing the cut line's
     // outset must not change how big the picture is.
@@ -35002,6 +35022,13 @@ function gtFitD(d,iw,ih,bw,bh){
       const w=iw*s, h=ih*s;
       return {w,h,x:bw/2-(bb.u0+bb.u1)/2*w,y:bh/2-(bb.v0+bb.v1)/2*h};
     }
+  }
+  // a drawn shape: the picture at its plain fit, with the shape in the middle
+  // of the placeholder, as a traced line is - so tags packed tight by their cut
+  // lines never run into one another
+  if(t&&t.on&&t.loop&&t.loop.length>3&&t.shape){
+    const f=gtFit(iw,ih,bw,bh), bb=gtCutAllBox(t);
+    return {w:f.w,h:f.h,x:bw/2-(bb.u0+bb.u1)/2*f.w,y:bh/2-(bb.v0+bb.v1)/2*f.h};
   }
   return gtFit(iw,ih,bw,bh);
 }
@@ -39202,8 +39229,8 @@ function gtArtWriteInputs(){
   const t=d.trace||null;
   document.getElementById('gtTraceOn').checked=!!(t&&t.on);
   document.getElementById('gtTraceOn').disabled=!t;
-  const shape=(t&&t.shape)||'trace';
-  document.querySelectorAll('#gtCutShapeSeg [data-gtcs]').forEach(b=>b.classList.toggle('on',!!t&&b.dataset.gtcs===shape));
+  const shape=!t||!t.on?'none':(t.shape||'trace');
+  document.querySelectorAll('#gtCutShapeSeg [data-gtcs]').forEach(b=>b.classList.toggle('on',b.dataset.gtcs===shape));
   // threshold and Trace are for reading the artwork's edge — a drawn shape has none
   document.getElementById('gtTraceThr').disabled=shape!=='trace';
   document.getElementById('gtTraceBtn').textContent=shape==='trace'?'Trace the artwork':'Trace the artwork instead';
@@ -39296,13 +39323,30 @@ document.getElementById('gtCutShapeSeg').addEventListener('click',e=>{
   const b=e.target.closest('[data-gtcs]'); const d=gtCurrentDesign;
   if(!b||!d) return;
   const want=b.dataset.gtcs;
+  // None takes the cut line off - the extra ones with it, since they hang off
+  // it - and the tag is cut to its placeholder again. Held until Save like any
+  // other change, so Discard brings it back.
+  if(want==='none'){
+    if(!d.trace) return;
+    gtCutBegin(d);
+    d.trace=null;
+    document.getElementById('gtTraceMsg').innerHTML='';
+    gtArtWriteInputs(); gtArtChanged();
+    return;
+  }
   if(want==='trace'){
     if(!(d.trace&&!d.trace.shape&&d.trace.on)) document.getElementById('gtTraceBtn').click();
     return;
   }
   gtCutBegin(d);
   const old=d.trace||{};
-  d.trace={loop:gtShapeLoop(want),shape:want,out:0,thr:Number(old.thr)||50,sm:0,on:true,
+  // The box the artwork actually fills, not the picture's whole canvas: a file
+  // with a transparent or plain margin round its art came out with a cut line
+  // the size of the canvas, bigger than the design itself.
+  const thr=Number(old.thr)||50, ab=gtArtInkBox(d,thr);
+  const loop=gtShapeLoop(want).map(([u,v])=>ab
+    ?[Math.round((ab.u0+u*(ab.u1-ab.u0))*1e4)/1e4,Math.round((ab.v0+v*(ab.v1-ab.v0))*1e4)/1e4]:[u,v]);
+  d.trace={loop,shape:want,out:0,thr,sm:0,on:true,
     ...(old.more?{more:old.more}:{})};
   gtArtWriteInputs(); gtArtChanged();
 });
