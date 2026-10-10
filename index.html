@@ -7083,7 +7083,12 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <label class="click-tog" title="Every tag gets a placeholder the size of its design's cut line, packed across as many sheets as the order needs. More of a design means more placeholders on the same sheet where there is room — never the same sheet again."><input type="checkbox" id="gtNestOn"/>Nest the order — a placeholder per design</label>
           </div></div>
             <div class="click-row" style="margin-top:6px;">
-            <label class="click-tog" title="While nesting, a tag may be turned a quarter where that fits more on the sheet. The artwork and words turn with it."><input type="checkbox" id="gtNestRotate" checked/>Turn tags a quarter to fit more</label>
+            <label class="click-tog" title="While nesting, a tag may be turned where that fits more on the sheet. The artwork and words turn with it."><input type="checkbox" id="gtNestRotate" checked/>Turn tags to fit more</label>
+            <label class="field gt-inline" style="display:inline-flex;align-items:center;gap:6px;margin-left:10px;" title="How far apart the turns tried are. Steps finer than a quarter are tried with Pack by real cut lines on, where an odd shape can tuck into another's gap; a plain box only ever fits better a quarter turned. Finer steps take longer."><span>STEP</span>
+              <select id="gtNestRotStep">
+                <option value="90">90° (quarter)</option><option value="45">45°</option><option value="15">15°</option>
+                <option value="10">10°</option><option value="5">5°</option><option value="1">1°</option>
+              </select></label>
           </div>
             <div class="click-row">
             <label class="click-tog" title="Packs each tag by its traced cut line instead of the box round it, so round and odd shapes sit in one another's gaps and fewer sheets are needed. Tags with no traced line stay boxes. Takes a few seconds on a big order."><input type="checkbox" id="gtNestRealOn"/>Fit the real cut lines (saves more paper)</label>
@@ -7348,6 +7353,11 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <div class="click-row">
             <label class="click-tog"><input type="checkbox" id="gtTraceOn"/>Cut round the artwork, not the placeholder</label>
           </div>
+          <div class="chips" id="gtCutShapeSeg" style="margin:9px 0 0;">
+            <button type="button" class="chip chip-state on" data-gtcs="trace" title="Follow the edge of the artwork">Traced</button>
+            <button type="button" class="chip chip-state" data-gtcs="rect" title="A rectangle the size of the artwork — resize it below">▭ Rectangle</button>
+            <button type="button" class="chip chip-state" data-gtcs="circle" title="A circle (or oval) the size of the artwork — resize it below">◯ Circle</button>
+          </div>
           <div class="grid3e" style="margin-top:9px;">
             <label class="field"><span>OUTSET (mm)</span><input type="number" step="0.1" id="gtTraceOut" value="1"/></label>
             <label class="field"><span>SMOOTH (mm)</span><input type="number" step="0.1" min="0" id="gtTraceSm" value="0.3"/></label>
@@ -7363,6 +7373,23 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <p class="hint" style="margin:6px 0 0;">The cut line's size, outset included. Change either one on its own and only the cut line moves — it is pulled wider or taller about its middle, and the artwork stays the size it is. Trace the artwork again to bring the line back to the artwork's own outline.</p>
           </div>
           <p class="hint" id="gtCutWarn" style="margin:8px 0 0;color:#B24C25;" hidden></p>
+          <!-- more cut lines on the same tag — windows, holes, a second outline —
+               up to 10 in all with the main one -->
+          <div id="gtCutMoreWrap" hidden>
+            <div class="sect-label" style="margin-top:12px;">More cut lines <span id="gtCutMoreCount" style="font-weight:400;"></span></div>
+            <div id="gtCutMoreList"></div>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+              <button type="button" class="btn-outline btn-sm" id="gtCutAddRect" style="flex:1;">+ ▭ Rectangle</button>
+              <button type="button" class="btn-outline btn-sm" id="gtCutAddCircle" style="flex:1;">+ ◯ Circle</button>
+            </div>
+          </div>
+          <!-- cut line changes are held here until Save: nothing about the cut
+               line goes into the library on its own -->
+          <div id="gtCutSaveRow" style="display:flex;gap:8px;margin-top:10px;" hidden>
+            <button type="button" class="btn-primary btn-sm" id="gtCutSaveBtn" style="flex:1;">💾 Save cut line</button>
+            <button type="button" class="btn-outline btn-sm" id="gtCutDiscardBtn">Discard</button>
+          </div>
+          <p class="hint" id="gtCutUnsaved" style="margin:6px 0 0;color:#B24C25;" hidden>Cut line not saved yet — press Save cut line to keep it.</p>
           <details class="gt-why"><summary>How the cut line works</summary>
             <p class="hint">A one-off design can be cut to its own outline instead of to the placeholder it lands in. Trace reads the edge of the artwork — where it goes transparent, or where it meets its background — and makes a contour from it. A minus outset cuts inside the artwork instead — −1 takes the blade 1mm in from its edge. Smooth irons out wobbles narrower than that; 0 follows the edge exactly.</p>
           </details>
@@ -13232,7 +13259,9 @@ async function cropApplyGt(){
     // traced again off the new one with the same settings
     const old=d.trace; let retraced=false;
     d.trace=null;
-    if(old){
+    // a rectangle or circle is the picture's box, whatever is in it
+    if(old&&old.shape) d.trace=old;
+    else if(old){
       let loop=null;
       try{ loop=gtTraceDesign(d,old.thr||50); }catch(e){ loop=null; }
       if(loop){ d.trace={...old,loop}; retraced=true; }
@@ -27323,9 +27352,14 @@ async function printArtReady(){ try{ await printArtLoading; }catch(e){} }
 // `whole` says this is a saved template from a library (a Place Card load, which
 // has no name to give the Custom Template's boxes): everything it leaves out is
 // the default, not what the last template happened to leave behind.
+// counts the templates loaded into the builder, so Undo's history is only ever
+// the one sheet's: a step back after loading another put the last one's paper
+// and placeholders onto it
+let printLoadSeq=0;
 function applyPrintState(meta,name,whole,keepArt){
   if(!meta) return;
   whole=!!whole||name!==undefined;
+  if(whole) printLoadSeq++;
   // copies: a Magic Create line's stored design is handed in here, and the
   // builder edits paper and boxes in place — it rewrote the line in memory
   const cp=v=>v==null?v:JSON.parse(JSON.stringify(v));
@@ -30697,6 +30731,45 @@ let gtCutRedrawT=0;
 // screen: swapping the visible list must never be able to write a manifest
 // that has lost the folder's real contents.
 let gtOwnDesigns=null;
+// A cut line being worked on is not saved as it is changed: the editor's tag
+// and the sheet show it straight away, but what goes into the library is the
+// line as it was last saved until Save cut line is pressed. Discard puts that
+// one back.
+let gtCutDraft=null;               // {id, saved: the design's trace as last saved}
+const gtTraceKept=d=>gtCutDraft&&d&&gtCutDraft.id===d.id?gtCutDraft.saved:(d?d.trace:null);
+// called before every change a person makes to the cut line
+function gtCutBegin(d){
+  if(!d) return;
+  if(gtCutDraft&&gtCutDraft.id!==d.id) gtCutSettle();
+  if(!gtCutDraft) gtCutDraft={id:d.id,saved:d.trace?JSON.parse(JSON.stringify(d.trace)):null};
+}
+const gtCutDesign=id=>gtDesign(id)||(gtOwnDesigns||[]).find(d=>d.id===id)||null;
+function gtCutDirty(){
+  if(!gtCutDraft) return false;
+  const d=gtCutDesign(gtCutDraft.id);
+  return !!d&&JSON.stringify(gtCutDraft.saved||null)!==JSON.stringify(d.trace||null);
+}
+function gtCutSave(){
+  gtCutDraft=null;
+  gtSaveLib().catch(()=>{});
+}
+function gtCutDiscard(){
+  if(!gtCutDraft) return;
+  const d=gtCutDesign(gtCutDraft.id);
+  if(d) d.trace=gtCutDraft.saved;
+  gtCutDraft=null;
+}
+// Another design opened with this one's line still unsaved: asked, not lost.
+function gtCutSettle(){
+  if(!gtCutDraft) return;
+  if(!gtCutDirty()){ gtCutDraft=null; return; }
+  const d=gtCutDesign(gtCutDraft.id);
+  if(confirm(`Save the cut line changes on "${(d&&d.name)||'the last design'}"?\n\nOK saves them, Cancel throws them away.`)) gtCutSave();
+  else{ gtCutDiscard(); gtDraw(); }
+}
+window.addEventListener('beforeunload',e=>{
+  try{ if(gtCutDirty()){ e.preventDefault(); e.returnValue=''; } }catch(_){}
+});
 // art, bleed and trace go with the design: a scale set on the library's own
 // artwork that came back at 100% next week would be set again every week. A
 // one-off is filtered out of the manifest and keeps none of it, which is what
@@ -30708,7 +30781,7 @@ function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
   gtKeepShape();
   return {version:2,sheet:{...gtSheet,slots:gtSlotsBase},
-    designs:own.filter(d=>!d.adhoc).map(gtManDesign),
+    designs:own.filter(d=>!d.adhoc).map(d=>gtManDesign({...d,trace:gtTraceKept(d)})),
     fonts:gtLib.fonts.map(f=>({id:f.id,name:f.name,file:f.file})),
     texts:gtLib.texts.map(t=>({id:t.id,name:t.name,text:t.text,font:t.font||undefined})),
     // the words set on Pigu-folder designs — see gtPiguFields. Kept only in
@@ -30800,7 +30873,7 @@ async function gtPiguFieldsSave(){
     // line are kept with the words: a folder design is read afresh every visit,
     // and a size set on it went back to the default each time
     const keep={fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
-      artV:2,art:d.art||null,bleed:d.bleed||null,trace:d.trace||null,cutSeen:d.cutSeen||null};
+      artV:2,art:d.art||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,cutSeen:d.cutSeen||null};
     const now=JSON.stringify(keep);
     if(JSON.stringify(map[d.file]||null)!==now){ map[d.file]=JSON.parse(now); changed=true; }
   });
@@ -31504,6 +31577,14 @@ function gtNormalizeDesign(d){
          // the cut line pulled wider or taller than the artwork's outline, each on its own
          ...(Number(d.trace.cx)>0&&Number(d.trace.cx)!==1?{cx:Number(d.trace.cx)}:{}),
          ...(Number(d.trace.cy)>0&&Number(d.trace.cy)!==1?{cy:Number(d.trace.cy)}:{}),
+         // drawn as a plain rectangle or circle rather than traced off the artwork
+         ...(d.trace.shape==='rect'||d.trace.shape==='circle'?{shape:d.trace.shape}:{}),
+         // further cut lines set by hand — rectangles and circles, each its middle
+         // and size as fractions of the artwork's box, like the loop
+         ...(Array.isArray(d.trace.more)&&d.trace.more.length
+             ?{more:d.trace.more.filter(m=>m&&(m.shape==='rect'||m.shape==='circle')
+                 &&Number(m.fw)>0&&Number(m.fh)>0).slice(0,9)      // 10 with the main one
+                 .map(m=>({shape:m.shape,u:Number(m.u)||0,v:Number(m.v)||0,fw:Number(m.fw),fh:Number(m.fh)}))}:{}),
          on:d.trace.on!==false} : null,
     // A picture of its own for the back, sized like the front's art. None means
     // the sheet's back picture (gtSheet.backFile), and with neither it is blank.
@@ -32369,6 +32450,7 @@ const gtPiguFolderOf=d=>{
 // new line actually landed on: its own, where the shape is new to the order,
 // or the one that shape was already running on.
 async function gtShapeForDesign(d,lineId){
+  if(gtOwnCut(d)) return;            // cut to its own line, not the folder's file
   const folder=gtPiguFolderOf(d); if(!folder) return;
   await gtFolderShapesGet();
   const path=gtFolderShapes[folder];
@@ -33428,13 +33510,32 @@ function gtTracePlace(d,r,extra){
 // The cuts inside the outline that came with the design's PDF, placed on the same
 // rect the outline is — as drawn, with no outset and no smoothing, and open
 // where they were open.
+// The hand-set ones after them, as closed loops on the same rect.
 function gtTraceExtras(d,r){
   const t=d&&d.trace;
-  if(!t||!t.on||!t.loop||t.loop.length<4||!t.extra||!t.extra.length||!r) return [];
-  return t.extra.map(e=>{
+  if(!t||!t.on||!t.loop||t.loop.length<4||!r) return [];
+  const out=(t.extra||[]).map(e=>{
     const p=e.pts.map(([u,v])=>[r.x+u*r.w,r.y+v*r.h]);
     p.open=!e.closed; return p;
   });
+  (t.more||[]).forEach(m=>{
+    const p=gtShapeLoop(m.shape).map(([u,v])=>
+      [r.x+(m.u+(u-0.5)*m.fw)*r.w, r.y+(m.v+(v-0.5)*m.fh)*r.h]);
+    out.push(p.concat([p[0]]));
+  });
+  return out;
+}
+// A rectangle or a circle filling the 0..1 box, in the terms a traced loop is
+// held in. The circle's points are close enough together that the cutter's own
+// step is what it is cut at.
+const GT_CUT_MAX=10;               // cut lines on one design, the main one included
+function gtShapeLoop(shape){
+  if(shape==='circle'){
+    const n=180, out=[];
+    for(let k=0;k<n;k++){ const a=k/n*2*Math.PI; out.push([0.5+0.5*Math.cos(a),0.5+0.5*Math.sin(a)]); }
+    return out;
+  }
+  return [[0,0],[1,0],[1,1],[0,1]];
 }
 function gtStrokeExtras(ctx,d,r,sc){
   gtTraceExtras(d,r).forEach(p=>{
@@ -33533,9 +33634,21 @@ function gtFlattenNow(d,m,stepVb){
 // itself is drawn in the box before the turn — same centre, width and height
 // swapped — and turned about that centre. The back sees it from the other side,
 // so it turns the other way.
+// Turned by some other angle (nesting by real cut lines, a step finer than a
+// quarter), x, y, w, h are the box the turned tag covers, and tw x th is the
+// tag's own size before the turn - no swap gives that back. Resized since, the
+// tag is resized with its box.
 function gtUnrotSlot(slot){
   if(!slot||!slot.rot) return slot;
   const cx=slot.x+slot.w/2, cy=slot.y+slot.h/2;
+  if(Number(slot.tw)>0&&Number(slot.th)>0){
+    const a=slot.rot*Math.PI/180, c=Math.abs(Math.cos(a)), sn=Math.abs(Math.sin(a));
+    const W=slot.tw*c+slot.th*sn, H=slot.tw*sn+slot.th*c;
+    const k=Math.min(W>0?slot.w/W:1,H>0?slot.h/H:1)||1;
+    const tw=slot.tw*k, th=slot.th*k;
+    return {...slot,x:cx-tw/2,y:cy-th/2,w:tw,h:th,rot:0};
+  }
+  if(((slot.rot%180)+180)%180===0) return {...slot,rot:0};     // half a turn: same box
   return {...slot,x:cx-slot.h/2,y:cy-slot.w/2,w:slot.h,h:slot.w,rot:0};
 }
 // fn is called with the placeholder as it is before the turn, with the canvas
@@ -33908,13 +34021,38 @@ async function gtUsePreset(){
 }
 // the shape a line is cut to: the one its design's folder names, or the
 // order's own where the design names none
+// A design cut to a line of its own — traced, or a rectangle or circle set by
+// hand — is not cut to its folder's cutting file, and taking that file off the
+// sheet is the whole point of giving it one. Its folder's file used to come
+// straight back the next time the line was opened or its sheet was counted.
+// A line taken off the PDF's own cut line (auto) is not one of these.
+const gtOwnCut=d=>!!(d&&d.trace&&d.trace.on&&!d.trace.auto&&d.trace.loop&&d.trace.loop.length>3);
 function gtShapeOfLine(l){
   // A line put on a shape of its own beats both. Magic Create asks which one
   // when the design's folder names none, and the answer belongs to that line:
   // it is the whole of how a design cut differently gets a sheet of its own
   // rather than landing on whatever the sheet was left on.
-  if(l&&l.shape) return l.shape;
   const d=gtDesign(l&&l.designId);
+  if(gtOwnCut(d)){
+    // Cut to its own line, it needs no cutting file of its own, so it goes on
+    // the sheet the others are on: the sheet's own cutting file, or else the
+    // one the rest of the order is cut to. Only an order of nothing but such
+    // tags is laid out with no cutting file at all - a sheet with no file
+    // beside sheets with one was drawn on whichever of them was on screen.
+    const base=gtBaseShape(); if(base) return base;
+    for(const o of (gtOrder||[])){
+      if(!o||o===l) continue;
+      const od=gtDesign(o.designId);
+      if(!od||gtOwnCut(od)) continue;
+      const sh=gtShapeOfOther(o,od); if(sh) return sh;
+    }
+    return '';
+  }
+  return gtShapeOfOther(l,d);
+}
+// the shape of a line not cut to its own line: its own pick, its folder's, the order's
+function gtShapeOfOther(l,d){
+  if(l&&l.shape) return l.shape;
   const folder=d?gtPiguFolderOf(d):'';
   const mapped=folder?gtFolderShapes[folder]:'';
   return mapped||gtBaseShape();
@@ -34014,28 +34152,38 @@ const GT_NEST_CELL=0.5;
 // bit rows ready to be shifted to any column.
 function gtNestMask(poly,w,h,gap,cell){
   const P=(poly&&poly.length>=3)?poly:[[0,0],[w,0],[w,h],[0,h]];
+  // an outline with extra cut lines past it (parts) is all of them, filled
+  const loops=[P].concat(((poly&&poly.parts)||[]).filter(q=>q&&q.length>1));
   let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
-  P.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); });
+  loops.forEach(L=>L.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); }));
   const radius=Math.max(0,gap)/2+cell*0.9, Rc=radius/cell, R=Math.ceil(Rc);
   const ring=R+1;
   const ox=x0-ring*cell, oy=y0-ring*cell;
   const mw=Math.ceil((x1-x0)/cell)+2*ring+1, mh=Math.ceil((y1-y0)/cell)+2*ring+1;
   // the shape itself: every cell a sample row of it touches, two rows a cell
-  const S=[], n=P.length;
+  const S=[];
   for(let j=0;j<mh;j++){
     const row=new Uint8Array(mw); let any=false;
     for(const f of [0.25,0.75]){
-      const y=oy+(j+f)*cell, xs=[];
-      for(let a=0;a<n;a++){
-        const p=P[a], q=P[(a+1)%n];
-        if((p[1]<=y&&q[1]>y)||(q[1]<=y&&p[1]>y)) xs.push(p[0]+(y-p[1])/(q[1]-p[1])*(q[0]-p[0]));
-      }
-      xs.sort((a,b)=>a-b);
-      for(let k=0;k+1<xs.length;k+=2){
-        const a=Math.max(0,Math.floor((xs[k]-ox)/cell)), b=Math.min(mw-1,Math.floor((xs[k+1]-ox)/cell));
-        for(let c=a;c<=b;c++){ row[c]=1; any=true; }
+      const y=oy+(j+f)*cell;
+      for(const L of loops){
+        const n=L.length, xs=[];
+        for(let a=0;a<n;a++){
+          const p=L[a], q=L[(a+1)%n];
+          if((p[1]<=y&&q[1]>y)||(q[1]<=y&&p[1]>y)) xs.push(p[0]+(y-p[1])/(q[1]-p[1])*(q[0]-p[0]));
+        }
+        xs.sort((a,b)=>a-b);
+        for(let k=0;k+1<xs.length;k+=2){
+          const a=Math.max(0,Math.floor((xs[k]-ox)/cell)), b=Math.min(mw-1,Math.floor((xs[k+1]-ox)/cell));
+          for(let c=a;c<=b;c++){ row[c]=1; any=true; }
+        }
       }
     }
+    // a slit is a line, not an area: wherever one of its points falls is taken
+    for(const L of loops) if(L!==P) L.forEach(([x,y])=>{
+      const jj=Math.floor((y-oy)/cell), c=Math.floor((x-ox)/cell);
+      if(jj===j&&c>=0&&c<mw){ row[c]=1; any=true; }
+    });
     S.push(any?row:null);
   }
   // grown by the radius: each run of a row spreads along the rows within reach
@@ -34069,7 +34217,35 @@ function gtNestMask(poly,w,h,gap,cell){
 // {pages:[{items:[{it,pos}]}],tooBig,fill}, pos being where the placeholder's
 // own top-left goes, in mm from the top-left of the printable area. scan 'row'
 // fills top to bottom, 'col' left to right. null if time ran out first.
-function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks,rotate){
+// The step tags are turned by while nesting, in degrees: 90 is a quarter.
+const gtNestStep=()=>{ const v=Math.round(Number(gtSheet.nestRotStep)||90); return Math.max(1,Math.min(90,v)); };
+// A tag turned `a` degrees clockwise about its middle: its outline (or its box)
+// turned, and the box that turned outline needs, the tag's middle in its middle.
+function gtNestTurned(it,a){
+  const w=it.sz.w, h=it.sz.h, r=a*Math.PI/180;
+  let c=Math.cos(r), s=Math.sin(r);
+  if(Math.abs(c)<1e-12) c=0; if(Math.abs(s)<1e-12) s=0;
+  const W=Math.abs(w*c)+Math.abs(h*s), H=Math.abs(w*s)+Math.abs(h*c);
+  const P=it.poly||[[0,0],[w,0],[w,h],[0,h]];
+  const turn=([x,y])=>{ const dx=x-w/2, dy=y-h/2; return [W/2+dx*c-dy*s,H/2+dx*s+dy*c]; };
+  const poly=P.map(turn);
+  if(it.poly&&it.poly.parts) poly.parts=it.poly.parts.map(q=>q.map(turn));
+  return {...it,key:it.key+'|r'+a,sz:{w:W,h:H},poly};
+}
+// The turns a tag is tried at besides as it is. A quarter is the old rule, and
+// all a box ever gains from; an outline is tried at every step round, while
+// there is time (fine) - the biggest tags go first, so they get the most of it.
+function gtNestTurns(it,rotate,step,fine){
+  if(!rotate) return [];
+  const sq=Math.abs(it.sz.w-it.sz.h)<=0.01;
+  if(step>=90||!it.poly) return sq?[]:[90];
+  if(!fine) return sq?[180]:[90,180,270];
+  const out=[];
+  for(let a=step;a<360;a+=step) out.push(a);
+  return out;
+}
+function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks,rotate,step,soft){
+  step=step||90; soft=soft||deadline;
   const cell=GT_NEST_CELL, gap=Math.max(0,gx,gy);
   const masks=new Map();
   const maskOf=it=>{
@@ -34132,48 +34308,50 @@ function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks,rotate){
     });
   };
   try{
+    // the earlier place wins, the one turned least on a tie
+    const before=(a,b)=>scan==='col'?(a.cx<b.cx||(a.cx===b.cx&&a.cy<b.cy)):(a.cy<b.cy||(a.cy===b.cy&&a.cx<b.cx));
     for(const it of items){
-      // the tag as it is, and — where the sheet may turn it a quarter — as it would
-      // lie turned: its outline's points (x,y) in a box w × h go to (h−y, x)
+      // the tag as it is, and turned each way the sheet allows. A spot found and
+      // not taken is still where that shape's search carries on from: places
+      // only fill up, so nothing before it can have opened.
       const m0=maskOf(it);
-      const itR=(rotate&&Math.abs(it.sz.w-it.sz.h)>0.01)
-        ?{...it,key:it.key+'|r',sz:{w:it.sz.h,h:it.sz.w},poly:it.poly?it.poly.map(([x,y])=>[it.sz.h-y,x]):null}:null;
-      const mR=itR?maskOf(itR):null;
-      let spot=null, pg=null, m=m0, rot=0;
-      // the earlier place wins, the one not turned on a tie
-      const before=(a,b)=>scan==='col'?(a.cx<b.cx||(a.cx===b.cx&&a.cy<b.cy)):(a.cy<b.cy||(a.cy===b.cy&&a.cx<b.cx));
-      const choose=(p,s0,sR)=>{
-        // looking is not taking: the turned try's progress is kept only if it is the one used
-        const turned=sR&&(!s0||before(sR,s0));
-        if(turned){ if(f0===undefined) p.from.delete(m0); else p.from.set(m0,f0); }
-        else if(mR){ if(fR===undefined) p.from.delete(mR); else p.from.set(mR,fR); }
-        return turned;
-      };
-      let f0, fR;
+      const cands=[{it,m:m0,rot:0}].concat(gtNestTurns(it,rotate,step,Date.now()<soft)
+        .map(a=>{ const t=gtNestTurned(it,a); return {it:t,m:maskOf(t),rot:a}; }));
+      let best=null, pg=null;
       for(const p of pages){
-        const try0=!p.failed.has(it.key), tryR=itR&&!p.failed.has(itR.key);
-        if(!try0&&!tryR) continue;
-        f0=p.from.get(m0); fR=mR?p.from.get(mR):undefined;
-        const s0=try0?find(p,m0):null, sR=tryR?find(p,mR):null;
-        if(try0&&!s0) p.failed.add(it.key);
-        if(tryR&&!sR) p.failed.add(itR.key);
-        if(!s0&&!sR) continue;
-        if(choose(p,s0,sR)){ spot=sR; m=mR; rot=1; } else { spot=s0; m=m0; }
-        pg=p; break;
+        let hit=null;
+        for(const c of cands){
+          if(p.failed.has(c.it.key)) continue;
+          const sp=find(p,c.m);
+          if(!sp){ p.failed.add(c.it.key); continue; }
+          if(!hit||before(sp,hit.s)) hit={c,s:sp};
+        }
+        if(hit){ best=hit; pg=p; break; }
       }
-      if(!spot){
+      if(!best){
         pg=newPage(); pages.push(pg);
-        f0=undefined; fR=undefined;
-        const s0=find(pg,m0), sR=itR?find(pg,mR):null;
-        if(!s0&&!sR){ spot={cx:0,cy:0}; tooBig++; }
-        else if(choose(pg,s0,sR)){ spot=sR; m=mR; rot=1; } else { spot=s0; m=m0; }
-        if(s0||sR) put(pg,m,spot.cx,spot.cy);
-      }else put(pg,m,spot.cx,spot.cy);
+        let hit=null;
+        for(const c of cands){ const sp=find(pg,c.m); if(sp&&(!hit||before(sp,hit.s))) hit={c,s:sp}; }
+        if(!hit){ best={c:cands[0],s:{cx:0,cy:0}}; tooBig++; }
+        else{ best=hit; put(pg,hit.c.m,hit.s.cx,hit.s.cy); }
+      }else put(pg,best.c.m,best.s.cx,best.s.cy);
+      const m=best.c.m, spot=best.s;
       // mask cell (0,0) sits ring cells before the shape's own top-left, and the
-      // grid ringMax before the printable area's — the difference is the shape's
+      // grid ringMax before the printable area's - the difference is the shape's
       // own position, from which the slot's origin is the shape's x0,y0 back
       const px=(spot.cx+m.ring-ringMax)*cell-m.x0, py=(spot.cy+m.ring-ringMax)*cell-m.y0;
-      pg.items.push({it,pos:{x:px,y:py,rot}});
+      // bw x bh: the box the tag covers as it lies, turned or not, and deg its
+      // turn in degrees (the boxes' packer answers w, h and rot in its own terms:
+      // its w and h carry the gutter, and its rot is only turned or not)
+      // Turned off the quarter, the box reaches past the outline at the corners,
+      // so where the outline itself lies in that box goes too (ext): the sheet
+      // is centred on the outlines, not on boxes that hang over the paper's edge.
+      let ext=null;
+      if(best.c.rot%90&&best.c.it.poly){
+        ext=[Infinity,Infinity,-Infinity,-Infinity];
+        best.c.it.poly.forEach(([a,b])=>{ ext[0]=Math.min(ext[0],a); ext[1]=Math.min(ext[1],b); ext[2]=Math.max(ext[2],a); ext[3]=Math.max(ext[3],b); });
+      }
+      pg.items.push({it,pos:{x:px,y:py,deg:best.c.rot,bw:best.c.it.sz.w,bh:best.c.it.sz.h,...(ext?{ext}:{})}});
     }
   }catch(e){ if(e==='late') return null; throw e; }
   const last=pages[pages.length-1];
@@ -34191,7 +34369,9 @@ function gtNestSizeOf(d){
   if(!img||!img.naturalWidth) return {w:tag.w,h:tag.h};
   let slot={x:0,y:0,w:tag.w,h:tag.h};
   for(let k=0;k<4;k++){
-    const r=gtArtRectOf(d,slot), pts=gtTracePlace(d,r);
+    const r=gtArtRectOf(d,slot), main=gtTracePlace(d,r);
+    // the outline and every extra cut line: a tag is as big as all it is cut to
+    const pts=main&&main.length?main.concat(...gtTraceExtras(d,r)):main;
     let b;
     if(pts&&pts.length){
       let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
@@ -34210,7 +34390,16 @@ function gtNestPolyOf(d,sz){
   const img=d&&gtImgGet(d.id);
   if(!img||!img.naturalWidth||!sz) return null;
   const r=gtArtRectOf(d,{x:0,y:0,w:sz.w,h:sz.h}), pts=gtTracePlace(d,r);
-  return pts&&pts.length>=4?pts.slice(0,-1):null;      // the loop repeats its first point
+  if(!(pts&&pts.length>=4)) return null;
+  const main=pts.slice(0,-1);                           // the loop repeats its first point
+  // Extra cut lines that reach past the outline are packed as shapes of their
+  // own beside it (parts), so nothing is set down over them; the ones inside it
+  // are covered by it already.
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  main.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); });
+  const out=gtTraceExtras(d,r).filter(p=>p.length>1&&p.some(([x,y])=>x<x0||x>x1||y<y0||y>y1));
+  if(out.length) main.parts=out.map(p=>p.slice());
+  return main;
 }
 function gtNestPlan(){
   const S=gtSheet, q=gtQueue();
@@ -34224,10 +34413,11 @@ function gtNestPlan(){
   const dsig=ids.map(id=>{
     const d=gtDesign(id), img=gtImgs.get(id), t=d&&d.trace;
     return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],
-            t&&t.on&&t.loop?[t.out,t.sm,t.loop.length,t.cx,t.cy]:0];
+            t&&t.on&&t.loop?[t.out,t.sm,t.loop.length,t.cx,t.cy,t.shape||'',
+              t.more?JSON.stringify(t.more):0,(t.extra||[]).length]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
-  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,marks,S.qrOn?(Number(S.qrDist)||10):0]);
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),marks,S.qrOn?(Number(S.qrDist)||10):0]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
   const size=new Map(ids.map(id=>[id,gtNestSizeOf(gtDesign(id))]));
   const dotBlocks=gtDotBlocks(x0,y0,availW+gx,availH+gy,1+Math.max(0,-gx,-gy));
@@ -34299,14 +34489,23 @@ function gtNestPlan(){
     const poly=new Map(ids.map(id=>[id,gtNestPolyOf(gtDesign(id),size.get(id))]));
     if([...poly.values()].some(Boolean)){
       const rall=all.map(it=>({...it,key:it.line.designId,poly:poly.get(it.line.designId)}));
-      const deadline=Date.now()+2000;
+      // finer turns are more shapes to try, so they are given longer
+      const deadline=Date.now()+(gtNestStep()<90&&S.nestRotate!==false?4000:2000);
       const byKey=[(a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i,
         (a,b)=>b.sz.w*b.sz.h-a.sz.w*a.sz.h||b.sz.h-a.sz.h||a.i-b.i,
         (a,b)=>Math.max(b.sz.w,b.sz.h)-Math.max(a.sz.w,a.sz.h)||b.sz.h-a.sz.h||a.i-b.i];
       try{
-        for(const scan of ['row','col']) for(const cmp of byKey){
+        // A finer step is not always a better packing - each tag takes the first
+        // place it fits, and an early odd turn can block a later neat one - so
+        // the coarser steps are packed too, quickest first, and the best kept.
+        const want=gtNestStep(), steps=[...new Set([90,want<45?45:90,want])];
+        for(const step of steps) for(const scan of ['row','col']) for(const cmp of byKey){
           if(Date.now()>deadline) throw 'late';
-          const r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,dotBlocks,S.nestRotate!==false);
+          // finer turns are tried in the first half of what time is left for this
+          // round, quarters after - so a round always finishes
+          const soft=Date.now()+(deadline-Date.now())/2;
+          const r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,dotBlocks,
+            S.nestRotate!==false,step,soft);
           if(!r) throw 'late';
           if(r.pages.length<packed.pages.length
             ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)){ packed=r; realUsed=true; }
@@ -34318,16 +34517,31 @@ function gtNestPlan(){
   const plan=pages.map((pg,at)=>{
     let uw=0,uh=0;
     // what each tag fills on the sheet: its width and height, swapped where it went in turned
-    const box=({it,pos})=>pos.rot?{w:it.sz.h,h:it.sz.w}:{w:it.sz.w,h:it.sz.h};
+    // (the real-cut-line packer says the box itself, and its turn in degrees;
+    // the boxes' packer says turned or not, which is a quarter)
+    const box=({it,pos})=>pos.bw>0?{w:pos.bw,h:pos.bh}:pos.rot?{w:it.sz.h,h:it.sz.w}:{w:it.sz.w,h:it.sz.h};
+    const turnOf=pos=>pos.bw>0?(Number(pos.deg)||0):(pos.rot?90:0);
     pg.items.forEach(a=>{ const b=box(a); uw=Math.max(uw,a.pos.x+b.w); uh=Math.max(uh,a.pos.y+b.h); });
     // centred, unless a dot is in the way: the sheet is then kept as packed
-    const ox=(manual||dotBlocks.length)?x0:(S.paperW-uw)/2, oy=(manual||dotBlocks.length)?y0:(S.paperH-uh)/2;
+    let ox=(manual||dotBlocks.length)?x0:(S.paperW-uw)/2, oy=(manual||dotBlocks.length)?y0:(S.paperH-uh)/2;
+    // a sheet with tags turned off the quarter is centred on what is cut
+    if(!(manual||dotBlocks.length)&&pg.items.some(a=>a.pos.ext)){
+      let ux0=Infinity,uy0=Infinity,ux1=-Infinity,uy1=-Infinity;
+      pg.items.forEach(a=>{
+        const b=box(a), e=a.pos.ext||[0,0,b.w,b.h];
+        ux0=Math.min(ux0,a.pos.x+e[0]); uy0=Math.min(uy0,a.pos.y+e[1]);
+        ux1=Math.max(ux1,a.pos.x+e[2]); uy1=Math.max(uy1,a.pos.y+e[3]);
+      });
+      ox=(S.paperW-(ux1-ux0))/2-ux0; oy=(S.paperH-(uy1-uy0))/2-uy0;
+    }
     const slots=[], queue=[];
     pg.items.forEach((a,k)=>{
       const {it,pos}=a, b=box(a);
       slots.push({id:'n'+at+'_'+k,shape:null,added:true,
         x:Math.round((ox+pos.x)*100)/100,y:Math.round((oy+pos.y)*100)/100,w:b.w,h:b.h,
-        ...(pos.rot?{rot:90}:{})});
+        ...(turnOf(pos)?{rot:turnOf(pos)}:{}),
+        // turned off the quarter, the tag's own size goes with it - see gtUnrotSlot
+        ...(turnOf(pos)%90?{tw:it.sz.w,th:it.sz.h}:{})});
       queue.push(it.line);
     });
     return {shape:S.layoutFile,slots,per:slots.length,queue,start:0,of:pages.length,at,
@@ -34460,6 +34674,28 @@ function gtTraceBox(loop){
   }
   return b;
 }
+// The box round all of a design's cut lines, in the picture's 0..1 terms: the
+// outline, and the extra ones where they reach past it. A tag is centred and
+// sized by this, so a cut line set outside the outline is inside its
+// placeholder like the rest, and never runs into the next tag.
+const gtExtraBoxes=new WeakMap();
+function gtCutAllBox(t){
+  const b={...gtTraceBox(t.loop)};
+  if(Array.isArray(t.extra)&&t.extra.length){
+    let e=gtExtraBoxes.get(t.extra);
+    if(!e){
+      e={u0:Infinity,v0:Infinity,u1:-Infinity,v1:-Infinity};
+      t.extra.forEach(x=>(x.pts||[]).forEach(([u,v])=>{ e.u0=Math.min(e.u0,u); e.u1=Math.max(e.u1,u); e.v0=Math.min(e.v0,v); e.v1=Math.max(e.v1,v); }));
+      gtExtraBoxes.set(t.extra,e);
+    }
+    if(isFinite(e.u0)){ b.u0=Math.min(b.u0,e.u0); b.v0=Math.min(b.v0,e.v0); b.u1=Math.max(b.u1,e.u1); b.v1=Math.max(b.v1,e.v1); }
+  }
+  (t.more||[]).forEach(m=>{
+    b.u0=Math.min(b.u0,m.u-m.fw/2); b.u1=Math.max(b.u1,m.u+m.fw/2);
+    b.v0=Math.min(b.v0,m.v-m.fh/2); b.v1=Math.max(b.v1,m.v+m.fh/2);
+  });
+  return b;
+}
 function gtFitD(d,iw,ih,bw,bh){
   // A design comes in at the size its file says it was drawn at, whatever the
   // placeholder it lands in — the placeholder is where it sits, not how big it
@@ -34470,7 +34706,7 @@ function gtFitD(d,iw,ih,bw,bh){
     // placeholder, which is what makes a placeholder the size of the cut line
     const tt=d&&d.trace;
     if(tt&&tt.on&&tt.loop&&tt.loop.length>3){
-      const bb=gtTraceBox(tt.loop);
+      const bb=gtCutAllBox(tt);
       return {w:real.w,h:real.h,x:bw/2-(bb.u0+bb.u1)/2*real.w,y:bh/2-(bb.v0+bb.v1)/2*real.h};
     }
     return {w:real.w,h:real.h,x:(bw-real.w)/2,y:(bh-real.h)/2};
@@ -34480,7 +34716,7 @@ function gtFitD(d,iw,ih,bw,bh){
     // A hair over, for the smoothing — and not the outset as well: the picture
     // is fitted to the placeholder by its outline, so changing the cut line's
     // outset must not change how big the picture is.
-    const bb=gtTraceBox(t.loop), pad=0.05;
+    const bb=gtCutAllBox(t), pad=0.05;
     const cw=(bb.u1-bb.u0)*iw, ch=(bb.v1-bb.v0)*ih;
     if(cw>0&&ch>0&&bw-2*pad>0&&bh-2*pad>0){
       const s=Math.min((bw-2*pad)/cw,(bh-2*pad)/ch);
@@ -36546,10 +36782,10 @@ function gtSlotScopeSync(){
     const b=document.getElementById(id); if(b) b.disabled=!n;
   });
 }
-// the picking tools say which are picked on the cards and on the sheet alike,
-// and turn Contours on so the picked ones can be dragged straight away
+// the picking tools say which are picked on the cards and on the sheet alike.
+// Contours is not turned on for them: it is only ever on when its button is
+// pressed, so the words on the sheet stay pickable
 function gtPickRedraw(){
-  if(!gtSlotEdit){ gtSlotEdit=true; gtSetSlotEditChrome(); }
   gtSlotCardSync(); gtSlotScopeSync(); gtDraw();
 }
 function gtPickAll(){
@@ -36577,7 +36813,6 @@ function gtDuplicatePicked(){
   gtSheet.slots.push(...copies);
   gtSelSet.clear(); copies.forEach(c=>gtSelSet.add(c.id));
   gtSelSlot=copies[copies.length-1].id;
-  if(!gtSlotEdit){ gtSlotEdit=true; gtSetSlotEditChrome(); }
   gtSlotsChanged();
   gtSlotToolMsg(`✓ ${copies.length} copied — they are picked, drag them where they go or press Distribute`);
 }
@@ -36618,7 +36853,6 @@ document.getElementById('gtAddSlotBtn').addEventListener('click',()=>{
   if(from&&from.hole) s.hole={...from.hole};
   S.slots.push(s);
   gtPickOnly(s.id);
-  if(!gtSlotEdit){ gtSlotEdit=true; gtSetSlotEditChrome(); }
   gtSlotsChanged();
   gtSlotToolMsg(`✓ Placeholder ${S.slots.length} added — drag it where it goes, or press Distribute.`);
 });
@@ -36768,6 +37002,8 @@ function gtNestSync(){
   if(!on||!msg) return;
   const rb=document.getElementById('gtNestRotate');
   if(rb){ rb.checked=gtSheet.nestRotate!==false; rb.disabled=!gtSheet.nestOn; }
+  const rs=document.getElementById('gtNestRotStep');
+  if(rs){ rs.value=String(gtNestStep()); rs.disabled=!gtSheet.nestOn||gtSheet.nestRotate===false; }
   on.checked=!!gtSheet.nestOn;
   on.disabled=!!gtLayout;
   const real=document.getElementById('gtNestRealOn');
@@ -36782,6 +37018,11 @@ function gtNestSync(){
     +'Moving a placeholder keeps until the order, a design or the sheet changes; Reset placeholders nests again.'
     +(plan.tooBig?` <span style="color:var(--amber)">⚠ ${plan.tooBig} tag${plan.tooBig===1?' is':'s are'} bigger than the sheet allows.</span>`:'');
 }
+document.getElementById('gtNestRotStep').addEventListener('change',e=>{
+  gtSheet.nestRotStep=Math.max(1,Math.min(90,Math.round(Number(e.target.value)||90)));
+  gtNestCache=null; gtPickOnly(null);
+  gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
+});
 document.getElementById('gtNestRotate').addEventListener('change',e=>{
   gtSheet.nestRotate=e.target.checked; gtNestCache=null; gtPickOnly(null);
   gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
@@ -37010,17 +37251,15 @@ document.getElementById('gtSlotList').addEventListener('click',e=>{
   }
   if(e.target.closest('label')&&e.target.closest('.ph-card-head')) return;   // the label's own click reaches the box
   if(!e.target.closest('[data-gt-del-slot]')){
-    // picking a card picks it on the sheet too, and turns contour mode on so
-    // the highlight means something you can then take hold of. A tap into one
+    // picking a card picks it on the sheet too. A tap into one
     // of the number boxes only highlights: rebuilding the list under a caret
     // that is being typed into would throw the keystrokes away. Shift adds it
     // to the ones already picked.
     const id=card.dataset.gtSlot;
     if(e.shiftKey&&!e.target.closest('input')) gtPickToggle(id);
     else if(!(e.target.closest('input')&&gtSelSet.has(id))) gtPickOnly(id);
-    if(gtSlotEdit||e.target.closest('input')){
-      gtSlotEdit=true; gtSetSlotEditChrome(); gtSlotCardSync(); gtSlotScopeSync(); gtDraw();
-    }else gtSetSlotEdit(true);
+    // Contours is left as it is: only its own button turns it on
+    gtSlotCardSync(); gtSlotScopeSync(); gtDraw();
     return;
   }
   const id=card.dataset.gtSlot;
@@ -38648,6 +38887,7 @@ function gtOrigK(d){
   return real&&g.art.w>0?real.w/g.art.w:1;
 }
 const GT_SCALE_MAX=400;
+let gtCutMsgFor=null;              // the design the trace message was written for
 function gtArtWriteInputs(){
   const d=gtCurrentDesign; if(!d) return;
   const a=d.art||{};
@@ -38663,9 +38903,18 @@ function gtArtWriteInputs(){
   document.querySelectorAll('#gtBleedModeSeg [data-gtbm]').forEach(b=>
     b.classList.toggle('on',b.dataset.gtbm===(gtSheet.bleedMode||'offset')));
   document.getElementById('gtCropWrap').hidden=!d.adhoc;
+  if(gtCutDraft&&gtCutDraft.id!==d.id) gtCutSettle();
+  // what the last design's trace said is not about this one
+  if(gtCutMsgFor!==d.id){ gtCutMsgFor=d.id; document.getElementById('gtTraceMsg').innerHTML=''; }
   const t=d.trace||null;
   document.getElementById('gtTraceOn').checked=!!(t&&t.on);
   document.getElementById('gtTraceOn').disabled=!t;
+  const shape=(t&&t.shape)||'trace';
+  document.querySelectorAll('#gtCutShapeSeg [data-gtcs]').forEach(b=>b.classList.toggle('on',!!t&&b.dataset.gtcs===shape));
+  // threshold and Trace are for reading the artwork's edge — a drawn shape has none
+  document.getElementById('gtTraceThr').disabled=shape!=='trace';
+  document.getElementById('gtTraceBtn').textContent=shape==='trace'?'Trace the artwork':'Trace the artwork instead';
+  gtCutMoreWrite();
   document.getElementById('gtTraceOut').value=t?round(t.out):1;
   document.getElementById('gtTraceThr').value=t?t.thr:50;
   document.getElementById('gtTraceSm').value=t&&t.sm!=null?round(t.sm):GT_TRACE_SMOOTH;
@@ -38711,6 +38960,7 @@ function gtCutSizeWrite(){
 function gtCutSetSize(k,want){
   const d=gtCurrentDesign; if(!d||!d.trace||!(want>0)) return;
   const b=gtCutBox(d); if(!b||!(b[k]>0)) return;
+  gtCutBegin(d);
   const key=k==='w'?'cx':'cy';
   const v=(Number(d.trace[key])||1)*want/b[k];
   if(!isFinite(v)||v<=0) return;
@@ -38727,8 +38977,115 @@ function gtCutSetSize(k,want){
 // window onto the same sheet, and a scale set here is a scale the sheet has.
 function gtArtChanged(){
   gtDrawDesign(); gtDraw(); gtSaveSoon();
-  gtCutSizeWrite();
+  gtCutSizeWrite(); gtCutMoreWrite(); gtCutSaveWrite();
 }
+// Save cut line and Discard show once the line has been changed and not saved.
+function gtCutSaveWrite(){
+  const d=gtCurrentDesign;
+  const dirty=!!d&&!!gtCutDraft&&gtCutDraft.id===d.id&&gtCutDirty();
+  document.getElementById('gtCutSaveRow').hidden=!dirty;
+  document.getElementById('gtCutUnsaved').hidden=!dirty;
+}
+document.getElementById('gtCutSaveBtn').addEventListener('click',()=>{
+  gtCutSave(); gtCutSaveWrite();
+  showMsg(document.getElementById('gtTraceMsg'),'✓ Cut line saved.',true);
+});
+document.getElementById('gtCutDiscardBtn').addEventListener('click',()=>{
+  gtCutDiscard();
+  document.getElementById('gtTraceMsg').innerHTML='';
+  gtArtWriteInputs(); gtArtChanged();
+});
+// The main cut line as a rectangle or circle the size of the artwork's box,
+// or traced off the artwork again. Its width and height are set below as for a
+// traced line; a fresh shape starts sharp-cornered with no outset.
+document.getElementById('gtCutShapeSeg').addEventListener('click',e=>{
+  const b=e.target.closest('[data-gtcs]'); const d=gtCurrentDesign;
+  if(!b||!d) return;
+  const want=b.dataset.gtcs;
+  if(want==='trace'){
+    if(!(d.trace&&!d.trace.shape&&d.trace.on)) document.getElementById('gtTraceBtn').click();
+    return;
+  }
+  gtCutBegin(d);
+  const old=d.trace||{};
+  d.trace={loop:gtShapeLoop(want),shape:want,out:0,thr:Number(old.thr)||50,sm:0,on:true,
+    ...(old.more?{more:old.more}:{})};
+  gtArtWriteInputs(); gtArtChanged();
+});
+// ---------- more cut lines ----------
+// Each one a rectangle or circle with its own size and place, in millimetres on
+// the editor's tag, kept as fractions of the artwork's box so it moves and
+// scales with the artwork exactly as the main line does.
+function gtCutMoreWrite(){
+  const d=gtCurrentDesign, wrap=document.getElementById('gtCutMoreWrap');
+  const t=d&&d.trace&&d.trace.on?d.trace:null;
+  wrap.hidden=!t;
+  if(!t) return;
+  const r=gtEditGeom().draw, more=t.more||[];
+  document.getElementById('gtCutMoreCount').textContent=`(${more.length+1} of ${GT_CUT_MAX})`;
+  const list=document.getElementById('gtCutMoreList');
+  // a box being typed in keeps its place: only the others are written
+  const act=document.activeElement;
+  if(act&&list.contains(act)&&act.dataset.k) return;
+  list.innerHTML=more.map((m,i)=>`
+    <div class="gt-cutmore" data-i="${i}" style="border:1px solid var(--line,#ddd);border-radius:8px;padding:8px;margin-top:6px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <b style="font-size:12px;">${i+2}. ${m.shape==='circle'?'◯ Circle':'▭ Rectangle'}</b>
+        <span style="flex:1;"></span>
+        <button type="button" class="btn-outline btn-sm" data-act="dup" title="Another one the same">Copy</button>
+        <button type="button" class="btn-outline btn-sm" data-act="del" title="Take this cut line off">✕</button>
+      </div>
+      <div class="grid3e" style="grid-template-columns:repeat(4,1fr);">
+        <label class="field"><span>WIDTH mm</span><input type="number" step="0.1" min="0.5" data-k="w" value="${round(m.fw*r.w)}"/></label>
+        <label class="field"><span>HEIGHT mm</span><input type="number" step="0.1" min="0.5" data-k="h" value="${round(m.fh*r.h)}"/></label>
+        <label class="field"><span>X mm</span><input type="number" step="0.1" data-k="x" value="${round((m.u-0.5)*r.w)}"/></label>
+        <label class="field"><span>Y mm</span><input type="number" step="0.1" data-k="y" value="${round((m.v-0.5)*r.h)}"/></label>
+      </div>
+    </div>`).join('');
+  ['gtCutAddRect','gtCutAddCircle'].forEach(id=>document.getElementById(id).disabled=more.length+1>=GT_CUT_MAX);
+}
+function gtCutMoreAdd(shape){
+  const d=gtCurrentDesign; if(!d||!d.trace) return;
+  const more=d.trace.more||[];
+  if(more.length+1>=GT_CUT_MAX) return;
+  gtCutBegin(d);
+  // a 20mm one in the middle of the artwork, square on the tag whatever its box
+  const r=gtEditGeom().draw, s=Math.min(20,r.w*0.4,r.h*0.4);
+  d.trace.more=more.concat([{shape,u:0.5,v:0.5,fw:s/r.w,fh:s/r.h}]);
+  gtArtWriteInputs(); gtArtChanged();
+}
+document.getElementById('gtCutAddRect').addEventListener('click',()=>gtCutMoreAdd('rect'));
+document.getElementById('gtCutAddCircle').addEventListener('click',()=>gtCutMoreAdd('circle'));
+document.getElementById('gtCutMoreList').addEventListener('click',e=>{
+  const b=e.target.closest('[data-act]'), row=e.target.closest('[data-i]'), d=gtCurrentDesign;
+  if(!b||!row||!d||!d.trace||!d.trace.more) return;
+  const i=Number(row.dataset.i);
+  gtCutBegin(d);
+  if(b.dataset.act==='del') d.trace.more=d.trace.more.filter((_,k)=>k!==i);
+  else if(d.trace.more.length+1<GT_CUT_MAX){
+    // the copy goes a little down and across, so it is seen as a second one
+    const m=d.trace.more[i], r=gtEditGeom().draw;
+    d.trace.more=d.trace.more.concat([{...m,u:m.u+3/r.w,v:m.v+3/r.h}]);
+  }
+  if(!d.trace.more.length) delete d.trace.more;
+  gtArtWriteInputs(); gtArtChanged();
+});
+document.getElementById('gtCutMoreList').addEventListener('input',e=>{
+  const inp=e.target, row=inp.closest('[data-i]'), d=gtCurrentDesign;
+  if(!inp.dataset.k||!row||!d||!d.trace||!d.trace.more) return;
+  const v=parseFloat(inp.value); if(!isFinite(v)) return;
+  const m=d.trace.more[Number(row.dataset.i)]; if(!m) return;
+  const r=gtEditGeom().draw;
+  gtCutBegin(d);
+  if(inp.dataset.k==='w'){ if(!(v>=0.5)) return; m.fw=v/r.w; }
+  else if(inp.dataset.k==='h'){ if(!(v>=0.5)) return; m.fh=v/r.h; }
+  else if(inp.dataset.k==='x') m.u=0.5+v/r.w;
+  else m.v=0.5+v/r.h;
+  gtArtChanged();
+});
+document.getElementById('gtCutMoreList').addEventListener('change',e=>{
+  if(e.target.dataset.k){ e.target.blur(); gtCutMoreWrite(); }
+});
 function gtArtSetScale(pct){
   const d=gtCurrentDesign; if(!d) return;
   const v=Math.max(5,Math.min(1000,Number(pct)||100));
@@ -38778,18 +39135,21 @@ document.getElementById('gtBleedModeSeg').addEventListener('click',async e=>{
 });
 document.getElementById('gtTraceOn').addEventListener('change',e=>{
   const d=gtCurrentDesign; if(!d||!d.trace) return;
+  gtCutBegin(d);
   d.trace.on=e.target.checked;
   gtArtChanged();
 });
 document.getElementById('gtTraceOut').addEventListener('input',e=>{
   const d=gtCurrentDesign; if(!d||!d.trace) return;
   const v=parseFloat(e.target.value);
+  gtCutBegin(d);
   d.trace.out=isFinite(v)?v:0;
   gtArtChanged();
 });
 document.getElementById('gtTraceSm').addEventListener('input',e=>{
   const d=gtCurrentDesign; if(!d||!d.trace) return;
   const v=parseFloat(e.target.value);
+  gtCutBegin(d);
   d.trace.sm=isFinite(v)&&v>=0?v:0;
   gtArtChanged();
 });
@@ -38810,10 +39170,13 @@ document.getElementById('gtTraceBtn').addEventListener('click',()=>{
       return;
     }
     const sm=parseFloat(document.getElementById('gtTraceSm').value);
-    d.trace={loop,out:isFinite(out)?out:1,thr,sm:isFinite(sm)&&sm>=0?sm:GT_TRACE_SMOOTH,on:true};
+    gtCutBegin(d);
+    // the hand-set cut lines stay; only the main one is traced afresh
+    const more=d.trace&&d.trace.more;
+    d.trace={loop,out:isFinite(out)?out:1,thr,sm:isFinite(sm)&&sm>=0?sm:GT_TRACE_SMOOTH,on:true,...(more?{more}:{})};
     gtArtWriteInputs();
     showMsg(msg,`✓ Traced — ${loop.length} points. The cut line follows the artwork now; `
-      +'switch it off above to go back to the placeholder.',true);
+      +'press Save cut line to keep it, or switch it off above to go back to the placeholder.',true);
     gtArtChanged();
   },30);
 });
@@ -39410,7 +39773,7 @@ makeReorderable('gtTextPanel',{selecting:()=>true,row:'.combo-opt',hold:true,sli
 // The lists that live on the server — orders, pick ups, requests — are not
 // covered: a step back there means writing rows again, and deleting has its own
 // way back through Recently deleted.
-const UNDO={defs:{},past:{},future:{},busy:false,timer:null};
+const UNDO={defs:{},past:{},future:{},ctx:{},busy:false,timer:null};
 const UNDO_KEY={tool:'print','tool-custom':'print',
   'tool-gift-tag':'gift','tool-gift-tag-design':'gift'};
 function undoDef(key,def){ UNDO.defs[key]=def; }
@@ -39420,8 +39783,21 @@ function undoNote(key){
   clearTimeout(UNDO.timer);
   UNDO.timer=setTimeout(()=>undoKeep(key),400);
 }
+// What the history is a history of — one template, one Magic Create line, one
+// gift tag page. Once that changes, what came before is another sheet's and is
+// dropped rather than put back over this one.
+function undoCtxOk(key){
+  const def=UNDO.defs[key]; if(!def) return false;
+  let ctx=''; try{ ctx=def.ctx?String(def.ctx()):''; }catch(e){}
+  if(UNDO.ctx[key]===ctx) return true;
+  UNDO.ctx[key]=ctx; UNDO.past[key]=[]; UNDO.future[key]=[];
+  return false;
+}
 function undoKeep(key){
   const def=UNDO.defs[key]; if(!def) return;
+  // an export borrows the builder sheet by sheet; what it lays out is not a step
+  try{ if(mcBusy) return; }catch(e){}
+  undoCtxOk(key);
   let s='';
   try{ s=JSON.stringify(def.snap()); }catch(e){ return; }
   const past=UNDO.past[key]||(UNDO.past[key]=[]);
@@ -39433,9 +39809,10 @@ function undoKeep(key){
 }
 function undoApply(key,text){
   UNDO.busy=true;
+  const seq=printLoadSeq;               // a step back is not a new sheet
   try{ UNDO.defs[key].put(JSON.parse(text)); }
   catch(e){}
-  finally{ UNDO.busy=false; }
+  finally{ UNDO.busy=false; printLoadSeq=seq; }
   syncUndoBtns();
 }
 // A step back rebuilds the form, so the box being typed in is a different box
@@ -39475,6 +39852,7 @@ function undoStep(){
 }
 function redoStep(){
   const key=undoKeyNow(); if(!key) return;
+  if(!undoCtxOk(key)){ syncUndoBtns(); return; }
   const ahead=UNDO.future[key]||[];
   if(!ahead.length) return;
   const where=undoWhere();
@@ -39487,6 +39865,7 @@ function syncUndoBtns(){
   const key=undoKeyNow();
   const u=document.getElementById('undoBtn'), r=document.getElementById('redoBtn');
   if(!u||!r) return;
+  if(key) undoCtxOk(key);
   u.hidden=!key||((UNDO.past[key]||[]).length<2);
   r.hidden=!key||!((UNDO.future[key]||[]).length);
 }
@@ -39515,15 +39894,37 @@ document.addEventListener('keydown',e=>{
 });
 
 // what each of the two tools counts as its state
+// A design line's picture and file cannot go into a snapshot (and its picture
+// as text is megabytes, every step), so they are held here by line id and put
+// back on the line a step back brings back.
+const UNDO_HELD=new Map();
 undoDef('print',{
+  ctx:()=>((typeof mcWinItem!=='undefined'&&mcWinItem)||'')+'|'+printLoadSeq+'|'+pcMode,
   snap:()=>({paper:state.paper,layout:state.layout,placeholders:state.placeholders,
     showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
     refMark:state.refMark,foldLine:state.foldLine,bleed:state.bleed,
-    rotate:state.rotate,shift:state.shift,
+    rotate:state.rotate,shift:state.shift,art:state.art,
+    // the design lines — added, taken off, how many of each
+    lines:(state.designs||[]).map(d=>{
+      const {data,img,file,...rest}=d;
+      UNDO_HELD.set(d.id,{data,img,file});
+      return rest;
+    }),
     // Place Card text — carried in the shared 'print' history; [] in Custom Template
     cats:pcMode==='placecard'?state.cats:undefined}),
-  put:v=>applyPrintState(v)});
+  put:v=>{
+    const {lines,...meta}=v;
+    applyPrintState(meta);
+    if(Array.isArray(lines)){
+      state.designs=lines.map(r=>({...r,...(UNDO_HELD.get(r.id)||{})}));
+      state.page=0;
+      renderDesignLines(); updateCalc(); drawAll();
+    }
+  }});
 undoDef('gift',{
+  // one page's history: a step back after switching pages put the other
+  // page's library onto this one, and saved it there
+  ctx:()=>(typeof gtMode!=='undefined'?gtMode:'')+'|'+(typeof mcGtHome!=='undefined'&&mcGtHome?'mc':''),
   snap:()=>({order:gtOrder,sheet:{...gtSheet,slots:gtSlotsBase},designs:gtLib.designs,
     fonts:gtLib.fonts,texts:gtLib.texts,base:gtDefaultShape,jobBack:gtJobBack}),
   put:v=>{
@@ -53061,6 +53462,14 @@ async function mcGtPutOneOff(it,d){
 async function mcGtKeepOneOffOn(it,si){
   if(!si) return;
   const d=si.designId?mcGtDesign(si.designId):null;
+  // Saving the line is saving its tag, cut line and all: a line traced and
+  // saved to the line came back with the cut line it had before the trace.
+  if(d&&typeof gtCutDraft!=='undefined'&&gtCutDraft&&gtCutDraft.id===d.id){
+    gtCutDraft=null;
+    // the library and a Pigu-folder design's kept settings both
+    if(typeof gtSaveSoon==='function') gtSaveSoon();
+    if(typeof gtCutSaveWrite==='function') try{ gtCutSaveWrite(); }catch(e){}
+  }
   // A design the loaded library does not hold is not "no longer a one-off": the
   // library on hand may be the other page's, or the fetch of the copy may have
   // failed. Only a design that is there and is an ordinary one clears the saved
@@ -53080,8 +53489,15 @@ async function mcGtKeepOneOffOn(it,si){
     try{ path=await mcGtPutOneOff(it,d); }catch(e){ path=null; }
     if(!path) return;               // nothing kept, and nothing claimed to be
   }
+  // how the picture sits, its own bleed and its cut line go with it: kept
+  // without them, the line came back fitted to the placeholder, cut to the
+  // placeholder or the file's own line, whatever had been set on it.
+  // cutSeen says the file's own cut line was already passed over, so it is not
+  // put back over a line traced by hand.
   si.oneOff={id:d.id,name:d.name||'',file:d.file||path,path,
-    fields:(d.fields||[]),hole:d.hole||null,...(d.back?{back:d.back}:{})};
+    fields:(d.fields||[]),hole:d.hole||null,...(d.back?{back:d.back}:{}),
+    artV:2,art:d.art||null,bleed:d.bleed||null,trace:d.trace||null,
+    ...(d.cutSeen?{cutSeen:d.cutSeen}:{})};
 }
 // The copies these lines are carrying, back into the library — only the ones
 // the library cannot already answer for, so a page still holding its one-offs
@@ -53103,7 +53519,9 @@ async function mcGtRehydrate(lines){
       if(error||!data){ mcGtOneOffBad.add(one.path); continue; }
       if(mcGtDesign(one.id)) continue;
       const d=gtNormalizeDesign({id:one.id,name:one.name||'One-off',
-        file:one.file||one.path,adhoc:true,fields:one.fields||[],hole:one.hole,back:one.back});
+        file:one.file||one.path,adhoc:true,fields:one.fields||[],hole:one.hole,back:one.back,
+        ...(one.artV?{artV:one.artV}:{}),art:one.art,bleed:one.bleed,trace:one.trace,
+        cutSeen:one.cutSeen});
       gtAssets.set(d.file,data);
       try{ gtImgs.set(d.id,await loadImage(await gtArtURL(data,d.file,true))); }catch(e){}
       gtLib.designs.push(d);
@@ -55017,6 +55435,12 @@ async function mcGiftPreview(lines,mode,canvas,dim,page,side){
   gtOrder=lines.map(mcGtLine); gtJobBack=null;   // the library's back, as mcGiftSides
   try{
     await mcGtShapesInHand();      // or the sheets are counted off the wrong cuts
+    // Pictures are read the first time they are drawn, and this draws once and
+    // hands the canvas over — a sheet not looked at yet came out with no
+    // artwork on it, though the download (which waits) had it all. So the
+    // lines' pictures, and the fonts their words are set in, are in hand
+    // before anything is drawn — the same wait the download makes.
+    if(typeof gtHydrateWait==='function') try{ await gtHydrateWait(); }catch(e){}
     const pages=Math.max(1,gtPageCount());
     const at=Math.max(0,Math.min(pages-1,Number(page)||0));
     // a sheet of another shape is another sheet: the page has to be turned to
@@ -55143,7 +55567,7 @@ async function mcGiftBundle(lines,mode,side){
 // the library happens to be on.
 const GT_JOB_SHEET_KEYS=['paperW','paperH','tagW','tagH','margin','gap','gapY','gridMode',
   'leadTrim','sideTrim','gridCols','gridRows','slotRadius','bleedOn','bleed','bleedMode',
-  'nestOn','nestReal','nestRotate','layoutFile'];
+  'nestOn','nestReal','nestRotate','nestRotStep','layoutFile'];
 const PJ_KINDS={
   giftTag:{
     label:'Gift tag sheet',
@@ -55162,7 +55586,7 @@ const PJ_KINDS={
           ...(d&&d.adhoc?{oneOff:{name:d.name||'',file:d.file||'',
             fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
             // how it sits, its own bleed and its traced cut line
-            artV:2,art:d.art||null,bleed:d.bleed||null,trace:d.trace||null}}:{})};
+            artV:2,art:d.art||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null}}:{})};
       });
       const sheet={};
       GT_JOB_SHEET_KEYS.forEach(k=>{ if(gtSheet[k]!==undefined) sheet[k]=gtSheet[k]; });
