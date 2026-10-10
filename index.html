@@ -14151,6 +14151,10 @@ async function patchFillGpu(imageData,X0,Y0,X1,Y1,say,opts){
         say(`${opts.label||'Filling the bleed from the artwork'}… ${Math.round(Math.min(0.99,done/work)*100)}%`,true);
       }
       if(L===0) out={buf:img[ic],n};
+      // done with this level: only its matches go on to the next one — every
+      // level held at once was over half a gigabyte on the card for a big fill
+      if(prev) prev.nn.destroy();
+      [...img,...nn,dist].forEach(b=>{ if(b!==nn[nc]&&!(L===0&&b===img[ic])) b.destroy(); });
       prev={w:l.w,h:l.h,nn:nn[nc]};
     }
     const rb=buf(out.n*16,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);
@@ -14404,7 +14408,10 @@ function lamaSession(say){
       .catch(err=>{ call.kill(); throw err; });
     return {run:async(image,mask)=>{
       const im=image.slice(), mk=mask.slice();
-      const m=await call({type:'run',image:im.buffer,mask:mk.buffer},[im.buffer,mk.buffer]);
+      // a square that failed — a graphics card lost after the model's bytes
+      // were let go — starts the next fill on a fresh worker, not this one
+      const m=await call({type:'run',image:im.buffer,mask:mk.buffer},[im.buffer,mk.buffer])
+        .catch(err=>{ lamaSessionP=null; call.kill(); throw err; });
       return new Float32Array(m.data);
     }};
   })().catch(err=>{ lamaSessionP=null; throw err; });
@@ -14438,6 +14445,9 @@ function lamaWorkerMain(){
           session=await open(['wasm']); gpu=false;
           out=await session.run(feed());
         }
+        // the model's bytes were only kept to fall back on; once a square has
+        // come through, that is 200 MB the worker no longer needs to hold
+        bytes=null;
         const d=new Float32Array(out[session.outputNames[0]].data);
         self.postMessage({id:m.id,data:d.buffer},[d.buffer]);
       }
