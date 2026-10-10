@@ -35175,6 +35175,20 @@ function gtDrawBack(ctx,line,x,y,w,h,sc,forExport,vec){
 // Spent when the sheets are exported, so what was printed is never printed again.
 const GT_QR_FIRST=990001, GT_QR_SIZE=10, GT_QR_TEXT=2.4, GT_QR_GAP=3;
 const gtQrNumber=page=>(Math.max(0,Math.floor(Number(gtSheet.qrNext))||GT_QR_FIRST))+Math.max(0,page|0);
+// A run's numbers spent: the next sheet starts at `next`. Only while the sheet
+// is still where the run began (base) - a run saved twice, or a second cut file
+// out of one run, spends them once - and only on the page the run was built on.
+function gtQrSpend(mode,base,next){
+  if(!gtSheet.qrOn||!(next>base)) return false;
+  if(mode&&mode!==gtMode) return false;
+  if(gtQrNumber(0)!==base) return false;
+  gtSheet.qrNext=next;
+  try{ gtQrSync(); }catch(e){}
+  gtNestCache=null;
+  try{ gtDraw(); }catch(e){}
+  gtSaveSoon();
+  return true;
+}
 // Where it goes: centred above the bottom-right dot, that far from the dot's
 // centre, with the number turned up the page to the left of it. The box that
 // takes — code and number — in sheet millimetres, or null where it is off.
@@ -39482,6 +39496,8 @@ document.getElementById('gtPltPreviewBtn').addEventListener('click',async()=>{
       return {...f,file:nm+'.plt',parsed:gtPltParse(f.text,f.frame)};
     });
     gtPltView.at=0; gtPltView.raw=false;
+    // the QR numbers these sheets carry, spent when one of them is saved
+    gtPltView.qr=gtSheet.qrOn?{mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(gtPltView.sheets.length)}:null;
     document.getElementById('gtPltTitle').textContent=
       `Cut file · ${gtPltView.sheets.length} sheet${gtPltView.sheets.length===1?'':'s'}`;
     document.getElementById('gtPltModal').classList.add('open');
@@ -39607,6 +39623,10 @@ document.getElementById('gtThumbForgetBtn').addEventListener('click',async()=>{
 gtThumbSync();
 document.getElementById('gtPltSaveBtn').addEventListener('click',async()=>{
   const S=gtPltView.sheets[gtPltView.at]; if(!S) return;
+  // A cut file saved is a cut file that can be fed to the cutter, named by the
+  // QR number on its sheet: those numbers are spent, so the sheet printed next
+  // never carries a code that already has a cut file out there.
+  if(gtPltView.qr) gtQrSpend(gtPltView.qr.mode,gtPltView.qr.base,gtPltView.qr.next);
   await gtThumbReady(true);
   const nm=S.file||(S.name+'.plt');
   const b=new Blob([S.text],{type:'application/vnd.hp-HPGL'});
@@ -39737,7 +39757,7 @@ async function gtExport(print){
     };
     await save(filename,bytes);
     // these numbers are on paper now; the next export starts after them
-    if(S.qrOn){ S.qrNext=gtQrNumber(pages); gtQrSync(); gtSaveSoon(); }
+    if(S.qrOn) gtQrSpend(gtMode,gtQrNumber(0),gtQrNumber(pages));
     // spaced a little, as the cut files are: a browser drops the second of a burst
     if(backBytes){ if(!dir) await new Promise(r=>setTimeout(r,400)); await save(backName,backBytes); }
     // One cut file per sheet, because that is how the cutter is fed: a sheet is
@@ -54437,13 +54457,22 @@ const mcOneName=(it,bundle)=>
 // The cut files the gift tag sheet just made went with it, to be saved beside
 // the PDF under its name. Set by mcGiftBundle, taken by the next mcPut.
 let mcPendingCuts=null;
+// The QR numbers the gift tag sheet just built carries, to be spent once it is
+// saved: {mode, base, next}. Set by mcGiftBundle, taken by the next mcPut.
+let mcPendingQr=null;
 async function mcPut(dir,name,bytes){
   // taken first: a PDF that fails to write must not leave its cuts for the
   // next file to be saved under that file's name
   const cuts=mcPendingCuts; mcPendingCuts=null;
+  const qr=mcPendingQr; mcPendingQr=null;
   const blob=new Blob([bytes],{type:'application/pdf'});
   if(dir) await writeIntoFolder(dir,name,blob);
   else downloadBlob(blob,name);
+  // These numbers are on paper and on the cut files now. Spent only on the
+  // gift tag screen's own export, a batch downloaded twice printed the same
+  // codes twice, and the cutter could be fed the first run's cut file for the
+  // second run's sheet. The next sheet starts after them.
+  if(qr) gtQrSpend(qr.mode,qr.base,qr.next);
   if(!cuts||!cuts.length) return;
   // onto the thumb drive as GT1.plt, GT2.plt …, carrying on through the run
   await gtSavePlts(cuts,false,dir);
@@ -55568,6 +55597,8 @@ async function mcGiftBundle(lines,mode,side){
     },sources);
     // handed to mcPut, which every caller saves this PDF through next
     if(cuts) mcPendingCuts=cuts.filter(Boolean);
+    // and the QR numbers it printed, spent when it is saved
+    mcPendingQr=(!back&&gtSheet.qrOn)?{mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(pages)}:null;
     return bytes;
   }finally{
     gtOrder=keep; gtJobBack=jb;
