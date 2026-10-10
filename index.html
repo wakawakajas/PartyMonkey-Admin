@@ -34808,6 +34808,96 @@ function gtNestPolyOf(d,sz){
   if(out.length) main.parts=out.map(p=>p.slice());
   return main;
 }
+// ---- the real-cut-line packing, off the page's thread ----
+var gtNestQuietUntil=0, gtNestQuietT=0;
+// the boxes' packing by sheet signature (see gtNestPlan)
+var gtNestBoxMemo=new Map();
+// any figure typed on the gift tag screens holds the packing until it stops
+document.addEventListener('input',e=>{
+  const t=e.target;
+  if(gtSheet.nestOn&&t&&t.closest&&t.closest('#giftTagScreen,#giftTagDesignScreen,#giftTagSettingsScreen'))
+    gtNestQuietUntil=Date.now()+450;
+},true);
+// sig -> {done, result, promise}; the last few kept
+var gtNestRealJobs=new Map();
+function gtNestWorkerGet(){
+  if(gtNestWorkerGet.w!==undefined) return gtNestWorkerGet.w;
+  try{
+    const src=[gtNestMask,gtNestRealPack,gtNestTurned,gtNestTurns].map(f=>f.toString()).join('\n')
+      +'\nconst GT_NEST_CELL='+JSON.stringify(GT_NEST_CELL)+';\n'
+      +'('+(function(){
+        self.onmessage=e=>{
+          const {id,items,availW,availH,gx,gy,dotBlocks,rotate,want,budget}=e.data;
+          items.forEach(it=>{ if(it.poly&&it.parts) it.poly.parts=it.parts; });
+          const byKey=[(a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i,
+            (a,b)=>b.sz.w*b.sz.h-a.sz.w*a.sz.h||b.sz.h-a.sz.h||a.i-b.i,
+            (a,b)=>Math.max(b.sz.w,b.sz.h)-Math.max(a.sz.w,a.sz.h)||b.sz.h-a.sz.h||a.i-b.i];
+          const deadline=Date.now()+budget; let best=null;
+          try{
+            const steps=[...new Set([90,want<45?45:90,want])];
+            for(const step of steps) for(const scan of ['row','col']) for(const cmp of byKey){
+              if(Date.now()>deadline) throw 'late';
+              const soft=Date.now()+(deadline-Date.now())/2;
+              const r=gtNestRealPack(items.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,dotBlocks,rotate,step,soft);
+              if(!r) throw 'late';
+              if(!best||r.pages.length<best.pages.length||(r.pages.length===best.pages.length&&r.fill<best.fill-1e-6)) best=r;
+            }
+          }catch(x){ if(x!=='late'){ self.postMessage({id,error:String(x)}); return; } }
+          self.postMessage({id,result:best?{tooBig:best.tooBig,fill:best.fill,
+            pages:best.pages.map(pg=>({items:pg.items.map(({it,pos})=>({i:it.i,pos}))}))}:null});
+        };
+      }).toString()+')();';
+    const url=URL.createObjectURL(new Blob([src],{type:'text/javascript'}));
+    const w=new Worker(url);
+    w.onmessage=e=>{
+      const j=[...gtNestRealJobs.values()].find(x=>x.id===e.data.id); if(!j) return;
+      j.done=true; j.result=e.data.result||null; j.resolve();
+      // the sheet on screen takes the packing now it is here
+      gtNestCache=null; try{ gtDraw(); gtNestSync(); }catch(err){}
+    };
+    w.onerror=()=>{ gtNestWorkerGet.w=null; [...gtNestRealJobs.values()].forEach(j=>{ if(!j.done){ j.done=true; j.result=null; j.resolve(); } }); };
+    gtNestWorkerGet.w=w;
+  }catch(e){ gtNestWorkerGet.w=null; }
+  return gtNestWorkerGet.w;
+}
+// The job for this sheet as it stands: asked for once, answered later. null
+// where there is no worker - the packing is then done here, as it always was.
+function gtNestRealJob(sig,rall,o){
+  let j=gtNestRealJobs.get(sig);
+  if(j) return j;
+  // A packing still running for the sheet as it was is of no use now, and the
+  // worker does one at a time: it is stopped and started afresh, or this one
+  // waited behind it (an export after typing waited for every old one in turn).
+  const stale=[...gtNestRealJobs.entries()].filter(([,x])=>!x.done);
+  if(stale.length&&gtNestWorkerGet.w){
+    try{ gtNestWorkerGet.w.terminate(); }catch(e){}
+    gtNestWorkerGet.w=undefined;
+    stale.forEach(([k,x])=>{ x.done=true; x.result=null; x.resolve(); gtNestRealJobs.delete(k); });
+  }
+  const w=gtNestWorkerGet(); if(!w) return null;
+  j={id:'n'+Math.random().toString(36).slice(2),done:false,result:null};
+  j.promise=new Promise(r=>{ j.resolve=r; });
+  gtNestRealJobs.set(sig,j);
+  while(gtNestRealJobs.size>6) gtNestRealJobs.delete(gtNestRealJobs.keys().next().value);
+  const items=rall.map(it=>({i:it.i,sz:it.sz,key:it.key,poly:it.poly||null,parts:(it.poly&&it.poly.parts)||null}));
+  try{ w.postMessage({id:j.id,items,...o,budget:Math.max(500,o.budget)}); }
+  catch(e){ j.done=true; j.resolve(); }
+  return j;
+}
+// Before anything is printed, counted or cut: the sheet's real packing in hand.
+async function gtNestSettle(){
+  if(!(gtSheet.nestOn&&!gtLayout)) return;
+  gtNestQuietUntil=0;
+  // the job for the sheet as it is now - asked again after each wait, in case
+  // the sheet changed meanwhile and the one waited for was dropped as stale
+  for(let k=0;k<6;k++){
+    gtNestPlan();
+    const sig=gtNestCache&&gtNestCache.sig, j=sig&&gtNestRealJobs.get(sig);
+    if(!j||j.done) return;
+    await j.promise; gtNestCache=null;
+  }
+  gtNestPlan();
+}
 function gtNestPlan(){
   const S=gtSheet, q=gtQueue();
   if(!q.length) return [];
@@ -34829,6 +34919,15 @@ function gtNestPlan(){
   const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
     S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,marks,S.qrOn?(Number(S.qrDist)||10):0]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
+  // A figure being typed (a gap, a size, a scale) changes the sheet on every
+  // keystroke, and packing a sheet by its cut lines takes seconds: the page
+  // froze for each digit. Until the typing stops the sheet keeps the packing it
+  // has, and packs once, a moment after the last key.
+  if(gtNestCache&&Date.now()<gtNestQuietUntil){
+    clearTimeout(gtNestQuietT);
+    gtNestQuietT=setTimeout(()=>{ try{ gtDraw(); gtNestSync(); }catch(e){} },Math.max(30,gtNestQuietUntil-Date.now()+30));
+    return gtNestCache.plan;
+  }
   // A tag with no cut line of its own, where nesting kept the cutting file's
   // shape: that shape, at the size the file gave it, outline and all.
   const NC=S.nestCut&&S.nestCut.file?S.nestCut:null, ncLay=NC?gtNestCutLayout(NC.file):null;
@@ -34877,7 +34976,14 @@ function gtNestPlan(){
     return {pages,tooBig,fill};
   };
   let packed=null;
-  orders.forEach(cmp=>{
+  // The boxes' packing for this very sheet, kept: the real packing coming back
+  // from the worker redraws the sheet, and working the boxes out again froze it
+  // for most of a second. Taken onto this call's own items (by i), so the rows
+  // are the ones the order holds now.
+  const memo=gtNestBoxMemo.get(sig);
+  if(memo) packed={tooBig:memo.tooBig,fill:memo.fill,
+    pages:memo.pages.map(pg=>({...pg,items:pg.items.map(({it,pos})=>({it:all[it.i],pos})).filter(x=>x.it)}))};
+  else orders.forEach(cmp=>{
     const items=all.slice().sort(cmp);
     Object.keys(GT_NEST_SCORE).forEach(mode=>{
       const r=packWith(items,mode);
@@ -34891,7 +34997,7 @@ function gtNestPlan(){
   // moment. The jostle is seeded, so the same order always nests the same way.
   const areaAll=all.reduce((t,it)=>t+(it.sz.w+gx)*(it.sz.h+gy),0);
   const lowest=Math.max(1,Math.ceil(areaAll/Math.max(1,(availW+gx)*(availH+gy))-1e-9));
-  if(packed.pages.length>lowest&&all.length>1){
+  if(!memo&&packed.pages.length>lowest&&all.length>1){
     let seed=1234567;
     const rnd=()=>(seed=(seed*16807)%2147483647)/2147483647;
     const keys=[it=>it.sz.h,it=>it.sz.w*it.sz.h,it=>it.sz.w,it=>Math.max(it.sz.w,it.sz.h),()=>1];
@@ -34904,6 +35010,10 @@ function gtNestPlan(){
       if(r.pages.length<packed.pages.length
         ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)) packed=r;
     }
+  }
+  if(!memo){
+    gtNestBoxMemo.set(sig,packed);
+    while(gtNestBoxMemo.size>6) gtNestBoxMemo.delete(gtNestBoxMemo.keys().next().value);
   }
   // Real cut lines: the same order packed with each tag's traced outline in
   // place of its box, several ways within a few seconds. The boxes' answer is
@@ -34918,7 +35028,20 @@ function gtNestPlan(){
       const byKey=[(a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i,
         (a,b)=>b.sz.w*b.sz.h-a.sz.w*a.sz.h||b.sz.h-a.sz.h||a.i-b.i,
         (a,b)=>Math.max(b.sz.w,b.sz.h)-Math.max(a.sz.w,a.sz.h)||b.sz.h-a.sz.h||a.i-b.i];
-      try{
+      // Off the page's own thread where the browser allows: the boxes' packing
+      // stands in the moment it is asked for, and the real one takes its place
+      // when the worker is done (gtNestRealJob) - exports wait for it.
+      const job=gtNestRealJob(sig,rall,{availW,availH,gx,gy,dotBlocks,rotate:S.nestRotate!==false,
+        want:gtNestStep(),budget:deadline-Date.now()});
+      if(job){
+        if(job.done&&job.result){
+          const byI=new Map(rall.map(it=>[it.i,it]));
+          const r={tooBig:job.result.tooBig,fill:job.result.fill,
+            pages:job.result.pages.map(pg=>({items:pg.items.map(({i,pos})=>({it:byI.get(i),pos})).filter(x=>x.it)}))};
+          if(r.pages.length<packed.pages.length
+            ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)){ packed=r; realUsed=true; }
+        }
+      }else try{
         // A finer step is not always a better packing - each tag takes the first
         // place it fits, and an early odd turn can block a later neat one - so
         // the coarser steps are packed too, quickest first, and the best kept.
@@ -35032,6 +35155,8 @@ async function gtShapesInHand(){
   for(const g of gtShapeGroups())
     if(g.shape&&g.shape!==was&&!gtShapeSlots.has(g.shape)) await gtShowShape(g.shape);
   if(was&&gtSheet.layoutFile!==was) await gtShowShape(was);
+  // and a nested sheet's real packing, not the stand-in
+  await gtNestSettle();
 }
 async function gtShowShape(path){
   if(path===gtSheet.layoutFile) return true;
@@ -50311,6 +50436,8 @@ async function mcGtShapesInHand(){
       if(g.shape&&g.shape!==was&&!gtShapeSlots.has(g.shape)&&!await gtShowShape(g.shape))
         throw new Error('the cutting file "'+gtShapeLabel(g.shape)+'" could not be loaded — nothing was saved.');
   }finally{ if(was&&gtSheet.layoutFile!==was) await gtShowShape(was); }
+  // and a nested sheet's real packing, not the stand-in
+  if(typeof gtNestSettle==='function') await gtNestSettle();
 }
 
 // ---------- the summary's tools, and what sits beside the list under them ----------
