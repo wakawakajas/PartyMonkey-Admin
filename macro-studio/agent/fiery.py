@@ -426,11 +426,10 @@ class Fiery:
 
 # ---------------------------------------------------------------- IPP
 # The way in that needs no API key: the Fiery is also an ordinary network
-# printer, with queues named print and hold, and one more for every virtual
-# printer set up in Command WorkStation. A virtual printer named exactly like
-# a server preset carries that preset; without one the job goes to hold and
-# the preset is put on it by hand. What is lost is the job's progress -- IPP
-# hands the file over and the Fiery's own job id is all that comes back.
+# printer. Everything goes to its hold queue, copies set, and the preset is
+# put on it by hand in Command WorkStation. What is lost is the job's
+# progress -- IPP hands the file over and the Fiery's job id is all that
+# comes back.
 
 
 def _ipp_attr(tag: int, name: str, value: Any) -> bytes:
@@ -475,7 +474,6 @@ class FieryIPP:
         if not host:
             raise FieryError("No Fiery address in fiery.json (fiery_host).")
         self.host = host
-        self._queues: dict[str, bool] = {}
 
     def _post(self, queue: str, op: int, attrs: bytes, data: Any = b"",
               length: int = 0, timeout: int = 30) -> tuple[int, dict]:
@@ -506,20 +504,11 @@ class FieryIPP:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise FieryError(f"Cannot reach the Fiery's printer queue at {self.host}: {exc}") from exc
 
-    def has_queue(self, queue: str) -> bool:
-        if queue not in self._queues:
-            try:
-                status, _ = self._post(queue, 0x000B, b"", timeout=15)  # Get-Printer-Attributes
-                self._queues[queue] = status < 0x0100
-            except FieryError:
-                self._queues[queue] = False
-        return self._queues[queue]
-
     def queue_for(self, row: dict) -> str:
-        """The preset's own virtual printer where there is one, else hold."""
-        preset = _preset_name(str(row.get("preset_id") or ""))
-        if preset and self.has_queue(preset):
-            return preset
+        """Always hold. The Fiery answers IPP and LPR under any queue name --
+        a virtual printer's name included -- and applies no preset either
+        way, printing straight off on the server's defaults; a held job is
+        given its preset by hand."""
         return "hold"
 
     def send(self, queue: str, name: str, pdf: Any, copies: int) -> str:
@@ -581,10 +570,10 @@ def ipp_send_one(ipp: FieryIPP, row: dict) -> str:
         pdf: Any = send
     else:
         pdf = _only_pages(_as_pdf(send), pages)
-    queue = ipp.queue_for(row)
-    if queue == "hold" and row.get("action") == "print" and not row.get("preset_id"):
-        queue = "print"         # nothing to put on it by hand: straight to print
-    return ipp.send(queue, name, pdf, int(row.get("copies") or 1))
+    # the preset to put on it, at the front of its title in Command WorkStation
+    preset = _preset_name(str(row.get("preset_id") or ""))
+    title = f"[{preset}] {name}" if preset else name
+    return ipp.send(ipp.queue_for(row), title, pdf, int(row.get("copies") or 1))
 
 
 # ---------------------------------------------------------------- the PDF
