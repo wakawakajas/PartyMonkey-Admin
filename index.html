@@ -34852,8 +34852,17 @@ function gtNestWorkerGet(){
     w.onmessage=e=>{
       const j=[...gtNestRealJobs.values()].find(x=>x.id===e.data.id); if(!j) return;
       j.done=true; j.result=e.data.result||null; j.resolve();
-      // the sheet on screen takes the packing now it is here
-      gtNestCache=null; try{ gtDraw(); gtNestSync(); }catch(err){}
+      // The sheet on screen takes the packing now it is here - only if it is
+      // the sheet this answers: clearing whatever plan was in hand changed an
+      // export's sheets half way through it.
+      if(gtNestCache&&gtNestCache.sig===j.sig){
+        gtNestCache=null;
+        try{ gtDraw(); gtNestSync(); }catch(err){}
+        // and the batch's views of it - the summary's sheet and the made pop-up
+        try{ if(typeof mcSummaryOpen==='function'&&mcSummaryOpen()) mcSumStageDraw(); }catch(err){}
+        try{ const ms=document.getElementById('mcMadeSheet');
+          if(ms&&ms.classList.contains('open')&&typeof mcRenderMade==='function') mcRenderMade(); }catch(err){}
+      }
     };
     w.onerror=()=>{ gtNestWorkerGet.w=null; [...gtNestRealJobs.values()].forEach(j=>{ if(!j.done){ j.done=true; j.result=null; j.resolve(); } }); };
     gtNestWorkerGet.w=w;
@@ -34875,7 +34884,7 @@ function gtNestRealJob(sig,rall,o){
     stale.forEach(([k,x])=>{ x.done=true; x.result=null; x.resolve(); gtNestRealJobs.delete(k); });
   }
   const w=gtNestWorkerGet(); if(!w) return null;
-  j={id:'n'+Math.random().toString(36).slice(2),done:false,result:null};
+  j={id:'n'+Math.random().toString(36).slice(2),sig,done:false,result:null};
   j.promise=new Promise(r=>{ j.resolve=r; });
   gtNestRealJobs.set(sig,j);
   while(gtNestRealJobs.size>6) gtNestRealJobs.delete(gtNestRealJobs.keys().next().value);
@@ -34888,6 +34897,9 @@ function gtNestRealJob(sig,rall,o){
 async function gtNestSettle(){
   if(!(gtSheet.nestOn&&!gtLayout)) return;
   gtNestQuietUntil=0;
+  // the pictures first: a tag's size is read off its picture, and settling on
+  // sizes from before they loaded let the stand-in packing back in mid-export
+  try{ if(typeof gtHydrateWait==='function') await gtHydrateWait(); }catch(e){}
   // the job for the sheet as it is now - asked again after each wait, in case
   // the sheet changed meanwhile and the one waited for was dropped as stale
   for(let k=0;k<6;k++){
@@ -34923,7 +34935,8 @@ function gtNestPlan(){
   // keystroke, and packing a sheet by its cut lines takes seconds: the page
   // froze for each digit. Until the typing stops the sheet keeps the packing it
   // has, and packs once, a moment after the last key.
-  if(gtNestCache&&Date.now()<gtNestQuietUntil){
+  const qkey=q.map(l=>l.id+'|'+l.designId).join(',');
+  if(gtNestCache&&gtNestCache.qkey===qkey&&Date.now()<gtNestQuietUntil){
     clearTimeout(gtNestQuietT);
     gtNestQuietT=setTimeout(()=>{ try{ gtDraw(); gtNestSync(); }catch(e){} },Math.max(30,gtNestQuietUntil-Date.now()+30));
     return gtNestCache.plan;
@@ -35096,7 +35109,7 @@ function gtNestPlan(){
       lines:[...new Set(queue)],nest:true};
   });
   plan.tooBig=tooBig; plan.real=realUsed;
-  gtNestCache={sig,plan};
+  gtNestCache={sig,plan,qkey:q.map(l=>l.id+'|'+l.designId).join(',')};
   return plan;
 }
 // the nested sheet on screen, if the sheets are nested
@@ -37909,7 +37922,7 @@ document.getElementById('gtSlotList').addEventListener('click',e=>{
 });
 document.getElementById('gtResetSlotsBtn').addEventListener('click',async()=>{
   // nested, Reset nests the order again, forgetting any placeholder moved by hand
-  if(gtSheet.nestOn&&!gtLayout){ gtNestCache=null; gtPickOnly(null); gtRenderSlots(); gtDraw(); gtNestSync(); return; }
+  if(gtSheet.nestOn&&!gtLayout){ gtNestCache=null; gtNestBoxMemo.clear(); gtPickOnly(null); gtRenderSlots(); gtDraw(); gtNestSync(); return; }
   if(gtSheet.shapeSlots&&gtSheet.layoutFile) delete gtSheet.shapeSlots[gtSheet.layoutFile];
   gtRebuildSlots();
   gtPickOnly(null);
@@ -55086,7 +55099,7 @@ async function mcGtReturn(){
   await mcGtWriteBack(edited,home,!mcBusy);
   // A row added on the sheet that did not become a line - its order not given,
   // or no design picked yet - is the page's own again rather than lost.
-  const stay=edited.filter(l=>l&&!mcGtLent(l)&&!gtOrder.includes(l)&&(l.designId||l.mcNewFor!==undefined));
+  const stay=edited.filter(l=>l&&!mcGtLent(l)&&!l.mcAdopting&&!gtOrder.includes(l)&&(l.designId||l.mcNewFor!==undefined));
   if(stay.length){
     stay.forEach(l=>{ delete l.mcNewFor; });
     // each onto the page it was added on
@@ -56289,7 +56302,7 @@ async function mcGiftSides(lines,mode){
   const keep=gtOrder, jb=gtJobBack;
   gtOrder=lines.map(mcGtLine); gtJobBack=null;
   try{ return (gtSheetHasBack()||gtBackUnread().length)?['front','back']:[null]; }
-  finally{ gtOrder=keep; gtJobBack=jb; }
+  finally{ gtOrder=keep; gtJobBack=jb; gtNestCache=null; }
 }
 async function mcGiftPreview(lines,mode,canvas,dim,page,side){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
@@ -56317,7 +56330,7 @@ async function mcGiftPreview(lines,mode,canvas,dim,page,side){
     return pages;
   }
   finally{
-    gtOrder=keep; gtPage=keepPage; gtJobBack=jb;
+    gtOrder=keep; gtPage=keepPage; gtJobBack=jb; gtNestCache=null;
     // turning to another shape's page changed the sheet's cut file; the
     // operator's gift tag screen is put back on the one it was on
     try{ if(gtSheet.layoutFile!==wasShape&&typeof gtShowShape==='function') await gtShowShape(wasShape); }catch(e){}
@@ -56406,7 +56419,7 @@ async function mcGiftBundle(lines,mode,side){
     mcPendingQr=(!back&&gtSheet.qrOn)?{mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(pages)}:null;
     return bytes;
   }finally{
-    gtOrder=keep; gtJobBack=jb;
+    gtOrder=keep; gtJobBack=jb; gtNestCache=null;
     // back onto the sheet this started on, whatever the last page was cut to
     if(wasShape&&gtSheet.layoutFile!==wasShape) await gtShowShape(wasShape);
   }
