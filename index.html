@@ -7349,7 +7349,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <label class="field"><span>OUTSET (mm)</span><input type="number" step="0.1" id="gtTraceOut" value="1"/></label>
             <label class="field"><span>SMOOTH (mm)</span><input type="number" step="0.1" min="0" id="gtTraceSm" value="0.3"/></label>
             <label class="field"><span>EDGE AT (%)</span><input type="number" step="1" min="1" max="99" id="gtTraceThr" value="50"/></label>
-            <label class="field" title="Rounds every sharp corner of the cut line, inside and out, to this radius - a rectangle comes out a rounded rectangle, a traced outline loses its points and notches. 0 keeps the corners sharp."><span>ROUND (mm)</span><input type="number" step="0.5" min="0" id="gtTraceRd" value="0"/></label>
+            <label class="field" title="Rounds every sharp corner of the cut line, inside and out, to this radius - a rectangle comes out a rounded rectangle, a traced outline loses its points and notches. The extra rectangles are rounded too. 0 keeps the corners sharp."><span>ROUND (mm)</span><input type="number" step="0.5" min="0" id="gtTraceRd" value="0"/></label>
           </div>
           <button class="btn-outline btn-sm" id="gtTraceBtn" style="width:100%;margin-top:9px;">Trace the artwork</button>
           <div id="gtTraceMsg"></div>
@@ -13289,6 +13289,10 @@ async function cropApplyGt(){
     d.trace=null;
     // a rectangle or circle is the picture's box, whatever is in it
     if(old&&old.shape) d.trace=old;
+    // what is held back as the saved line was read off the old picture too
+    if(gtCutDraft&&gtCutDraft.id===d.id&&gtCutDraft.saved&&!gtCutDraft.saved.shape){
+      try{ const l2=gtTraceDesign(d,gtCutDraft.saved.thr||50); if(l2) gtCutDraft.saved={...gtCutDraft.saved,loop:l2}; }catch(e){}
+    }
     else if(old){
       let loop=null;
       try{ loop=gtTraceDesign(d,old.thr||50); }catch(e){ loop=null; }
@@ -31031,7 +31035,9 @@ const gtCutDesign=id=>gtDesign(id)||(gtOwnDesigns||[]).find(d=>d.id===id)||null;
 function gtCutDirty(){
   if(!gtCutDraft) return false;
   const d=gtCutDesign(gtCutDraft.id);
-  return !!d&&JSON.stringify(gtCutDraft.saved||null)!==JSON.stringify(d.trace||null);
+  if(!d) return false;
+  if(gtCutDraft.art!==undefined&&JSON.stringify(gtCutDraft.art)!==JSON.stringify(d.art||null)) return true;
+  return JSON.stringify(gtCutDraft.saved||null)!==JSON.stringify(d.trace||null);
 }
 function gtCutSave(){
   gtCutDraft=null;
@@ -31040,7 +31046,11 @@ function gtCutSave(){
 function gtCutDiscard(){
   if(!gtCutDraft) return;
   const d=gtCutDesign(gtCutDraft.id);
-  if(d) d.trace=gtCutDraft.saved;
+  if(d){
+    d.trace=gtCutDraft.saved;
+    // a Fit artwork to cut line is put back with the line it was fitted to
+    if(gtCutDraft.art!==undefined){ d.art=gtCutDraft.art; try{ gtSaveSoon(); }catch(e){} }
+  }
   gtCutDraft=null;
 }
 // Another design opened with this one's line still unsaved: asked, not lost.
@@ -33869,7 +33879,14 @@ function gtTraceExtras(d,r){
     const p=e.pts.map(([u,v])=>[r.x+u*r.w,r.y+v*r.h]);
     p.open=!e.closed; return p;
   });
+  const rd=Math.max(0,Number(t.rd)||0);
   (t.more||[]).forEach(m=>{
+    // a rectangle takes the line's ROUND too, up to half its shorter side
+    if(m.shape==='rect'&&rd>0){
+      const w=m.fw*r.w, h=m.fh*r.h, x=r.x+m.u*r.w-w/2, y=r.y+m.v*r.h-h/2;
+      out.push(gtRoundRectLoop(x,y,w,h,Math.min(rd,w/2,h/2)));
+      return;
+    }
     const p=gtShapeLoop(m.shape).map(([u,v])=>
       [r.x+(m.u+(u-0.5)*m.fw)*r.w, r.y+(m.v+(v-0.5)*m.fh)*r.h]);
     out.push(p.concat([p[0]]));
@@ -36940,7 +36957,7 @@ document.getElementById('gtAddLineBtn').addEventListener('click',()=>{
   // asked for when it is saved
   const lent=typeof mcGtHome!=='undefined'&&mcGtHome;
   const from=lent?((typeof mcWinItem!=='undefined'&&mcWinItem)||'?'):'';
-  gtOrder.push({id:gtId('l'),designId:'',qty:1,vals:{},...(from?{mcNewFor:from}:{})});
+  gtOrder.push({id:gtId('l'),designId:'',qty:1,vals:{},...(from?{mcNewFor:from,mcPage:gtMode}:{})});
   gtRenderOrder(); gtDraw();
 });
 document.getElementById('gtPrevPageBtn').addEventListener('click',()=>{ gtGoPage(gtPage-1); });
@@ -37424,7 +37441,10 @@ document.getElementById('gtArrangeSeg').addEventListener('click',e=>{
     // The file's tag shape and size are kept for nesting: a tag with no cut line
     // of its own is still that shape - a flag stays a flag - rather than the
     // plain rectangle nesting made of every tag.
-    const rep=gtSheet.slots.find(x=>x.shape!=null&&gtLayout.shapes[x.shape]);
+    const counts=new Map();
+    gtSheet.slots.forEach(x=>{ if(x.shape!=null&&gtLayout.shapes[x.shape]) counts.set(x.shape,(counts.get(x.shape)||0)+1); });
+    const most=[...counts.entries()].sort((a,b)=>b[1]-a[1])[0];
+    const rep=most?gtSheet.slots.find(x=>x.shape===most[0]):null;
     gtSheet.nestCut=rep?{file:gtSheet.layoutFile,shape:rep.shape,w:rep.w,h:rep.h}:null;
     if(rep) gtNestCutCache().set(gtSheet.layoutFile,gtLayout);
     gtSheet.layoutFile=''; gtLayout=null; gtLayoutFrom=''; gtSheet.cutRemoved=true;
@@ -39476,6 +39496,8 @@ function gtCutFitArt(){
     return;
   }
   gtCutBegin(d);
+  // the picture as it was, so Discard puts it back along with the line
+  if(gtCutDraft&&gtCutDraft.art===undefined) gtCutDraft.art=JSON.parse(JSON.stringify(d.art||null));
   const a=d.art||(d.art={});
   a.s=(Number(a.s)||1)*k;
   // the line back to the size it was given
@@ -54883,7 +54905,11 @@ async function mcGtReturn(){
   const stay=edited.filter(l=>l&&!mcGtLent(l)&&!gtOrder.includes(l)&&(l.designId||l.mcNewFor!==undefined));
   if(stay.length){
     stay.forEach(l=>{ delete l.mcNewFor; });
-    gtOrder=gtOrder.concat(stay);
+    // each onto the page it was added on
+    const here=stay.filter(l=>!l.mcPage||l.mcPage===gtMode||typeof gtOrders==='undefined');
+    stay.filter(l=>!here.includes(l)).forEach(l=>{ gtOrders[l.mcPage]=(gtOrders[l.mcPage]||[]).concat([l]); });
+    stay.forEach(l=>{ delete l.mcPage; });
+    gtOrder=gtOrder.concat(here);
     if(typeof gtRenderOrder==='function') gtRenderOrder();
   }
   if(mcOnBatch()) mcRenderItems();
