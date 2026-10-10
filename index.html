@@ -36872,7 +36872,10 @@ document.getElementById('gtAddLineBtn').addEventListener('click',()=>{
   // On a sheet lent from Magic Create, a row added here is another design on
   // the order being worked, not a row of the page's own: it remembers which
   // line it came from, and Save to line makes it a line of that order.
-  const from=(typeof mcGtHome!=='undefined'&&mcGtHome&&typeof mcWinItem!=='undefined'&&mcWinItem)?mcWinItem:'';
+  // lent with no single line open (from the SKU summary): '?' - the order is
+  // asked for when it is saved
+  const lent=typeof mcGtHome!=='undefined'&&mcGtHome;
+  const from=lent?((typeof mcWinItem!=='undefined'&&mcWinItem)||'?'):'';
   gtOrder.push({id:gtId('l'),designId:'',qty:1,vals:{},...(from?{mcNewFor:from}:{})});
   gtRenderOrder(); gtDraw();
 });
@@ -50603,7 +50606,7 @@ async function mcMarkLinesOnSheet(laid,page){
   for(const {sku,designId,shape} of laid){
     // a line merged onto the print sheet by its own box stays there: the tag
     // side matching its SKU is not somebody deciding to move it
-    for(const it of mcItems.filter(i=>mcRowKey(i)===String(sku)&&!mcMergedKey(i))){
+    for(const it of mcItems.filter(i=>mcRowKey(i)===String(sku)&&!mcMergedKey(i)&&!mcIsExtraDesign(i))){
       const was=it.sheet_item||{};
       // words already typed into the line's own window are its own and are
       // never written over from here. The page is written down rather than
@@ -50716,6 +50719,7 @@ async function mcAddSkusToGiftTagRun(rows,opts,stage){
           if(!mcGtLent(l)||String(l.sku||'').trim().toLowerCase()
             !==String(row.sku).trim().toLowerCase()) return;
           const it=mcItem(String(l.id).slice(3));
+          if(mcIsExtraDesign(it)) return;
           l.designId=d.id; if(it) l.qty=Math.max(1,mcQty(it)||1);
           l.shape=shape||l.shape||'';
         });
@@ -54601,6 +54605,10 @@ let mcGtHome=null;
 // somebody typing it in there. The two share one order now, so every place
 // that has to tell them apart asks this rather than spelling out the prefix.
 const mcGtLent=l=>String((l&&l.id)||'').startsWith('mc-');
+// A line added on the builder as another design for an order. It shares its
+// SKU with the line it was added beside, and whatever sets a design on every
+// line of a SKU at once (the SKU summary's Add) must leave its own design alone.
+const mcIsExtraDesign=it=>!!(it&&it.raw&&it.raw.extraDesign);
 // Which sheet a line goes onto, said the way the export says it: the page it
 // is built on and the stock it is run on. Matte and gloss are two runs through
 // the machine and come out as two PDFs, so they are two sheets — and a sheet
@@ -54786,6 +54794,14 @@ async function mcGtReturn(){
   if(typeof gtFinishRestore==='function') await gtFinishRestore();
   if(typeof gtRenderOrder==='function') gtRenderOrder();
   await mcGtWriteBack(edited,home);
+  // A row added on the sheet that did not become a line - its order not given,
+  // or no design picked yet - is the page's own again rather than lost.
+  const stay=edited.filter(l=>l&&!mcGtLent(l)&&!gtOrder.includes(l)&&(l.designId||l.mcNewFor!==undefined));
+  if(stay.length){
+    stay.forEach(l=>{ delete l.mcNewFor; });
+    gtOrder=gtOrder.concat(stay);
+    if(typeof gtRenderOrder==='function') gtRenderOrder();
+  }
   if(mcOnBatch()) mcRenderItems();
   mcSyncBatchButtons();
   if(mcWinItem) mcWinRender();
@@ -54803,6 +54819,20 @@ async function mcGtAdoptNewRows(edited,home){
   if(!sb||!mcBatch||mcBatch.status!=='open') return;
   for(const l of edited){
     if(!l||mcGtLent(l)||!l.mcNewFor||!l.designId) continue;
+    if(l.mcNewFor==='?'){
+      const lentOrders=[...new Set(edited.filter(mcGtLent).map(x=>mcItem(String(x.id).slice(3)))
+        .filter(Boolean).map(x=>String(x.order_id||'').trim()).filter(Boolean))];
+      const d0=gtDesign(l.designId);
+      const typed=prompt(`"${(d0&&d0.name)||'This design'}" was added on the sheet.\n\n`
+        +'Which order is it for? Type its order ID to add it to that order as a new line, or Cancel to keep it off the batch.',
+        lentOrders[0]||'');
+      if(typed===null){ delete l.mcNewFor; continue; }
+      const want=String(typed).trim();
+      const sib=mcItems.filter(i=>String(i.order_id||'').trim()===want);
+      const pick=sib.find(i=>i.tile==='giftTag')||sib[0];
+      if(!pick){ mcWarn(`No order ${want} on this batch — the design added on the sheet was not saved.`); continue; }
+      l.mcNewFor=pick.id;
+    }
     const from=mcItem(String(l.mcNewFor)); if(!from) continue;
     const d=gtDesign(l.designId);
     try{
@@ -54812,7 +54842,7 @@ async function mcGtAdoptNewRows(edited,home){
         sort_order:Math.max(0,...mcItems.map(i=>Number(i.sort_order)||0))+1,
         order_id:from.order_id||'',buyer:from.buyer||'',sku:from.sku||'',
         product:from.product||'',design_name:(d&&d.name)||'',
-        qty:Math.max(1,Math.round(Number(l.qty)||1)),message:'',note:'',image_url:'',raw:{},
+        qty:Math.max(1,Math.round(Number(l.qty)||1)),message:'',note:'',image_url:'',raw:{extraDesign:true},
         tile:'giftTag',
         sheet_item:{page:home.page||gtMode,finish:home.finish||((from.sheet_item||{}).finish)||'Matte'}};
       const {data,error}=await sb.from('magic_items').insert(row).select().single();
@@ -56579,7 +56609,7 @@ async function mcSheetAdoptLoose(){
       sort_order:Math.max(0,...mcItems.map(i=>Number(i.sort_order)||0))+1,
       order_id:order,buyer:(from&&from.buyer)||'',sku,
       product:cut<0?sku:sku.slice(0,cut),design_name:cut<0?'':sku.slice(cut+1),
-      qty:Math.max(1,Math.round(Number(d.qty)||1)),message:'',note:'',image_url:'',raw:{}};
+      qty:Math.max(1,Math.round(Number(d.qty)||1)),message:'',note:'',image_url:'',raw:{extraDesign:true}};
     const {data,error}=await sb.from('magic_items').insert(row).select().single();
     if(error||!data){
       mcWarn(`${order}: "${d.name||'the design'}" could not be added as a line`
