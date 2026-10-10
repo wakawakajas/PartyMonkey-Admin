@@ -34657,7 +34657,7 @@ function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks,rotate,st
   const masks=new Map();
   const maskOf=it=>{
     let m=masks.get(it.key);
-    if(!m){ m=gtNestMask(it.poly,it.sz.w,it.sz.h,gap,cell); masks.set(it.key,m); }
+    if(!m){ m=gtNestMask(it.poly,it.sz.w,it.sz.h,Math.max(gap,2*(it.bl||0)),cell); masks.set(it.key,m); }
     return m;
   };
   let ringMax=0;
@@ -34888,7 +34888,7 @@ function gtNestRealJob(sig,rall,o){
   j.promise=new Promise(r=>{ j.resolve=r; });
   gtNestRealJobs.set(sig,j);
   while(gtNestRealJobs.size>6) gtNestRealJobs.delete(gtNestRealJobs.keys().next().value);
-  const items=rall.map(it=>({i:it.i,sz:it.sz,key:it.key,poly:it.poly||null,parts:(it.poly&&it.poly.parts)||null}));
+  const items=rall.map(it=>({i:it.i,sz:it.sz,key:it.key,bl:it.bl||0,poly:it.poly||null,parts:(it.poly&&it.poly.parts)||null}));
   try{ w.postMessage({id:j.id,items,...o,budget:Math.max(500,o.budget)}); }
   catch(e){ j.done=true; j.resolve(); }
   return j;
@@ -34924,6 +34924,7 @@ function gtNestPlan(){
     return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],
             d&&d.file,img&&img.naturalWidth?[img.naturalWidth,img.naturalHeight]:0,
             t&&t.refBox?[t.refBox.w,t.refBox.h]:0,
+            gtBleedOf(d),
             t&&t.on&&t.loop?[t.out,t.sm,t.loop.length,t.cx,t.cy,t.shape||'',t.rd||0,!!t.ownSize,
               t.more?JSON.stringify(t.more):0,(t.extra||[]).length]:0];
   });
@@ -34962,7 +34963,9 @@ function gtNestPlan(){
   // placed by topmost-leftmost or by tightest fit — and the packing with the
   // fewest sheets wins; of those, the one that leaves the last sheet emptiest
   // (the most paper saved). Ties keep the first tried, which is the old way.
-  const all=q.map((line,i)=>({i,line,sz:size.get(line.designId)}));
+  // bl: how far each tag prints past its cut. Packed by cut lines alone, one
+  // tag's bleed printed over the next tag, or over a registration dot.
+  const all=q.map((line,i)=>({i,line,sz:size.get(line.designId),bl:gtBleedOf(gtDesign(line.designId))||0}));
   const orders=[
     (a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i,
     (a,b)=>b.sz.w*b.sz.h-a.sz.w*a.sz.h||b.sz.h-a.sz.h||a.i-b.i,
@@ -34972,9 +34975,10 @@ function gtNestPlan(){
   const packWith=(items,mode)=>{
     const pages=[]; let tooBig=0;
     items.forEach(it=>{
-      const cw=Math.max(0.1,it.sz.w+gx), ch=Math.max(0.1,it.sz.h+gy);
+      const e=2*(it.bl||0), ex=e+Math.max(0,gx-e), ey=e+Math.max(0,gy-e);
+      const cw=Math.max(0.1,it.sz.w+ex), ch=Math.max(0.1,it.sz.h+ey);
       const alt=(S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)
-        ?{w:Math.max(0.1,it.sz.h+gx),h:Math.max(0.1,it.sz.w+gy)}:null;
+        ?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
       let pos=null, pg=null;
       for(const p of pages){ pos=p.bin.add(cw,ch,alt); if(pos){ pg=p; break; } }
       if(!pos){
@@ -35081,7 +35085,7 @@ function gtNestPlan(){
     // the boxes' packer says turned or not, which is a quarter)
     const box=({it,pos})=>pos.bw>0?{w:pos.bw,h:pos.bh}:pos.rot?{w:it.sz.h,h:it.sz.w}:{w:it.sz.w,h:it.sz.h};
     const turnOf=pos=>pos.bw>0?(Number(pos.deg)||0):(pos.rot?90:0);
-    pg.items.forEach(a=>{ const b=box(a); uw=Math.max(uw,a.pos.x+b.w); uh=Math.max(uh,a.pos.y+b.h); });
+    pg.items.forEach(a=>{ const b=box(a), e=a.pos.bw>0?0:2*(a.it.bl||0); uw=Math.max(uw,a.pos.x+b.w+e); uh=Math.max(uh,a.pos.y+b.h+e); });
     // centred, unless a dot is in the way: the sheet is then kept as packed
     let ox=(manual||dotBlocks.length)?x0:(S.paperW-uw)/2, oy=(manual||dotBlocks.length)?y0:(S.paperH-uh)/2;
     // a sheet with tags turned off the quarter is centred on what is cut
@@ -35099,7 +35103,7 @@ function gtNestPlan(){
       const {it,pos}=a, b=box(a);
       const fl=flags.get(it.line.designId);
       slots.push({id:'n'+at+'_'+k,shape:fl?NC.shape:null,...(fl?{nestCut:NC.file}:{}),added:true,
-        x:Math.round((ox+pos.x)*100)/100,y:Math.round((oy+pos.y)*100)/100,w:b.w,h:b.h,
+        x:Math.round((ox+pos.x+(pos.bw>0?0:(it.bl||0)))*100)/100,y:Math.round((oy+pos.y+(pos.bw>0?0:(it.bl||0)))*100)/100,w:b.w,h:b.h,
         ...(turnOf(pos)?{rot:turnOf(pos)}:{}),
         // turned off the quarter, the tag's own size goes with it - see gtUnrotSlot
         ...(turnOf(pos)%90?{tw:it.sz.w,th:it.sz.h}:{})});
@@ -35495,6 +35499,10 @@ function gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc,side){
 // whatever they were saved with, following the sheet's bleed included.
 function gtNewBleed(){ return {on:true,mm:0}; }
 function gtBleedOf(d){
+  // Cut to its own line drawn out past the artwork (an outset), the blade runs
+  // through blank paper: nothing is printed past the cut. A coloured bleed there
+  // reached into the next tag on a nested sheet.
+  if(gtOwnCut(d)&&Number(d.trace.out)>0) return 0;
   const own=d&&d.bleed;
   if(own&&own.on!==undefined) return own.on?Math.max(0,Number(own.mm)||0):0;
   return gtSheet.bleedOn?Math.max(0,Number(gtSheet.bleed)||0):0;
