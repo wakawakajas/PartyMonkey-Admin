@@ -13913,9 +13913,15 @@ async function bleedFill(img,bx,by,mode,say){
 // ---- content-aware: PatchMatch, the method behind Photoshop's classic fill ----
 // Every pixel of the bleed is given the patch of the artwork that best matches
 // what surrounds it, coarse to fine, and the overlapping patches vote on its
-// colour. Run in a worker so the page keeps moving while it thinks.
+// colour. Run on the graphics card where the browser offers one, and
+// otherwise in a worker so the page keeps moving while it thinks.
+async function patchFill(imageData,x0,y0,x1,y1,say,opts){
+  if(navigator.gpu) try{ return await patchFillGpu(imageData,x0,y0,x1,y1,say,opts); }
+  catch(err){ console.warn('Content-aware fill on the graphics card failed, using the processor:',err); }
+  return patchFillCpu(imageData,x0,y0,x1,y1,say,opts);
+}
 let patchWorkerUrl=null;
-function patchFill(imageData,x0,y0,x1,y1,say,opts){
+function patchFillCpu(imageData,x0,y0,x1,y1,say,opts){
   opts=opts||{};
   if(!patchWorkerUrl) patchWorkerUrl=URL.createObjectURL(new Blob(
     ['('+patchWorkerMain.toString()+')()'],{type:'text/javascript'}));
@@ -13933,6 +13939,235 @@ function patchFill(imageData,x0,y0,x1,y1,say,opts){
     wk.postMessage({w:imageData.width,h:imageData.height,data:buf,x0,y0,x1,y1,
       levels:opts.levels||0,coarseEm:opts.coarseEm||0},[buf]);
   });
+}
+// The same PatchMatch on the graphics card. The processor walks the picture in
+// reading order, each pixel handing its match on to the next; the card works
+// every pixel at once, so matches are handed on by jumps of 8, 4, 2 and 1
+// instead. Same pyramid, same patches, same voting.
+const PATCH_WGSL=`
+struct U { w:i32, h:i32, x0:i32, y0:i32, x1:i32, y1:i32, pw:i32, ph:i32, seed:u32, jump:i32, flag:i32, pad:i32 };
+@group(0) @binding(0) var<uniform> u:U;
+@group(0) @binding(1) var<storage,read> img:array<vec4f>;
+@group(0) @binding(2) var<storage,read_write> imgOut:array<vec4f>;
+@group(0) @binding(3) var<storage,read> nn:array<u32>;
+@group(0) @binding(4) var<storage,read_write> nnOut:array<u32>;
+@group(0) @binding(5) var<storage,read_write> dist:array<f32>;
+@group(0) @binding(6) var<storage,read> nnPrev:array<u32>;
+const R=3;
+const BIG=3.0e38;
+fn sx0()->i32{ return u.x0+R; }
+fn sy0()->i32{ return u.y0+R; }
+fn sx1()->i32{ return u.x1-R-1; }
+fn sy1()->i32{ return u.y1-R-1; }
+fn isSrc(x:i32,y:i32)->bool{ return x>=sx0()&&x<=sx1()&&y>=sy0()&&y<=sy1(); }
+fn known(x:i32,y:i32)->bool{ return x>=u.x0&&x<u.x1&&y>=u.y0&&y<u.y1; }
+fn pk(x:i32,y:i32)->u32{ return u32(x)|(u32(y)<<16u); }
+fn ux(v:u32)->i32{ return i32(v&0xffffu); }
+fn uy(v:u32)->i32{ return i32(v>>16u); }
+fn hash(v:u32)->u32{ let s=v*747796405u+2891336453u; let w=((s>>((s>>28u)+4u))^s)*277803737u; return (w>>22u)^w; }
+// squared colour distance between the patch at p and the one at q, per pixel
+// of p's patch that is on the canvas; gives up once past best
+fn D(px:i32,py:i32,qx:i32,qy:i32,best:f32)->f32{
+  let ya=max(-R,-py); let yb=min(R,u.h-1-py); let xa=max(-R,-px); let xb=min(R,u.w-1-px);
+  var cap=BIG;
+  if(best<BIG){ cap=best*f32((yb-ya+1)*(xb-xa+1)); }
+  var s=0.0; var n=0;
+  for(var dy=ya;dy<=yb;dy++){
+    var ti=(py+dy)*u.w+px+xa; var si=(qy+dy)*u.w+qx+xa;
+    for(var dx=xa;dx<=xb;dx++){ let a=img[ti]-img[si]; s+=dot(a,a); ti++; si++; }
+    n+=xb-xa+1;
+    if(s>=cap){ return BIG; }
+  }
+  return s/f32(n);
+}
+@compute @workgroup_size(16,16) fn initNN(@builtin(global_invocation_id) g:vec3u){
+  let x=i32(g.x); let y=i32(g.y); if(x>=u.w||y>=u.h){ return; }
+  let i=y*u.w+x;
+  if(isSrc(x,y)){ nnOut[i]=pk(x,y); return; }
+  if(u.flag==1){
+    let cx=min(u.pw-1,x/2); let cy=min(u.ph-1,y/2); let v=nnPrev[cy*u.pw+cx];
+    nnOut[i]=pk(clamp(ux(v)*2+(x-cx*2),sx0(),sx1()),clamp(uy(v)*2+(y-cy*2),sy0(),sy1()));
+  }else{
+    let a=hash(u32(i)^u.seed); let b=hash(a);
+    nnOut[i]=pk(sx0()+i32(a%u32(sx1()-sx0()+1)),sy0()+i32(b%u32(sy1()-sy0()+1)));
+  }
+}
+@compute @workgroup_size(16,16) fn measure(@builtin(global_invocation_id) g:vec3u){
+  let x=i32(g.x); let y=i32(g.y); if(x>=u.w||y>=u.h||isSrc(x,y)){ return; }
+  let i=y*u.w+x; let v=nn[i];
+  dist[i]=D(x,y,ux(v),uy(v),BIG);
+}
+@compute @workgroup_size(16,16) fn propagate(@builtin(global_invocation_id) g:vec3u){
+  let x=i32(g.x); let y=i32(g.y); if(x>=u.w||y>=u.h){ return; }
+  let i=y*u.w+x; let v=nn[i];
+  if(isSrc(x,y)){ nnOut[i]=v; return; }
+  var bx=ux(v); var by=uy(v); var bd=dist[i];
+  let J=u.jump;
+  var offs=array<vec2i,4>(vec2i(-J,0),vec2i(J,0),vec2i(0,-J),vec2i(0,J));
+  for(var k=0;k<4;k++){
+    let o=offs[k]; let nx=x+o.x; let ny=y+o.y;
+    if(nx<0||ny<0||nx>=u.w||ny>=u.h){ continue; }
+    let c=nn[ny*u.w+nx]; let qx=ux(c)-o.x; let qy=uy(c)-o.y;
+    if(qx<sx0()||qx>sx1()||qy<sy0()||qy>sy1()||(qx==bx&&qy==by)){ continue; }
+    let d=D(x,y,qx,qy,bd);
+    if(d<bd){ bd=d; bx=qx; by=qy; }
+  }
+  nnOut[i]=pk(bx,by); dist[i]=bd;
+}
+@compute @workgroup_size(16,16) fn search(@builtin(global_invocation_id) g:vec3u){
+  let x=i32(g.x); let y=i32(g.y); if(x>=u.w||y>=u.h){ return; }
+  let i=y*u.w+x; let v=nn[i];
+  if(isSrc(x,y)){ nnOut[i]=v; return; }
+  var bx=ux(v); var by=uy(v); var bd=dist[i];
+  var st=hash(u32(i)^u.seed);
+  for(var rad=max(sx1()-sx0(),sy1()-sy0());rad>=1;rad=rad/2){
+    st=hash(st); let qx=clamp(bx+i32(st%u32(rad*2+1))-rad,sx0(),sx1());
+    st=hash(st); let qy=clamp(by+i32(st%u32(rad*2+1))-rad,sy0(),sy1());
+    if(qx==bx&&qy==by){ continue; }
+    let d=D(x,y,qx,qy,bd);
+    if(d<bd){ bd=d; bx=qx; by=qy; }
+  }
+  nnOut[i]=pk(bx,by); dist[i]=bd;
+}
+// each bleed pixel gathers from every patch over it; flag 1 takes the single
+// best-matching one rather than the average, for the last word at full size
+@compute @workgroup_size(16,16) fn vote(@builtin(global_invocation_id) g:vec3u){
+  let x=i32(g.x); let y=i32(g.y); if(x>=u.w||y>=u.h){ return; }
+  let i=y*u.w+x;
+  if(known(x,y)){ imgOut[i]=img[i]; return; }
+  var acc=vec4f(0.0); var ws=0.0; var best=BIG; var val=img[i];
+  for(var dy=R;dy>=-R;dy--){
+    let py=y-dy; if(py<0||py>=u.h){ continue; }
+    for(var dx=R;dx>=-R;dx--){
+      let px=x-dx; if(px<0||px>=u.w||isSrc(px,py)){ continue; }
+      let j=py*u.w+px; let q=nn[j]; let d=dist[j];
+      let c=img[(uy(q)+dy)*u.w+ux(q)+dx];
+      if(u.flag==1){ if(d<best){ best=d; val=c; } }
+      else{ let wt=1.0/(1.0+d/64.0); acc+=c*wt; ws+=wt; }
+    }
+  }
+  if(u.flag==1){ imgOut[i]=val; }
+  else if(ws>0.0){ imgOut[i]=acc/ws; }
+  else{ imgOut[i]=img[i]; }
+}`;
+let patchGpuP=null;
+function patchGpu(){
+  if(!patchGpuP) patchGpuP=(async()=>{
+    const ad=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});
+    if(!ad) throw new Error('no graphics card offered');
+    // a full-size fill is well over the 128 MB a buffer is allowed by default
+    const dev=await ad.requestDevice({requiredLimits:{
+      maxStorageBufferBindingSize:ad.limits.maxStorageBufferBindingSize,maxBufferSize:ad.limits.maxBufferSize}});
+    dev.lost.then(()=>{ patchGpuP=null; });
+    const module=dev.createShaderModule({code:PATCH_WGSL});
+    const entry=(binding,type)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type}});
+    const bgl=dev.createBindGroupLayout({entries:[entry(0,'uniform'),
+      entry(1,'read-only-storage'),entry(2,'storage'),entry(3,'read-only-storage'),
+      entry(4,'storage'),entry(5,'storage'),entry(6,'read-only-storage')]});
+    const layout=dev.createPipelineLayout({bindGroupLayouts:[bgl]});
+    const pipes={};
+    for(const n of ['initNN','measure','propagate','search','vote'])
+      pipes[n]=await dev.createComputePipelineAsync({layout,compute:{module,entryPoint:n}});
+    return {dev,bgl,pipes};
+  })().catch(err=>{ patchGpuP=null; throw err; });
+  return patchGpuP;
+}
+async function patchFillGpu(imageData,X0,Y0,X1,Y1,say,opts){
+  opts=opts||{};
+  const R=3, maxLevels=opts.levels||7, coarseEm=opts.coarseEm||6;
+  const W=imageData.width, H=imageData.height;
+  if(X1-X0<R*2+2||Y1-Y0<R*2+2) throw new Error('the artwork is too small to match patches from');
+  const {dev,bgl,pipes}=await patchGpu();
+  if(W*H*16>dev.limits.maxStorageBufferBindingSize) throw new Error('too big for the graphics card');
+  // the pyramid, as on the processor: halved until the bleed is a few pixels deep
+  const levels=[];
+  let lv={w:W,h:H,img:Float32Array.from(imageData.data),x0:X0,y0:Y0,x1:X1,y1:Y1};
+  levels.push(lv);
+  while(levels.length<maxLevels){
+    const ring=Math.min(lv.x0,lv.y0,lv.w-lv.x1,lv.h-lv.y1);
+    const nx0=Math.ceil(lv.x0/2), ny0=Math.ceil(lv.y0/2), nx1=Math.floor(lv.x1/2), ny1=Math.floor(lv.y1/2);
+    if(ring<8||nx1-nx0<R*4+2||ny1-ny0<R*4+2) break;
+    const w2=Math.ceil(lv.w/2), h2=Math.ceil(lv.h/2), im2=new Float32Array(w2*h2*4);
+    for(let y=0;y<h2;y++) for(let x=0;x<w2;x++){
+      const o=(y*w2+x)*4;
+      for(let dy=0;dy<2;dy++) for(let dx=0;dx<2;dx++){
+        const i=(Math.min(lv.h-1,y*2+dy)*lv.w+Math.min(lv.w-1,x*2+dx))*4;
+        im2[o]+=lv.img[i]/4; im2[o+1]+=lv.img[i+1]/4; im2[o+2]+=lv.img[i+2]/4; im2[o+3]+=lv.img[i+3]/4;
+      }
+    }
+    lv={w:w2,h:h2,img:im2,x0:nx0,y0:ny0,x1:nx1,y1:ny1};
+    levels.push(lv);
+  }
+  const emOf=L=>L===0?2:(L===levels.length-1?coarseEm:3);
+  let work=0, done=0;
+  levels.forEach((l,L)=>{ work+=emOf(L)*(l.w*l.h-(l.x1-l.x0)*(l.y1-l.y0)); });
+  const S=GPUBufferUsage.STORAGE, made=[];
+  const buf=(size,usage)=>{ const b=dev.createBuffer({size:Math.max(16,size),usage}); made.push(b); return b; };
+  dev.pushErrorScope('out-of-memory'); dev.pushErrorScope('validation');
+  let scopes=2;
+  try{
+    const dummy=buf(16,S);
+    let prev=null, out=null;
+    for(let L=levels.length-1;L>=0;L--){
+      const l=levels[L], n=l.w*l.h;
+      // two of each, read from one and written to the other in turn
+      const img=[buf(n*16,S|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC),buf(n*16,S|GPUBufferUsage.COPY_SRC)];
+      const nn=[buf(n*4,S),buf(n*4,S)], dist=buf(n*4,S);
+      dev.queue.writeBuffer(img[0],0,l.img);
+      let ic=0, nc=0, enc=null;
+      const run=(name,p)=>{
+        p=p||{};
+        const ub=dev.createBuffer({size:48,usage:GPUBufferUsage.UNIFORM,mappedAtCreation:true});
+        made.push(ub);
+        const iv=new Int32Array(ub.getMappedRange());
+        iv.set([l.w,l.h,l.x0,l.y0,l.x1,l.y1,prev?prev.w:1,prev?prev.h:1,0,p.jump||0,p.flag||0,0]);
+        new Uint32Array(iv.buffer)[8]=(Math.random()*4294967296)>>>0;
+        ub.unmap();
+        const bg=dev.createBindGroup({layout:bgl,entries:[
+          {binding:0,resource:{buffer:ub}},
+          {binding:1,resource:{buffer:img[ic]}},{binding:2,resource:{buffer:img[1-ic]}},
+          {binding:3,resource:{buffer:nn[nc]}},{binding:4,resource:{buffer:nn[1-nc]}},
+          {binding:5,resource:{buffer:dist}},{binding:6,resource:{buffer:prev?prev.nn:dummy}}]});
+        const pass=enc.beginComputePass();
+        pass.setPipeline(pipes[name]); pass.setBindGroup(0,bg);
+        pass.dispatchWorkgroups(Math.ceil(l.w/16),Math.ceil(l.h/16));
+        pass.end();
+        if(name==='vote') ic=1-ic;
+        else if(name!=='measure') nc=1-nc;
+      };
+      enc=dev.createCommandEncoder();
+      run('initNN',{flag:prev?1:0});
+      if(prev){ run('measure'); run('vote'); }
+      dev.queue.submit([enc.finish()]);
+      const em=emOf(L), area=n-(l.x1-l.x0)*(l.y1-l.y0);
+      for(let it=0;it<em;it++){
+        enc=dev.createCommandEncoder();
+        run('measure');
+        for(let k=0;k<2;k++){ for(const jump of [8,4,2,1]) run('propagate',{jump}); run('search'); }
+        run('vote',{flag:L===0&&it===em-1?1:0});
+        dev.queue.submit([enc.finish()]);
+        await dev.queue.onSubmittedWorkDone();
+        done+=area;
+        say(`${opts.label||'Filling the bleed from the artwork'}… ${Math.round(Math.min(0.99,done/work)*100)}%`,true);
+      }
+      if(L===0) out={buf:img[ic],n};
+      prev={w:l.w,h:l.h,nn:nn[nc]};
+    }
+    const rb=buf(out.n*16,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);
+    enc=dev.createCommandEncoder();
+    enc.copyBufferToBuffer(out.buf,0,rb,0,out.n*16);
+    dev.queue.submit([enc.finish()]);
+    const e1=await dev.popErrorScope(), e2=await dev.popErrorScope();
+    scopes=0;
+    if(e1||e2) throw new Error((e1||e2).message);
+    await rb.mapAsync(GPUMapMode.READ);
+    const px=new Uint8ClampedArray(new Float32Array(rb.getMappedRange()));
+    rb.unmap();
+    return new ImageData(px,W,H);
+  }finally{
+    while(scopes-->0) dev.popErrorScope().catch(()=>{});
+    made.forEach(b=>{ try{ b.destroy(); }catch(e){} });
+  }
 }
 function patchWorkerMain(){
   self.onmessage=e=>{
@@ -14097,7 +14332,7 @@ function patchWorkerMain(){
 // ---- AI fill: LaMa, an open inpainting model, run on this computer ----
 // Free and private: the model is fetched once from Hugging Face and kept in
 // the browser's own storage, and the picture never leaves the machine.
-const ORT_BASE='https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+const ORT_BASE='https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
 const LAMA_URL='https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx';
 const LAMA_SIZE=208044816;
 const MODEL_CACHE='pigu-ai-models';
@@ -14157,9 +14392,9 @@ function modelWorker(main,onDead){
     waiting.clear(); };
   return call;
 }
-// LaMa runs on the processor: the graphics card route cannot run its Fourier
-// layers, and on the page's own thread a quarter of a minute per square would
-// freeze everything while it thought.
+// LaMa runs on the graphics card where the browser offers one — a third of a
+// second a square, against a dozen on the processor, which stays the fallback.
+// Either way in a worker, so the page keeps moving while it thinks.
 function lamaSession(say){
   if(!lamaSessionP) lamaSessionP=(async()=>{
     const bytes=await modelBytes(LAMA_URL,LAMA_SIZE,'AI model',say);
@@ -14176,22 +14411,33 @@ function lamaSession(say){
   return lamaSessionP;
 }
 function lamaWorkerMain(){
-  let session=null;
+  let session=null, gpu=false, bytes=null;
+  const open=async eps=>self.ort.InferenceSession.create(bytes,{executionProviders:eps});
   self.onmessage=async e=>{
     const m=e.data;
     try{
       if(m.type==='init'){
-        importScripts(m.ortBase+'ort.wasm.min.js');
+        importScripts(m.ortBase+'ort.webgpu.min.js');
         self.ort.env.wasm.wasmPaths=m.ortBase;
         // every core the computer has, where the browser allows more than one
         self.ort.env.wasm.numThreads=Math.max(1,Math.min(8,(self.navigator.hardwareConcurrency||2)-1));
-        session=await self.ort.InferenceSession.create(new Uint8Array(m.bytes),{executionProviders:['wasm']});
-        self.postMessage({id:m.id});
+        bytes=new Uint8Array(m.bytes);
+        if(self.navigator.gpu){ try{ session=await open(['webgpu','wasm']); gpu=true; }catch(err){ session=null; } }
+        if(!session) session=await open(['wasm']);
+        self.postMessage({id:m.id,gpu});
       }else if(m.type==='run'){
         const T=512, ort=self.ort;
-        const out=await session.run({
+        const feed=()=>({
           image:new ort.Tensor('float32',new Float32Array(m.image),[1,3,T,T]),
           mask:new ort.Tensor('float32',new Float32Array(m.mask),[1,1,T,T])});
+        let out;
+        try{ out=await session.run(feed()); }
+        catch(err){
+          // a graphics card that took the model but cannot run it
+          if(!gpu) throw err;
+          session=await open(['wasm']); gpu=false;
+          out=await session.run(feed());
+        }
         const d=new Float32Array(out[session.outputNames[0]].data);
         self.postMessage({id:m.id,data:d.buffer},[d.buffer]);
       }
