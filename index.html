@@ -13287,16 +13287,19 @@ async function cropApplyGt(){
     // traced again off the new one with the same settings
     const old=d.trace; let retraced=false;
     d.trace=null;
-    // a rectangle or circle is the picture's box, whatever is in it
-    if(old&&old.shape) d.trace=old;
-    // what is held back as the saved line was read off the old picture too
-    if(gtCutDraft&&gtCutDraft.id===d.id&&gtCutDraft.saved&&!gtCutDraft.saved.shape){
-      try{ const l2=gtTraceDesign(d,gtCutDraft.saved.thr||50); if(l2) gtCutDraft.saved={...gtCutDraft.saved,loop:l2}; }catch(e){}
-    }
+    // a rectangle or circle is the picture's box, whatever is in it - a circle
+    // made round again for the cropped picture's shape, or it comes out an oval
+    if(old&&old.shape) d.trace=old.shape==='circle'?{...old,loop:gtCircleLoopFor(d)}:old;
     else if(old){
       let loop=null;
       try{ loop=gtTraceDesign(d,old.thr||50); }catch(e){ loop=null; }
       if(loop){ d.trace={...old,loop}; retraced=true; }
+    }
+    // and what is held back as the saved line was read off the old picture too
+    const sv=gtCutDraft&&gtCutDraft.id===d.id?gtCutDraft.saved:null;
+    if(sv&&sv.shape==='circle') gtCutDraft.saved={...sv,loop:gtCircleLoopFor(d)};
+    else if(sv&&!sv.shape){
+      try{ const l2=gtTraceDesign(d,sv.thr||50); if(l2) gtCutDraft.saved={...sv,loop:l2}; }catch(e){}
     }
     await gtSaveLib();
     gtArtWriteInputs(); gtArtChanged();
@@ -31031,6 +31034,8 @@ let gtOwnDesigns=null;
 // one back.
 let gtCutDraft=null;               // {id, saved: the design's trace as last saved}
 const gtTraceKept=d=>gtCutDraft&&d&&gtCutDraft.id===d.id?gtCutDraft.saved:(d?d.trace:null);
+// and the picture's scale, where Fit artwork to cut line changed it with the line
+const gtArtKept=d=>gtCutDraft&&d&&gtCutDraft.id===d.id&&gtCutDraft.art!==undefined?gtCutDraft.art:(d?d.art:null);
 // called before every change a person makes to the cut line
 function gtCutBegin(d){
   if(!d) return;
@@ -31081,7 +31086,7 @@ function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
   gtKeepShape();
   return {version:2,sheet:{...gtSheet,slots:gtSlotsBase},
-    designs:own.filter(d=>!d.adhoc).map(d=>gtManDesign({...d,trace:gtTraceKept(d)})),
+    designs:own.filter(d=>!d.adhoc).map(d=>gtManDesign({...d,trace:gtTraceKept(d),art:gtArtKept(d)})),
     fonts:gtLib.fonts.map(f=>({id:f.id,name:f.name,file:f.file})),
     texts:gtLib.texts.map(t=>({id:t.id,name:t.name,text:t.text,font:t.font||undefined})),
     // the words set on Pigu-folder designs — see gtPiguFields. Kept only in
@@ -31173,7 +31178,7 @@ async function gtPiguFieldsSave(){
     // line are kept with the words: a folder design is read afresh every visit,
     // and a size set on it went back to the default each time
     const keep={fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
-      artV:2,art:d.art||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,cutSeen:d.cutSeen||null};
+      artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,cutSeen:d.cutSeen||null};
     const now=JSON.stringify(keep);
     if(JSON.stringify(map[d.file]||null)!==now){ map[d.file]=JSON.parse(now); changed=true; }
   });
@@ -31881,8 +31886,10 @@ function gtNormalizeDesign(d){
          ...(d.trace.shape==='rect'||d.trace.shape==='circle'?{shape:d.trace.shape}:{}),
          // its outside corners rounded to this radius, in mm
          ...(Number(d.trace.rd)>0?{rd:Number(d.trace.rd)}:{}),
-         // traced to keep the picture's own size (see gtFitD)
+         // traced to keep the picture's own size (see gtFitD), and the tag it was sized against
          ...(d.trace.ownSize?{ownSize:true}:{}),
+         ...(d.trace.refBox&&Number(d.trace.refBox.w)>0&&Number(d.trace.refBox.h)>0
+             ?{refBox:{w:Number(d.trace.refBox.w),h:Number(d.trace.refBox.h)}}:{}),
          // further cut lines set by hand — rectangles and circles, each its middle
          // and size as fractions of the artwork's box, like the loop
          ...(Array.isArray(d.trace.more)&&d.trace.more.length
@@ -33904,6 +33911,13 @@ function gtTraceExtras(d,r){
 // held in. The circle's points are close enough together that the cutter's own
 // step is what it is cut at.
 const GT_CUT_MAX=10;               // cut lines on one design, the main one included
+// A circle round in millimetres on this design's picture: its diameter the
+// picture's shorter side, in the middle of it, held in the picture's 0..1 terms.
+function gtCircleLoopFor(d){
+  const pic=d&&gtImgGet(d.id), asp=pic&&pic.naturalWidth&&pic.naturalHeight?pic.naturalWidth/pic.naturalHeight:1;
+  const ku=Math.min(1,1/asp), kv=Math.min(1,asp);
+  return gtShapeLoop('circle').map(([u,v])=>[0.5+(u-0.5)*ku,0.5+(v-0.5)*kv]);
+}
 function gtShapeLoop(shape){
   if(shape==='circle'){
     const n=180, out=[];
@@ -34806,6 +34820,8 @@ function gtNestPlan(){
   const dsig=ids.map(id=>{
     const d=gtDesign(id), img=gtImgs.get(id), t=d&&d.trace;
     return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],
+            d&&d.file,img&&img.naturalWidth?[img.naturalWidth,img.naturalHeight]:0,
+            t&&t.refBox?[t.refBox.w,t.refBox.h]:0,
             t&&t.on&&t.loop?[t.out,t.sm,t.loop.length,t.cx,t.cy,t.shape||'',t.rd||0,!!t.ownSize,
               t.more?JSON.stringify(t.more):0,(t.extra||[]).length]:0];
   });
@@ -35088,8 +35104,18 @@ function gtTraceBox(loop){
 // sized by this, so a cut line set outside the outline is inside its
 // placeholder like the rest, and never runs into the next tag.
 const gtExtraBoxes=new WeakMap();
-function gtCutAllBox(t){
+// noMore: leave out the hand-set extra cuts - a line fitted to its placeholder
+// by its outline (traced before ownSize) would otherwise be refitted, and its
+// picture resized, every time an extra cut was moved past it.
+function gtCutAllBox(t,noMore){
   const b={...gtTraceBox(t.loop)};
+  // pulled wider or taller about its middle (CUT WIDTH / CUT HEIGHT): the box
+  // the line really takes, so an extra cut past it is centred with it right
+  // (not for a line traced before today, fitted by its outline - noMore - so
+  // those print exactly as they always have)
+  const cx=!noMore&&Number(t.cx)>0?Number(t.cx):1, cy=!noMore&&Number(t.cy)>0?Number(t.cy):1;
+  if(cx!==1){ const m=(b.u0+b.u1)/2, h=(b.u1-b.u0)/2*cx; b.u0=m-h; b.u1=m+h; }
+  if(cy!==1){ const m=(b.v0+b.v1)/2, h=(b.v1-b.v0)/2*cy; b.v0=m-h; b.v1=m+h; }
   if(Array.isArray(t.extra)&&t.extra.length){
     let e=gtExtraBoxes.get(t.extra);
     if(!e){
@@ -35099,7 +35125,7 @@ function gtCutAllBox(t){
     }
     if(isFinite(e.u0)){ b.u0=Math.min(b.u0,e.u0); b.v0=Math.min(b.v0,e.v0); b.u1=Math.max(b.u1,e.u1); b.v1=Math.max(b.v1,e.v1); }
   }
-  (t.more||[]).forEach(m=>{
+  if(!noMore) (t.more||[]).forEach(m=>{
     b.u0=Math.min(b.u0,m.u-m.fw/2); b.u1=Math.max(b.u1,m.u+m.fw/2);
     b.v0=Math.min(b.v0,m.v-m.fh/2); b.v1=Math.max(b.v1,m.v+m.fh/2);
   });
@@ -35128,7 +35154,7 @@ function gtFitD(d,iw,ih,bw,bh){
     // A hair over, for the smoothing — and not the outset as well: the picture
     // is fitted to the placeholder by its outline, so changing the cut line's
     // outset must not change how big the picture is.
-    const bb=gtCutAllBox(t), pad=0.05;
+    const bb=gtCutAllBox(t,true), pad=0.05;
     const cw=(bb.u1-bb.u0)*iw, ch=(bb.v1-bb.v0)*ih;
     if(cw>0&&ch>0&&bw-2*pad>0&&bh-2*pad>0){
       const s=Math.min((bw-2*pad)/cw,(bh-2*pad)/ch);
@@ -35145,7 +35171,10 @@ function gtFitD(d,iw,ih,bw,bh){
     // has one, the same in every place - fitted to each place in turn, a place
     // sized to its cut line shrank it, and the shrinking went round until the
     // tag was 2 mm across.
-    const ref=gtFitRef();
+    // the size it was given when its shape or trace was made (refBox): fitted
+    // against whatever the sheet's first place is now, it changed size the
+    // moment Nest rebuilt the places or the first one was resized
+    const ref=t.refBox&&t.refBox.w>0&&t.refBox.h>0?t.refBox:gtFitRef();
     const f=gtFit(iw,ih,ref.w>0?ref.w:bw,ref.h>0?ref.h:bh), bb=gtCutAllBox(t);
     return {w:f.w,h:f.h,x:bw/2-(bb.u0+bb.u1)/2*f.w,y:bh/2-(bb.v0+bb.v1)/2*f.h};
   }
@@ -36300,6 +36329,9 @@ function gtSheetDrag(c,side){
         const cx=slot0.x+slot0.w/2, cy=slot0.y+slot0.h/2, ang=-(back?-1:1)*slot0.rot*Math.PI/180;
         const c=Math.cos(ang), sn=Math.sin(ang), dx=p.mx-cx, dy=p.my-cy;
         P={mx:cx+dx*c-dy*sn,my:cy+dx*sn+dy*c}; slot=gtUnrotSlot(slot0);
+        // packed at an angle, boxes overlap at their corners: the point has to
+        // be on this tag, not merely in the box round it
+        if(slot0.tw&&(P.mx<slot.x||P.my<slot.y||P.mx>slot.x+slot.w||P.my>slot.y+slot.h)) continue;
       }
       const d=gtDesign(line.designId); if(!d) return {line};
       const art=gtTagArt(line,slot);
@@ -36335,6 +36367,13 @@ function gtSheetDrag(c,side){
     for(let i=gtSheet.slots.length-1;i>=0;i--){
       const s=gtSheet.slots[i];
       if(p.mx<s.x||p.my<s.y||p.mx>s.x+s.w||p.my>s.y+s.h) continue;
+      // turned off the quarter, the box overlaps its neighbours' - the point has
+      // to be on the tag as it lies
+      if(s.rot&&s.tw){
+        const cx=s.x+s.w/2, cy=s.y+s.h/2, a=-s.rot*Math.PI/180, c=Math.cos(a), sn=Math.sin(a);
+        const dx=p.mx-cx, dy=p.my-cy, u=gtUnrotSlot(s), X=cx+dx*c-dy*sn, Y=cy+dx*sn+dy*c;
+        if(X<u.x||Y<u.y||X>u.x+u.w||Y>u.y+u.h) continue;
+      }
       const corner=(s.x+s.w-p.mx)<=Math.min(g,s.w*0.35)
                  &&(s.y+s.h-p.my)<=Math.min(g,s.h*0.35);
       return {slot:s,corner};
@@ -39585,13 +39624,9 @@ document.getElementById('gtCutShapeSeg').addEventListener('click',e=>{
   // filling a picture that is not square made it an oval. Its diameter is the
   // picture's shorter side, in the middle of it; CUT WIDTH / CUT HEIGHT make an
   // oval of it on purpose.
-  let loop=gtShapeLoop(want);
-  if(want==='circle'){
-    const pic=gtImgGet(d.id), asp=pic&&pic.naturalWidth&&pic.naturalHeight?pic.naturalWidth/pic.naturalHeight:1;
-    const ku=Math.min(1,1/asp), kv=Math.min(1,asp);
-    loop=loop.map(([u,v])=>[0.5+(u-0.5)*ku,0.5+(v-0.5)*kv]);
-  }
-  d.trace={loop,shape:want,out:0,thr,sm:0,on:true,
+  const loop=want==='circle'?gtCircleLoopFor(d):gtShapeLoop(want);
+  const rb=gtFitRef();
+  d.trace={loop,shape:want,out:0,thr,sm:0,on:true,refBox:{w:rb.w,h:rb.h},
     ...(old.more?{more:old.more}:{})};
   gtArtWriteInputs(); gtArtChanged();
 });
@@ -39768,7 +39803,8 @@ document.getElementById('gtTraceBtn').addEventListener('click',()=>{
     // tag. Fitted by its outline instead (how lines traced before this still
     // work), a picture with blank space round its art was blown up until the
     // outline filled the tag - many times its size, and tiny on screen.
-    d.trace={loop,out:isFinite(out)?out:1,thr,sm:isFinite(sm)&&sm>=0?sm:GT_TRACE_SMOOTH,on:true,ownSize:true,...(more?{more}:{})};
+    const rb=gtFitRef();
+    d.trace={loop,out:isFinite(out)?out:1,thr,sm:isFinite(sm)&&sm>=0?sm:GT_TRACE_SMOOTH,on:true,ownSize:true,refBox:{w:rb.w,h:rb.h},...(more?{more}:{})};
     gtArtWriteInputs();
     showMsg(msg,`✓ Traced — ${loop.length} points. The cut line follows the artwork now; `
       +'press Save cut line to keep it, or switch it off above to go back to the placeholder.',true);
@@ -40506,9 +40542,11 @@ undoDef('print',{
     refMark:state.refMark,foldLine:state.foldLine,bleed:state.bleed,
     rotate:state.rotate,shift:state.shift,art:state.art,
     // the design lines — added, taken off, how many of each
+    // held by line and file together: a row swapped to another file keeps its
+    // id, and a step back gave it the old file's name with the new one's picture
     lines:(state.designs||[]).map(d=>{
       const {data,img,file,...rest}=d;
-      UNDO_HELD.set(d.id,{data,img,file});
+      UNDO_HELD.set(d.id+'|'+((d.source&&d.source.path)||d.name||''),{data,img,file});
       return rest;
     }),
     // Place Card text — carried in the shared 'print' history; [] in Custom Template
@@ -40517,7 +40555,7 @@ undoDef('print',{
     const {lines,...meta}=v;
     applyPrintState(meta);
     if(Array.isArray(lines)){
-      state.designs=lines.map(r=>({...r,...(UNDO_HELD.get(r.id)||{})}));
+      state.designs=lines.map(r=>({...r,...(UNDO_HELD.get(r.id+'|'+((r.source&&r.source.path)||r.name||''))||{})}));
       state.page=0;
       renderDesignLines(); updateCalc(); drawAll();
     }
@@ -48533,7 +48571,7 @@ async function mcSetSkuQty(sku,want,only){
   if(!mcBatch||mcBatch.status!=='open'){
     showMsg(out,'This batch is completed — re-open it to change it.',false); mcRenderSummary(); return; }
   if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); mcRenderSummary(); return; }
-  const lines=mcItems.filter(it=>mcRowKey(it)===sku&&!mcMergedKey(it)&&(!only||only(it)));
+  const lines=mcItems.filter(it=>mcRowKey(it)===sku&&!mcMergedKey(it)&&!mcIsExtraDesign(it)&&(!only||only(it)));
   if(!lines.length) return;
   // Two different figures, and they were one. `onSheet` is what this SKU is set
   // to print now — which is what the box shows and what a new share is worked
@@ -54061,17 +54099,23 @@ async function mcGtPutOneOff(it,d){
 // Called with the sheet_item about to be written, and writes into it. The bytes
 // go up once; the name, the words and the hole can all be changed on the sheet
 // afterwards, so those are refreshed every time.
+// Save to line pressed: a cut line held back until Save is saved with it -
+// the line on screen is what is being saved. Only the buttons call this.
+function mcCutCommit(){
+  if(typeof gtCutDraft==='undefined'||!gtCutDraft) return;
+  gtCutDraft=null;
+  // the library and a Pigu-folder design's kept settings both
+  if(typeof gtSaveSoon==='function') gtSaveSoon();
+  if(typeof gtCutSaveWrite==='function') try{ gtCutSaveWrite(); }catch(e){}
+}
 async function mcGtKeepOneOffOn(it,si){
   if(!si) return;
   const d=si.designId?mcGtDesign(si.designId):null;
-  // Saving the line is saving its tag, cut line and all: a line traced and
-  // saved to the line came back with the cut line it had before the trace.
-  if(d&&typeof gtCutDraft!=='undefined'&&gtCutDraft&&gtCutDraft.id===d.id){
-    gtCutDraft=null;
-    // the library and a Pigu-folder design's kept settings both
-    if(typeof gtSaveSoon==='function') gtSaveSoon();
-    if(typeof gtCutSaveWrite==='function') try{ gtCutSaveWrite(); }catch(e){}
-  }
+  // A cut line still being worked on (not saved, not discarded) is not this
+  // copy's: every write-back comes through here - leaving the screen, Download
+  // All, a page move - and committing it here saved a line meant to be thrown
+  // away. The copy takes the line as last saved; Save to line commits a held
+  // line first (mcCutCommit), so pressing it saves what is on screen.
   // A design the loaded library does not hold is not "no longer a one-off": the
   // library on hand may be the other page's, or the fetch of the copy may have
   // failed. Only a design that is there and is an ordinary one clears the saved
@@ -54098,7 +54142,7 @@ async function mcGtKeepOneOffOn(it,si){
   // put back over a line traced by hand.
   si.oneOff={id:d.id,name:d.name||'',file:d.file||path,path,
     fields:(d.fields||[]),hole:d.hole||null,...(d.back?{back:d.back}:{}),
-    artV:2,art:d.art||null,bleed:d.bleed||null,trace:d.trace||null,
+    artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,
     ...(d.cutSeen?{cutSeen:d.cutSeen}:{})};
 }
 // The copies these lines are carrying, back into the library — only the ones
@@ -54613,6 +54657,7 @@ function mcGiftWire(it){
     const msg=document.getElementById('mcWinMsg');
     if(!mcGtPick){ showMsg(msg,'Search for a design and pick one first.',false); return; }
     it.sheet_item=collect();
+    mcCutCommit();               // Save to line saves the cut line on screen too
     // a one-off is nobody's file but this session's, so the line takes a copy
     await mcGtKeepOneOffOn(it,it.sheet_item);
     if(await mcSave(it,{sheet_item:it.sheet_item,...mcDonePatch(it,true)})){
@@ -54911,7 +54956,7 @@ async function mcGtReturn(){
   // the run the batch set was the lent sheet's; the page goes back to its own
   if(typeof gtFinishRestore==='function') await gtFinishRestore();
   if(typeof gtRenderOrder==='function') gtRenderOrder();
-  await mcGtWriteBack(edited,home);
+  await mcGtWriteBack(edited,home,!mcBusy);
   // A row added on the sheet that did not become a line - its order not given,
   // or no design picked yet - is the page's own again rather than lost.
   const stay=edited.filter(l=>l&&!mcGtLent(l)&&!gtOrder.includes(l)&&(l.designId||l.mcNewFor!==undefined));
@@ -54937,11 +54982,16 @@ async function mcGtReturn(){
 // the same SKU, run and page, named for its design - and from then on is lent
 // like the rest, so the loop below writes it as it writes them. One with no
 // design yet is left as it is, to be taken the next time this runs.
-async function mcGtAdoptNewRows(edited,home){
+async function mcGtAdoptNewRows(edited,home,asked){
   if(!sb||!mcBatch||mcBatch.status!=='open') return;
+  let adopted=0;
   for(const l of edited){
-    if(!l||mcGtLent(l)||!l.mcNewFor||!l.designId) continue;
+    // one already being added by a write-back still running is left to it
+    if(!l||mcGtLent(l)||!l.mcNewFor||!l.designId||l.mcAdopting) continue;
     if(l.mcNewFor==='?'){
+      // the order is only asked for on a save somebody pressed - never in the
+      // middle of an export borrowing the sheet, where Cancel lost the design
+      if(!asked) continue;
       const lentOrders=[...new Set(edited.filter(mcGtLent).map(x=>mcItem(String(x.id).slice(3)))
         .filter(Boolean).map(x=>String(x.order_id||'').trim()).filter(Boolean))];
       const d0=gtDesign(l.designId);
@@ -54957,6 +55007,7 @@ async function mcGtAdoptNewRows(edited,home){
     }
     const from=mcItem(String(l.mcNewFor)); if(!from) continue;
     const d=gtDesign(l.designId);
+    l.mcAdopting=true;
     try{
       const {data:{session}}=await sb.auth.getSession();
       if(!session) return;
@@ -54966,25 +55017,31 @@ async function mcGtAdoptNewRows(edited,home){
         product:from.product||'',design_name:(d&&d.name)||'',
         qty:Math.max(1,Math.round(Number(l.qty)||1)),message:'',note:'',image_url:'',raw:{extraDesign:true},
         tile:'giftTag',
-        sheet_item:{page:home.page||gtMode,finish:home.finish||((from.sheet_item||{}).finish)||'Matte'}};
+        // the page it was added on - a row added after switching pages is that page's design
+        sheet_item:{page:l.mcPage||home.page||gtMode,finish:home.finish||((from.sheet_item||{}).finish)||'Matte'}};
       const {data,error}=await sb.from('magic_items').insert(row).select().single();
       if(error||!data){
         mcWarn(`${from.order_id||'The order'}: the extra design on the gift tag sheet could not be added as a line`
-          +`${error&&error.message?': '+error.message:''}. Press Save to line again.`);
+          +`${error&&error.message?': '+error.message:''}. Press Save to line again - if the sheet has been closed, it is on the page's own sheet.`);
         continue;
       }
       if(!mcItems.some(x=>x.id===data.id)) mcItems.push(data);
       // lent from here on, under the line it now is
-      l.id='mc-'+data.id; delete l.mcNewFor;
+      l.id='mc-'+data.id; delete l.mcNewFor; delete l.mcPage;
       l.sku=mcRowKey(data);
       if(home&&Array.isArray(home.ids)&&!home.ids.includes(data.id)) home.ids.push(data.id);
+      adopted++;
     }catch(e){
       mcWarn(`${from.order_id||'The order'}: the extra design could not be added as a line. Press Save to line again.`);
-    }
+    }finally{ delete l.mcAdopting; }
   }
+  // A step back from here would bring back the row as it was before it became
+  // a line - and the next save would add the line a second time. The gift tag
+  // history starts again from the sheet as it is now.
+  if(adopted&&typeof UNDO!=='undefined'){ UNDO.past.gift=[]; UNDO.future.gift=[]; try{ syncUndoBtns(); }catch(e){} }
 }
-async function mcGtWriteBack(edited,home){
-  await mcGtAdoptNewRows(edited,home);
+async function mcGtWriteBack(edited,home,asked){
+  await mcGtAdoptNewRows(edited,home,asked);
   for(const l of edited){
     const id=String(l.id||'').startsWith('mc-')?String(l.id).slice(3):null;
     const it=id?mcItem(id):null;
@@ -56270,7 +56327,7 @@ const PJ_KINDS={
           ...(d&&d.adhoc?{oneOff:{name:d.name||'',file:d.file||'',
             fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
             // how it sits, its own bleed and its traced cut line
-            artV:2,art:d.art||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null}}:{})};
+            artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null}}:{})};
       });
       const sheet={};
       GT_JOB_SHEET_KEYS.forEach(k=>{ if(gtSheet[k]!==undefined) sheet[k]=gtSheet[k]; });
@@ -56946,10 +57003,12 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
       // switch they were parked elsewhere, this saw none of them, and wrote the
       // whole loan off the batch as if every tag had been taken off.
       const lent=mcGtLentRows();
-      await mcGtWriteBack(lent,mcGtHome);
+      mcCutCommit();             // Save to line saves the cut line on screen too
+      await mcGtWriteBack(lent,mcGtHome,true);
       // and what is lent is now what is on the batch, so a tag taken off after
-      // this is measured against this rather than against what was lent
-      mcGtHome.ids=lent.map(l=>String(l.id).slice(3));
+      // this is measured against this rather than against what was lent - the
+      // batch's lines only, not a row that has not become one
+      mcGtHome.ids=lent.filter(mcGtLent).map(l=>String(l.id).slice(3));
       const n=lent.filter(l=>l&&l.designId).length;
       if(mcOnBatch()) mcRenderItems();
       mcSyncBatchButtons();
