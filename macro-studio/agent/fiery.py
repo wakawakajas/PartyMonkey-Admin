@@ -30,7 +30,6 @@ import io
 import json
 import os
 import platform
-import socket
 import ssl
 import threading
 import time
@@ -78,8 +77,8 @@ DEFAULTS: dict[str, Any] = {
     # the press, before it is sent anyway.
     "order_wait_minutes": 20,
     # When the Fiery API turns the key down (an expired licence), send over
-    # LPR instead -- the Fiery's plain printer queues, no key needed.
-    "lpr_fallback": True,
+    # IPP instead -- the Fiery's plain printer queue, no key needed.
+    "ipp_fallback": True,
     # Send a slim copy of big Illustrator PDFs (their editing data left out).
     # Off until a slim copy has been opened in Acrobat and printed from the
     # Fiery: the first version of this made files Acrobat and the Fiery could
@@ -425,20 +424,49 @@ class Fiery:
         raise FieryError(f"The job is on the Fiery, held -- it would not print: {last}")
 
 
-# ---------------------------------------------------------------- LPR
+# ---------------------------------------------------------------- IPP
 # The way in that needs no API key: the Fiery is also an ordinary network
-# printer. Over LPR every virtual printer set up in Command WorkStation is a
-# queue of its own name, and a job sent to it takes that virtual printer's
-# preset and job action -- each server preset is published as one, set to
-# Hold. (IPP was tried first: the Fiery answers there under any name and
-# applies no preset.) A preset without a virtual printer goes to the plain
-# hold queue and is given its preset by hand. What is lost is the job's
-# progress: LPR hands the file over and nothing comes back.
-
-LPR_PORT = 515
+# printer, with queues named print and hold, and one more for every virtual
+# printer set up in Command WorkStation. A virtual printer named exactly like
+# a server preset carries that preset; without one the job goes to hold and
+# the preset is put on it by hand. What is lost is the job's progress -- IPP
+# hands the file over and the Fiery's own job id is all that comes back.
 
 
-class FieryLPR:
+def _ipp_attr(tag: int, name: str, value: Any) -> bytes:
+    if isinstance(value, int):
+        raw = value.to_bytes(4, "big", signed=True)
+    else:
+        raw = str(value).encode("utf-8")
+    return (bytes([tag]) + len(name).to_bytes(2, "big") + name.encode("utf-8")
+            + len(raw).to_bytes(2, "big") + raw)
+
+
+def _ipp_status(raw: bytes) -> tuple[int, dict]:
+    """The status code and the integer/text attributes of an IPP answer."""
+    status = int.from_bytes(raw[2:4], "big") if len(raw) >= 4 else 0xFFFF
+    out: dict[str, Any] = {}
+    i, name = 8, ""
+    while i < len(raw):
+        tag = raw[i]
+        i += 1
+        if tag == 0x03:
+            break
+        if tag < 0x10:
+            continue
+        nl = int.from_bytes(raw[i:i + 2], "big")
+        n = raw[i + 2:i + 2 + nl].decode("latin-1")
+        i += 2 + nl
+        vl = int.from_bytes(raw[i:i + 2], "big")
+        v = raw[i + 2:i + 2 + vl]
+        i += 2 + vl
+        name = n or name
+        if name not in out:
+            out[name] = int.from_bytes(v, "big") if tag == 0x21 and vl == 4 else v.decode("utf-8", "replace")
+    return status, out
+
+
+class FieryIPP:
     """Jobs onto the Fiery as a plain printer, for while the API is shut."""
 
     def __init__(self, cfg: dict):
@@ -447,51 +475,77 @@ class FieryLPR:
         if not host:
             raise FieryError("No Fiery address in fiery.json (fiery_host).")
         self.host = host
+        self._queues: dict[str, bool] = {}
 
-    def send(self, queue: str, name: str, pdf: Any, copies: int) -> None:
-        """RFC 1179 receive-job: the control file, then the data. A queue the
-        Fiery does not have is refused at the first byte."""
+    def _post(self, queue: str, op: int, attrs: bytes, data: Any = b"",
+              length: int = 0, timeout: int = 30) -> tuple[int, dict]:
+        uri = f"ipp://{self.host}/ipp/{urllib.parse.quote(queue)}"
+        head = (b"\x01\x01" + op.to_bytes(2, "big") + (1).to_bytes(4, "big") + b"\x01"
+                + _ipp_attr(0x47, "attributes-charset", "utf-8")
+                + _ipp_attr(0x48, "attributes-natural-language", "en")
+                + _ipp_attr(0x45, "printer-uri", uri) + attrs + b"\x03")
+        if isinstance(data, (bytes, bytearray)):
+            body: Any = head + bytes(data)
+            length = 0
+        else:
+            def pieces():
+                yield head
+                yield from data
+            body = pieces()
+            length += len(head)
+        req = urllib.request.Request(f"http://{self.host}:631/ipp/{urllib.parse.quote(queue)}",
+                                     data=body, method="POST")
+        req.add_header("Content-Type", "application/ipp")
+        if length:
+            req.add_header("Content-Length", str(length))
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+                return _ipp_status(res.read())
+        except urllib.error.HTTPError as exc:
+            raise FieryError(f"Fiery printer queue {queue} -> HTTP {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise FieryError(f"Cannot reach the Fiery's printer queue at {self.host}: {exc}") from exc
+
+    def has_queue(self, queue: str) -> bool:
+        if queue not in self._queues:
+            try:
+                status, _ = self._post(queue, 0x000B, b"", timeout=15)  # Get-Printer-Attributes
+                self._queues[queue] = status < 0x0100
+            except FieryError:
+                self._queues[queue] = False
+        return self._queues[queue]
+
+    def queue_for(self, row: dict) -> str:
+        """The preset's own virtual printer where there is one, else hold."""
+        preset = _preset_name(str(row.get("preset_id") or ""))
+        if preset and self.has_queue(preset):
+            return preset
+        return "hold"
+
+    def send(self, queue: str, name: str, pdf: Any, copies: int) -> str:
+        attrs = (_ipp_attr(0x42, "requesting-user-name", "Macro Studio")
+                 + _ipp_attr(0x42, "job-name", name)
+                 + _ipp_attr(0x49, "document-format", "application/pdf")
+                 + b"\x02" + _ipp_attr(0x21, "copies", max(1, int(copies))))
         if isinstance(pdf, Path):
             size = pdf.stat().st_size
-        else:
-            size = len(pdf)
-        job = uuid.uuid4().int % 1000
-        me = "macrostudio"
-        title = name.replace("\n", " ")[:120]
-        data_name = f"dfA{job:03d}{me}"
-        # one print line per copy: the LPR way of asking for copies
-        control = (f"H{me}\nPMacroStudio\nJ{title}\nN{title}\n"
-                   + f"l{data_name}\n" * max(1, int(copies))).encode("utf-8")
-        timeout = max(600, int(size / (100 << 20) * 60))
-        try:
-            with socket.create_connection((self.host, LPR_PORT), timeout=30) as s:
-                s.settimeout(timeout)
 
-                def ack(what: str) -> None:
-                    got = s.recv(1)
-                    if got != b"\x00":
-                        raise FieryError(f"The Fiery's {queue} queue refused the {what}.")
-                s.sendall(b"\x02" + queue.encode("utf-8") + b"\n")
-                ack("job")
-                s.sendall(f"\x02{len(control)} cfA{job:03d}{me}\n".encode("utf-8"))
-                ack("job ticket")
-                s.sendall(control + b"\x00")
-                ack("job ticket")
-                s.sendall(f"\x03{size} {data_name}\n".encode("utf-8"))
-                ack("file")
-                if isinstance(pdf, Path):
-                    with open(pdf, "rb") as fh:
-                        while True:
-                            chunk = fh.read(1 << 20)
-                            if not chunk:
-                                break
-                            s.sendall(chunk)
-                else:
-                    s.sendall(pdf)
-                s.sendall(b"\x00")
-                ack("file")
-        except OSError as exc:
-            raise FieryError(f"Cannot reach the Fiery's printer queue at {self.host}: {exc}") from exc
+            def chunks():
+                with open(pdf, "rb") as fh:
+                    while True:
+                        chunk = fh.read(1 << 20)
+                        if not chunk:
+                            break
+                        yield chunk
+            data: Any = chunks()
+        else:
+            data, size = pdf, len(pdf)
+        timeout = max(600, int(size / (100 << 20) * 60))
+        status, out = self._post(queue, 0x0002, attrs, data, length=size, timeout=timeout)
+        if status >= 0x0100:
+            raise FieryError(f"The Fiery's {queue} queue refused {name} "
+                             f"(IPP status 0x{status:04x}).")
+        return f"ipp:{queue}:{out.get('job-id', '')}"
 
 
 _preset_names: dict[str, str] = {}
@@ -516,9 +570,7 @@ def _api_shut(exc: Exception) -> bool:
     return "licence has run out" in str(exc)
 
 
-def lpr_send_one(lpr: FieryLPR, row: dict) -> str:
-    """One row's file to the preset's virtual printer, or to hold. Returns
-    where it went."""
+def ipp_send_one(ipp: FieryIPP, row: dict) -> str:
     path = _find_file(row)
     if path is None:
         raise FieryError(f"{row.get('file_name')} is not in {load().get('folder')}.")
@@ -529,17 +581,10 @@ def lpr_send_one(lpr: FieryLPR, row: dict) -> str:
         pdf: Any = send
     else:
         pdf = _only_pages(_as_pdf(send), pages)
-    copies = int(row.get("copies") or 1)
-    preset = _preset_name(str(row.get("preset_id") or ""))
-    if preset:
-        try:
-            lpr.send(preset, name, pdf, copies)
-            return f"lpr:{preset}"
-        except FieryError as exc:
-            if "refused the job" not in str(exc):
-                raise
-    lpr.send("hold", name, pdf, copies)
-    return "lpr:hold" + (f" (no virtual printer {preset}: set the preset by hand)" if preset else "")
+    queue = ipp.queue_for(row)
+    if queue == "hold" and row.get("action") == "print" and not row.get("preset_id"):
+        queue = "print"         # nothing to put on it by hand: straight to print
+    return ipp.send(queue, name, pdf, int(row.get("copies") or 1))
 
 
 # ---------------------------------------------------------------- the PDF
@@ -982,8 +1027,8 @@ def sync_once() -> dict:
         try:
             fiery.login()
         except FieryError as exc:
-            if _api_shut(exc) and cfg.get("lpr_fallback"):
-                _lpr_pass(cloud, todo, report)
+            if _api_shut(exc) and cfg.get("ipp_fallback"):
+                _ipp_pass(cloud, todo, report)
                 _state["last_error"] = str(exc) + " Sending over the printer queue meanwhile."
                 _state["last_pass_at"] = _now()
                 return report
@@ -1065,15 +1110,15 @@ def sync_once() -> dict:
     return report
 
 
-def _lpr_pass(cloud: Cloud, todo: list[dict], report: dict) -> None:
-    """The claimed rows sent over LPR, one after another in the batch's order
+def _ipp_pass(cloud: Cloud, todo: list[dict], report: dict) -> None:
+    """The claimed rows sent over IPP, one after another in the batch's order
     -- with no progress to read, a run is kept in order by sending it so."""
-    lpr = FieryLPR(load())
+    ipp = FieryIPP(load())
     for row in todo:
         if _stopped(cloud, row):
             continue
         try:
-            job_id = lpr_send_one(lpr, row)
+            job_id = ipp_send_one(ipp, row)
             _finish(cloud, row["id"], True, job_id=job_id)
             report["sent"] += 1
             _state["sent_total"] += 1
