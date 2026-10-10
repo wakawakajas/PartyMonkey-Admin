@@ -7266,10 +7266,16 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
       <div class="preview-card">
         <div class="top-row"><span id="gtDesignLbl">ONE TAG</span>
           <div style="display:flex;gap:4px;align-items:center;">
+            <button class="icon-btn" id="gtEdZoomOut" title="Further out (Ctrl + scroll on the tag)">−</button>
+            <button class="icon-btn" id="gtEdZoomFit" title="The whole tag, picture and cut line in view">Fit</button>
+            <button class="icon-btn" id="gtEdZoomIn" title="Closer in (Ctrl + scroll on the tag)">+</button>
             <button class="icon-btn" id="gtReplaceArtBtn">Replace artwork</button>
           </div>
         </div>
-        <canvas id="gtDesignCanvas" style="touch-action:none;cursor:default;"></canvas>
+        <!-- zoomed in, the tag is bigger than its card and scrolls inside it -->
+        <div id="gtDesignScroll" style="overflow:auto;max-height:82vh;">
+        <canvas id="gtDesignCanvas" style="touch-action:none;cursor:default;display:block;max-width:none;"></canvas>
+        </div>
 
         <!-- One panel for every text on the tag, rather than a card each with
              its own copy of the same boxes. It shows whatever is selected and
@@ -33810,9 +33816,20 @@ const GT_CUT_MAX=10;               // cut lines on one design, the main one incl
 // Where the artwork actually is in its picture, as 0..1 fractions of it: read
 // the same way Trace reads the edge (transparency, or where it meets its
 // background). null where there is no picture, or nothing to tell apart.
+// Only a picture with a transparent margin is cut in to its art: an opaque one
+// is the tag as drawn — a white card with a picture on it — and reading its edge
+// off the background cut the rectangle down to the picture alone.
 function gtArtInkBox(d,thr){
   const img=d&&gtImgGet(d.id);
   if(!img||!img.naturalWidth) return null;
+  try{
+    const n=64, c=document.createElement('canvas'); c.width=c.height=n;
+    const x=c.getContext('2d',{willReadFrequently:true}); x.drawImage(img,0,0,n,n);
+    const px=x.getImageData(0,0,n,n).data; let clear=0;
+    for(let i=3;i<px.length;i+=4) if(px[i]<200) clear++;
+    c.width=c.height=0;
+    if(clear<=n*n*0.02) return null;
+  }catch(e){ return null; }
   let m=null; try{ m=gtTraceMask(img,thr); }catch(e){ return null; }
   if(!m||!m.inside) return null;
   const {inside,W,H}=m;
@@ -38347,6 +38364,23 @@ document.getElementById('gtImportLibBtn').addEventListener('click',async()=>{
 
 // ---------- design editor ----------
 const GT_EDIT_MAX=1600;            // the editor canvas's longest side, in px
+// Zoom on the tag, on top of the fit: 1 is the whole view in its card. The
+// canvas is capped at GT_EDIT_PX_MAX a side, past which a browser starts
+// refusing to make it.
+let gtEditZoom=1;
+const GT_EDIT_PX_MAX=4200;
+function gtEditZoomSet(z){
+  gtEditZoom=Math.max(0.25,Math.min(6,Number(z)||1));
+  const out=document.getElementById('gtEdZoomOut'), inn=document.getElementById('gtEdZoomIn');
+  if(out) out.disabled=gtEditZoom<=0.25+1e-9;
+  if(inn) inn.disabled=gtEditZoom>=6-1e-9;
+  const fit=document.getElementById('gtEdZoomFit');
+  if(fit) fit.textContent=Math.abs(gtEditZoom-1)<1e-9?'Fit':Math.round(gtEditZoom*100)+'%';
+  gtDrawDesign();
+  // once more after the page has laid the new size out, so scroll bars coming
+  // and going settle at once rather than on the next change
+  requestAnimationFrame(()=>{ try{ gtDrawDesign(); }catch(e){} });
+}
 // The editor shows a whole placeholder, not the artwork alone — a design has to
 // be judged at the size and shape the sheet will give it.
 // px per mm here, so everything below is in the sheet's own units.
@@ -38355,7 +38389,9 @@ function gtEditGeom(){
   const T=gtTagBox();
   // drawn to the width it is actually given, so it stays sharp in the narrow
   // sticky rail as well as full width on a phone
-  const host=c.parentElement;
+  // the card, not the scroll box the canvas sits in, whose own width moves
+  // with its scroll bars
+  const host=c.closest('.preview-card')||c.parentElement;
   const availW=host&&host.clientWidth?host.clientWidth-24:GT_EDIT_MAX;
   // the whole width the card gives it, held to most of the window's height so a
   // tall tag still fits on screen
@@ -38374,12 +38410,23 @@ function gtEditGeom(){
   // a design that comes in bigger than its placeholder is still a design to be
   // seen whole, not a corner of it. On the back the picture is turned over, so
   // what hangs over turns with it.
-  let ex0=draw.x, ex1=draw.x+draw.w;
+  let ex0=draw.x, ex1=draw.x+draw.w, ey0=draw.y, ey1=draw.y+draw.h;
+  // and wherever the cut line reaches past both - an outset, a line pulled
+  // wider, an extra cut set off to one side - so it is never cut off the view
+  // while it is being sized
+  if(d&&d.trace&&d.trace.on){
+    try{
+      const pts=(gtTracePlace(d,draw)||[]).concat(...gtTraceExtras(d,draw));
+      pts.forEach(([x,y])=>{ ex0=Math.min(ex0,x); ex1=Math.max(ex1,x); ey0=Math.min(ey0,y); ey1=Math.max(ey1,y); });
+    }catch(e){}
+  }
   if(gtEditSide==='back'){ const a=T.w-ex1, b=T.w-ex0; ex0=a; ex1=b; }
-  const vx0=Math.min(0,ex0), vx1=Math.max(T.w,ex1);
-  const vy0=Math.min(0,draw.y), vy1=Math.max(T.h,draw.y+draw.h);
+  const pad=1;                       // a millimetre round it, so a line on the edge shows
+  const vx0=Math.min(0,ex0-(ex0<0?pad:0)), vx1=Math.max(T.w,ex1+(ex1>T.w?pad:0));
+  const vy0=Math.min(0,ey0-(ey0<0?pad:0)), vy1=Math.max(T.h,ey1+(ey1>T.h?pad:0));
   const vw=vx1-vx0, vh=vy1-vy0;
-  const sc=Math.max(220/Math.max(vw,vh),Math.min(GT_EDIT_MAX/vw,GT_EDIT_MAX/vh,availW/vw,availH/vh));
+  const fit=Math.max(220/Math.max(vw,vh),Math.min(GT_EDIT_MAX/vw,GT_EDIT_MAX/vh,availW/vw,availH/vh));
+  const sc=fit*Math.min(gtEditZoom,GT_EDIT_PX_MAX/(Math.max(vw,vh)*fit));
   const w=Math.max(1,Math.round(vw*sc)), h=Math.max(1,Math.round(vh*sc));
   return {c,img,sc,w,h,art,draw,tag:T,vx0,vy0,vw,vh,over:vw>T.w+1e-6||vh>T.h+1e-6};
 }
@@ -38618,6 +38665,15 @@ document.addEventListener('keydown',e=>{
   clearTimeout(gtNudgeDrawT); gtNudgeDrawT=setTimeout(gtDraw,250);
 });
 let gtNudgeDrawT=0;
+// the zoom buttons, and Ctrl + scroll over the tag
+document.getElementById('gtEdZoomIn').addEventListener('click',()=>gtEditZoomSet(gtEditZoom*1.25));
+document.getElementById('gtEdZoomOut').addEventListener('click',()=>gtEditZoomSet(gtEditZoom/1.25));
+document.getElementById('gtEdZoomFit').addEventListener('click',()=>gtEditZoomSet(1));
+document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
+  if(!(e.ctrlKey||e.metaKey)) return;          // a plain scroll still scrolls the page
+  e.preventDefault();
+  gtEditZoomSet(gtEditZoom*(e.deltaY<0?1.15:1/1.15));
+},{passive:false});
 (function gtDesignDrag(){
   const c=document.getElementById('gtDesignCanvas');
   // the pointer lands on a tag, and a field box is a fraction of the artwork
