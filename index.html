@@ -33258,6 +33258,13 @@ function gtRebuildSlotsFresh(){
     S.slots.push({id:'s'+S.slots.length,shape:null,
       x:round(G.x0+c*(S.tagW+G.gx)), y:round(G.y0+r*(S.tagH+G.gy)), w:S.tagW, h:S.tagH});
 }
+// What a picture with no size of its own is fitted against: the sheet's own
+// first place - the grid's or the cutting file's, never a nested one, which is
+// itself worked out from these sizes (asking it went round and round for ever).
+function gtFitRef(){
+  const s=(gtSlotsBase&&gtSlotsBase[0])||null;
+  return s&&s.w>0&&s.h>0?{w:s.w,h:s.h}:{w:Math.max(5,Number(gtSheet.tagW)||60),h:Math.max(5,Number(gtSheet.tagH)||40)};
+}
 // the size one tag is, for the design editor to draw against
 function gtTagBox(){
   const s=gtSheet.slots[0];
@@ -33268,8 +33275,34 @@ function gtTagBox(){
 // Round corners on a plain rectangle placeholder: its own figure where one was
 // set on it (Fine tune), the sheet's otherwise, and never more than half the
 // shorter side. A placeholder cut from a file keeps the file's own shape.
+// The shape a placeholder is cut to: one of the cutting file's on the sheet,
+// or - for a nested placeholder (nestCut) - one of the file the sheet was on
+// when Nest was chosen, which nesting keeps for the tags that have no cut line
+// of their own. null for a plain placeholder.
+// cutting file path -> its built layout, kept on the function so it is there
+// whenever the sheet is first drawn
+function gtNestCutCache(){ return gtNestCutCache.m||(gtNestCutCache.m=new Map()); }
+function gtNestCutLayout(path){
+  if(!path) return null;
+  if(gtNestCutCache().has(path)) return gtNestCutCache().get(path);
+  gtNestCutCache().set(path,null);    // asked once; filled in when it has been read
+  (async()=>{
+    try{
+      const had=gtShapeSlots.get(path);
+      let lay=had&&had.layout||null;
+      if(!lay){ const f=await gtShapeFile(path); if(f) lay=gtBuildLayout(await f.text()); }
+      if(lay){ gtNestCutCache().set(path,lay); gtNestCache=null; try{ gtDraw(); }catch(e){} }
+    }catch(e){}
+  })();
+  return null;
+}
+function gtSlotShapeOf(slot){
+  if(!slot||slot.shape==null) return null;
+  const lay=slot.nestCut?gtNestCutLayout(slot.nestCut):gtLayout;
+  return (lay&&lay.shapes&&lay.shapes[slot.shape])||null;
+}
 function gtSlotR(slot){
-  if(!slot||slot.shape!=null&&gtLayout&&gtLayout.shapes[slot.shape]) return 0;
+  if(!slot||gtSlotShapeOf(slot)) return 0;
   const r=slot.r!=null&&slot.r!==''?Number(slot.r):Number(gtSheet.slotRadius)||0;
   return Math.max(0,Math.min(isFinite(r)?r:0,slot.w/2,slot.h/2));
 }
@@ -33297,8 +33330,8 @@ function gtStrokeSlot(ctx,slot,sc){
     ctx.stroke(); ctx.restore();
     return true;
   }
-  if(slot.shape==null||!gtLayout||!gtLayout.shapes[slot.shape]) return false;
-  const sh=gtLayout.shapes[slot.shape];
+  const sh=gtSlotShapeOf(slot);
+  if(!sh) return false;
   const sx=slot.w/sh.bbox.w, sy=slot.h/sh.bbox.h;
   ctx.save();
   ctx.translate(slot.x*sc,slot.y*sc);
@@ -34000,7 +34033,7 @@ function gtSlotLoops(slot,opts){
     out.push(traced);
     gtTraceExtras(d,gtArtRectOf(d,slot)).forEach(l=>out.push(l));
   }else{
-    const sh=(slot.shape!=null&&gtLayout&&gtLayout.shapes[slot.shape])||null;
+    const sh=gtSlotShapeOf(slot);
     if(!sh){
       out.push(gtRoundRectLoop(slot.x,slot.y,slot.w,slot.h,gtSlotR(slot)));
     }else{
@@ -34748,9 +34781,24 @@ function gtNestPlan(){
               t.more?JSON.stringify(t.more):0,(t.extra||[]).length]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
-  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),marks,S.qrOn?(Number(S.qrDist)||10):0]);
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
+    S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,marks,S.qrOn?(Number(S.qrDist)||10):0]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
-  const size=new Map(ids.map(id=>[id,gtNestSizeOf(gtDesign(id))]));
+  // A tag with no cut line of its own, where nesting kept the cutting file's
+  // shape: that shape, at the size the file gave it, outline and all.
+  const NC=S.nestCut&&S.nestCut.file?S.nestCut:null, ncLay=NC?gtNestCutLayout(NC.file):null;
+  const ncSh=ncLay&&ncLay.shapes&&ncLay.shapes[NC.shape]||null;
+  const flagOf=id=>{
+    const d=gtDesign(id);
+    if(!ncSh||gtOwnCut(d)||!(NC.w>0&&NC.h>0)) return null;
+    const sx=NC.w/ncSh.bbox.w, sy=NC.h/ncSh.bbox.h;
+    const stepVb=GT_PLT_STEP/Math.max(1e-6,Math.max(sx,sy));
+    let poly=null;
+    try{ poly=gtFlatten(ncSh.d,ncSh.m,stepVb).map(([x,y])=>[(x-ncSh.bbox.x)*sx,(y-ncSh.bbox.y)*sy]); }catch(e){ poly=null; }
+    return {sz:{w:NC.w,h:NC.h},poly:poly&&poly.length>2?poly:null};
+  };
+  const flags=new Map(ids.map(id=>[id,flagOf(id)]));
+  const size=new Map(ids.map(id=>[id,flags.get(id)?flags.get(id).sz:gtNestSizeOf(gtDesign(id))]));
   const dotBlocks=gtDotBlocks(x0,y0,availW+gx,availH+gy,1+Math.max(0,-gx,-gy));
   // One heuristic leaves gaps another would have filled, so the order is packed
   // several ways — tags sorted by height, area, width or longest side, each
@@ -34817,7 +34865,7 @@ function gtNestPlan(){
   // kept if it is no worse, so turning this on can only save paper.
   let realUsed=false;
   if(S.nestReal&&all.length>1){
-    const poly=new Map(ids.map(id=>[id,gtNestPolyOf(gtDesign(id),size.get(id))]));
+    const poly=new Map(ids.map(id=>[id,flags.get(id)?flags.get(id).poly:gtNestPolyOf(gtDesign(id),size.get(id))]));
     if([...poly.values()].some(Boolean)){
       const rall=all.map(it=>({...it,key:it.line.designId,poly:poly.get(it.line.designId)}));
       // finer turns are more shapes to try, so they are given longer
@@ -34868,7 +34916,8 @@ function gtNestPlan(){
     const slots=[], queue=[];
     pg.items.forEach((a,k)=>{
       const {it,pos}=a, b=box(a);
-      slots.push({id:'n'+at+'_'+k,shape:null,added:true,
+      const fl=flags.get(it.line.designId);
+      slots.push({id:'n'+at+'_'+k,shape:fl?NC.shape:null,...(fl?{nestCut:NC.file}:{}),added:true,
         x:Math.round((ox+pos.x)*100)/100,y:Math.round((oy+pos.y)*100)/100,w:b.w,h:b.h,
         ...(turnOf(pos)?{rot:turnOf(pos)}:{}),
         // turned off the quarter, the tag's own size goes with it - see gtUnrotSlot
@@ -35067,7 +35116,7 @@ function gtFitD(d,iw,ih,bw,bh){
     // has one, the same in every place - fitted to each place in turn, a place
     // sized to its cut line shrank it, and the shrinking went round until the
     // tag was 2 mm across.
-    const ref=gtTagBox();
+    const ref=gtFitRef();
     const f=gtFit(iw,ih,ref.w>0?ref.w:bw,ref.h>0?ref.h:bh), bb=gtCutAllBox(t);
     return {w:f.w,h:f.h,x:bw/2-(bb.u0+bb.u1)/2*f.w,y:bh/2-(bb.v0+bb.v1)/2*f.h};
   }
@@ -37372,6 +37421,12 @@ document.getElementById('gtArrangeSeg').addEventListener('click',e=>{
   // Nest makes its own placeholders, so picking it is taking the cutting file off:
   // it used to refuse and leave the choice reading Nest with the file still on
   if(m==='nest'&&gtLayout){
+    // The file's tag shape and size are kept for nesting: a tag with no cut line
+    // of its own is still that shape - a flag stays a flag - rather than the
+    // plain rectangle nesting made of every tag.
+    const rep=gtSheet.slots.find(x=>x.shape!=null&&gtLayout.shapes[x.shape]);
+    gtSheet.nestCut=rep?{file:gtSheet.layoutFile,shape:rep.shape,w:rep.w,h:rep.h}:null;
+    if(rep) gtNestCutCache().set(gtSheet.layoutFile,gtLayout);
     gtSheet.layoutFile=''; gtLayout=null; gtLayoutFrom=''; gtSheet.cutRemoved=true;
     gtSetBaseShape('');
     gtSheet.layoutW=0; gtSheet.layoutH=0; gtSheet.layoutX=null; gtSheet.layoutY=null;
@@ -37417,8 +37472,9 @@ document.getElementById('gtNestRotate').addEventListener('change',e=>{
 document.getElementById('gtNestOn').addEventListener('change',e=>{
   if(e.target.checked&&gtLayout){ e.target.checked=false; gtNestSync(); return; }
   gtSheet.nestOn=e.target.checked; gtNestCache=null; gtPage=0; gtPickOnly(null);
-  // back to the grid: its own placeholders are rebuilt in case the tag size or gutters moved meanwhile
-  if(!gtSheet.nestOn) gtRebuildSlots(true);
+  // back to the grid: its own placeholders are rebuilt in case the tag size or gutters moved meanwhile.
+  // The cutting file's shape nesting kept goes with it.
+  if(!gtSheet.nestOn){ gtRebuildSlots(true); delete gtSheet.nestCut; }
   gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
 });
 document.getElementById('gtNestRealOn').addEventListener('change',e=>{
@@ -56157,7 +56213,7 @@ async function mcGiftBundle(lines,mode,side){
 // the library happens to be on.
 const GT_JOB_SHEET_KEYS=['paperW','paperH','tagW','tagH','margin','gap','gapY','gridMode',
   'leadTrim','sideTrim','gridCols','gridRows','slotRadius','bleedOn','bleed','bleedMode',
-  'nestOn','nestReal','nestRotate','nestRotStep','layoutFile','cutRemoved'];
+  'nestOn','nestReal','nestRotate','nestRotStep','nestCut','layoutFile','cutRemoved'];
 const PJ_KINDS={
   giftTag:{
     label:'Gift tag sheet',
