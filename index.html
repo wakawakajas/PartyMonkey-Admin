@@ -7362,6 +7362,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <label class="field"><span>OUTSET (mm)</span><input type="number" step="0.1" id="gtTraceOut" value="1"/></label>
             <label class="field"><span>SMOOTH (mm)</span><input type="number" step="0.1" min="0" id="gtTraceSm" value="0.3"/></label>
             <label class="field"><span>EDGE AT (%)</span><input type="number" step="1" min="1" max="99" id="gtTraceThr" value="50"/></label>
+            <label class="field" title="Rounds every sharp corner of the cut line, inside and out, to this radius - a rectangle comes out a rounded rectangle, a traced outline loses its points and notches. 0 keeps the corners sharp."><span>ROUND (mm)</span><input type="number" step="0.5" min="0" id="gtTraceRd" value="0"/></label>
           </div>
           <button class="btn-outline btn-sm" id="gtTraceBtn" style="width:100%;margin-top:9px;">Trace the artwork</button>
           <div id="gtTraceMsg"></div>
@@ -31579,6 +31580,8 @@ function gtNormalizeDesign(d){
          ...(Number(d.trace.cy)>0&&Number(d.trace.cy)!==1?{cy:Number(d.trace.cy)}:{}),
          // drawn as a plain rectangle or circle rather than traced off the artwork
          ...(d.trace.shape==='rect'||d.trace.shape==='circle'?{shape:d.trace.shape}:{}),
+         // its outside corners rounded to this radius, in mm
+         ...(Number(d.trace.rd)>0?{rd:Number(d.trace.rd)}:{}),
          // further cut lines set by hand — rectangles and circles, each its middle
          // and size as fractions of the artwork's box, like the loop
          ...(Array.isArray(d.trace.more)&&d.trace.more.length
@@ -33484,11 +33487,26 @@ function gtTracePlace(d,r,extra){
   let byLoop=gtTraceCache.get(t.loop);
   if(!byLoop){ byLoop=new Map(); gtTraceCache.set(t.loop,byLoop); }
   const cx=Number(t.cx)>0?Number(t.cx):1, cy=Number(t.cy)>0?Number(t.cy):1;
-  const key=`${r.w.toFixed(3)}|${r.h.toFixed(3)}|${out}|${sm}|${cx}|${cy}`;
+  const rd=Math.max(0,Number(t.rd)||0);
+  const key=`${r.w.toFixed(3)}|${r.h.toFixed(3)}|${out}|${sm}|${cx}|${cy}|${rd}`;
   let hit=byLoop.get(key);
   if(!hit){
     let pts=t.loop.map(([u,v])=>[u*r.w,v*r.h]), rel=null;
     if(out){ try{ pts=gtOffsetLoop(pts,out); }catch(e){ pts=null; } }
+    // Rounded: every sharp corner given this radius, the straight runs left
+    // where they were. Grown out by the radius and drawn back in rounds the
+    // inside corners; drawn in and grown back out rounds the outside ones. A
+    // part narrower than twice the radius would vanish on the way in, so each
+    // step that would lose the line is skipped rather than taken.
+    if(pts&&pts.length>3&&rd>0){
+      const twice=(p,a,b)=>{
+        try{ const m=gtOffsetLoop(p,a); const q=m&&m.length>3?gtOffsetLoop(m,b):null;
+          return q&&q.length>3?q:p; }catch(e){ return p; }
+      };
+      const parts=pts.parts;
+      pts=twice(twice(pts,rd,-rd),-rd,rd);
+      pts.parts=parts;
+    }
     if(pts&&pts.length>3){
       const smooth=gtResample(gtSmoothMm(pts,sm),GT_PLT_STEP);
       rel=smooth.concat([smooth[0]]);
@@ -34418,7 +34436,7 @@ function gtNestPlan(){
   const dsig=ids.map(id=>{
     const d=gtDesign(id), img=gtImgs.get(id), t=d&&d.trace;
     return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],
-            t&&t.on&&t.loop?[t.out,t.sm,t.loop.length,t.cx,t.cy,t.shape||'',
+            t&&t.on&&t.loop?[t.out,t.sm,t.loop.length,t.cx,t.cy,t.shape||'',t.rd||0,
               t.more?JSON.stringify(t.more):0,(t.extra||[]).length]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
@@ -38923,6 +38941,7 @@ function gtArtWriteInputs(){
   document.getElementById('gtTraceOut').value=t?round(t.out):1;
   document.getElementById('gtTraceThr').value=t?t.thr:50;
   document.getElementById('gtTraceSm').value=t&&t.sm!=null?round(t.sm):GT_TRACE_SMOOTH;
+  document.getElementById('gtTraceRd').value=t&&Number(t.rd)>0?round(t.rd):0;
   const msg=document.getElementById('gtTraceMsg');
   if(msg&&!t) msg.innerHTML='<p class="hint" style="margin:8px 0 0;">Not traced yet — the placeholder is what this design is cut to.</p>';
   gtCutSizeWrite();
@@ -39149,6 +39168,14 @@ document.getElementById('gtTraceOut').addEventListener('input',e=>{
   const v=parseFloat(e.target.value);
   gtCutBegin(d);
   d.trace.out=isFinite(v)?v:0;
+  gtArtChanged();
+});
+// The corners rounded: every sharp corner of the cut line given this radius.
+document.getElementById('gtTraceRd').addEventListener('input',e=>{
+  const d=gtCurrentDesign; if(!d||!d.trace) return;
+  const v=parseFloat(e.target.value);
+  gtCutBegin(d);
+  if(isFinite(v)&&v>0) d.trace.rd=v; else delete d.trace.rd;
   gtArtChanged();
 });
 document.getElementById('gtTraceSm').addEventListener('input',e=>{
