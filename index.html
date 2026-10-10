@@ -33644,6 +33644,15 @@ function gtTraceDesign(d,thr){
   const r4=n=>Math.round(n*1e4)/1e4;
   return thin.map(([x,y])=>[r4((x-P)/(W-1)),r4((y-P)/(H-1))]);
 }
+// A closed polyline with points added along each side, every corner kept.
+function gtDensify(pts,step){
+  const out=[], n=pts.length;
+  for(let i=0;i<n;i++){
+    const a=pts[i], b=pts[(i+1)%n], k=Math.max(1,Math.ceil(Math.hypot(b[0]-a[0],b[1]-a[1])/step));
+    for(let j=0;j<k;j++) out.push([a[0]+(b[0]-a[0])*j/k,a[1]+(b[1]-a[1])*j/k]);
+  }
+  return out;
+}
 // A closed polyline walked at an even spacing — what smoothing and the cut
 // file both want, rather than points bunched wherever the outline was busy.
 function gtResample(pts,step){
@@ -33773,7 +33782,11 @@ function gtTracePlace(d,r,extra){
       pts.parts=parts;
     }
     if(pts&&pts.length>3){
-      const smooth=gtResample(gtSmoothMm(pts,sm),GT_PLT_STEP);
+      // A drawn rectangle or circle left as drawn - no outset, rounding or
+      // smoothing - keeps its own corners: walked at an even step, a corner
+      // between two steps was cut across and the shape came out a hair small.
+      const asDrawn=t.shape&&!out&&!(rd>0)&&!(sm>0);
+      const smooth=asDrawn?gtDensify(pts,GT_PLT_STEP):gtResample(gtSmoothMm(pts,sm),GT_PLT_STEP);
       rel=smooth.concat([smooth[0]]);
       // The cut line made wider or taller than the artwork's outline plus its
       // outset, about its own middle: the picture stays the size it is.
@@ -33813,33 +33826,6 @@ function gtTraceExtras(d,r){
 // held in. The circle's points are close enough together that the cutter's own
 // step is what it is cut at.
 const GT_CUT_MAX=10;               // cut lines on one design, the main one included
-// Where the artwork actually is in its picture, as 0..1 fractions of it: read
-// the same way Trace reads the edge (transparency, or where it meets its
-// background). null where there is no picture, or nothing to tell apart.
-// Only a picture with a transparent margin is cut in to its art: an opaque one
-// is the tag as drawn — a white card with a picture on it — and reading its edge
-// off the background cut the rectangle down to the picture alone.
-function gtArtInkBox(d,thr){
-  const img=d&&gtImgGet(d.id);
-  if(!img||!img.naturalWidth) return null;
-  try{
-    const n=64, c=document.createElement('canvas'); c.width=c.height=n;
-    const x=c.getContext('2d',{willReadFrequently:true}); x.drawImage(img,0,0,n,n);
-    const px=x.getImageData(0,0,n,n).data; let clear=0;
-    for(let i=3;i<px.length;i+=4) if(px[i]<200) clear++;
-    c.width=c.height=0;
-    if(clear<=n*n*0.02) return null;
-  }catch(e){ return null; }
-  let m=null; try{ m=gtTraceMask(img,thr); }catch(e){ return null; }
-  if(!m||!m.inside) return null;
-  const {inside,W,H}=m;
-  let x0=W,y0=H,x1=-1,y1=-1;
-  for(let y=0;y<H;y++) for(let x=0;x<W;x++) if(inside[y*W+x]){
-    if(x<x0) x0=x; if(x>x1) x1=x; if(y<y0) y0=y; if(y>y1) y1=y;
-  }
-  if(x1<x0||y1<y0) return null;
-  return {u0:x0/W,v0:y0/H,u1:(x1+1)/W,v1:(y1+1)/H};
-}
 function gtShapeLoop(shape){
   if(shape==='circle'){
     const n=180, out=[];
@@ -39398,12 +39384,11 @@ document.getElementById('gtCutShapeSeg').addEventListener('click',e=>{
   }
   gtCutBegin(d);
   const old=d.trace||{};
-  // The box the artwork actually fills, not the picture's whole canvas: a file
-  // with a transparent or plain margin round its art came out with a cut line
-  // the size of the canvas, bigger than the design itself.
-  const thr=Number(old.thr)||50, ab=gtArtInkBox(d,thr);
-  const loop=gtShapeLoop(want).map(([u,v])=>ab
-    ?[Math.round((ab.u0+u*(ab.u1-ab.u0))*1e4)/1e4,Math.round((ab.v0+v*(ab.v1-ab.v0))*1e4)/1e4]:[u,v]);
+  // The picture's own box, so a Rectangle is the size the design is: reading
+  // where the art "really" is off its edge guessed wrong on artwork with
+  // soft or see-through parts and cut the shape down to a fraction of it.
+  // Sized from there with CUT WIDTH / CUT HEIGHT.
+  const thr=Number(old.thr)||50, loop=gtShapeLoop(want);
   d.trace={loop,shape:want,out:0,thr,sm:0,on:true,
     ...(old.more?{more:old.more}:{})};
   gtArtWriteInputs(); gtArtChanged();
