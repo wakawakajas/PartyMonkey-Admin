@@ -36629,6 +36629,8 @@ function gtAskAge(line){
 }
 function gtRenderOrder(){
   if(!gtOrder.length) gtJobBack=null;        // the job's back went with its order
+  // the batch's Save chip counts these rows, so it is told whenever they change
+  try{ if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync(); }catch(e){}
   const wrap=document.getElementById('gtOrderList');
   if(!gtLib.designs.length){
     wrap.innerHTML='<p class="hint" style="margin:0;">Upload a design first.</p>';
@@ -36867,7 +36869,11 @@ document.getElementById('gtAddLineBtn').addEventListener('click',()=>{
     showMsg(document.getElementById('gtExportMsg'),'Upload a design first.',false);
     return;
   }
-  gtOrder.push({id:gtId('l'),designId:'',qty:1,vals:{}});
+  // On a sheet lent from Magic Create, a row added here is another design on
+  // the order being worked, not a row of the page's own: it remembers which
+  // line it came from, and Save to line makes it a line of that order.
+  const from=(typeof mcGtHome!=='undefined'&&mcGtHome&&typeof mcWinItem!=='undefined'&&mcWinItem)?mcWinItem:'';
+  gtOrder.push({id:gtId('l'),designId:'',qty:1,vals:{},...(from?{mcNewFor:from}:{})});
   gtRenderOrder(); gtDraw();
 });
 document.getElementById('gtPrevPageBtn').addEventListener('click',()=>{ gtGoPage(gtPage-1); });
@@ -54736,7 +54742,9 @@ function mcGtLiveDesign(it,id){
 // (the SKU summary's Add and the export's previews both do). Nothing is moved.
 function mcGtLentRows(){
   const out=[], seen=new Set();
-  const take=l=>{ const k=String((l&&l.id)||''); if(mcGtLent(l)&&!seen.has(k)){ seen.add(k); out.push(l); } };
+  // and the rows added there as another design for one of them (mcNewFor),
+  // which become lines of their own when they are written back
+  const take=l=>{ const k=String((l&&l.id)||''); if((mcGtLent(l)||(l&&l.mcNewFor))&&!seen.has(k)){ seen.add(k); out.push(l); } };
   (gtOrder||[]).forEach(take);
   if(typeof gtOrders!=='undefined'&&gtOrders)
     Object.values(gtOrders).forEach(list=>{ if(Array.isArray(list)&&list!==gtOrder) list.forEach(take); });
@@ -54756,16 +54764,17 @@ async function mcGtReturn(){
     Object.keys(gtOrders).forEach(k=>{
       if(!Array.isArray(gtOrders[k])) return;
       gtOrders[k].forEach(l=>{
-        if(mcGtLent(l)&&!seen.has(String(l.id||''))){
+        if((mcGtLent(l)||l.mcNewFor)&&!seen.has(String(l.id||''))){
           seen.add(String(l.id||'')); parked.push(l);
         }
       });
-      gtOrders[k]=gtOrders[k].filter(l=>!mcGtLent(l));
+      gtOrders[k]=gtOrders[k].filter(l=>!mcGtLent(l)&&!l.mcNewFor);
     });
   const edited=gtOrder.concat(parked);
   // the batch's rows go back to the batch; everything else on the sheet is the
-  // page's own and stays exactly as it was left, edits and all
-  gtOrder=gtOrder.filter(l=>!mcGtLent(l));
+  // page's own and stays exactly as it was left, edits and all. A row added as
+  // another design for a batch line is the batch's too.
+  gtOrder=gtOrder.filter(l=>!mcGtLent(l)&&!l.mcNewFor);
   // and the page's own rows that were set aside for the loan come back
   const back=(home.dropped||[]).filter(l=>!gtOrder.some(x=>x.id===l.id));
   if(back.length){
@@ -54785,7 +54794,45 @@ async function mcGtReturn(){
 // function because leaving the screen is no longer the only way it happens:
 // the sheet has a Save of its own now, and both have to write the same thing
 // the same way or the two would disagree about what is on the batch.
+// Rows added on the lent sheet as another design for a batch line (mcNewFor):
+// each that has been given a design becomes a new line on that line's order -
+// the same SKU, run and page, named for its design - and from then on is lent
+// like the rest, so the loop below writes it as it writes them. One with no
+// design yet is left as it is, to be taken the next time this runs.
+async function mcGtAdoptNewRows(edited,home){
+  if(!sb||!mcBatch||mcBatch.status!=='open') return;
+  for(const l of edited){
+    if(!l||mcGtLent(l)||!l.mcNewFor||!l.designId) continue;
+    const from=mcItem(String(l.mcNewFor)); if(!from) continue;
+    const d=gtDesign(l.designId);
+    try{
+      const {data:{session}}=await sb.auth.getSession();
+      if(!session) return;
+      const row={user_id:session.user.id,batch_id:from.batch_id||mcBatch.id,
+        sort_order:Math.max(0,...mcItems.map(i=>Number(i.sort_order)||0))+1,
+        order_id:from.order_id||'',buyer:from.buyer||'',sku:from.sku||'',
+        product:from.product||'',design_name:(d&&d.name)||'',
+        qty:Math.max(1,Math.round(Number(l.qty)||1)),message:'',note:'',image_url:'',raw:{},
+        tile:'giftTag',
+        sheet_item:{page:home.page||gtMode,finish:home.finish||((from.sheet_item||{}).finish)||'Matte'}};
+      const {data,error}=await sb.from('magic_items').insert(row).select().single();
+      if(error||!data){
+        mcWarn(`${from.order_id||'The order'}: the extra design on the gift tag sheet could not be added as a line`
+          +`${error&&error.message?': '+error.message:''}. Press Save to line again.`);
+        continue;
+      }
+      if(!mcItems.some(x=>x.id===data.id)) mcItems.push(data);
+      // lent from here on, under the line it now is
+      l.id='mc-'+data.id; delete l.mcNewFor;
+      l.sku=mcRowKey(data);
+      if(home&&Array.isArray(home.ids)&&!home.ids.includes(data.id)) home.ids.push(data.id);
+    }catch(e){
+      mcWarn(`${from.order_id||'The order'}: the extra design could not be added as a line. Press Save to line again.`);
+    }
+  }
+}
 async function mcGtWriteBack(edited,home){
+  await mcGtAdoptNewRows(edited,home);
   for(const l of edited){
     const id=String(l.id||'').startsWith('mc-')?String(l.id).slice(3):null;
     const it=id?mcItem(id):null;
@@ -56497,8 +56544,59 @@ const mcSharedSheetSkus=()=>{
 // Save for the shared print sheet. The bleed and turn a design keeps are
 // written to its record (shared with the team) and the batch lines on the
 // sheet are marked and ticked, the same marks Add made. Returns what it said.
+// A design added to the shared print sheet in the builder that is no batch
+// SKU's file was shown, said to be "not kept", and gone the next time the sheet
+// was laid - an extra design for an order could not be saved at all. Each one
+// off the designs folder becomes a new line now: on the order of the line open
+// beside the builder, or the order asked for, named for its file so the folder
+// finds it again. A picture not off the folder has no file to come back from
+// and stays as it was. Answers whether any line was added.
+async function mcSheetAdoptLoose(){
+  if(!sb||!mcBatch||mcBatch.status!=='open') return 0;
+  // a design that IS a batch SKU's file belongs to that SKU's lines, not a new one
+  mcClaimSheetDesigns();
+  const loose=mcSheetLooseDesigns().filter(d=>d.source&&d.source.path);
+  if(!loose.length) return 0;
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session) return 0;
+  const open=mcWinItem?mcItem(mcWinItem):null;
+  const orders=[...new Set(mcItems.map(i=>String(i.order_id||'').trim()).filter(Boolean))];
+  let added=0, last=open?String(open.order_id||''):'';
+  for(const d of loose){
+    let order=open?String(open.order_id||''):'';
+    if(!order){
+      const typed=prompt(`"${d.name||'This design'}" is not on any line of this batch yet.\n\n`
+        +'Which order is it for? Type its order ID to add it to that order as a new line, or Cancel to leave it off.',last);
+      if(typed===null) continue;
+      order=String(typed).trim();
+      if(!orders.includes(order)){ mcWarn(`No order ${order} on this batch — "${d.name||'the design'}" was not added.`); continue; }
+      last=order;
+    }
+    const from=mcItems.find(i=>String(i.order_id||'').trim()===order)||null;
+    const sku=String(d.name||'').trim()||String(d.source.path).split('/').pop().replace(/\.[^.]+$/,'');
+    const cut=sku.indexOf('-');
+    const row={user_id:session.user.id,batch_id:mcBatch.id,
+      sort_order:Math.max(0,...mcItems.map(i=>Number(i.sort_order)||0))+1,
+      order_id:order,buyer:(from&&from.buyer)||'',sku,
+      product:cut<0?sku:sku.slice(0,cut),design_name:cut<0?'':sku.slice(cut+1),
+      qty:Math.max(1,Math.round(Number(d.qty)||1)),message:'',note:'',image_url:'',raw:{}};
+    const {data,error}=await sb.from('magic_items').insert(row).select().single();
+    if(error||!data){
+      mcWarn(`${order}: "${d.name||'the design'}" could not be added as a line`
+        +`${error&&error.message?': '+error.message:''}.`);
+      continue;
+    }
+    if(!mcItems.some(x=>x.id===data.id)) mcItems.push(data);
+    // the design on the sheet is this line's from now on, at its own quantity
+    d.sku=mcRowKey(data); delete d.mcClaimed;
+    added++;
+  }
+  if(added){ mcRenderItems(); mcSyncBatchButtons(); if(typeof mcRenderSummary==='function') mcRenderSummary(); }
+  return added;
+}
 async function mcSaveSharedSheet(){
   let wrote=0,failed=0;
+  const adopted=await mcSheetAdoptLoose();
   const store=designBleedStore();
   for(const d of (state.designs||[])){
     // a merged line's bleed came from its Create layout, not from the design
@@ -56564,7 +56662,7 @@ async function mcSaveSharedSheet(){
   if(lay===true) layout=1; else if(lay===false) failed++;
   // a line that would not take its design is as unsaved as a design record that
   // would not write
-  return {wrote,failed,lines,skus:skus.length,qty,off,layout,loose:mcSheetLooseDesigns().length};
+  return {wrote,failed,lines,skus:skus.length,qty,off,layout,adopted,loose:mcSheetLooseDesigns().length};
 }
 // The sheet's geometry — paper, grid, card boxes, cut and fold marks, bleed —
 // written onto the template it is laid on. Only the geometry: the template's own
@@ -56616,6 +56714,7 @@ const mcNoteSheetPaths=()=>{
 const mcSheetSaidOf=r=>`✓ Saved — ${r.skus} SKU${r.skus===1?'':'s'}, ${r.wrote} design record${r.wrote===1?'':'s'}`
   +(r.qty?`, ${r.qty} quantit${r.qty===1?'y':'ies'}`:'')+(r.off?`, ${r.off} taken off the sheet`:'')
   +(r.layout?', card layout saved to the template':'')
+  +(r.adopted?`, ${r.adopted} design${r.adopted===1?'':'s'} added as new line${r.adopted===1?'':'s'}`:'')
   // said, not left to be found on the next open: these have no line to go onto
   +(r.loose?` — ${r.loose} design${r.loose===1?' is':'s are'} no batch SKU’s file and not kept`:'');
 function mcBuilderSaveSync(){
