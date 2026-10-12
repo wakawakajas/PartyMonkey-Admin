@@ -6656,6 +6656,11 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
     <!-- Custom Template orders on one layout and one paper, printed together -->
     <div class="click-row mc-merge-row" style="margin-top:16px;">
       <label class="click-tog"><input type="checkbox" id="mcMergeSameToggle"/>Merge same layout &amp; paper</label>
+      <label class="click-tog" title="Off: the cutter runs on its own settings. On: every cut file (.plt) tells it this speed and force — the same setting as on the gift tag pages."><input type="checkbox" id="mcPltSfOn"/>Cut file speed &amp; force</label>
+    </div>
+    <div class="grid2" id="mcPltSfRow" style="margin-top:7px;max-width:420px;">
+      <label class="field"><span>SPEED (200–1600)</span><input type="number" step="10" min="200" max="1600" id="mcPltSpeed" value="1600"/></label>
+      <label class="field"><span>FORCE (1–1000)</span><input type="number" step="1" min="1" max="1000" id="mcPltForce" value="150"/></label>
     </div>
     <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
       <button class="btn-primary" id="mcDownloadAllBtn" style="flex:1 1 200px;height:50px;">Download All</button>
@@ -7019,6 +7024,13 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <label class="field"><span>OVERCUT (mm)</span><input type="number" step="0.1" min="0" max="5" id="gtPltOvercut" value="0.5"/></label>
           </div>
           <div class="click-row" style="margin-top:10px;">
+            <label class="click-tog"><input type="checkbox" id="gtPltSfOn"/>Set speed &amp; force</label>
+          </div>
+          <div class="grid2" style="margin-top:7px;">
+            <label class="field"><span>SPEED (200–1600)</span><input type="number" step="10" min="200" max="1600" id="gtPltSpeed" value="1600"/></label>
+            <label class="field"><span>FORCE (1–1000)</span><input type="number" step="1" min="1" max="1000" id="gtPltForce" value="150"/></label>
+          </div>
+          <div class="click-row" style="margin-top:10px;">
             <label class="click-tog"><input type="checkbox" id="gtPltInnerFirst" checked/>Cut inside first</label>
             <label class="click-tog"><input type="checkbox" id="gtPltFromMark" checked/>Count from the bottom-right dot</label>
           </div>
@@ -7029,6 +7041,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           </div>
           <details class="gt-why"><summary>What these do</summary>
             <p class="hint">Each cut runs this far past where it started, so the curve is finished. 0 = none. 0.5 mm is what your cutter's own files use most (PkemonHBD.plt).</p>
+            <p class="hint">Set speed &amp; force: off, and the cutter runs on its own settings. On, every cut file tells it this speed (200–1600) and force (1–1000) — the same setting as on Magic Create.</p>
             <p class="hint">Off, and it counts from the bottom-right corner of the paper instead. Try one test sheet before a run — if the cut lands out by the inset, this is the switch.</p>
           </details>
         </div>
@@ -34131,6 +34144,46 @@ function gtPltFrame(){
     : {ox:S.paperW,oy:S.paperH};
 }
 const gtPltPt=(F,x,y)=>Math.round((F.oy-y)*GT_PLT_UNIT)+','+Math.round((F.ox-x)*GT_PLT_UNIT);
+// ---------- the cutter's speed and force ----------
+// Off, and the cut file says nothing about them: the cutter runs on its own
+// settings. On, the file carries them after IN;PA; the way the cutter's own
+// files do (SP1;VS1600;HS150; — VS the speed, HS the force). One setting on
+// this computer, the same on the gift tag pages and on Magic Create.
+const PLT_SF_KEY='pigu.pltSpeedForce';
+const PLT_SPEED={min:200,max:1600,def:1600}, PLT_FORCE={min:1,max:1000,def:150};
+const pltSfClamp=(v,R)=>{ v=Math.round(Number(v)); return isFinite(v)?Math.min(R.max,Math.max(R.min,v)):R.def; };
+function pltSfGet(){
+  let o={};
+  try{ o=JSON.parse(localStorage.getItem(PLT_SF_KEY)||'{}')||{}; }catch(e){}
+  return {on:!!o.on,speed:pltSfClamp(o.speed??PLT_SPEED.def,PLT_SPEED),force:pltSfClamp(o.force??PLT_FORCE.def,PLT_FORCE)};
+}
+function pltSfSet(patch){
+  try{ localStorage.setItem(PLT_SF_KEY,JSON.stringify({...pltSfGet(),...patch})); }catch(e){}
+  pltSfSync();
+}
+function pltSfHead(){ const s=pltSfGet(); return s.on?`SP1;VS${s.speed};HS${s.force};`:''; }
+function pltSfSync(){
+  const s=pltSfGet();
+  ['gt','mc'].forEach(p=>{
+    const on=document.getElementById(p+'PltSfOn'); if(on) on.checked=s.on;
+    [['PltSpeed','speed'],['PltForce','force']].forEach(([id,k])=>{
+      const el=document.getElementById(p+id); if(!el) return;
+      el.disabled=!s.on;
+      if(document.activeElement!==el) el.value=s[k];
+    });
+  });
+}
+['gt','mc'].forEach(p=>{
+  const on=document.getElementById(p+'PltSfOn');
+  if(on) on.addEventListener('change',e=>pltSfSet({on:e.target.checked}));
+  [['PltSpeed','speed',PLT_SPEED],['PltForce','force',PLT_FORCE]].forEach(([id,k,R])=>{
+    const el=document.getElementById(p+id); if(!el) return;
+    // kept as typed while typing; held to the range once the field is left
+    el.addEventListener('input',e=>{ const v=Number(e.target.value); if(e.target.value!==''&&v>=R.min&&v<=R.max) pltSfSet({[k]:Math.round(v)}); });
+    el.addEventListener('change',e=>{ const v=pltSfClamp(e.target.value===''?R.def:e.target.value,R); e.target.value=v; pltSfSet({[k]:v}); });
+  });
+});
+pltSfSync();
 // One sheet's worth of cutting, as the text the machine reads.
 function gtPltSheet(at){
   const S=gtSheet;
@@ -34146,7 +34199,7 @@ function gtPltSheet(at){
   const head=(S.pltFromMark!==false&&m.length===4)
     ? `CR; TB25,${Math.round(Math.abs(m[1].cx-m[0].cx)*GT_PLT_UNIT)},${Math.round(Math.abs(m[1].cy-m[2].cy)*GT_PLT_UNIT)};CT1;`
     : '';
-  const out=[head?head.padEnd(1050,' '):'','IN;PA;PU-20,20;PD-20,20;PD-20,40;PU-20,40;'];
+  const out=[head?head.padEnd(1050,' '):'','IN;PA;'+pltSfHead()+'PU-20,20;PD-20,20;PD-20,40;PU-20,40;'];
   // Each loop as CutToolAI writes one: pen up onto the start, down on it, round,
   // and pen up again on the last point before travelling on — the machine would
   // not read a file whose loops ran straight into the next PU. Points on a
