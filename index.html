@@ -34931,7 +34931,7 @@ var gtNestRealJobs=new Map();
 function gtNestWorkerGet(){
   if(gtNestWorkerGet.w!==undefined) return gtNestWorkerGet.w;
   try{
-    const src=[gtNestMask,gtNestRealPack,gtNestTurned,gtNestTurns].map(f=>f.toString()).join('\n')
+    const src=[gtNestMask,gtNestRealPack,gtNestTurned,gtNestTurns,gtNestUsed,gtNestRealBetter].map(f=>f.toString()).join('\n')
       +'\nconst GT_NEST_CELL='+JSON.stringify(GT_NEST_CELL)+';\n'
       +'('+(function(){
         self.onmessage=e=>{
@@ -34948,7 +34948,7 @@ function gtNestWorkerGet(){
               const soft=Date.now()+(deadline-Date.now())/2;
               const r=gtNestRealPack(items.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,dotBlocks,rotate,step,soft);
               if(!r) throw 'late';
-              if(!best||r.pages.length<best.pages.length||(r.pages.length===best.pages.length&&r.fill<best.fill-1e-6)) best=r;
+              if(!best||gtNestRealBetter(r,best)) best=r;
             }
           }catch(x){ if(x!=='late'){ self.postMessage({id,error:String(x)}); return; } }
           self.postMessage({id,result:best?{tooBig:best.tooBig,fill:best.fill,
@@ -35017,6 +35017,24 @@ async function gtNestSettle(){
     await j.promise; gtNestCache=null;
   }
   gtNestPlan();
+}
+// The real cut lines' packing is taken over the boxes' when it needs fewer
+// sheets, leaves the last one emptier - or, the same tags on the same sheets,
+// packs them into less of the last sheet. An order that fits one sheet either
+// way was left in boxes, spread over the whole sheet, with no room shown for
+// the tags that would fit if the shapes were tucked into one another.
+function gtNestUsed(r){
+  const pg=r.pages[r.pages.length-1]; let uw=0,uh=0;
+  (pg?pg.items:[]).forEach(({it,pos})=>{
+    const w=pos.bw>0?pos.bw:pos.rot?it.sz.h:it.sz.w, h=pos.bw>0?pos.bh:pos.rot?it.sz.w:it.sz.h;
+    uw=Math.max(uw,pos.x+w); uh=Math.max(uh,pos.y+h);
+  });
+  return uw*uh;
+}
+function gtNestRealBetter(r,packed){
+  if(r.pages.length!==packed.pages.length) return r.pages.length<packed.pages.length;
+  if(r.fill<packed.fill-1e-6) return true;
+  return Math.abs(r.fill-packed.fill)<=1e-6&&gtNestUsed(r)<gtNestUsed(packed)*0.98;
 }
 function gtNestPlan(){
   const S=gtSheet, q=gtQueue();
@@ -35163,8 +35181,7 @@ function gtNestPlan(){
           const byI=new Map(rall.map(it=>[it.i,it]));
           const r={tooBig:job.result.tooBig,fill:job.result.fill,
             pages:job.result.pages.map(pg=>({items:pg.items.map(({i,pos})=>({it:byI.get(i),pos})).filter(x=>x.it)}))};
-          if(r.pages.length<packed.pages.length
-            ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)){ packed=r; realUsed=true; }
+          if(gtNestRealBetter(r,packed)){ packed=r; realUsed=true; }
         }
       }else try{
         // A finer step is not always a better packing - each tag takes the first
@@ -35179,8 +35196,7 @@ function gtNestPlan(){
           const r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,dotBlocks,
             S.nestRotate!==false,step,soft);
           if(!r) throw 'late';
-          if(r.pages.length<packed.pages.length
-            ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)){ packed=r; realUsed=true; }
+          if(gtNestRealBetter(r,packed)){ packed=r; realUsed=true; }
         }
       }catch(e){ if(e!=='late') throw e; }
     }
