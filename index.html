@@ -387,6 +387,7 @@ html{touch-action:manipulation;}
 .sheet-actions .btn-primary{width:100%;height:48px;font-size:14px;}
 /* a design on the sheet: what it looks like, what it is called, how many */
 .design-line{display:flex;align-items:center;gap:9px;}
+.design-line [data-design-enhance]{flex:0 0 auto;white-space:nowrap;}
 .design-line .thumb{width:38px;height:38px;flex:0 0 38px;border:1px solid var(--border);
   border-radius:8px;overflow:hidden;background:var(--nest);}
 .design-line .thumb img{width:100%;height:100%;object-fit:cover;display:block;}
@@ -15561,6 +15562,9 @@ function renderDesignLines(){
           <span>TURN</span>
           <button type="button" data-design-rot${designRotOf(d)?' class="on"':''}>${designRotOf(d)}°</button>
         </div>
+        ${d.img&&!artIsVector(d)?`<button type="button" class="btn-outline btn-sm" data-design-enhance
+          ${typeof designEnhancing!=='undefined'&&designEnhancing&&designEnhancing.has(d)?'disabled':''}
+          title="AI-upscale this design: to 300 DPI at its card size, or ×2 to clean up a soft picture">✨ Enhance</button>`:''}
         <button class="icon-btn" data-design-remove title="Take this design off the sheet">×</button>
       </div>`).join('');
   }
@@ -15652,7 +15656,34 @@ document.getElementById('designLines').addEventListener('focusin',e=>{
   panel.innerHTML=designPickerPanel('',d&&d.source?d.source.path:'');
   panel.classList.add('open'); search.setAttribute('aria-expanded','true');
 });
+// the design lines being upscaled right now (✨ Enhance), so a second press
+// waits for the first
+var designEnhancing=new WeakSet();
 document.getElementById('designLines').addEventListener('click',async e=>{
+  // ✨ Enhance on one line: its picture upscaled the way the single artwork's
+  // is (upscaleArtPicture) - to 300 DPI at the card size, or ×2 to clean up a
+  // picture already there. A PDF has no button: it prints sharp as it is.
+  const enh=e.target.closest('[data-design-enhance]');
+  if(enh){
+    const d=designLineOf(enh); if(!d||!d.img||designEnhancing.has(d)) return;
+    designEnhancing.add(d); enh.disabled=true;
+    const say=t=>{ enh.textContent=t; };
+    const was=d.img;
+    try{
+      const got=await upscaleArtPicture(d,artDpiOf('front',d.img),say);
+      if(!got){ say('Already as large as it goes'); return; }
+      // the line changed or went meanwhile: its new picture is not this one's
+      if(d.img!==was||!state.designs.includes(d)) return;
+      Object.assign(d,got);
+      renderDesignLines(); drawAll();
+    }catch(err){
+      say('Upscale failed'); enh.title=(err&&err.message)||'unknown error';
+    }finally{
+      designEnhancing.delete(d);
+      if(enh.isConnected) setTimeout(()=>{ if(enh.isConnected){ enh.disabled=false; enh.textContent='✨ Enhance'; } },4000);
+    }
+    return;
+  }
   // a quarter turn per press, round to where it started. The row is not drawn
   // again — only this button's face changes — so nothing under the finger moves
   const rot=e.target.closest('[data-design-rot]');
