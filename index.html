@@ -28103,11 +28103,14 @@ async function pcSaveTemplate(){
     const designs=state.designs.filter(d=>d.source&&d.source.path).map(d=>
       ({path:d.source.path,name:d.name,qty:d.qty,rotate:designRotOf(d),
         bleedOn:!!d.bleedOn,bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}));
+    // the back and what will not come back, as Custom Template's Save keeps
+    // them: left out, a Place Card's back PDF vanished on the next load
+    const designBack=printBackRef(), unkept=printUnkept();
     const meta={name,kind:'place-card',
       paper:state.paper,layout:state.layout,placeholders:state.placeholders,cats:state.cats,
       showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
       refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate,
-      design,designs,orderId:state.orderId,pdfNaming:state.pdfNaming,
+      design,designBack,designs,unkept,orderId:state.orderId,pdfNaming:state.pdfNaming,
       artFit:state.artFit,artMode:state.artMode,art:state.art,bleed:state.bleed,
       paperType:state.paperType,gsm:state.gsm};
     const open=pcTemplateById(pcSelectedTemplate);
@@ -28125,7 +28128,8 @@ async function pcSaveTemplate(){
     }
     if(error) throw error;
     await pcRefreshTemplateList();
-    showMsg(msg,'✓ Saved "'+name+'" — shared with everyone who has this tool',true);
+    showMsg(msg,'✓ Saved "'+name+'" — shared with everyone who has this tool'
+      +(unkept.length?'. '+printUnkeptNote(unkept,'Saved'):''),!unkept.length);
   }catch(err){
     showMsg(msg,'Could not save: '+((err&&err.message)||'unknown error'),false);
   }finally{ btn.disabled=false;btn.textContent='Save template'; }
@@ -31652,7 +31656,9 @@ async function gtMergeRun(){
   }
   if(gone.size){
     gone.forEach(id=>gtImgs.delete(id));
-    gtOrder=gtOrder.filter(l=>!gone.has(l.designId));
+    // a row lent by a Magic Create batch is the batch's, as in gtDropMissing:
+    // dropped here, the write-back read it as taken off and unmarked the line
+    gtOrder=gtOrder.filter(l=>String(l.id||'').startsWith('mc-')||!gone.has(l.designId));
     if(gtCurrentDesign&&gone.has(gtCurrentDesign.id)) gtCurrentDesign=null;
   }
   // fonts and saved phrases
@@ -32330,7 +32336,10 @@ function gtDedupeLib(){
     if(!d.file){ keep.push(d); return; }
     const win=first.get(d.file);
     if(win!==d){
-      gtOrder.forEach(l=>{ if(l.designId===d.id) l.designId=win.id; });
+      // every page's rows, not only the one on screen: a row parked on another
+      // page kept the dropped id and was written back pointing at nothing
+      [gtOrder,...Object.values(gtOrders||{})].forEach(list=>(Array.isArray(list)?list:[])
+        .forEach(l=>{ if(l&&l.designId===d.id) l.designId=win.id; }));
       if(gtCurrentDesign&&gtCurrentDesign.id===d.id) gtCurrentDesign=win;
       gtImgs.delete(d.id);
       dropped=true;
@@ -32659,6 +32668,9 @@ async function gtSetModeNow(m,save){
     if(await gtMergeFromDisk().catch(()=>false)) gtWriteSheetInputs();
     await gtApplyMode(); return;
   }
+  // a cut line edited and not saved is asked about before the page goes: the
+  // library is emptied below, and the edit went with it without a word
+  gtCutSettle();
   // what is still to be written for the page being left goes on its folder first
   await gtSaveFlush();
   // the order was built out of the page being left, and belongs to it
@@ -39835,6 +39847,9 @@ document.getElementById('gtReplaceArtBtn').addEventListener('click',async()=>{
   // as with a crop: bleed grown and a cut line traced off the old picture go
   [...gtGrown.keys()].forEach(k=>{ if(k.startsWith(d.id+'@')) gtGrown.delete(k); });
   if(d.trace) d.trace=null;
+  // and the line held back as saved was the old picture's: kept, the next save
+  // or a Discard put the old outline onto the new picture
+  if(gtCutDraft&&gtCutDraft.id===d.id) gtCutDraft=null;
   gtArtWriteInputs(); gtArtChanged();
 });
 document.getElementById('gtSaveDesignBtn').addEventListener('click',async()=>{
@@ -40829,11 +40844,18 @@ document.getElementById('gtFinishSeg').addEventListener('click',async e=>{
   gtFinish=b.dataset.gtFinish;
   document.querySelectorAll('#gtFinishSeg [data-gt-finish]')
     .forEach(x=>x.classList.toggle('on',x.dataset.gtFinish===gtFinish));
-  gtFinishKeep();
   // A batch has lent this sheet one run's tags. Asking for the other run is
   // asking for the other sheet — not for these tags on different paper, which
   // is what it used to do: the same forty tags with a gloss name on the file.
-  if(typeof mcGtHome!=='undefined'&&mcGtHome&&was!==gtFinish){
+  // Only on the loan's own page: on another page this is that page's own run,
+  // and re-lending jumped back to the loan's page with the wrong run.
+  const onLoan=typeof mcGtHome!=='undefined'&&mcGtHome&&gtMode===mcGtHome.page;
+  if(onLoan) gtFinishKeep();
+  else if(typeof mcGtHome!=='undefined'&&mcGtHome){
+    (await gtFinishMap())[gtMode]=gtFinish;
+    await gtIdbPut('gtFinish',{...gtFinishes}).catch(()=>{});
+  }else gtFinishKeep();
+  if(onLoan&&was!==gtFinish){
     await mcGtOpenFull(mcGtHome.page,gtFinish).catch(()=>{});
     mcGtSetFinish(mcGtHome?mcGtHome.finish:gtFinish);
   }
@@ -54706,7 +54728,15 @@ function mcCutCommit(){
 }
 async function mcGtKeepOneOffOn(it,si){
   if(!si) return;
-  const d=si.designId?mcGtDesign(si.designId):null;
+  let d=si.designId?mcGtDesign(si.designId):null;
+  // A page switch empties the library and puts one-offs back only for the
+  // page's own order, so a lent row parked on another page can point at a
+  // one-off nothing holds — but the stash still has it and its bytes. Without
+  // this the line was saved pointing at a design that existed nowhere.
+  if(!d&&si.designId&&typeof gtOneOffKeep!=='undefined'){
+    const k=gtOneOffKeep.get(si.designId);
+    if(k&&k.d&&k.blob){ d=k.d; if(!gtAssets.get(d.file)) gtAssets.set(d.file,k.blob); }
+  }
   // A cut line still being worked on (not saved, not discarded) is not this
   // copy's: every write-back comes through here - leaving the screen, Download
   // All, a page move - and committing it here saved a line meant to be thrown
@@ -54718,8 +54748,10 @@ async function mcGtKeepOneOffOn(it,si){
   // copy — wiping it here left a line with no artwork after a page switch.
   if(!d&&si.designId&&si.oneOff&&si.oneOff.id===si.designId) return;
   if(!d||!d.adhoc){
-    // not a one-off any more — what is kept on the line is another design's
-    if(si.oneOff&&(d||!si.designId)) si.oneOff=null;
+    // not a one-off any more — what is kept on the line is another design's.
+    // A copy of some other design than the one the line names is never this
+    // line's: put back later, it printed the old picture or nothing at all.
+    if(si.oneOff&&(d||!si.designId||si.oneOff.id!==si.designId)) si.oneOff=null;
     return;
   }
   // the same picture as last time: a one-off cropped since has a new file,
