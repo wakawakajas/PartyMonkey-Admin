@@ -36558,11 +36558,13 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   SL.forEach((slot,i)=>{
     const line=q[start+i]; if(!line) return;
     const at=onSide(slot);
-    // a turned tag is drawn as a picture: an artwork page placed as it is cannot be turned here
+    // a turned tag's artwork page is placed turned the same way (gtBuildPdf),
+    // so it stays as sharp as an upright one
     gtWithTurn(ctx,at,sc,back,u=>{
       gtDrawingSlot={s:u,back,d:gtDesign(line.designId)};
-      try{ (back?gtDrawBack:gtDrawTag)(ctx,line,u.x,u.y,u.w,u.h,sc,forExport,at.rot?null:vec); }
-      finally{ gtDrawingSlot=null; }
+      if(vec) vec.turn=at.rot?{cx:at.x+at.w/2,cy:at.y+at.h/2,deg:(back?-1:1)*at.rot}:null;
+      try{ (back?gtDrawBack:gtDrawTag)(ctx,line,u.x,u.y,u.w,u.h,sc,forExport,vec); }
+      finally{ gtDrawingSlot=null; if(vec) vec.turn=null; }
     });
   });
   // The base layer goes over the tags, so its dots and template lines are
@@ -40833,7 +40835,7 @@ async function gtBuildPdf(count,render,sources){
   for(let i=0;i<count;i++){
     const {imgData,wMm,hMm,place,clear,over,ink}=await render(i,forms);
     const W=mmToPt(wMm).toFixed(2), H=mmToPt(hMm).toFixed(2);
-    const put=(place||[]).map(p=>({em:forms.get(p.key),r:p.rect,c:p.clip,e:p.ext})).filter(u=>u.em);
+    const put=(place||[]).map(p=>({em:forms.get(p.key),r:p.rect,c:p.clip,e:p.ext,t:p.turn})).filter(u=>u.em);
     // A render made without paper under it has to let what is beneath show
     // through, so it goes in with its alpha channel as a mask. That holds for
     // every page of such a run, not only the pages that ended up with artwork
@@ -40848,6 +40850,15 @@ async function gtBuildPdf(count,render,sources){
     put.forEach(u=>{ if(!names.has(u.em.form)) names.set(u.em.form,'Fm'+names.size); });
     put.forEach(u=>{
       const {em,r,c}=u;
+      // a tag on a turned placeholder: everything below - its clip, its page
+      // and the bleed made from it - is worked out unturned, then the lot is
+      // turned about the placeholder's middle, as the sheet turns it (clockwise
+      // on the sheet, the negative angle in a PDF)
+      let tc='';
+      if(u.t){
+        const CX=mmToPt(u.t.cx), CY=mmToPt(hMm-u.t.cy), rad=-u.t.deg*Math.PI/180, co=Math.cos(rad), si=Math.sin(rad);
+        tc=mtxMul([1,0,0,1,-CX,-CY],mtxMul([co,si,-si,co,0,0],[1,0,0,1,CX,CY])).map(f).join(' ')+' cm ';
+      }
       // the sheet is worked in millimetres from the top, a PDF in points from
       // the bottom, and the form draws inside a box of its own choosing
       const X=mmToPt(r.x), Y=mmToPt(hMm-(r.y+r.h)), TW=mmToPt(r.w), TH=mmToPt(r.h);
@@ -40867,7 +40878,7 @@ async function gtBuildPdf(count,render,sources){
       const cut=c?`${re(c)}W n `+(c.holes||[]).map(hb=>`${re(c)}${re(hb)}W* n `).join('')
         // and to a cut line's shape, bleed and all, where the tag has one
         +(c.path?c.path.map(([x,y],k)=>`${f(mmToPt(x))} ${f(mmToPt(hMm-y))} ${k?'l':'m'} `).join('')+'h W n ':''):'';
-      cs+=`q ${cut}${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
+      cs+=`q ${tc}${cut}${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
       // A bleed made from the page: each side and corner outside the box gets
       // the page again, its last sliver stretched out to the clip's edge
       // (Extend) or turned over about that edge (Mirror) - the page's own
@@ -40892,7 +40903,7 @@ async function gtBuildPdf(count,render,sources){
             if(E.mirror){ d=-1; ey=2*edge; }
             else{ const an=edge-sy*eps; d=(dy+eps)/eps; ey=an-an*d; }
           }
-          cs+=`q ${cut}${f(rx)} ${f(ry)} ${f(rw)} ${f(rh)} re W n ${f(a)} 0 0 ${f(d)} ${f(ex)} ${f(ey)} cm `
+          cs+=`q ${tc}${cut}${f(rx)} ${f(ry)} ${f(rw)} ${f(rh)} re W n ${f(a)} 0 0 ${f(d)} ${f(ex)} ${f(ey)} cm `
             +`${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
         }));
       }
@@ -41002,7 +41013,10 @@ async function gtFillBleeds(pages,plan,withBack){
 // false when it is drawn.
 function gtVecTaker(forms,place){
   // noInvert: a back picture, which Invert colours never touches
-  return {take(d,r,b,gap,clip,noInvert,whole){
+  // turn: set while a turned placeholder is drawn (gtRenderPage) - each page
+  // placed then is turned with it
+  const me={turn:null,take(d,r,b,gap,clip,noInvert,whole){
+    const put=o=>place.push(me.turn?{...o,turn:me.turn}:o);
     if(!forms.has(d.id)) return false;
     if(gtSheet.invertArt&&!noInvert) return false;     // a placed page cannot be inverted
     // whole: the bleed made from the page itself, out to the edge of the clip
@@ -41011,7 +41025,7 @@ function gtVecTaker(forms,place){
       const e={l:Math.max(0,r.x-clip.x),t:Math.max(0,r.y-clip.y),
         r:Math.max(0,clip.x+clip.w-(r.x+r.w)),b:Math.max(0,clip.y+clip.h-(r.y+r.h)),
         mirror:whole==='mirror'};
-      place.push({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip,ext:e});
+      put({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip,ext:e});
       return true;
     }
     // growing a cut-out's shape outward reaches inside its box too, which a
@@ -41019,19 +41033,20 @@ function gtVecTaker(forms,place){
     // and the grown bleed is drawn over it with a hole wherever the artwork
     // itself is (see gtDrawTag) — only the growth is pixels.
     if(b>0&&gtSheet.bleedMode==='offset'){
-      place.push({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip});
+      put({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip});
       return 'offset';
     }
     const gapped=!!gap&&(gap.x>0.05||gap.y>0.05);
     if(b>0&&(gtSheet.bleedMode!=='scale'||gapped)){
-      place.push({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip});
+      put({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip});
       return 'ring';
     }
     // Stretch with nothing to cross: the page itself is enlarged into the bleed
     const R=b>0?{x:r.x-b,y:r.y-b,w:r.w+b*2,h:r.h+b*2}:{x:r.x,y:r.y,w:r.w,h:r.h};
-    place.push({key:d.id,rect:R,clip});
+    put({key:d.id,rect:R,clip});
     return true;
   }};
+  return me;
 }
 // The files behind the designs on this order that are PDFs, read once for the
 // whole run. A design whose file is a picture is not here and never was.
