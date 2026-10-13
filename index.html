@@ -36014,11 +36014,13 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
       clip={x:x0,y:y0,w:x1-x0,h:y1-y0};
     }
   }
-  // A tag cut to a line of its own with a bleed is drawn whole, as the screen
-  // draws it: placed, its page and the pixel bleed round it met at the box's
-  // edge, in two colourings and with a seam - worst where the line was grown
-  // past the artwork and the bleed fills the gap between them.
-  if(vec&&design&&b>0&&gtOwnCut(design)) vec=null;
+  // A tag cut to a line of its own with a bleed: its page and a pixel bleed
+  // round it met at the box's edge in two colourings and with a seam - worst
+  // where the line was grown past the artwork and the bleed fills the gap. So
+  // the bleed is made from the page too (gtBuildPdf, ext), exact in its own
+  // CMYK; a bleed only pixels can make draws the tag whole, as the screen does.
+  const own=!!(vec&&design&&b>0&&gtOwnCut(design));
+  if(own&&!['extend','offset','mirror'].includes(gtSheet.bleedMode)) vec=null;
   // a placed page is clipped to the same shape the screen clips it to (see
   // gtClipToTrace): without it a circle-cut PDF went out as its whole square
   if(vec&&design&&b>0){
@@ -36028,7 +36030,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // a placed page with a made-up bleed: its page goes in at the trim and only
   // the ring of bleed around it is drawn here, the way the Custom Print
   // Template does it
-  const took=vec?vec.take({id:key},r,b,gap,clip,!invert):false;
+  const took=vec?vec.take({id:key},r,b,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
   if(took===true) return;
   ctx.save();
   ctx.beginPath();
@@ -40576,7 +40578,7 @@ async function gtBuildPdf(count,render,sources){
   for(let i=0;i<count;i++){
     const {imgData,wMm,hMm,place,clear,over,ink}=await render(i,forms);
     const W=mmToPt(wMm).toFixed(2), H=mmToPt(hMm).toFixed(2);
-    const put=(place||[]).map(p=>({em:forms.get(p.key),r:p.rect,c:p.clip})).filter(u=>u.em);
+    const put=(place||[]).map(p=>({em:forms.get(p.key),r:p.rect,c:p.clip,e:p.ext})).filter(u=>u.em);
     // A render made without paper under it has to let what is beneath show
     // through, so it goes in with its alpha channel as a mask. That holds for
     // every page of such a run, not only the pages that ended up with artwork
@@ -40611,6 +40613,34 @@ async function gtBuildPdf(count,render,sources){
         // and to a cut line's shape, bleed and all, where the tag has one
         +(c.path?c.path.map(([x,y],k)=>`${f(mmToPt(x))} ${f(mmToPt(hMm-y))} ${k?'l':'m'} `).join('')+'h W n ':''):'';
       cs+=`q ${cut}${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
+      // A bleed made from the page: each side and corner outside the box gets
+      // the page again, its last sliver stretched out to the clip's edge
+      // (Extend) or turned over about that edge (Mirror) - the page's own
+      // colours, so nothing meets the artwork in a different shade.
+      if(u.e){
+        const E=u.e, eps=0.25;
+        const sides=[[-1,mmToPt(E.l)],[0,0],[1,mmToPt(E.r)]];
+        const ups=[[1,mmToPt(E.t)],[0,0],[-1,mmToPt(E.b)]];   // +1: the top, which is up in a PDF
+        sides.forEach(([sx,dx])=>ups.forEach(([sy,dy])=>{
+          if(!sx&&!sy) return;
+          if((sx&&!(dx>0))||(sy&&!(dy>0))) return;
+          const rx=sx<0?X-dx:sx>0?X+TW:X, rw=sx?dx:TW;
+          const ry=sy<0?Y-dy:sy>0?Y+TH:Y, rh=sy?dy:TH;
+          let a=1,ex=0,d=1,ey=0;
+          if(sx){
+            const edge=sx<0?X:X+TW;
+            if(E.mirror){ a=-1; ex=2*edge; }
+            else{ const an=edge-sx*eps; a=(dx+eps)/eps; ex=an-an*a; }
+          }
+          if(sy){
+            const edge=sy<0?Y:Y+TH;
+            if(E.mirror){ d=-1; ey=2*edge; }
+            else{ const an=edge-sy*eps; d=(dy+eps)/eps; ey=an-an*d; }
+          }
+          cs+=`q ${cut}${f(rx)} ${f(ry)} ${f(rw)} ${f(rh)} re W n ${f(a)} 0 0 ${f(d)} ${f(ex)} ${f(ey)} cm `
+            +`${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
+        }));
+      }
     });
     cs+=`q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
     // Layers over the page at a finer resolution than it — a place card's
@@ -40717,9 +40747,18 @@ async function gtFillBleeds(pages,plan,withBack){
 // false when it is drawn.
 function gtVecTaker(forms,place){
   // noInvert: a back picture, which Invert colours never touches
-  return {take(d,r,b,gap,clip,noInvert){
+  return {take(d,r,b,gap,clip,noInvert,whole){
     if(!forms.has(d.id)) return false;
     if(gtSheet.invertArt&&!noInvert) return false;     // a placed page cannot be inverted
+    // whole: the bleed made from the page itself, out to the edge of the clip
+    // on every side - see gtBuildPdf
+    if(whole){
+      const e={l:Math.max(0,r.x-clip.x),t:Math.max(0,r.y-clip.y),
+        r:Math.max(0,clip.x+clip.w-(r.x+r.w)),b:Math.max(0,clip.y+clip.h-(r.y+r.h)),
+        mirror:whole==='mirror'};
+      place.push({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip,ext:e});
+      return true;
+    }
     // growing a cut-out's shape outward reaches inside its box too, which a
     // ring round the trim cannot carry. So the page goes in whole at its box
     // and the grown bleed is drawn over it with a hole wherever the artwork
