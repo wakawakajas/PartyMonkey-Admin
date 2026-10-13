@@ -39745,13 +39745,16 @@ function gtEditGeom(){
   }
   if(gtEditSide==='back'){ const a=T.w-ex1, b=T.w-ex0; ex0=a; ex1=b; }
   const pad=1;                       // a millimetre round it, so a line on the edge shows
-  const vx0=Math.min(0,ex0-(ex0<0?pad:0)), vx1=Math.max(T.w,ex1+(ex1>T.w?pad:0));
-  const vy0=Math.min(0,ey0-(ey0<0?pad:0)), vy1=Math.max(T.h,ey1+(ey1>T.h?pad:0));
+  // and the bleed past the cut all round, with a millimetre of paper past that,
+  // so how far the artwork runs on can be seen - not just its edge at the cut
+  const bl=d?Math.max(0,Number(gtBleedOf(d))||0):0, bp=bl>0?bl+pad:0;
+  const vx0=Math.min(-bp,ex0-(ex0<0?pad:0)), vx1=Math.max(T.w+bp,ex1+(ex1>T.w?pad:0));
+  const vy0=Math.min(-bp,ey0-(ey0<0?pad:0)), vy1=Math.max(T.h+bp,ey1+(ey1>T.h?pad:0));
   const vw=vx1-vx0, vh=vy1-vy0;
   const fit=Math.max(220/Math.max(vw,vh),Math.min(GT_EDIT_MAX/vw,GT_EDIT_MAX/vh,availW/vw,availH/vh));
   const sc=fit*Math.min(gtEditZoom,GT_EDIT_PX_MAX/(Math.max(vw,vh)*fit));
   const w=Math.max(1,Math.round(vw*sc)), h=Math.max(1,Math.round(vh*sc));
-  return {c,img,sc,w,h,art,draw,tag:T,vx0,vy0,vw,vh,over:vw>T.w+1e-6||vh>T.h+1e-6};
+  return {c,img,sc,w,h,art,draw,tag:T,vx0,vy0,vw,vh,bleed:bl,over:vw>T.w+1e-6||vh>T.h+1e-6};
 }
 // the texts on the side of the tag being worked on — everything the editor
 // picks, drags, lines up and lists answers to these and leaves the other
@@ -39765,10 +39768,12 @@ function gtDrawDesign(){
   const lbl=document.getElementById('gtDesignLbl');
   if(lbl){
     const h=gtEditLock&&gtCurrentDesign.fields.find(f=>f.id===gtEditLock);
-    lbl.textContent='ONE TAG'+(back?' · BACK':'')+(h?` · HELD TO ${(h.name||'THAT TEXT').toUpperCase()}`:'');
+    const bm=gtCurrentDesign?Math.max(0,Number(gtBleedOf(gtCurrentDesign))||0):0;
+    lbl.textContent='ONE TAG'+(back?' · BACK':'')+(bm>0?` · BLEED ${Math.round(bm*100)/100} MM SHADED`:'')
+      +(h?` · HELD TO ${(h.name||'THAT TEXT').toUpperCase()}`:'');
   }
   const d=gtCurrentDesign; if(!d) return;
-  const {c,img,sc,w,h,art,draw,tag,vx0,vy0,over}=gtEditGeom();
+  const {c,img,sc,w,h,art,draw,tag,vx0,vy0,vw,vh,bleed,over}=gtEditGeom();
   c.width=w; c.height=h;
   const ctx=c.getContext('2d');
   // the tag is white; where the picture runs past it the rest is grey, so the
@@ -39860,6 +39865,10 @@ function gtDrawDesign(){
   });
   // seen from the back, the hole and the cut shape are the front's turned over
   if(back){ ctx.save(); ctx.translate(tw,0); ctx.scale(-1,1); }
+  // The bleed: everything past the cut is shaded (it is trimmed off), and its
+  // outer edge - the cut pushed out by the bleed - drawn dashed, so how much
+  // artwork runs past the cut, and whether it reaches all the way, can be seen
+  if(bleed>0) gtDrawBleedZone(ctx,d,draw,slot,sc,tw,th,bleed,vx0,vy0,vw,vh);
   if(d.hole.on){
     ctx.save(); ctx.strokeStyle='#B24C25'; ctx.lineWidth=1.5;
     ctx.beginPath();
@@ -39870,6 +39879,42 @@ function gtDrawDesign(){
   // traced outline where it has one, and the placeholder's where it has not
   gtDrawDesignCut(ctx,d,draw,slot,sc,tw,th);
   if(back) ctx.restore();
+  ctx.restore();
+}
+// the cut line of the tag in the editor as one loop in mm (tag at 0,0): its
+// traced line, the placeholder's shape, or the tag's own rectangle
+function gtDesignCutLoop(d,draw,slot,w,h){
+  const traced=gtTracePlace(d,draw);
+  if(traced&&traced.length>3) return traced;
+  try{
+    if(slot&&gtSlotShapeOf(slot)){
+      const L=gtSlotLoops({...slot,x:0,y:0,hole:null},{holes:false})[0];
+      if(L&&L.length>3) return L;
+    }
+  }catch(e){}
+  return [[0,0],[w,0],[w,h],[0,h]];
+}
+function gtDrawBleedZone(ctx,d,draw,slot,sc,tw,th,b,vx0,vy0,vw,vh){
+  const loop=gtDesignCutLoop(d,draw,slot,tw/sc,th/sc);
+  // a plain box bleeds square, as it prints; a shape bleeds round its outline
+  const box=loop.length===4&&!gtTracePlace(d,draw)&&!(slot&&gtSlotShapeOf(slot));
+  let outer=null;
+  if(box) outer=[[-b,-b],[tw/sc+b,-b],[tw/sc+b,th/sc+b],[-b,th/sc+b]];
+  else try{ outer=gtOffsetLoop(loop,b); }catch(e){ outer=null; }
+  const path=L=>{ ctx.moveTo(L[0][0]*sc,L[0][1]*sc); L.slice(1).forEach(([x,y])=>ctx.lineTo(x*sc,y*sc)); ctx.closePath(); };
+  ctx.save();
+  // shade past the cut: the whole view less the inside of the cut
+  ctx.beginPath();
+  ctx.rect((vx0-1)*sc,(vy0-1)*sc,(vw+2)*sc,(vh+2)*sc);
+  path(loop);
+  ctx.fillStyle='rgba(30,30,30,0.28)';
+  ctx.fill('evenodd');
+  // the bleed's outer edge
+  if(outer&&outer.length>3){
+    ctx.beginPath(); path(outer);
+    ctx.strokeStyle='#2B7FFF'; ctx.lineWidth=1.25; ctx.setLineDash([5,4]);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 function gtDrawDesignCut(ctx,d,draw,slot,sc,w,h){
