@@ -10093,6 +10093,8 @@ document.getElementById('splitPickDone').addEventListener('click',()=>{
 document.querySelectorAll('[data-split-edit]').forEach(b=>{
   b.addEventListener('click',()=>{
     const side=b.dataset.splitEdit, list=state.finalList[side];
+    // the picker works on a copy: Done while Enhance runs put the old pictures back
+    if(typeof artEnhancing!=='undefined'&&artEnhancing[side]) return;
     if(list&&list.length) splitPickOpen(side,list,false);
   });
 });
@@ -14830,7 +14832,8 @@ function enhancePages(side){
   if(!finalSplitList(side)) return null;
   const seen=new Set();
   return state.finalList[side].filter(d=>{
-    if(!d.img||artIsVector(d)||seen.has(d.img)) return false;
+    // an unticked page does not print, so it is neither upscaled nor counted
+    if(d.on===false||!d.img||artIsVector(d)||seen.has(d.img)) return false;
     seen.add(d.img); return true;
   });
 }
@@ -41222,7 +41225,9 @@ undoDef('print',{
 undoDef('gift',{
   // one page's history: a step back after switching pages put the other
   // page's library onto this one, and saved it there
-  ctx:()=>(typeof gtMode!=='undefined'?gtMode:'')+'|'+(typeof mcGtHome!=='undefined'&&mcGtHome?'mc':''),
+  // each loan its own history: two loans on one page shared one, and Ctrl+Z in
+  // the second put the first one's rows back, which the write-back then saved
+  ctx:()=>(typeof gtMode!=='undefined'?gtMode:'')+'|'+(typeof mcGtHome!=='undefined'&&mcGtHome?'mc'+(mcGtHome.loan||''):''),
   snap:()=>({order:gtOrder,sheet:{...gtSheet,slots:gtSlotsBase},designs:gtLib.designs,
     fonts:gtLib.fonts,texts:gtLib.texts,base:gtDefaultShape,jobBack:gtJobBack}),
   put:v=>{
@@ -46489,6 +46494,28 @@ async function mcExtraToSheet(it){
       if(rows.length&&rows.some(d=>Number(d.qty)!==want)){
         rows.forEach(d=>{ d.qty=want; });
         await mcSave(it,{design:it.design});
+      }
+    }
+    // Multiple Design: the pages carry the counts, and the list above never
+    // sees them, so "+N extra" changed nothing on the PDF. One ticked page is
+    // this line's card and takes the count; several are a set whose counts
+    // only the operator can say, so it is said rather than guessed.
+    const pages=it.art&&Array.isArray(it.art.frontSplit)?it.art.frontSplit:null;
+    if(pages&&pages.length){
+      const on=pages.filter(p=>p.on!==false);
+      if(on.length===1){
+        if(Number(on[0].qty)!==want){
+          on[0].qty=want;
+          await mcSave(it,{art:it.art});
+        }
+        if(mcWinItem===it.id&&!mcLaidShared){
+          const live=(state.finalList.front||[]).filter(d=>d.on!==false);
+          if(live.length===1){ live[0].qty=splitQty(want); refreshSlots(); drawAll(); }
+        }
+      }else if(on.length>1){
+        const strip=document.getElementById('mcBatchMsg');
+        if(strip) showMsg(strip,`${escapeHtml(it.order_id||it.sku||'That line')} prints ${on.length} `
+          +'Multiple Design pages — set the extra pieces on each page in Pages &amp; qty.',false);
       }
     }
     return;
@@ -53397,6 +53424,9 @@ function mcWinCloseRun(){
   // even while it was sitting minimised as the bubble, not the panel
   if(!mcWinItem) return;
   if(mcBusy){ showMsg(document.getElementById('mcBatchMsg'),'An export is running — wait for it to finish.',false); return; }
+  // the download list counting or drawing a sheet has the builder on loan:
+  // saved now, this line was given the borrowed sheet — another line's bleed
+  if(mcPlanDrawing){ showMsg(document.getElementById('mcBatchMsg'),'The download list is drawing a sheet — try again in a moment.',false); return; }
   return mcCommit().then(async ok=>{
     // A layout that did not save is still only on this screen. Handing the
     // builder back now would throw it away after saying it was kept.
@@ -55513,6 +55543,7 @@ document.getElementById('mcBackChip').addEventListener('click',async()=>{
 // on the way out — so a sheet being built on the Gift Tag screen is not lost
 // to a batch borrowing it, and edits made there land on the batch's rows.
 let mcGtHome=null;
+let mcGtLoanSeq=0;     // numbers each loan, so undo never reaches across two
 // A row on the gift tag sheet that came from the batch rather than from
 // somebody typing it in there. The two share one order now, so every place
 // that has to tell them apart asks this rather than spelling out the prefix.
@@ -55562,8 +55593,13 @@ async function mcGtOpenFull(page,finish){
   // written back against whichever page had just been opened.
   if(mcGtHome&&(mcGtHome.page!==want||mcGtHome.finish!==fin)) await mcGtReturn();
   if(want!==gtMode&&typeof gtSetMode==='function') await gtSetMode(want);
+  // A line with no page of its own goes on the page being lent — except a
+  // one-off, which is on no page's list: lent onto whichever page was open, the
+  // write-back pinned it there for good (a Gloss tag ended up a Sticker one).
+  // The line being opened is still lent, since that is the page asked for.
+  const pageFits=x=>(mcLinePage(x)||((x.sheet_item&&x.sheet_item.oneOff&&x!==here)?'':want))===want;
   const lines=mcPool().filter(x=>x.tile==='giftTag'&&x.sheet_item&&x.sheet_item.designId
-    &&(mcLinePage(x)||want)===want&&mcGtFinishOf(x)===fin);
+    &&pageFits(x)&&mcGtFinishOf(x)===fin);
   // The line being worked has not been given a design yet — which is the whole
   // reason anybody is on this screen. It goes onto the lent sheet blank, so the
   // design is chosen on the screen that actually shows the designs and comes
@@ -55624,7 +55660,7 @@ async function mcGtOpenFull(page,finish){
     // back. Only the rows the batch lent are ever taken away again.
     const own=gtOrder.filter(l=>!mcGtLent(l)&&!dupe(l));
     // set aside rather than deleted: they are the page's, and go back on return
-    mcGtHome={ids:lines.map(l=>l.id),page:want,finish:fin,dropped:gtOrder.filter(dupe)};
+    mcGtHome={ids:lines.map(l=>l.id),page:want,finish:fin,dropped:gtOrder.filter(dupe),loan:++mcGtLoanSeq};
     if(!own.length) gtJobBack=null;    // a new order: no saved sheet's back on it
     gtOrder=own.concat(lines.map(mcGtLine));
   }
@@ -56812,8 +56848,13 @@ const mcMergeCache=new Map();
 // quantity alone — a line re-Created or given other artwork kept its old merged
 // picture. The key is the line's layout, artwork and sheet entry themselves.
 const mcHashStr=str=>{ let h=0; for(let i=0;i<str.length;i++) h=(Math.imul(h,31)+str.charCodeAt(i))|0; return h; };
+// The bleed a design remembers for itself (the shared table) is read when it is
+// laid, not saved on the line — so it is in the key, or a bleed changed on the
+// design kept printing the old one from the cache for the rest of the session.
+const mcMergeBleedOf=it=>((it.design&&Array.isArray(it.design.designs))?it.design.designs:[])
+  .map(d=>{ try{ return designBleedSaved({source:{path:d.path}})||null; }catch(e){ return null; } });
 const mcMergeCacheKey=set=>set.map(it=>`${it.id}:${mcHashStr(JSON.stringify(
-  [it.design||null,it.art||null,it.sheet_item||null,it.paper_type||'',it.gsm||'']))}:${mcQty(it)}`).join(',');
+  [it.design||null,it.art||null,it.sheet_item||null,it.paper_type||'',it.gsm||'',mcMergeBleedOf(it)]))}:${mcQty(it)}`).join(',');
 // why a line put nothing up, as far as can be told
 // — an upload is the line's own; only a design off the folder needs the folder
 const mcMergeWhy=it=>(it&&it.art&&it.art.front)||(loadDesignFiles&&loadDesignFiles.length)?''
