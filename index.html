@@ -36076,6 +36076,33 @@ function gtDrawArt(ctx,img,x,y,w,h,b,sc,mode,id,gap){
 // Clips to the printing area of a traced design: its cut line pushed out by the
 // bleed, so the bleed follows the shape instead of the picture's rectangle.
 // Answers false, and clips nothing, where the design has no traced line.
+// The placeholder a tag is being drawn into on the sheet, while it is drawn
+// (gtRenderPage) - so its artwork can be cut to that placeholder's shape:
+// {s: the placeholder as drawn, back: the back of the sheet, d: its design}
+let gtDrawingSlot=null;
+const gtSlotClipCache=new Map();
+// A cutting-file placeholder's shape grown by the bleed, in sheet mm: what a
+// design with no cut line of its own prints to. null for a plain box, which
+// the rectangle clip already covers. mirror: the back - the same tag seen from
+// behind, so its shape turned over left to right inside the placeholder.
+function gtSlotClipPath(slot,b,mirror){
+  if(!slot||!gtSlotShapeOf(slot)) return null;
+  const r2=v=>Math.round(v*100)/100;
+  const key=[slot.nestCut||gtSheet.layoutFile,slot.shape,r2(slot.w),r2(slot.h),r2(b)].join('|');
+  let rel=gtSlotClipCache.get(key);
+  if(rel===undefined){
+    rel=null;
+    try{
+      const at={...slot,x:0,y:0,hole:null};
+      const loop=gtSlotLoops(at,{holes:false})[0];
+      const grown=loop&&loop.length>3?(b>0?gtOffsetLoop(loop,b):loop):null;
+      rel=grown&&grown.length>3?grown.map(([x,y])=>[x,y]):null;
+    }catch(e){ rel=null; }
+    gtSlotClipCache.set(key,rel);
+    if(gtSlotClipCache.size>200) gtSlotClipCache.delete(gtSlotClipCache.keys().next().value);
+  }
+  return rel?rel.map(([x,y])=>[(mirror?slot.w-x:x)+slot.x,y+slot.y]):null;
+}
 function gtClipToTrace(ctx,d,r,b,sc){
   if(!(b>0)) return false;
   const p=gtTracePlace(d,r,b);
@@ -36112,6 +36139,13 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
       clip={x:x0,y:y0,w:x1-x0,h:y1-y0};
     }
   }
+  // Cut to the placeholder's own shape instead (a cutting file's circle), it
+  // prints to that shape plus its bleed - not to the square box round it,
+  // whose corners stood out past the cut. The back too (drawn with its back
+  // box), cut to the same shape turned over.
+  const ds=gtDrawingSlot;
+  const slotPath=(ds&&ds.d&&!gtOwnCut(ds.d)&&(ds.back?!!box:(!box&&!!design)))
+    ?gtSlotClipPath(ds.s,b>0?b:0,ds.back):null;
   // A tag cut to a line of its own with a bleed: its page and a pixel bleed
   // round it met at the box's edge in two colourings and with a seam - worst
   // where the line was grown past the artwork and the bleed fills the gap. So
@@ -36130,6 +36164,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
     const tp=gtTracePlace(design,r,b);
     if(tp&&tp.length>3) clip={...clip,path:tp};
   }
+  if(vec&&slotPath) clip={...clip,path:slotPath};
   // a placed page with a made-up bleed: its page goes in at the trim and only
   // the ring of bleed around it is drawn here, the way the Custom Print
   // Template does it
@@ -36141,6 +36176,11 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   ctx.clip();
   // a traced design is printed to its own shape plus the bleed, not to a box
   if(design) gtClipToTrace(ctx,design,r,b,sc);
+  if(slotPath){
+    ctx.beginPath();
+    slotPath.forEach(([px,py],k)=>k?ctx.lineTo(px*sc,py*sc):ctx.moveTo(px*sc,py*sc));
+    ctx.closePath(); ctx.clip();
+  }
   if(invert) ctx.filter='invert(1)';
   gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,key,gap);
   // a pixel short of the trim, so the ring overlaps the placed page rather
@@ -36513,7 +36553,11 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
     const line=q[start+i]; if(!line) return;
     const at=onSide(slot);
     // a turned tag is drawn as a picture: an artwork page placed as it is cannot be turned here
-    gtWithTurn(ctx,at,sc,back,u=>(back?gtDrawBack:gtDrawTag)(ctx,line,u.x,u.y,u.w,u.h,sc,forExport,at.rot?null:vec));
+    gtWithTurn(ctx,at,sc,back,u=>{
+      gtDrawingSlot={s:u,back,d:gtDesign(line.designId)};
+      try{ (back?gtDrawBack:gtDrawTag)(ctx,line,u.x,u.y,u.w,u.h,sc,forExport,at.rot?null:vec); }
+      finally{ gtDrawingSlot=null; }
+    });
   });
   // The base layer goes over the tags, so its dots and template lines are
   // never hidden by artwork — on screen and in the PDF alike. Multiplied, so
