@@ -10844,9 +10844,37 @@ function renderSide(side,canvas,maxDim,opts){
         const ix=swapped?insH:insW, iy=swapped?insW:insH;
         if(trimPx) vclip=cut(vclip,mx-wMm/2+ix,my-hMm/2+iy,wMm-ix*2,hMm-iy*2);
         if(holes.length) vclip.holes=vHoles;
+        // A bleed made from pixels round a placed page met it at the trim in
+        // two colourings - the page's own, the picture's sRGB - and printed
+        // there as a faint frame. Extend, Mirror and Offset (on art with
+        // nothing see-through) make the bleed from the page itself instead,
+        // as the gift tag does - turned or not, the page's edges are
+        // stretched along the sheet's axes (gtBuildPdf).
+        const whole=!trimPx&&(bleedMode==='extend'
+          ||(bleedMode==='mirror'&&bX<=wMm&&bY<=hMm)
+          ||(bleedMode==='offset'&&gtArtOpaque(img)))
+          ?{bx:bX,by:bY,mirror:bleedMode==='mirror'}:null;
         ringOnly=opts.vec.take(key,
           {x:mx-trimW/2, y:my-trimH/2, w:trimW, h:trimH, rot:rotDeg},
-          reach((wMm-ph.wMm)/2, (hMm-ph.hMm)/2), vclip);
+          reach((wMm-ph.wMm)/2, (hMm-ph.hMm)/2), vclip, whole);
+        if(ringOnly==='whole'){
+          // nothing drawn here; the cutting marks under the card and its
+          // bleed are taken off the sheet, as the art covers them on screen
+          if(state.refMark&&state.refMark.enabled){
+            const ex=cut(clip,ph.xMm+ph.wMm/2-effW/2,ph.yMm+ph.hMm/2-effH/2,effW,effH);
+            ctx.save();
+            ctx.beginPath(); ctx.rect(ex.x*sc,ex.y*sc,ex.w*sc,ex.h*sc); ctx.clip();
+            holes.forEach(hb=>{
+              ctx.beginPath();
+              ctx.rect(ex.x*sc,ex.y*sc,ex.w*sc,ex.h*sc);
+              ctx.rect(hb.x*sc,hb.y*sc,hb.w*sc,hb.h*sc);
+              ctx.clip('evenodd');
+            });
+            ctx.clearRect(ex.x*sc,ex.y*sc,ex.w*sc,ex.h*sc);
+            ctx.restore();
+          }
+          return;
+        }
       }else{
         // shaved and stretched back to the box: the page is enlarged by the
         // same share and held to the box, its shaved edge falling outside
@@ -10861,7 +10889,32 @@ function renderSide(side,canvas,maxDim,opts){
         const ox=-to.x*w, oy=-to.y*h;
         const px=mx+ox*Math.cos(ra)-oy*Math.sin(ra), py=my+ox*Math.sin(ra)+oy*Math.cos(ra);
         if(opts.vec.take(key,{x:px-w/2, y:py-h/2, w, h, rot:rotDeg},
-          reach((effW-ph.wMm)/2, (effH-ph.hMm)/2), vclip)) return;
+          reach((effW-ph.wMm)/2, (effH-ph.hMm)/2), vclip)){
+          // the cutting marks lie under the artwork: wherever the placed
+          // page's art reaches over them they are taken off the sheet, as the
+          // screen shows them, rather than printing on top of it
+          if(state.refMark&&state.refMark.enabled){
+            ctx.save();
+            ctx.beginPath(); ctx.rect(clip.x*sc,clip.y*sc,clip.w*sc,clip.h*sc); ctx.clip();
+            holes.forEach(hb=>{
+              ctx.beginPath();
+              ctx.rect(clip.x*sc,clip.y*sc,clip.w*sc,clip.h*sc);
+              ctx.rect(hb.x*sc,hb.y*sc,hb.w*sc,hb.h*sc);
+              ctx.clip('evenodd');
+            });
+            if(trimPx){
+              const ex=cut(clip,ph.xMm+ph.wMm/2-effW/2,ph.yMm+ph.hMm/2-effH/2,effW,effH);
+              ctx.beginPath(); ctx.rect(ex.x*sc,ex.y*sc,ex.w*sc,ex.h*sc); ctx.clip();
+            }
+            ctx.translate(cx,cy); ctx.rotate(rotDeg*Math.PI/180);
+            ctx.globalCompositeOperation='destination-out';
+            const pw=w*sc, phh=h*sc;
+            ctx.drawImage(gtPunchMask(img,Math.max(1,Math.round(pw)),Math.max(1,Math.round(phh))),
+              -pw/2-to.x*pw,-phh/2-to.y*phh,pw,phh);
+            ctx.restore();
+          }
+          return;
+        }
       }
     }
     {
@@ -30172,6 +30225,63 @@ async function artPdfBytes(o){
   if(!looksPdf) return null;
   try{ return new Uint8Array(await file.arrayBuffer()); }catch(e){ return null; }
 }
+// A picture (PNG, JPG) finer than the 300dpi sheet is placed the way a PDF
+// is, at every pixel it has, instead of being redrawn into the sheet - a 945px
+// design on a 50mm card is 480dpi, and taken down to 300 its small words came
+// out soft. It is wrapped in a one-page PDF of its own (in the sheet's own
+// sRGB, a see-through picture with its mask) so the same placing carries it.
+// A picture at or under 300dpi loses nothing on the sheet and stays there.
+const PRINT_SHEET_DPI=300;
+async function imgPdfBytes(img){
+  const W=img&&(img.naturalWidth||img.width), H=img&&(img.naturalHeight||img.height);
+  if(!(W>0&&H>0)||W*H>60e6) return null;
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  let id;
+  try{ c.getContext('2d').drawImage(img,0,0,W,H); id=c.getContext('2d').getImageData(0,0,W,H); }
+  catch(e){ return null; }
+  finally{ c.width=c.height=0; }
+  let see=false;
+  for(let i=3;i<id.data.length;i+=4) if(id.data[i]<255){ see=true; break; }
+  const rgb=await deflateBytes(rgbaToRawRgbScanlines(id));
+  const msk=see?await deflateBytes(rgbaToAlphaScanlines(id)):null;
+  const enc=new TextEncoder(), parts=[], off=[]; let pos=0;
+  const push=u8=>{ parts.push(u8); pos+=u8.length; };
+  const obj=(n,head,stream)=>{
+    off[n]=pos;
+    if(stream){ push(enc.encode(`${n} 0 obj\n${head}\nstream\n`)); push(stream); push(enc.encode('\nendstream\nendobj\n')); }
+    else push(enc.encode(`${n} 0 obj\n${head}\nendobj\n`));
+  };
+  // the page in points at 72 to the pixel's inch - its size is only a shape,
+  // the placing scales it to the card
+  const pw=W*0.24, ph=H*0.24;
+  const content=enc.encode(`q ${pw} 0 0 ${ph} 0 0 cm /Im0 Do Q`);
+  push(enc.encode('%PDF-1.7\n'));
+  obj(1,'<< /Type /Catalog /Pages 2 0 R >>');
+  obj(2,'<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
+  obj(3,`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pw} ${ph}] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>`);
+  obj(4,`<< /Length ${content.length} >>`,content);
+  obj(5,`<< /Type /XObject /Subtype /Image /Width ${W} /Height ${H} /ColorSpace [/ICCBased 6 0 R] /BitsPerComponent 8 `
+    +`/Interpolate true /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns ${W} >> `
+    +(msk?'/SMask 7 0 R ':'')+`/Length ${rgb.length} >>`,rgb);
+  off[6]=pos; push(iccObject(6));
+  if(msk) obj(7,`<< /Type /XObject /Subtype /Image /Width ${W} /Height ${H} /ColorSpace /DeviceGray /BitsPerComponent 8 `
+    +`/Interpolate true /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 1 /BitsPerComponent 8 /Columns ${W} >> /Length ${msk.length} >>`,msk);
+  const last=msk?7:6, xref=pos;
+  let x=`xref\n0 ${last+1}\n0000000000 65535 f \n`;
+  for(let i=1;i<=last;i++) x+=String(off[i]).padStart(10,'0')+' 00000 n \n';
+  push(enc.encode(x+`trailer\n<< /Size ${last+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`));
+  const out=new Uint8Array(pos); let o=0;
+  parts.forEach(u=>{ out.set(u,o); o+=u.length; });
+  return out;
+}
+// whether a picture is finer than the sheet in the card it is printed in
+function imgFinerThanSheet(img,side){
+  const a=state.art&&state.art[side], W=img&&(img.naturalWidth||img.width), H=img&&(img.naturalHeight||img.height);
+  if(!a||!(a.wMm>0&&a.hMm>0)||!(W>0&&H>0)) return false;
+  // either way round, the card turned or not: the finer of the two fits
+  const dpi=Math.max(W,H)/(Math.max(a.wMm,a.hMm)/25.4);
+  return dpi>PRINT_SHEET_DPI*1.05;
+}
 async function printVectorSources(side){
   const out=new Map();
   if(!wholeArtOn()) return out;
@@ -30185,20 +30295,27 @@ async function printVectorSources(side){
     else want.push(['final:'+side,state.final[side]]);
   }
   for(const [key,o] of want){
-    const bytes=await artPdfBytes(o);
+    let bytes=await artPdfBytes(o);
+    if(!bytes&&o&&o.img&&imgFinerThanSheet(o.img,side)) bytes=await imgPdfBytes(o.img).catch(()=>null);
     if(bytes) out.set(key,{bytes,page:0});
   }
   return out;
 }
-// A design is only lifted out of the render where the sheet prints nothing of
-// its own underneath it. The cutting marks are drawn below the artwork here,
-// so artwork that reaches them is drawn as it always was rather than placed
-// and leaving them on top of it.
+// Every design whose file is a PDF (or a picture finer than the sheet) is
+// lifted out of the render and placed. The cutting marks are drawn below the
+// artwork: where a placed design reaches over them, renderSide punches them
+// out of the sheet there (marks under art), so they never print on top of it.
+// They used to stop the placing instead, and every design whose bleed reached
+// the marks went out as a soft 300dpi picture.
+// whole {bx,by,mirror}: the bleed is made from the page itself, its edges
+// stretched (or turned over) out by bx/by mm - see gtBuildPdf. Answers 'whole'.
 function printVecTaker(forms,place){
-  const off=state.refMark&&state.refMark.enabled?(Number(state.refMark.offsetMm)||0):null;
-  return {take(key,rect,ext,clip){
+  return {take(key,rect,ext,clip,whole){
     if(!key||!forms.has(key)) return false;
-    if(off!==null&&(ext.x>off||ext.y>off)) return false;
+    if(whole){
+      place.push({key,rect,clip,ext:{l:whole.bx,r:whole.bx,t:whole.by,b:whole.by,mirror:!!whole.mirror}});
+      return 'whole';
+    }
     place.push({key,rect,clip});
     return true;
   }};
@@ -40862,6 +40979,7 @@ async function gtBuildPdf(count,render,sources){
       // the sheet is worked in millimetres from the top, a PDF in points from
       // the bottom, and the form draws inside a box of its own choosing
       const X=mmToPt(r.x), Y=mmToPt(hMm-(r.y+r.h)), TW=mmToPt(r.w), TH=mmToPt(r.h);
+      const X0=X, Y0=Y, TW0=TW, TH0=TH;
       const sx=TW/em.w, sy=TH/em.h;
       let M=[sx,0,0,sy,X-em.x*sx,Y-em.y*sy];
       if(r.rot){
@@ -40884,6 +41002,10 @@ async function gtBuildPdf(count,render,sources){
       // (Extend) or turned over about that edge (Mirror) - the page's own
       // colours, so nothing meets the artwork in a different shade.
       if(u.e){
+        // the box as it stands on the sheet: a quarter-turned page's is its
+        // own box turned, about the same middle
+        const q=r.rot&&(((Math.round(r.rot)%180)+180)%180)===90;
+        const X=q?X0+TW0/2-TH0/2:X0, Y=q?Y0+TH0/2-TW0/2:Y0, TW=q?TH0:TW0, TH=q?TW0:TH0;
         const E=u.e, eps=0.25;
         const sides=[[-1,mmToPt(E.l)],[0,0],[1,mmToPt(E.r)]];
         const ups=[[1,mmToPt(E.t)],[0,0],[-1,mmToPt(E.b)]];   // +1: the top, which is up in a PDF
