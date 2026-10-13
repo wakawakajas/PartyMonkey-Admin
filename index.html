@@ -7344,6 +7344,10 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <div class="click-row">
             <label class="click-tog"><input type="checkbox" id="gtTraceOn"/>Cut round the artwork, not the placeholder</label>
           </div>
+          <!-- a PDF that is a whole sheet: every red cut line on it is kept as it is -->
+          <div class="click-row" id="gtCutSheetRow" style="margin-top:6px;" hidden>
+            <label class="click-tog" title="For a PDF that is a whole sheet — a sticker sheet with a red cut line round every sticker. Every closed red line on the page becomes the cut line, however many there are, and the page goes in as one design. The red is never printed."><input type="checkbox" id="gtCutSheet"/>Sticker sheet: cut on every red line in the PDF</label>
+          </div>
           <div class="chips" id="gtCutShapeSeg" style="margin:9px 0 0;">
             <button type="button" class="chip chip-state" data-gtcs="none" title="No cut line of its own - the tag is cut to its placeholder">None</button>
             <button type="button" class="chip chip-state on" data-gtcs="trace" title="Follow the edge of the artwork">Traced</button>
@@ -29474,7 +29478,7 @@ const pdfLift=(function(){
     // a cut line drawn on the page is read off and left out of what is kept
     let cutScan = null;
     if (opts && opts.cut) {
-      try { cutScan = pdfCutScan(content, bbox); } catch (e) { cutScan = null; }
+      try { cutScan = pdfCutScan(content, bbox, !!opts.sheet); } catch (e) { cutScan = null; }
       if (cutScan) content = cutScan.content;
     }
 
@@ -29606,7 +29610,7 @@ const pdfLift=(function(){
 // Only a stroke with no fill, in a plain red (CMYK 0/100/100/0, RGB red), is
 // taken: the outline has to cover most of the page, and a circle has to be small
 // and inside it. Any other red line in the artwork is left exactly as it is.
-function pdfCutScan(content,box){
+function pdfCutScan(content,box,sheetOn){
   let s=''; for(let i=0;i<content.length;i+=8192) s+=String.fromCharCode.apply(null,content.subarray(i,i+8192));
   const n=s.length, WS=/[\0\t\n\f\r ]/, DL=/[\0\t\n\f\r ()<>\[\]{}\/%]/;
   const mul=(m,c)=>[m[0]*c[0]+m[1]*c[2],m[0]*c[1]+m[1]*c[3],m[2]*c[0]+m[3]*c[2],m[2]*c[1]+m[3]*c[3],
@@ -29688,13 +29692,15 @@ function pdfCutScan(content,box){
     if(b.w*b.h>=0.4*pageA&&(!outline||b.w*b.h>outline.b.w*outline.b.h)) outline={c,l,b}; }));
   const holes=[], extras=[];
   let sheet=null;
-  if(!outline){
+  if(!sheetOn&&!outline) return null;
+  if(sheetOn){
     // A whole sheet drawn as one page — a sticker sheet, each sticker its own red
-    // outline and none of them most of the page — is cut just as it is drawn:
+    // outline — is cut just as it is drawn, when the design says it is one:
     // every closed red line is kept, the biggest as the main one and the rest
     // beside it, so the page goes in as one design with all its cut lines. A
     // small circle here is a round sticker, not a punch hole. Open red strokes,
     // and specks under 3mm, are the artwork's and stay in it.
+    outline=null;
     const shut=l=>{ const p=l.pts, a=p[0], z=p[p.length-1], b=bb(p);
       return p.length>=3&&(!!l.closed||Math.hypot(a[0]-z[0],a[1]-z[1])<0.5)&&Math.max(b.w,b.h)>=8.5; };
     sheet=cands.filter(c=>c.loops.length&&c.loops.every(shut));
@@ -31052,7 +31058,7 @@ async function gtArtURL(blob,name,asDesign){
   // A design whose PDF has its cut line drawn on the page is drawn without it,
   // and the line is kept to cut to — see gtCutLift
   if(asDesign&&name){
-    const lift=await gtCutLift(blob);
+    const lift=await gtCutLift(blob,gtCutSheetFiles.has(name));
     // either way the designs on this file are told what was found, so a line
     // taken from an earlier version of the file does not outlive it
     if(lift) gtCutFound.set(name,lift.cut); else gtCutFound.delete(name);
@@ -31069,14 +31075,23 @@ async function gtArtURL(blob,name,asDesign){
 const gtCutLifted=new WeakMap();
 const gtCutFound=new Map();        // design file -> the cut line found on its page
 const gtCutPending=new Set();      // files whose line has not been given to their designs yet
-function gtCutLift(blob){
+// sheet: the design is a sticker sheet, cut on every red line (see pdfCutScan)
+var gtCutSheetFiles=new Set();     // design files read as a sticker sheet
+function gtCutSheetSync(file){
+  if((gtLib.designs||[]).some(x=>x.file===file&&x.cutSheet)) gtCutSheetFiles.add(file);
+  else gtCutSheetFiles.delete(file);
+}
+function gtCutLift(blob,sheet){
   if(!blob||typeof blob.arrayBuffer!=='function') return Promise.resolve(null);
-  let p=gtCutLifted.get(blob);
+  sheet=!!sheet;
+  let two=gtCutLifted.get(blob);
+  if(!two){ two={}; gtCutLifted.set(blob,two); }
+  let p=two[sheet];
   if(!p){
     p=(async()=>{
       try{
         const bytes=new Uint8Array(await blob.arrayBuffer());
-        const file=await pdfPageFile(bytes,0,blob.name||'art.pdf','',{cut:true});
+        const file=await pdfPageFile(bytes,0,blob.name||'art.pdf','',{cut:true,sheet});
         if(!file||!file.cutFound||file.cutFound.outline.length<=3) return null;
         const c=file.cutFound, p=c.outline[0];
         // enough to tell one export of the line from the next
@@ -31084,7 +31099,7 @@ function gtCutLift(blob){
         return {clean:file,cut:c};
       }catch(e){ return null; }
     })();
-    gtCutLifted.set(blob,p);
+    two[sheet]=p;
   }
   return p;
 }
@@ -31188,7 +31203,7 @@ window.addEventListener('beforeunload',e=>{
 // one-off means.
 const gtManDesign=d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.hole,
   artV:2,art:d.art,bleed:d.bleed,trace:d.trace,...(d.cutSeen?{cutSeen:d.cutSeen}:{}),
-  ...(d.back?{back:d.back}:{})});
+  ...(d.cutSheet?{cutSheet:true}:{}),...(d.back?{back:d.back}:{})});
 function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
   gtKeepShape();
@@ -31285,7 +31300,8 @@ async function gtPiguFieldsSave(){
     // line are kept with the words: a folder design is read afresh every visit,
     // and a size set on it went back to the default each time
     const keep={fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
-      artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,cutSeen:d.cutSeen||null};
+      artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,cutSeen:d.cutSeen||null,
+      ...(d.cutSheet?{cutSheet:true}:{})};
     const now=JSON.stringify(keep);
     if(JSON.stringify(map[d.file]||null)!==now){ map[d.file]=JSON.parse(now); changed=true; }
   });
@@ -31964,6 +31980,7 @@ async function gtLoadLibRead(){
 // A design read back off disk is trusted for its shape but not its contents —
 // a hand-edited library.json should not be able to take the screen down.
 function gtNormalizeDesign(d){
+  if(d.cutSheet&&d.file) gtCutSheetFiles.add(d.file);
   return {id:d.id||gtId('d'),name:d.name||'Untitled',file:d.file||'',adhoc:!!d.adhoc,
     fields:(d.fields||[]).map(f=>({id:f.id||gtId('f'),name:f.name||'Text',def:f.def||'',
       font:f.font||'',size:Number(f.size)||6,color:f.color||'#232323',align:f.align||'center',
@@ -31984,6 +32001,8 @@ function gtNormalizeDesign(d){
     // as the new kind it came up as 70-odd percent — so it comes in at 100%.
     artV:2,
     ...(d.cutSeen?{cutSeen:String(d.cutSeen)}:{}),
+    // a sticker sheet: the PDF's every red line is its cut line (see pdfCutScan)
+    ...(d.cutSheet?{cutSheet:true}:{}),
     art:d.artV===2
       ?{s:Number(d.art&&d.art.s)||1,dx:Number(d.art&&d.art.dx)||0,dy:Number(d.art&&d.art.dy)||0}
       :{s:1,dx:0,dy:0},
@@ -32319,7 +32338,7 @@ function gtDropMissing(present){
     const heir=gtLib.designs.find(d=>!gone.has(d.id)&&!d.adhoc&&base(d.name)===base(old.name)
       &&(!d.trace||d.trace.auto)&&!(d.fields||[]).length&&!d.bleed&&!d.back);
     if(!heir) return;
-    ['trace','fields','bleed','back','art','hole','cutSeen'].forEach(k=>{
+    ['trace','fields','bleed','back','art','hole','cutSeen','cutSheet'].forEach(k=>{
       if(old[k]!==undefined&&old[k]!==null) heir[k]=old[k]; });
   });
   gone.forEach(id=>{ gtImgs.delete(id); gtOneOffKeep.delete(id); });
@@ -32802,7 +32821,7 @@ async function gtReadPiguFolder(dir,folderName,keep){
       adhoc:true,fields:(was&&was.fields)||[],hole:was&&was.hole,back:was&&was.back,
       // one never seen before is new to the library: no bleed until given one
       artV:was&&was.artV,art:was&&was.art,bleed:was?was.bleed:gtNewBleed(),trace:was&&was.trace,
-      cutSeen:was&&was.cutSeen});
+      cutSeen:was&&was.cutSeen,cutSheet:was&&was.cutSheet});
     try{ gtImgs.set(id,await loadImage(await gtArtURL(blob,path,true))); }catch(err){}
     made.push(d);
   }
@@ -40002,6 +40021,8 @@ function gtArtWriteInputs(){
   const t=d.trace||null;
   document.getElementById('gtTraceOn').checked=!!(t&&t.on);
   document.getElementById('gtTraceOn').disabled=!t;
+  document.getElementById('gtCutSheetRow').hidden=!gtIsPdfFile(d.file);
+  document.getElementById('gtCutSheet').checked=!!d.cutSheet;
   const shape=!t||!t.on?'none':(t.shape||'trace');
   document.querySelectorAll('#gtCutShapeSeg [data-gtcs]').forEach(b=>b.classList.toggle('on',b.dataset.gtcs===shape));
   // threshold and Trace are for reading the artwork's edge — a drawn shape has none
@@ -40327,6 +40348,24 @@ document.getElementById('gtBleedModeSeg').addEventListener('click',async e=>{
   gtSheet.bleedMode=b.dataset.gtbm;
   gtArtWriteInputs(); gtSyncBleedChips(); gtArtChanged();
 });
+// A sticker sheet: the page is read again for every red line on it, and drawn
+// again without them. Every design on the same file goes the same way, since
+// they share the one picture.
+document.getElementById('gtCutSheet').addEventListener('change',async e=>{
+  const d=gtCurrentDesign; if(!d) return;
+  const on=e.target.checked;
+  (gtLib.designs||[]).forEach(x=>{ if(x.file!==d.file) return;
+    if(on) x.cutSheet=true; else delete x.cutSheet;
+    gtImgs.delete(x.id); gtImgFailed.delete(x.id); });
+  gtCutSheetSync(d.file);
+  await gtImgLoad(d.id);
+  gtImgGet(d);
+  const f=gtCutFound.get(d.file);
+  gtArtWriteInputs(); gtArtChanged();
+  showMsg(document.getElementById('gtTraceMsg'),
+    on?(f?`✓ ${1+((f.extras||[]).length)} cut lines taken from the PDF.`:'No closed red line found in this PDF.')
+      :"Back to the PDF's single cut line.",!on||!!f);
+});
 document.getElementById('gtTraceOn').addEventListener('change',e=>{
   const d=gtCurrentDesign; if(!d||!d.trace) return;
   gtCutBegin(d);
@@ -40598,7 +40637,7 @@ async function gtVectorSources(side){
     if(!key||out.has(key)||!gtIsPdfFile(file)) continue;
     const blob=gtAssets.get(file); if(!blob) continue;
     try{
-      const lift=side==='back'?null:await gtCutLift(blob);
+      const lift=side==='back'?null:await gtCutLift(blob,!!d.cutSheet);
       out.set(key,{bytes:new Uint8Array(await (lift?lift.clean:blob).arrayBuffer()),page:0});
     }catch(e){}
   }
@@ -54853,7 +54892,7 @@ async function mcGtKeepOneOffOn(it,si){
   si.oneOff={id:d.id,name:d.name||'',file:d.file||path,path,
     fields:(d.fields||[]),hole:d.hole||null,...(d.back?{back:d.back}:{}),
     artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,
-    ...(d.cutSeen?{cutSeen:d.cutSeen}:{})};
+    ...(d.cutSeen?{cutSeen:d.cutSeen}:{}),...(d.cutSheet?{cutSheet:true}:{})};
 }
 // The copies these lines are carrying, back into the library — only the ones
 // the library cannot already answer for, so a page still holding its one-offs
@@ -54877,7 +54916,7 @@ async function mcGtRehydrate(lines){
       const d=gtNormalizeDesign({id:one.id,name:one.name||'One-off',
         file:one.file||one.path,adhoc:true,fields:one.fields||[],hole:one.hole,back:one.back,
         ...(one.artV?{artV:one.artV}:{}),art:one.art,bleed:one.bleed,trace:one.trace,
-        cutSeen:one.cutSeen});
+        cutSeen:one.cutSeen,cutSheet:one.cutSheet});
       gtAssets.set(d.file,data);
       try{ gtImgs.set(d.id,await loadImage(await gtArtURL(data,d.file,true))); }catch(e){}
       gtLib.designs.push(d);
