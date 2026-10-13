@@ -53334,6 +53334,7 @@ function mcWinClose(){
   return p;
 }
 function mcWinCloseRun(){
+  mcAutoRun++;   // nothing still reading the folder for this line lands after it shuts
   // checked on mcWinItem rather than the 'open' class, so a window closed
   // from elsewhere (leaving the batch, completing it) is actually let go of
   // even while it was sitting minimised as the bubble, not the panel
@@ -53670,6 +53671,8 @@ async function mcCommit(){
   // Nothing of the line's own is on it to save, and saving it would give this
   // one order every other order's cards.
   if(mcLaidShared) return true;
+  if(mcWinArtLoad) await mcWinArtLoad.catch(()=>{});
+  if(mcWinItem!==it.id) return true;
   // the pictures as well as the layout, as Save to line keeps them: an
   // enhanced front, or Multiple Design pages changed since, were left behind
   // and the export reloaded the old file off the line — or, for a folder
@@ -53701,6 +53704,9 @@ async function mcCommit(){
   return !!ok;
 }
 let mcWinLive=false;             // has this line's layout been loaded into the builder
+// the open line's own pictures still coming down: saved before they land, the
+// line was written without its Multiple Design pages
+let mcWinArtLoad=null;
 // Which saved template the live line was built from. The snapshot is the
 // finished sheet, not the template it came off, so a line reopened had its
 // layout back and the picker above it blank — the second order of the same
@@ -54142,6 +54148,9 @@ function mcCustomWire(it){
   const sel=document.getElementById('mcTplSel');
   sel.addEventListener('change',async()=>{
     if(!sel.value) return;
+    // a layout picked by hand: an auto-layout still reading the folder for
+    // this line would land over it when it came back
+    mcAutoRun++;
     mcWinTplId=sel.value;
     const want=sel.value;
     const {data,error}=await sb.from('templates').select('data').eq('id',want).single();
@@ -54183,11 +54192,13 @@ function mcCustomWire(it){
       if(pick) await mcAddPickedDesign(it,pick,sku,
         {reset:true,msg:document.getElementById('mcWinMsg'),live:()=>mcWinItem===it.id});
     }
-    await mcApplyArt(it,()=>mcWinItem===it.id);
+    mcWinArtLoad=mcApplyArt(it,()=>mcWinItem===it.id);
+    await mcWinArtLoad;
     mcLinePreview();
   });
   // a line that already has a layout puts it back the moment it is opened
   const restore=()=>{
+    mcAutoRun++;     // a run started for this line before is not to land over it
     applyPrintState(it.design);
     // This line's own saved sheet, not a template laid fresh. Left naming the
     // last template, the next line on that template took this sheet for its own
@@ -54212,7 +54223,9 @@ function mcCustomWire(it){
       sel.value=mcWinTplId;
     if(mcWinTplId&&!pc) mcScopePickerTo(mcTemplateById(mcWinTplId));
     if(pc&&typeof pcRegisterFolderFonts==='function') pcRegisterFolderFonts();
-    mcApplyArt(it,()=>mcWinItem===it.id).then(mcLinePreview);
+    mcWinArtLoad=mcApplyArt(it,()=>mcWinItem===it.id);
+    mcWinArtLoad.then(mcLinePreview);
+    return mcWinArtLoad;
   };
   const failed=err=>{
     const m=document.getElementById('mcWinMsg');
@@ -54249,10 +54262,19 @@ function mcCustomWire(it){
   }else if(it.design&&hasArt){
     restore();
   }else if(it.design){
-    mcAutoLayoutFor(it,sel)
-      // false is "found nothing"; null is a run that stopped or already said why
-      .then(ok=>{ if(ok===false&&mcWinItem===it.id) restore(); })
-      .catch(failed);
+    // The line's own layout always comes back — bleed, fit, size, turn. Laying
+    // the template fresh here (as it used to) put the template's defaults on
+    // a line whose pictures had not filed, and closing it saved them for good.
+    // Only the artwork is looked for again, once the layout is down.
+    restore().then(async()=>{
+      if(mcWinItem!==it.id||pc) return;
+      const ready=await mcDesignsReady(true).catch(()=>false);
+      if(!ready||mcWinItem!==it.id) return;
+      let pick=null,sku='';
+      for(const n of mcNamesOf(it)){ const p=designFileForSku(n); if(p){ pick=p; sku=n; break; } }
+      if(pick) await mcAddPickedDesign(it,pick,sku,
+        {reset:true,msg:document.getElementById('mcWinMsg'),live:()=>mcWinItem===it.id});
+    }).catch(failed);
   }else{
     // Nothing saved on it yet, and the line's own name already says what it
     // wants: the template named after this SKU's designs folder, and the
@@ -54384,6 +54406,9 @@ async function mcKeepBuilderArt(it){
     // side's own picture is the first ticked page, which is what anything
     // that only knows one picture a side reads.
     const key=side+'Split';
+    // restored short (a page would not download) and not edited since: what the
+    // line holds is the whole list, so it is left as it is
+    if(state.finalList[side]&&state.finalList[side]._short&&art[key]) continue;
     if(finalSplitList(side)){
       const list=state.finalList[side], was=Array.isArray(art[key])?art[key]:[];
       const out=[];
@@ -54591,6 +54616,9 @@ async function mcApplyArt(it,live){
           source:null,file:got.file||null,mcPath:pg.path,on:pg.on!==false,qty:splitQty(pg.qty)});
       }catch(e){ /* a page that will not load is left out, the rest still print */ }
     }
+    // pages that would not come down: the list on screen is short, and saved
+    // as it stands it would write those pages and their counts off the line
+    if(list.length<pages.length) list._short=true;
     const first=list.find(d=>d.on);
     if(!first) continue;
     state.finalList[side]=list;
@@ -54604,6 +54632,14 @@ async function mcApplyArt(it,live){
     const tg=document.getElementById('finalSplitToggle'); if(tg) tg.checked=true;
     const off=document.getElementById('finalSplitHintOff'), on=document.getElementById('finalSplitHintOn');
     if(off) off.hidden=true; if(on) on.hidden=false;
+  }else{
+    // a line of one picture is not left in the last line's Multiple Design:
+    // its next upload was split into pages, and the old pages printed with it
+    state.finalSplit=false;
+    state.finalList={front:[],back:[]};
+    const tg=document.getElementById('finalSplitToggle'); if(tg) tg.checked=false;
+    const off=document.getElementById('finalSplitHintOff'), on=document.getElementById('finalSplitHintOn');
+    if(off) off.hidden=false; if(on) on.hidden=true;
   }
   refreshSlots(); refreshArtInputs(); drawAll();
 }
