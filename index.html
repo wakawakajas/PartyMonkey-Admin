@@ -14556,7 +14556,13 @@ function artIsVector(o){
   return !!(o&&(/\.(pdf|ai)$/i.test(o.name||'')||(o.file&&o.file.type==='application/pdf')));
 }
 function artPrintDpi(side){
-  const o=state.final[side], img=o&&o.img, a=state.art[side];
+  const o=state.final[side];
+  return artDpiOf(side,o&&o.img);
+}
+// any one picture at the side's printed size — Multiple Design pages all fill
+// the same box, so each is measured as the side's own artwork would be
+function artDpiOf(side,img){
+  const a=state.art[side];
   if(!img||!img.naturalWidth||!a||!(a.wMm>0)||!(a.hMm>0)) return null;
   let wMm=a.wMm, hMm=a.hMm;
   const turned=((state.rotate[side]||0)%180)!==0;
@@ -14575,18 +14581,35 @@ function refreshArtQuality(){
     const o=state.final[side];
     const txt=box.querySelector('[data-art-dpi]'), btn=box.querySelector('[data-enhance-art]');
     if(!o||!o.img){ box.hidden=true; return; }
-    // Split prints every page off its own picture, which Enhance does not
-    // reach — the check would speak for the first page only
-    if(finalSplitList(side)){ box.hidden=true; return; }
     box.hidden=false;
     if(artEnhancing[side]) return;   // the progress line is the enhancer's until it finishes
+    // Multiple Design prints every page off its own picture: the line speaks
+    // for the softest of them, and Enhance does them all
+    const pages=enhancePages(side);
+    if(pages){
+      if(!pages.length){
+        txt.innerHTML='<span class="ok">PDF</span> · prints sharp at any size';
+        btn.hidden=true; return;
+      }
+      const dpis=pages.map(d=>artDpiOf(side,d.img)).filter(Boolean);
+      const worst=dpis.length?Math.min(...dpis):null, low=worst&&worst<PRINT_DPI*0.95;
+      txt.innerHTML=(worst?`<span class="${low?'low':'ok'}">${Math.round(worst)} DPI</span> lowest · `:'')
+        +pages.length+' picture'+(pages.length===1?'':'s')+(low?' · will print soft':'');
+      btn.hidden=false;
+      btn.title='Upscale every page'+(low?' to 300 DPI':' to clean up soft pictures');
+      return;
+    }
     if(artIsVector(o)){
       txt.innerHTML='<span class="ok">PDF</span> · prints sharp at any size';
       btn.hidden=true; return;
     }
     const dpi=artPrintDpi(side);
     const px=o.img.naturalWidth+' × '+o.img.naturalHeight+' px';
-    if(!dpi){ txt.textContent=px; btn.hidden=true; return; }
+    if(!dpi){
+      // no printed size yet to measure against: still worth a ×2 clean-up
+      txt.textContent=px; btn.hidden=false;
+      btn.title='Upscale ×2 to clean up a soft picture'; return;
+    }
     const low=dpi<PRINT_DPI*0.95;
     txt.innerHTML=`<span class="${low?'low':'ok'}">${Math.round(dpi)} DPI</span> · ${px}`
       +(low?' · will print soft':'');
@@ -14797,65 +14820,105 @@ async function upscaleImage(img,scale,onProgress){
 // Brings one side's artwork up to print resolution at the size it is printed.
 // The file keeps its printed size: its DPI tag goes up with its pixels, so an
 // artwork on Actual size lands exactly where it was.
-async function enhanceArt(side){
-  const o=state.final[side];
-  if(!o||!o.img||artIsVector(o)||artEnhancing[side]) return false;
-  const box=document.getElementById('artQ'+(side==='front'?'Front':'Back'));
-  const txt=box.querySelector('[data-art-dpi]'), btn=box.querySelector('[data-enhance-art]');
-  const dpi=artPrintDpi(side);
-  if(!dpi) return false;
-  const img=o.img;
+// The Multiple Design pages Enhance works through — each picture once, PDFs
+// left out as already sharp — or null when the side is one artwork
+function enhancePages(side){
+  if(!finalSplitList(side)) return null;
+  const seen=new Set();
+  return state.finalList[side].filter(d=>{
+    if(!d.img||artIsVector(d)||seen.has(d.img)) return false;
+    seen.add(d.img); return true;
+  });
+}
+// One picture upscaled for printing at the side's size: the new data, image
+// and name, or null when it is already as large as the upscaler goes.
+async function upscaleArtPicture(side,o,show){
+  const img=o.img, dpi=artDpiOf(side,img);
   const long=Math.max(img.naturalWidth,img.naturalHeight);
   // Below 300 DPI, exactly as much as 300 needs, four times at most — more
   // pixels than the print can use only slow every fill and export after this.
-  // At 300 already, twice: the point then is the clean-up, not the pixels.
-  let scale=dpi<PRINT_DPI*0.95?Math.min(4,PRINT_DPI/dpi):2;
+  // At 300 already, or with no printed size to go by, twice: the point then
+  // is the clean-up, not the pixels.
+  let scale=dpi&&dpi<PRINT_DPI*0.95?Math.min(4,PRINT_DPI/dpi):2;
   if(long*scale>UPSCALE_MAX_PX) scale=UPSCALE_MAX_PX/long;
-  if(scale<1.1){
-    txt.innerHTML='<span class="low">Too large to upscale further</span> — '+Math.round(dpi)+' DPI';
-    return false;
-  }
+  if(scale<1.1) return null;
   const shown=Math.round(scale*10)/10;
-  artEnhancing[side]=true; btn.hidden=true;
-  txt.textContent='Loading the upscaler…';
-  const say=t=>{ txt.textContent=t.replace(/<[^>]+>/g,''); };
+  show('Loading the upscaler…');
+  let c;
   try{
-    let c;
-    try{
-      c=await upscaleSharp(img,scale,(p,gpu)=>{
-        txt.textContent=`Upscaling ×${shown}… ${Math.round(p*100)}%`+(gpu?'':' (on the processor — slow)');
-      },say);
-    }catch(err){
-      // no Real-ESRGAN to be had: the small model, softer but still better than nothing
-      console.warn('Real-ESRGAN unavailable, using the small upscaler:',err);
-      const small=scale<=2?2:4;
-      const soft=await upscaleImage(img,small,p=>{ txt.textContent=`Upscaling ×${small} (basic)… ${Math.round(p*100)}%`; });
-      c=document.createElement('canvas');
-      c.width=Math.round(img.naturalWidth*scale); c.height=Math.round(img.naturalHeight*scale);
-      const cx=c.getContext('2d'); cx.imageSmoothingQuality='high';
-      cx.drawImage(soft,0,0,c.width,c.height);
+    c=await upscaleSharp(img,scale,(p,gpu)=>{
+      show(`Upscaling ×${shown}… ${Math.round(p*100)}%`+(gpu?'':' (on the processor — slow)'));
+    },t=>show(t.replace(/<[^>]+>/g,'')));
+  }catch(err){
+    // no Real-ESRGAN to be had: the small model, softer but still better than nothing
+    console.warn('Real-ESRGAN unavailable, using the small upscaler:',err);
+    const small=scale<=2?2:4;
+    const soft=await upscaleImage(img,small,p=>show(`Upscaling ×${small} (basic)… ${Math.round(p*100)}%`));
+    c=document.createElement('canvas');
+    c.width=Math.round(img.naturalWidth*scale); c.height=Math.round(img.naturalHeight*scale);
+    const cx=c.getContext('2d'); cx.imageSmoothingQuality='high';
+    cx.drawImage(soft,0,0,c.width,c.height);
+  }
+  // The printed size stays what it was: the DPI tag rises with the pixels.
+  // A file that never said its size is told the size it is printing at, or
+  // Actual size would read the new tag and blow it up. With no size known
+  // either, it says nothing, as before.
+  let tag=null;
+  try{ tag=imageDpi(o.data); }catch(e){}
+  const k=c.width/img.naturalWidth;
+  const dx=tag&&tag.x>0?tag.x*k:dpi?dpi*k:0, dy=tag&&tag.y>0?tag.y*k:dx;
+  // a trim the crop (or the PDF) stamped in is fractions of the picture, so
+  // it carries over to the bigger copy unchanged
+  artTrimFrac(img);
+  const trim=img._pdfTrim, png=c.toDataURL('image/png');
+  const data=trim?pngWithDpi(png,dx||72*k,dy||72*k,'pigu-pdf',trim.map(n=>Math.max(0,n).toFixed(5)).join(','))
+    :dx?pngWithDpi(png,dx,dy):png;
+  const up=await loadImage(data);
+  const name=(o.name||'artwork').replace(/(\.[^.]+)?$/,'')+` · enhanced ×${shown}.png`;
+  // the upload was a JPEG or PNG on disk; the file now printing is this one
+  // and no longer the line's filed copy, or Save to line would pass it over —
+  // nor the designs-folder file `source` names, or a template would reopen that
+  return {data,img:up,name,file:null,source:null,mcPath:null};
+}
+async function enhanceArt(side){
+  const o=state.final[side];
+  if(!o||!o.img||artEnhancing[side]) return false;
+  const pages=enhancePages(side);
+  if(!pages&&artIsVector(o)) return false;
+  if(pages&&!pages.length) return false;
+  const box=document.getElementById('artQ'+(side==='front'?'Front':'Back'));
+  const txt=box.querySelector('[data-art-dpi]'), btn=box.querySelector('[data-enhance-art]');
+  artEnhancing[side]=true; btn.hidden=true;
+  try{
+    if(pages){
+      // every page in turn; one that cannot go larger is left as it is
+      let n=0;
+      for(let i=0;i<pages.length;i++){
+        const d=pages[i], was=d.img;
+        const pre=pages.length>1?`Page ${i+1} of ${pages.length} · `:'';
+        const got=await upscaleArtPicture(side,d,t=>{ txt.textContent=pre+t; });
+        if(!got) continue;
+        // the same picture may sit on more than one page entry
+        state.finalList[side].forEach(e=>{ if(e.img===was) Object.assign(e,got); });
+        if(state.final[side].img===was) state.final[side]={...state.final[side],...got};
+        n++;
+      }
+      artEnhancing[side]=false;
+      refreshSlots(); drawAll();
+      if(!n) txt.innerHTML='<span class="low">Too large to upscale further</span>';
+      return n>0;
+    }
+    const img=o.img;
+    const got=await upscaleArtPicture(side,o,t=>{ txt.textContent=t; });
+    if(!got){
+      artEnhancing[side]=false; refreshArtQuality();
+      const dpi=artPrintDpi(side);
+      txt.innerHTML='<span class="low">Too large to upscale further</span>'+(dpi?' — '+Math.round(dpi)+' DPI':'');
+      return false;
     }
     // still the same artwork on the sheet: nothing is moved or refitted
     if(state.final[side].img!==img){ artEnhancing[side]=false; refreshArtQuality(); return false; }
-    // The printed size stays what it was: the DPI tag rises with the pixels.
-    // A file that never said its size is told the size it is printing at, or
-    // Actual size would read the new tag and blow it up.
-    let tag=null;
-    try{ tag=imageDpi(o.data); }catch(e){}
-    const k=c.width/img.naturalWidth;
-    const dx=tag&&tag.x>0?tag.x*k:dpi*k, dy=tag&&tag.y>0?tag.y*k:dx;
-    // a trim the crop (or the PDF) stamped in is fractions of the picture, so
-    // it carries over to the bigger copy unchanged
-    artTrimFrac(img);
-    const trim=img._pdfTrim;
-    const data=trim?pngWithDpi(c.toDataURL('image/png'),dx,dy,'pigu-pdf',trim.map(n=>Math.max(0,n).toFixed(5)).join(','))
-      :pngWithDpi(c.toDataURL('image/png'),dx,dy);
-    const up=await loadImage(data);
-    const name=(o.name||'artwork').replace(/(\.[^.]+)?$/,'')+` · enhanced ×${shown}.png`;
-    // the upload was a JPEG or PNG on disk; the file now printing is this one
-    // and no longer the line's filed copy, or Save to line would pass it over —
-    // nor the designs-folder file `source` names, or a template would reopen that
-    state.final[side]={...o,data,img:up,name,file:null,source:null,mcPath:null};
+    state.final[side]={...o,...got};
     artEnhancing[side]=false;
     refreshSlots(); drawAll();
     return true;
