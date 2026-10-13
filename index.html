@@ -37259,7 +37259,9 @@ function gtRenderOrder(){
 // keeps the new picture rather than the one it filed before.
 const gtEnhancing=new Map();   // design id -> the progress line while it runs
 function gtEnhanceable(d){
-  return !!(d&&d.adhoc&&!gtIsPdfFile(d.file)&&gtImgs.get(d.id));
+  // a design read off a Pigu folder is marked adhoc too, but it is the shop's
+  // own file, and given a new path it lost its saved words and came back twice
+  return !!(d&&d.adhoc&&!gtIsPiguFile(d.file)&&!gtIsPdfFile(d.file)&&gtImgs.get(d.id));
 }
 // the picture's DPI at the size it prints on the tag, or null
 function gtDesignDpi(d){
@@ -49470,12 +49472,15 @@ async function mcGtIndex(){
       // not the one-offs: one is put back into whichever page is open when it
       // is fetched, and filed under that page here it moved its line there —
       // a Gloss gift tag opened on the Sticker page, its paper and its cut line
-      ? ((typeof gtLib!=='undefined'&&gtLib.designs)||[]).filter(d=>!d.adhoc).map(d=>({id:d.id,name:d.name}))
+      ? ((typeof gtLib!=='undefined'&&gtLib.designs)||[]).filter(d=>!mcGtTrueOneOff(d)).map(d=>({id:d.id,name:d.name}))
       : await mcPatient('reading the '+p.name+' folder',mcGtReadNames(p),mcGtNames[p.mode]||[]);
   }
   mcGtNames=out;
   return out;
 }
+// A one-off proper: the customer's own picture, on no page. A design read off a
+// Pigu folder is marked adhoc as well but belongs to the page it was read on.
+const mcGtTrueOneOff=d=>!!(d&&d.adhoc&&!gtIsPiguFile(d.file));
 // After gift tag lines are written back with the SKU summary open. The summary
 // reads its design ids off mcGtNames, taken when it opened — a one-off made
 // since was in none of them, so its lines showed no design until the summary
@@ -49484,9 +49489,11 @@ async function mcGtIndex(){
 function mcSumAfterGtSave(){
   if(!mcSummaryOpen()) return;
   // never with an empty library: a page half way through loading would wipe
-  // that page's names and every line on it would read as having no design
-  if(typeof gtLib!=='undefined'&&gtLoaded&&gtLib.designs&&gtLib.designs.length)
-    mcGtNames={...mcGtNames,[gtMode]:gtLib.designs.filter(d=>!d.adhoc).map(d=>({id:d.id,name:d.name}))};
+  // that page's names and every line on it would read as having no design.
+  // Counted without the one-offs, which can be put back before the library is.
+  const names=(typeof gtLib!=='undefined'&&gtLoaded&&gtLib.designs||[])
+    .filter(d=>!mcGtTrueOneOff(d)).map(d=>({id:d.id,name:d.name}));
+  if(names.length) mcGtNames={...mcGtNames,[gtMode]:names};
   mcRenderSummary();
 }
 // The design of this exact name, and which page it is on. The SKU first and
@@ -49562,7 +49569,8 @@ function mcWhereIsSku(sku){
     const it=mine[0];
     const gift=it.tile==='giftTag';
     return {on:gift?'gift':'print',marked:true,line:null,
-      mode:gift?(mcGtModeOfDesign(it.sheet_item.designId)||gtMode):'',
+      // the line's own page first: a one-off is on no page's list
+      mode:gift?(it.sheet_item.page||mcGtModeOfDesign(it.sheet_item.designId)||gtMode):'',
       qty:mine.reduce((n,x)=>n+(Number((x.sheet_item||{}).qty)||Number(x.qty)||0),0)};
   }
   return null;
@@ -53662,10 +53670,25 @@ async function mcCommit(){
   // Nothing of the line's own is on it to save, and saving it would give this
   // one order every other order's cards.
   if(mcLaidShared) return true;
+  // the pictures as well as the layout, as Save to line keeps them: an
+  // enhanced front, or Multiple Design pages changed since, were left behind
+  // and the export reloaded the old file off the line — or, for a folder
+  // design that was enhanced, found no front at all. Filed first, so the
+  // snapshot below sees their new paths.
+  let kept=null;
+  try{
+    const r=await mcKeepBuilderArt(it);
+    kept=r.patch;
+    if(r.failed.length){
+      const strip=document.getElementById('mcBatchMsg');
+      if(strip) showMsg(strip,`${escapeHtml(it.order_id||'That line')}: the `
+        +escapeHtml(r.failed.join(' and the '))+' picture did not upload — save the line again.',false);
+    }
+  }catch(e){}
   it.design=mcLineSnapshot();
   // and the paper and weight the builder was left on: changed there and then
   // closed, the export went on naming and printing the line's old figure
-  const patch={design:it.design};
+  const patch={design:it.design,...(kept||{})};
   if(state.paperType&&state.paperType!==it.paper_type) patch.paper_type=it.paper_type=state.paperType;
   if(state.gsm&&state.gsm!==it.gsm) patch.gsm=it.gsm=state.gsm;
   const ok=await mcSave(it,patch);
@@ -54708,7 +54731,9 @@ async function mcGtPutOneOff(it,d){
   const blob=(typeof gtAssets!=='undefined')?gtAssets.get(d.file):null;
   if(!sb||!blob) return null;
   const uid=await mcWhoAmI();
-  const path=`${uid}/magic/${it.id}-tag${mcGtOneOffExt(d.file)}`;
+  // a fresh name each time, as mcPutArt does: one name written over served the
+  // old picture from cache, and a failed save had nothing to fall back to
+  const path=`${uid}/magic/${it.id}-tag-${Date.now().toString(36)}${mcGtOneOffExt(d.file)}`;
   const up=await sb.storage.from(PHOTO_BUCKET)
     .upload(path,blob,{contentType:blob.type||'application/octet-stream',upsert:true});
   if(up.error) throw up.error;
@@ -55996,9 +56021,6 @@ async function mcRenderLine(it,side){
   pcMode=mcPcOf(it);
   try{
     applyPrintState(it.design);
-    console.log('[bleed-debug] mcRenderLine after applyPrintState',it.order_id||it.sku,side,
-      'saved:',it.design&&JSON.parse(JSON.stringify(it.design.bleed||null)),
-      'live state.bleed:',JSON.parse(JSON.stringify(state.bleed)));
     state.orderId=it.order_id;
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
     // names in a folder font that is not loaded would print in the fallback
@@ -56617,6 +56639,9 @@ function mcMergeSameKeyOf(it){
   const d=it.design||{}, ab=(d.art&&d.art.back)||{};
   const bkHow=bk?[Number(d.rotate&&d.rotate.back)||0,Math.round((Number(ab.wMm)||0)*10),
     Math.round((Number(ab.hMm)||0)*10)].join(','):'';
+  // a back of several pages is drawn as its first page behind every card on a
+  // merged sheet, so a line carrying one prints as its own file instead
+  if(it.art&&Array.isArray(it.art.backSplit)&&it.art.backSplit.length>1) return '';
   return [sig,n(it.paper_type),n(it.gsm),bkHow,String(bk)].join('|');
 }
 // The groups worth merging: two or more lines on one key. A line alone on its
