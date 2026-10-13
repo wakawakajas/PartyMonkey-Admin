@@ -11516,8 +11516,10 @@ function pcPaintMode(){
   show('pcCatsCard',placecard);
   show('pcLibCard',placecard);
   show('pcTextPanel',placecard);
-  const pj=document.getElementById('pjPrintBtn');
-  if(pj) pj.style.display=placecard?'none':'';
+  // and the back's copy of it: it clicked the hidden one, and a saved sheet
+  // opened over Place Card's words without them being put aside
+  ['pjPrintBtn','pjPrintBtnB'].forEach(id=>{ const pj=document.getElementById(id);
+    if(pj) pj.style.display=placecard?'none':''; });
   pcApplyOrder(placecard);
   if(placecard&&typeof pcRefreshTemplateList==='function') pcRefreshTemplateList();
   if(placecard&&typeof pcLibEnsure==='function') pcLibEnsure();
@@ -46822,9 +46824,12 @@ async function mcToggleDone(id,quiet){
       &&(si.copied||it.tile==='sheetPrint'||it.tile==='giftTag')){
       // (a line merged by its own Merge box stays merged: that box is how it
       // comes off the sheet, and the tick is only whether it has been printed)
-      // what was on the sheet is taken off it below; the words and extras stay
-      it.tile=null; it.sheet_item=mcOffSheetItem(it,si);
-      patch.tile=null; patch.sheet_item=it.sheet_item;
+      // what was on the sheet is taken off it below; the words and extras stay.
+      // A line the summary moved off its Custom tile goes back to it, as
+      // Remove does (mcUnmarkLine) — set to none, its own PDF stopped coming out
+      const back=it.tile==='sheetPrint'?(si.fromTile||null):null;
+      it.tile=back; it.sheet_item=mcOffSheetItem(it,si);
+      patch.tile=back; patch.sheet_item=it.sheet_item;
     }
   }
   const before=(!now&&(wasTile==='sheetPrint'||wasTile==='giftTag'))?{...it,tile:wasTile,sheet_item:wasItem}:null;
@@ -46839,11 +46844,13 @@ async function mcToggleDone(id,quiet){
   }
   // the card goes off the builder's sheet as well, or the line said "not on a
   // sheet" while the sheet went on printing it and the summary offered Remove
-  if(before&&!it.tile&&mcLaid(before)){
+  if(before&&it.tile!==before.tile&&mcLaid(before)){
     const off=mcOffSheets([before],it.order_id);
     if(off.print){ state.page=0; renderDesignLines(); refreshArtInputs(); drawAll(); }
     if(off.gift&&typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
   }
+  // back on its own layout, which is told the extras again
+  if(before&&it.tile==='custom') await mcExtraToSheet(it).catch(()=>{});
   mcRenderSummary();
 }
 
@@ -49319,7 +49326,10 @@ async function mcSetSkuQty(sku,want,only){
       extra_qty:Math.max(0,s.q-(Math.round(Number(s.it.qty))||0))};
     const was=s.it.sheet_item;
     s.it.sheet_item=si;
-    if(!await mcSave(s.it,{sheet_item:si})){ s.it.sheet_item=was; failed++; }
+    if(!await mcSave(s.it,{sheet_item:si})){ s.it.sheet_item=was; failed++; continue; }
+    // a Custom Template line prints from its own design list: told only the
+    // batch line, its PDF still came out at the old count
+    if(s.it.tile==='custom') await mcExtraToSheet(s.it).catch(()=>{});
   }
   // and the sheet this SKU is already on is set to the same figure. It used
   // to be told only when the SKU was taken off and put on again: the box said
@@ -51491,7 +51501,10 @@ async function mcMarkLinesOnSheet(laid,page){
   for(const {sku,designId,shape} of laid){
     // a line merged onto the print sheet by its own box stays there: the tag
     // side matching its SKU is not somebody deciding to move it
-    for(const it of mcItems.filter(i=>mcRowKey(i)===String(sku)&&!mcMergedKey(i)&&!mcIsExtraDesign(i))){
+    // and a Custom Template or Place Card line of the same SKU is its own PDF:
+    // turned into a gift tag here, Remove left it on no tile at all
+    for(const it of mcItems.filter(i=>mcRowKey(i)===String(sku)&&!mcMergedKey(i)&&!mcIsExtraDesign(i)
+        &&i.tile!=='custom'&&i.tile!=='placeCard')){
       const was=it.sheet_item||{};
       // words already typed into the line's own window are its own and are
       // never written over from here. The page is written down rather than
@@ -53256,8 +53269,10 @@ let mcPrintOpening=false;
 let mcWinOpeningId='';
 async function mcWinOpen(id){
   if(mcPrintOpening) return;
-  // two taps on Create ran the tile, finish and stock questions twice
-  if(mcWinOpeningId===id) return;
+  // two taps on Create ran the tile, finish and stock questions twice — and a
+  // tap on another line's Create meanwhile ran a second open beside the first,
+  // both committing the line being left and uploading its files twice
+  if(mcWinOpeningId) return;
   mcWinOpeningId=id;
   try{ return await mcWinOpenRun(id); }
   finally{ if(mcWinOpeningId===id) mcWinOpeningId=''; }
@@ -54104,9 +54119,24 @@ async function mcAutoLayoutFor(it,sel){
   // away the sheet the first one had just built.
   // Never the batch's shared print sheet, though: that is every merged line on
   // the template, and a custom line added to it would print them all as its own.
-  const sameSheet=!!tpl&&(state.designs||[]).length>0&&!mcLaidShared
+  // And only a sheet whose every card was put there for a line of this same
+  // order: on the template alone, a line of the next order was added to the
+  // last order's sheet and printed it as well, and a line opened over the
+  // operator's own work took that work as its own.
+  const ownOrder=!!it.order_id&&(state.designs||[]).every(d=>{
+    const o=d.mcLine&&mcItems.find(x=>x.id===d.mcLine);
+    return !!o&&String(o.order_id||'')===String(it.order_id); });
+  const sameSheet=!!tpl&&(state.designs||[]).length>0&&!mcLaidShared&&ownOrder
     &&(String(selectedTemplate||'')===String(tpl.id)
       ||String(mcLaidTemplate||'')===String(tpl.id));
+  // A fresh sheet starts with none of the last line's artwork: a template that
+  // names no artwork, or no template at all, left its front and back where they
+  // were, and the commit filed that back as this line's own
+  if(!sameSheet){
+    ['front','back'].forEach(side=>{ if(it.art&&it.art[side]) return;
+      state.final[side]={data:null,img:null,name:''}; state.finalList[side]=[]; });
+    if(!(state.finalList.front||[]).length&&!(state.finalList.back||[]).length) state.finalSplit=false;
+  }
   if(tpl&&sameSheet){
     mcWinLive=true;
     mcWinTplId=String(tpl.id);
@@ -54447,6 +54477,10 @@ function mcCustomWire(it){
     mcWinLive=true;
     const undoLine=mcUndoOf(it,MC_LINE_KEYS);
     const {patch:kept,failed}=await mcKeepBuilderArt(it);
+    // another line opened while the artwork uploaded: the builder is that
+    // line's now, and its layout and paper would be saved onto this one. Opening
+    // it committed this line already.
+    if(mcWinItem!==it.id) return;
     it.design=mcLineSnapshot();
     // and what the builder was set to, where the line has not been told
     // itself: paper and GSM are two thirds of the file name, and a line
