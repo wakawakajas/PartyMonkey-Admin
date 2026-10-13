@@ -7196,6 +7196,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <label class="click-tog" title="With several picked, a new width or height — typed, or dragged by a corner — goes onto every picked placeholder. Off, it changes only the one you touched."><input type="checkbox" id="gtSizeTogether" checked/>Resize picked together</label>
           <label class="click-tog" title="Changing a placeholder's width or height leaves the artwork in it the size it is, instead of refitting it to the new placeholder."><input type="checkbox" id="gtKeepArt" checked/>Keep artwork size</label>
         </div>
+          <button class="btn-outline" id="gtFitAllBtn" style="width:100%;margin-bottom:10px;"
+            title="Every design on the sheet - or in the picked placeholders - shrunk or grown to sit inside its placeholder (its cut line), centred">Fit artwork to placeholders</button>
           <div class="sect-label" style="margin-top:2px;">Type a figure for all or the picked (blank = unchanged)</div>
           <div class="grid4" style="margin-bottom:9px;">
           <label class="field"><span>X</span><input type="number" step="0.1" id="gtBulkX" placeholder="—"/></label>
@@ -31275,8 +31277,8 @@ function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
   gtKeepShape();
   return {version:2,sheet:{...gtSheet,slots:gtSlotsBase},
-    designs:own.filter(d=>!d.adhoc).map(d=>gtManDesign({...d,trace:gtTraceKept(d),art:gtArtKept(d)})),
-    fonts:gtLib.fonts.map(f=>({id:f.id,name:f.name,file:f.file})),
+    designs:own.filter(d=>!d.adhoc&&!d.mcLent).map(d=>gtManDesign({...d,trace:gtTraceKept(d),art:gtArtKept(d)})),
+    fonts:gtLib.fonts.filter(f=>!f.mcLent).map(f=>({id:f.id,name:f.name,file:f.file})),
     texts:gtLib.texts.map(t=>({id:t.id,name:t.name,text:t.text,font:t.font||undefined})),
     // the words set on Pigu-folder designs — see gtPiguFields. Kept only in
     // one browser, a design a colleague put words on came up bare on every
@@ -35774,6 +35776,12 @@ function gtVal(line,f){
 // is what comes out on the other — with `line` left out, the design's own
 // defaults are what get drawn. side: which side's words — the front unless
 // the back is asked for.
+// While a PDF is being drawn the words are not put on the 300dpi sheet: each
+// box is handed back here as a layer of its own, drawn at GT_WORDS_DPI when the
+// PDF asks for it — the way a place card's words are. Typed on the sheet, a
+// name came out with stepped edges next to artwork that was sharp.
+let gtWordsCatch=null;
+const GT_WORDS_DPI=1200;
 function gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc,side){
   const want=side==='back'?'back':'front';
   gtFieldsOf(d,line).forEach(f=>{
@@ -35782,40 +35790,73 @@ function gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc,side){
     if(!v.text) return;
     const bx=ax+f.x*aw+v.dx, by=ay+f.y*ah+v.dy;
     const bw=v.bw>0?v.bw:f.w*aw, bh=v.bh>0?v.bh:f.h*ah;
-    ctx.save();
-    // turned about the middle of its own box, so a rotated line stays where it
-    // was put rather than swinging off the tag
-    if(v.rot){
-      const cx=(bx+bw/2)*sc, cy=(by+bh/2)*sc;
-      ctx.translate(cx,cy); ctx.rotate(v.rot*Math.PI/180); ctx.translate(-cx,-cy);
-    }
-    ctx.fillStyle=v.color||f.color||'#232323';
-    ctx.textBaseline='alphabetic';
-    // The outline is drawn first and twice as wide as it is asked for, since a
-    // stroke straddles the edge it follows: half of it is then covered by the
-    // letter itself and what is left standing outside is the thickness keyed in.
-    const ow=Math.max(0,Number(v.ow)||0)*sc;
-    if(ow>0){
-      ctx.strokeStyle=v.oc||'#FFFFFF';
-      ctx.lineWidth=ow*2;
-      ctx.lineJoin='round'; ctx.miterLimit=2;
-    }
-    const put=(t,x,ty)=>{ if(ow>0) ctx.strokeText(t,x,ty); ctx.fillText(t,x,ty); };
-    const fit=gtFitText(ctx,v.text,gtFamily(v.font),v.size,sc,bw,bh);
-    const lines=fit.lines, lh=fit.size*1.25;
-    ctx.textAlign=v.align;
-    const tx=v.align==='left'?bx:v.align==='right'?bx+bw:bx+bw/2;
-    // the block of lines is centred in the box, whatever it grew to
-    let ty=by+(bh-lines.length*lh)/2+lh*0.8;
-    // a bent line is centred on its arc whatever the field's own alignment is:
-    // there is no left edge to hang it off once it is on a circle
-    lines.forEach(ln=>{
-      if(v.curve) gtDrawCurved(ctx,ln,(bx+bw/2)*sc,ty*sc,v.curve,put);
-      else put(ln,tx*sc,ty*sc);
-      ty+=lh;
-    });
-    ctx.restore();
+    if(gtWordsCatch) gtWordsTake(ctx,f,v,bx,by,bw,bh,sc);
+    else gtDrawField(ctx,f,v,bx,by,bw,bh,sc);
   });
+}
+// The piece of sheet one box of words can reach, in mm — the box turned however
+// the sheet and the box are turned, with room for an outline, the tails of
+// letters and a bend — and how to draw just those words there, finer.
+function gtWordsTake(ctx,f,v,bx,by,bw,bh,sc){
+  const T=ctx.getTransform();
+  const m=1.5+2*Math.max(0,Number(v.ow)||0)+(v.curve?Math.max(bw,bh)/2:0);
+  const cx=bx+bw/2, cy=by+bh/2, hw=bw/2+m, hh=bh/2+m;
+  const t=(Number(v.rot)||0)*Math.PI/180, co=Math.cos(t), si=Math.sin(t);
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  [[-1,-1],[1,-1],[1,1],[-1,1]].forEach(([i,j])=>{
+    const ux=i*hw, uy=j*hh;
+    const p=T.transformPoint(new DOMPoint((cx+ux*co-uy*si)*sc,(cy+ux*si+uy*co)*sc));
+    x0=Math.min(x0,p.x/sc); x1=Math.max(x1,p.x/sc); y0=Math.min(y0,p.y/sc); y1=Math.max(y1,p.y/sc);
+  });
+  gtWordsCatch.push({x:x0,y:y0,w:x1-x0,h:y1-y0,draw:()=>{
+    const k=GT_WORDS_DPI/25.4;
+    const cv=document.createElement('canvas');
+    cv.width=Math.max(1,Math.round((x1-x0)*k)); cv.height=Math.max(1,Math.round((y1-y0)*k));
+    const c2=cv.getContext('2d');
+    // the sheet's pixels (mm*sc) onto this layer's (mm*k), then the turn the
+    // sheet was drawing under
+    c2.setTransform(k/sc,0,0,k/sc,-x0*k,-y0*k);
+    c2.transform(T.a,T.b,T.c,T.d,T.e,T.f);
+    gtDrawField(c2,f,v,bx,by,bw,bh,sc);
+    const data=c2.getImageData(0,0,cv.width,cv.height);
+    cv.width=cv.height=0;
+    return data;
+  }});
+}
+function gtDrawField(ctx,f,v,bx,by,bw,bh,sc){
+  ctx.save();
+  // turned about the middle of its own box, so a rotated line stays where it
+  // was put rather than swinging off the tag
+  if(v.rot){
+    const cx=(bx+bw/2)*sc, cy=(by+bh/2)*sc;
+    ctx.translate(cx,cy); ctx.rotate(v.rot*Math.PI/180); ctx.translate(-cx,-cy);
+  }
+  ctx.fillStyle=v.color||f.color||'#232323';
+  ctx.textBaseline='alphabetic';
+  // The outline is drawn first and twice as wide as it is asked for, since a
+  // stroke straddles the edge it follows: half of it is then covered by the
+  // letter itself and what is left standing outside is the thickness keyed in.
+  const ow=Math.max(0,Number(v.ow)||0)*sc;
+  if(ow>0){
+    ctx.strokeStyle=v.oc||'#FFFFFF';
+    ctx.lineWidth=ow*2;
+    ctx.lineJoin='round'; ctx.miterLimit=2;
+  }
+  const put=(t,x,ty)=>{ if(ow>0) ctx.strokeText(t,x,ty); ctx.fillText(t,x,ty); };
+  const fit=gtFitText(ctx,v.text,gtFamily(v.font),v.size,sc,bw,bh);
+  const lines=fit.lines, lh=fit.size*1.25;
+  ctx.textAlign=v.align;
+  const tx=v.align==='left'?bx:v.align==='right'?bx+bw:bx+bw/2;
+  // the block of lines is centred in the box, whatever it grew to
+  let ty=by+(bh-lines.length*lh)/2+lh*0.8;
+  // a bent line is centred on its arc whatever the field's own alignment is:
+  // there is no left edge to hang it off once it is on a circle
+  lines.forEach(ln=>{
+    if(v.curve) gtDrawCurved(ctx,ln,(bx+bw/2)*sc,ty*sc,v.curve,put);
+    else put(ln,tx*sc,ty*sc);
+    ty+=lh;
+  });
+  ctx.restore();
 }
 // How much a design runs past the blade, in mm. The sheet says it for every
 // tag on it; a design that needs its own figure — a border that has to sit
@@ -38307,6 +38348,27 @@ function gtBulkApply(list){
 }
 document.getElementById('gtBulkAllBtn').addEventListener('click',()=>gtBulkApply(gtSheet.slots));
 document.getElementById('gtBulkSelBtn').addEventListener('click',()=>gtBulkApply(gtSheet.slots.filter(s=>gtSelSet.has(s.id))));
+// Fit artwork to placeholders: each design on the sheet (or in the picked
+// placeholders) sized to sit inside its placeholder in one go. A design's size
+// is its own, not the placeholder's, so one in placeholders of two sizes is
+// fitted to the smallest - then it fits in all of them.
+document.getElementById('gtFitAllBtn').addEventListener('click',()=>{
+  const best=new Map();
+  gtScopeSlots().forEach(slot=>{
+    const d=gtSlotDesign(slot); if(!d) return;
+    // a turned placeholder's w and h are the box round it; the tag is drawn
+    // in the placeholder as it stands before the turn
+    const u=gtUnrotSlot(slot);
+    const a=gtFitArtIn(d,u.w,u.h); if(!a) return;
+    const had=best.get(d.id);
+    if(!had||a.s<had.a.s) best.set(d.id,{d,a});
+  });
+  if(!best.size) return gtSlotToolMsg('No artwork in these placeholders to fit.',false);
+  best.forEach(({d,a})=>{ d.art=a; });
+  gtNestCache=null;
+  gtDraw(); gtSaveSoon();
+  gtSlotToolMsg(`✓ ${best.size} design${best.size===1?'':'s'} fitted to ${best.size===1?'its placeholder':'their placeholders'}`);
+});
 // ---------- punch holes on the placeholders ----------
 // x across from the placeholder's centre, y down from its top, d across — so
 // one set of numbers puts the hole in the same place on tags of any size.
@@ -40485,11 +40547,12 @@ document.getElementById('gtArtResetBtn').addEventListener('click',()=>{
 });
 // The whole design shrunk or grown to sit inside the placeholder, centred —
 // by its cut line where it has one, so the outline is what fills the box.
-document.getElementById('gtArtFitBtn').addEventListener('click',()=>{
-  const d=gtCurrentDesign; if(!d) return;
-  const img=gtImgGet(d.id), T=gtTagBox();
-  if(!img||!img.naturalWidth||!(T.w>0&&T.h>0)) return;
-  const f=gtFitD(d,img.naturalWidth,img.naturalHeight,T.w,T.h);
+// The design's art set so the whole of it sits inside a W x H placeholder,
+// centred; null where there is no picture to measure.
+function gtFitArtIn(d,W,H){
+  const img=gtImgGet(d.id);
+  if(!img||!img.naturalWidth||!(W>0&&H>0)) return null;
+  const f=gtFitD(d,img.naturalWidth,img.naturalHeight,W,H);
   // What has to fit: the cut line where there is one (and its outset, which is
   // millimetres whatever the scale), the picture otherwise - measured where
   // the plain fit put it, whichever way that fit was made
@@ -40497,13 +40560,19 @@ document.getElementById('gtArtFitBtn').addEventListener('click',()=>{
   const bb=cut?gtCutAllBox(tt):{u0:0,v0:0,u1:1,v1:1};
   const out=cut?Math.max(0,Number(tt.out)||0):0;
   const cw=(bb.u1-bb.u0)*f.w, ch=(bb.v1-bb.v0)*f.h;
-  if(!(cw>0&&ch>0)||!(T.w>2*out&&T.h>2*out)) return;
-  const s=Math.min((T.w-2*out)/cw,(T.h-2*out)/ch);
+  if(!(cw>0&&ch>0)||!(W>2*out&&H>2*out)) return null;
+  const s=Math.min((W-2*out)/cw,(H-2*out)/ch);
   // gtArtDraw scales about the picture's middle; the nudge then carries that
   // box's middle to the placeholder's
   const px=f.x+f.w/2, py=f.y+f.h/2;
   const cx=f.x+(bb.u0+bb.u1)/2*f.w, cy=f.y+(bb.v0+bb.v1)/2*f.h;
-  d.art={s,dx:round(T.w/2-px-(cx-px)*s),dy:round(T.h/2-py-(cy-py)*s)};
+  return {s,dx:round(W/2-px-(cx-px)*s),dy:round(H/2-py-(cy-py)*s)};
+}
+document.getElementById('gtArtFitBtn').addEventListener('click',()=>{
+  const d=gtCurrentDesign; if(!d) return;
+  const T=gtTagBox(), a=gtFitArtIn(d,T.w,T.h);
+  if(!a) return;
+  d.art=a;
   gtArtWriteInputs(); gtArtChanged();
 });
 document.getElementById('gtArtBleedOwn').addEventListener('change',e=>{
@@ -40885,15 +40954,15 @@ async function gtBuildSide(side,pages,plan,cuts){
     const c=document.createElement('canvas');
     const place=[];
     const vec=forms.size?gtVecTaker(forms,place):null;
-    gtQrVecPass=true;
-    try{ gtRenderPage(c,i,px,true,null,vec,side); } finally{ gtQrVecPass=false; }  // cut lines and holes are preview furniture
+    gtQrVecPass=true; const words=gtWordsCatch=[];
+    try{ gtRenderPage(c,i,px,true,null,vec,side); } finally{ gtQrVecPass=false; gtWordsCatch=null; }  // cut lines and holes are preview furniture
     placed+=place.length;
     const ctx=c.getContext('2d');
     const out={imgData:ctx.getImageData(0,0,c.width,c.height),
                wMm:S.paperW,hMm:S.paperH,place,clear:!!vec,
                ink:back?'':gtQrPdfOps(i,S.paperH),
-               // the base layer is the front's
-               over:(vec&&!back)?gtBaseOver(px/Math.max(S.paperW,S.paperH)):[]};
+               // the words, then the base layer (the front's) multiplied over them
+               over:words.concat((vec&&!back)?gtBaseOver(px/Math.max(S.paperW,S.paperH)):[])};
     setTimeout(()=>{ c.width=c.height=0; },0);
     return out;
   },sources);
@@ -45328,9 +45397,9 @@ const MC_TILES={
       label:p.name+' Gift Tag',page:p.mode})),
     bundles:mcGiftBundles,
     // a sheet with a back on any of its tags is two files, front then back
-    sides:b=>mcGiftSides(b.set,b.meta&&b.meta.mode),
-    make:e=>mcGiftBundle(e.set,e.meta&&e.meta.mode,e.side),
-    preview:(e,c,dim,page)=>mcGiftPreview(e.set,e.meta&&e.meta.mode,c,dim,page,e.side)
+    sides:b=>mcGiftSides(b.set,b.meta&&b.meta.mode,b.meta&&b.meta.guest),
+    make:e=>mcGiftBundle(e.set,e.meta&&e.meta.mode,e.side,e.meta&&e.meta.guest),
+    preview:(e,c,dim,page)=>mcGiftPreview(e.set,e.meta&&e.meta.mode,c,dim,page,e.side,e.meta&&e.meta.guest)
   },
   // The batch's own print sheet: one design off the designs folder to a line,
   // at that line's quantity, all of them on one template. It is what the SKU
@@ -51268,7 +51337,9 @@ async function mcGtShapesInHand(){
   if(typeof gtShapeGroups!=='function'||typeof gtShowShape!=='function') return;
   const was=gtSheet.layoutFile;
   try{
-    for(const g of gtShapeGroups())
+    // a nested sheet is laid by gtNestPlan, which no cutting file decides —
+    // and loading one here would put the die back under a merged sheet
+    if(!(gtSheet.nestOn&&!gtLayout)) for(const g of gtShapeGroups())
       if(g.shape&&g.shape!==was&&!gtShapeSlots.has(g.shape)&&!await gtShowShape(g.shape))
         throw new Error('the cutting file "'+gtShapeLabel(g.shape)+'" could not be loaded — nothing was saved.');
   }finally{ if(was&&gtSheet.layoutFile!==was) await gtShowShape(was); }
@@ -57146,7 +57217,7 @@ function mcMergeSameSync(){
     try{ localStorage.setItem(mcMergeSameKey(),e.target.checked?'1':'0'); }catch(err){}
     mcMergeSameSync();
     showMsg(document.getElementById('mcBatchMsg'),e.target.checked
-      ?'Merge on — Download All puts Custom Template orders with the same layout, paper and GSM on one sheet.'
+      ?'Merge on — Download All puts Custom Template orders with the same layout, paper and GSM on one sheet, and Festive and Custom gift tags on the same paper and GSM on one sheet.'
       :'Merge off — every Custom Template order is a file of its own.',true);
   });
 });
@@ -57347,19 +57418,134 @@ async function mcPrintPreview(lines,template,canvas,dim,page){
 // and the same two for the gift tag side, so the plan can ask every tile the
 // same questions
 function mcGiftBundles(lines){
-  const by=new Map();
-  lines.forEach(it=>{
+  const by=new Map(), out=mcGtMergeBundles(lines), taken=new Set();
+  out.forEach(b=>b.set.forEach(it=>taken.add(it)));
+  lines.filter(it=>!taken.has(it)).forEach(it=>{
     const f=mcGtFinishOf(it);
     // what the line was told it is on comes before what its design looks like
     const m=mcLinePage(it)||gtMode;
     const k=m+'|'+f;
     (by.get(k)||by.set(k,[]).get(k)).push(it);
   });
-  return [...by.entries()].map(([k,set])=>{
+  return out.concat([...by.entries()].map(([k,set])=>{
     const mode=k.slice(0,k.indexOf('|')), finish=k.slice(k.indexOf('|')+1);
     const page=mcGtPage(mode).name;
     return {name:`Gift Tag_${page}_${finish}_${mcBatchDate()}.pdf`,set,meta:{mode,finish}};
+  }));
+}
+// ---------- Festive + Custom on one sheet ----------
+// With the batch's Merge switch on, Festive and Custom gift tag lines on the
+// same paper and GSM print on one sheet, whatever size each tag is. Stickers
+// never join: a sticker is another stock and another cut. A paper with lines
+// on one page only comes out the way it always did, by page and finish.
+const MC_GT_MERGE_PAGES=['festive','custom'];
+const mcGtStockKey=it=>{
+  const n=v=>String(v||'').trim().toLowerCase();
+  return n(it&&it.paper_type)?n(it.paper_type)+'|'+n(it.gsm):'';
+};
+function mcGtMergeBundles(lines){
+  if(!mcMergeSameOn()) return [];
+  const by=new Map();
+  lines.forEach(it=>{
+    const m=mcLinePage(it)||gtMode, k=mcGtStockKey(it);
+    if(k&&MC_GT_MERGE_PAGES.includes(m)) (by.get(k)||by.set(k,[]).get(k)).push(it);
   });
+  const out=[];
+  by.forEach(set=>{
+    const n={festive:0,custom:0};
+    set.forEach(it=>n[mcLinePage(it)||gtMode]++);
+    if(!n.festive||!n.custom) return;
+    // the sheet is laid on the page with more tags on it; the other page's
+    // designs are lent to it for the one file
+    const mode=n.custom>n.festive?'custom':'festive';
+    const guest=mode==='festive'?'custom':'festive';
+    const it=set[0];
+    const name=['Gift Tag_Festive+Custom',it.paper_type,it.gsm,mcBatchDate()]
+      .map(v=>String(v||'').trim()).filter(Boolean).join('_').replace(/[\\/:*?"<>|]/g,'-')+'.pdf';
+    out.push({name,set,meta:{mode,finish:mcGtFinishOf(it),guest}});
+  });
+  return out;
+}
+// The guest page's designs (and the fonts their words are set in) read off its
+// own folder and put into the library in hand, under file names of their own so
+// two libraries' designs/x.png never meet. Marked mcLent, so a save in the
+// meantime does not write them into this page's library.json.
+async function mcGtBorrow(lines,guest){
+  const page=mcGtPage(guest), want=new Set(), fontIds=new Set();
+  lines.forEach(it=>{
+    const si=it.sheet_item||{};
+    if((mcLinePage(it)||gtMode)!==guest) return;
+    if(si.designId&&!gtDesign(si.designId)) want.add(String(si.designId));
+    Object.values(si.vals||{}).forEach(v=>{ if(v&&v.font) fontIds.add(v.font); });
+    (si.extra||[]).forEach(x=>{ if(x&&x.font) fontIds.add(x.font); });
+  });
+  const lent={designs:[],fonts:[],files:[]};
+  if(!want.size) return lent;
+  let man, read;
+  const dir=await gtIdbGet(page.dir).catch(()=>null);
+  if(dir){
+    if(!await gtDirOk(dir))
+      throw new Error(`the ${page.name} gift tag folder would not open — open the ${page.name} page once, then download again`);
+    man=(await gtReadAll(dir)).man||{};
+    read=f=>gtDirRead(dir,f);
+  }else{
+    const rec=await gtIdbGet(page.lib).catch(()=>null);
+    man=(rec&&rec.manifest)||{};
+    const as=(rec&&rec.assets)||{};
+    read=async f=>{ if(!as[f]) throw new Error('not in this browser'); return as[f]; };
+  }
+  const pre='mc-lent/'+guest+'/';
+  const take=async f=>{
+    if(!f) return '';
+    const k=pre+f;
+    if(!gtAssets.has(k)){
+      try{ gtAssets.set(k,await read(f)); lent.files.push(k); }catch(e){ return ''; }
+    }
+    return k;
+  };
+  for(const raw of man.designs||[]){
+    if(!want.has(String(raw.id))||gtDesign(raw.id)) continue;
+    const file=await take(raw.file); if(!file) continue;
+    const back=raw.back&&raw.back.file?{...raw.back,file:(await take(raw.back.file))||raw.back.file}:raw.back;
+    const d=gtNormalizeDesign({...raw,file,...(back?{back}:{})});
+    d.mcLent=true;
+    try{ gtImgs.set(d.id,await loadImage(await gtArtURL(gtAssets.get(file),file,true))); }catch(e){}
+    gtLib.designs.push(d); lent.designs.push(d);
+    (d.fields||[]).forEach(f=>{ if(f&&f.font) fontIds.add(f.font); });
+  }
+  for(const f of man.fonts||[]){
+    if(!fontIds.has(f.id)||gtFont(f.id)) continue;
+    const file=await take(f.file); if(!file) continue;
+    const ff={id:f.id,name:f.name,file,mcLent:true};
+    gtLib.fonts.push(ff); lent.fonts.push(ff);
+  }
+  if(lent.designs.some(d=>d.back)) await gtHydrateBacks().catch(()=>{});
+  gtNestCache=null;
+  return lent;
+}
+function mcGtGiveBack(lent){
+  if(!lent) return;
+  const ds=new Set(lent.designs), fs=new Set(lent.fonts);
+  gtLib.designs=gtLib.designs.filter(d=>!ds.has(d));
+  gtLib.fonts=gtLib.fonts.filter(f=>!fs.has(f));
+  lent.designs.forEach(d=>gtImgs.delete(d.id));
+  lent.files.forEach(f=>{ gtAssets.delete(f); gtBackImgs.delete(f); });
+  gtNestCache=null;
+}
+// Two pages' tags are two sizes, so a merged sheet is nested — each tag in a
+// placeholder of its own size — whatever the host page is set to. Put back after.
+function mcGtNestForce(){
+  const keep={on:gtSheet.nestOn,layout:gtLayout};
+  gtSheet.nestOn=true; gtLayout=null; gtNestCache=null;
+  return ()=>{ gtSheet.nestOn=keep.on; gtLayout=keep.layout; gtNestCache=null; };
+}
+// Borrows the guest page's designs and nests the sheet, for one merged sheet's
+// work; undone by the function it returns.
+async function mcGtMergeOpen(lines,guest){
+  if(!guest) return ()=>{};
+  const lent=await mcGtBorrow(lines,guest);
+  const unNest=mcGtNestForce();
+  return ()=>{ unNest(); mcGtGiveBack(lent); };
 }
 // X.pdf as one side of a pair: X_Front.pdf / X_Back.pdf, as gtExport names them
 const mcSideName=(name,side)=>String(name||'').replace(/(\.pdf)?$/i,
@@ -57368,7 +57554,7 @@ const mcSideName=(name,side)=>String(name||'').replace(/(\.pdf)?$/i,
 // it has a back (gtSheetHasBack), or one whose back picture would not read —
 // that back then fails by name rather than the sheet going out one-sided.
 // [null] is the one file under the name it always had.
-async function mcGiftSides(lines,mode){
+async function mcGiftSides(lines,mode,guest){
   if(typeof gtSheetHasBack!=='function') return [null];
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
@@ -57376,10 +57562,14 @@ async function mcGiftSides(lines,mode){
   // a batch prints the library's back, never a saved sheet's job override
   const keep=gtOrder, jb=gtJobBack;
   gtOrder=lines.map(mcGtLine); gtJobBack=null;
-  try{ return (gtSheetHasBack()||gtBackUnread().length)?['front','back']:[null]; }
-  finally{ gtOrder=keep; gtJobBack=jb; gtNestCache=null; }
+  let unMerge=()=>{};
+  try{
+    unMerge=await mcGtMergeOpen(lines,guest);
+    return (gtSheetHasBack()||gtBackUnread().length)?['front','back']:[null];
+  }
+  finally{ unMerge(); gtOrder=keep; gtJobBack=jb; gtNestCache=null; }
 }
-async function mcGiftPreview(lines,mode,canvas,dim,page,side){
+async function mcGiftPreview(lines,mode,canvas,dim,page,side,guest){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
   // what the file will be is what is proofed, one-off copies included
@@ -57387,7 +57577,9 @@ async function mcGiftPreview(lines,mode,canvas,dim,page,side){
   const keep=gtOrder, keepPage=gtPage, jb=gtJobBack;
   const wasShape=gtSheet.layoutFile;
   gtOrder=lines.map(mcGtLine); gtJobBack=null;   // the library's back, as mcGiftSides
+  let unMerge=()=>{};
   try{
+    unMerge=await mcGtMergeOpen(lines,guest);
     await mcGtShapesInHand();      // or the sheets are counted off the wrong cuts
     // Pictures are read the first time they are drawn, and this draws once and
     // hands the canvas over — a sheet not looked at yet came out with no
@@ -57405,6 +57597,7 @@ async function mcGiftPreview(lines,mode,canvas,dim,page,side){
     return pages;
   }
   finally{
+    unMerge();
     gtOrder=keep; gtPage=keepPage; gtJobBack=jb; gtNestCache=null;
     // turning to another shape's page changed the sheet's cut file; the
     // operator's gift tag screen is put back on the one it was on
@@ -57413,7 +57606,7 @@ async function mcGiftPreview(lines,mode,canvas,dim,page,side){
 }
 // side: 'back' builds the back of the sheet (gtBuildSide's), anything else the
 // front with its cut files.
-async function mcGiftBundle(lines,mode,side){
+async function mcGiftBundle(lines,mode,side,guest){
   mcPendingCuts=null;
   const back=side==='back';
   if(typeof gtBuildPdf!=='function') throw new Error('the gift tag tool has not loaded');
@@ -57435,7 +57628,10 @@ async function mcGiftBundle(lines,mode,side){
   const keep=gtOrder, jb=gtJobBack;
   gtOrder=lines.map(mcGtLine); gtJobBack=null;   // the library's back, as mcGiftSides
   const wasShape=gtSheet.layoutFile;
+  let unMerge=()=>{};
   try{
+    // a Festive + Custom sheet: the other page's designs lent to this one
+    unMerge=await mcGtMergeOpen(lines,guest);
     await mcGtShapesInHand();
     // A line whose design is not in this library lays out as nothing, and the
     // sheet then builds as a blank page rather than failing — a PDF of empty
@@ -57479,14 +57675,14 @@ async function mcGiftBundle(lines,mode,side){
       const c=document.createElement('canvas');
       const place=[];
       const vec=forms.size?gtVecTaker(forms,place):null;
-      gtQrVecPass=true;
-      try{ gtRenderPage(c,i,px,true,null,vec,back?'back':'front'); } finally{ gtQrVecPass=false; }
+      gtQrVecPass=true; const words=gtWordsCatch=[];
+      try{ gtRenderPage(c,i,px,true,null,vec,back?'back':'front'); } finally{ gtQrVecPass=false; gtWordsCatch=null; }
       const ctx=c.getContext('2d');
       const imgData=ctx.getImageData(0,0,c.width,c.height);
       // the base layer is the front's
       return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH,place,clear:!!vec,
               ink:back?'':gtQrPdfOps(i,gtSheet.paperH),
-              over:(vec&&!back)?gtBaseOver(px/Math.max(gtSheet.paperW,gtSheet.paperH)):[]};
+              over:words.concat((vec&&!back)?gtBaseOver(px/Math.max(gtSheet.paperW,gtSheet.paperH)):[])};
     },sources);
     // handed to mcPut, which every caller saves this PDF through next
     if(cuts) mcPendingCuts=cuts.filter(Boolean);
@@ -57494,6 +57690,7 @@ async function mcGiftBundle(lines,mode,side){
     mcPendingQr=(!back&&gtSheet.qrOn)?{mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(pages)}:null;
     return bytes;
   }finally{
+    unMerge();
     gtOrder=keep; gtJobBack=jb; gtNestCache=null;
     // back onto the sheet this started on, whatever the last page was cut to
     if(wasShape&&gtSheet.layoutFile!==wasShape) await gtShowShape(wasShape);
