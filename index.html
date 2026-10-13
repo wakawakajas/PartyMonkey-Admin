@@ -9835,7 +9835,9 @@ async function pdfAllPageFiles(file){
 // source: {dir:'loadDesignDir',path} when the file came off the NAS presets
 // folder — kept so a template can point back at the same file later. A plain
 // Upload has no reusable path, so it's left null.
-async function useArtFile(group,side,file,source,split=true){
+// live: asked before the picture goes on — a template's design still reading
+// when the next sheet was laid landed on that sheet
+async function useArtFile(group,side,file,source,split=true,live){
   const infoEl=document.getElementById('finalInfo'+(side==='front'?'Front':'Back'));
   infoEl.textContent='Loading…';
   try{
@@ -9849,8 +9851,10 @@ async function useArtFile(group,side,file,source,split=true){
         if(side==='back') infoEl.textContent='';
         // a front off the designs folder stays the file its path names; an
         // uploaded one is just its own page, so a line files half the bytes
-        await Promise.all([useArtFile(group,'front',source?file:sides.front,source,false),
-          useArtFile(group,'back',sides.back,null,false)]);
+        if(live&&!live()) return;
+        await Promise.all([useArtFile(group,'front',source?file:sides.front,source,false,live),
+          useArtFile(group,'back',sides.back,null,false,live)]);
+        if(live&&!live()) return;
         // the back is the folder file's own second page: a saved sheet names it
         // by that path (printBackRef) rather than calling it an upload
         if(source&&source.path&&state[group].back.file) state[group].back.pairPath=source.path;
@@ -9859,6 +9863,7 @@ async function useArtFile(group,side,file,source,split=true){
     }
     const dataURL=await fileToImageData(file);
     const img=await loadImage(dataURL);
+    if(live&&!live()){ infoEl.textContent=''; return; }
     // the file itself is kept beside the picture of it — a File is a handle on
     // what is on disk, not a copy of it, and the export needs the real thing
     state[group][side]={data:dataURL,img,name:file.name,source:source||null,file};
@@ -14908,7 +14913,8 @@ async function enhanceArt(side){
         const got=await upscaleArtPicture(d,artDpiOf(side,d.img),t=>{ txt.textContent=pre+t; });
         if(!got) continue;
         // the same picture may sit on more than one page entry
-        state.finalList[side].forEach(e=>{ if(e.img===was) Object.assign(e,got); });
+        // and is uploaded again on the line's save: its saved file is the old pixels
+        state.finalList[side].forEach(e=>{ if(e.img===was){ Object.assign(e,got); e.mcPath=''; } });
         if(state.final[side].img===was) state.final[side]={...state.final[side],...got};
         n++;
       }
@@ -27910,7 +27916,7 @@ function applyPrintState(meta,name,whole,keepArt){
       const file=await loadDesignFileByPath(single.path);
       if(artGen!==printArtGen) return;
       if(file){
-        await useArtFile('final','front',file,{dir:'loadDesignDir',path:single.path});
+        await useArtFile('final','front',file,{dir:'loadDesignDir',path:single.path},true,()=>artGen===printArtGen);
         if(keepArt&&artGen===printArtGen){
           ['front','back'].forEach(s=>{ if(keepArt[s].wMm>0&&keepArt[s].hMm>0) state.art[s]={...keepArt[s]}; });
           refreshArtInputs(); drawAll();
@@ -54250,12 +54256,13 @@ function mcCustomWire(it){
     if(!sel.value) return;
     // a layout picked by hand: an auto-layout still reading the folder for
     // this line would land over it when it came back
-    mcAutoRun++;
-    mcWinTplId=sel.value;
+    const run=++mcAutoRun;
     const want=sel.value;
     const {data,error}=await sb.from('templates').select('data').eq('id',want).single();
     // another line opened while it was fetched: this layout is not that line's
     if(mcWinItem!==it.id) return;
+    // another layout picked since: the last one picked is the one that goes on
+    if(run!==mcAutoRun) return;
     if(error||!data){
       const m=document.getElementById('mcWinMsg');
       if(m) showMsg(m,'Could not load that layout: '
@@ -54271,6 +54278,7 @@ function mcCustomWire(it){
       state.final.back={data:null,img:null,name:''};
     }
     applyPrintState(data.data);
+    mcWinTplId=want;                               // only once it is on the sheet
     mcLaidTemplate=String(want);                   // what the builder now holds
     mcLaidShared=false;                            // and it is this line's, not a shared sheet
     // and the designs it prints. A place card keeps its own list and its own
@@ -54366,14 +54374,18 @@ function mcCustomWire(it){
     // the template fresh here (as it used to) put the template's defaults on
     // a line whose pictures had not filed, and closing it saved them for good.
     // Only the artwork is looked for again, once the layout is down.
+    // A layout picked by hand meanwhile (mcAutoRun) has this step stand down,
+    // as an auto-layout does: both resetting and adding doubled the card.
+    const run=mcAutoRun;
+    const live=()=>mcWinItem===it.id&&run===mcAutoRun;
     restore().then(async()=>{
-      if(mcWinItem!==it.id||pc) return;
+      if(!live()||pc) return;
       const ready=await mcDesignsReady(true).catch(()=>false);
-      if(!ready||mcWinItem!==it.id) return;
+      if(!ready||!live()) return;
       let pick=null,sku='';
       for(const n of mcNamesOf(it)){ const p=designFileForSku(n); if(p){ pick=p; sku=n; break; } }
       if(pick) await mcAddPickedDesign(it,pick,sku,
-        {reset:true,msg:document.getElementById('mcWinMsg'),live:()=>mcWinItem===it.id});
+        {reset:true,msg:document.getElementById('mcWinMsg'),live});
     }).catch(failed);
   }else{
     // Nothing saved on it yet, and the line's own name already says what it
@@ -54506,11 +54518,17 @@ async function mcKeepBuilderArt(it){
     // side's own picture is the first ticked page, which is what anything
     // that only knows one picture a side reads.
     const key=side+'Split';
-    // restored short (a page would not download) and not edited since: what the
-    // line holds is the whole list, so it is left as it is
-    if(state.finalList[side]&&state.finalList[side]._short&&art[key]) continue;
+    // None of this side's pages came down when the line was opened, and nothing
+    // has been put on it since: the line's pages are left as they are
+    if(mcShortSides.has(side)&&art[key]&&!finalSplitList(side)){
+      const o=state.final[side];
+      if(!o||!o.data||o.mcPath===art[side]) continue;
+    }
     if(finalSplitList(side)){
       const list=state.finalList[side], was=Array.isArray(art[key])?art[key]:[];
+      // restored short (a page would not download): the pages that did not come
+      // down stay on the line in their places, with their counts
+      const short=Array.isArray(list._short)?list._short:null;
       const out=[];
       try{
         for(let i=0;i<list.length;i++){
@@ -54527,6 +54545,12 @@ async function mcKeepBuilderArt(it){
             d.mcPath=path;
           }
           out.push({path,name:d.name||'',qty:splitQty(d.qty),on:d.on!==false});
+        }
+        if(short){
+          const mine=new Map(out.map(x=>[x.path,x]));
+          const kept=was.filter(w=>mine.has(w.path)||short.includes(w.path)).map(w=>mine.get(w.path)||w);
+          out.forEach(x=>{ if(!was.some(w=>w.path===x.path)) kept.push(x); });
+          out.length=0; out.push(...kept);
         }
         const first=out.find(x=>x.on)||out[0];
         const same=JSON.stringify(out)===JSON.stringify(was)&&art[side]===first.path;
@@ -54662,9 +54686,14 @@ async function mcArtDataURL(path){
 // `live`, where given, says whether the line is still the one open: a slow
 // download for a line somebody has already moved on from landed on the next
 // line's builder, and its Save then kept that artwork as its own.
+// Sides whose Multiple Design pages did not come down at all when the line was
+// opened: nothing of them is on screen, so a close must not read that as the
+// pages being taken off the line.
+const mcShortSides=new Set();
 async function mcApplyArt(it,live){
   const gone=()=>!!live&&!live();
   const art=it.art||{};
+  mcShortSides.clear();
   // The layout this line was saved with may name its own artwork off the
   // designs folder, and applying it started that read — so it is waited for
   // here. It used to be wiped instead, which is what left a line laid out with
@@ -54718,9 +54747,10 @@ async function mcApplyArt(it,live){
     }
     // pages that would not come down: the list on screen is short, and saved
     // as it stands it would write those pages and their counts off the line
-    if(list.length<pages.length) list._short=true;
+    // _short names the pages that did not come down
+    if(list.length<pages.length) list._short=pages.filter(pg=>!list.some(d=>d.mcPath===pg.path)).map(pg=>pg.path);
     const first=list.find(d=>d.on);
-    if(!first) continue;
+    if(!first){ if(list._short) mcShortSides.add(side); continue; }
     state.finalList[side]=list;
     state.final[side]={...first};
     const a=state.art[side];
@@ -56037,8 +56067,9 @@ function pcBuilderKeep(){
     // copies of the lists: the one left in the builder is added to in place
     designs:[...(state.designs||[])],page:state.page,artMode:state.artMode,
     final:{front:state.final.front,back:state.final.back},
-    finalList:{front:state.finalList.front&&[...state.finalList.front],
-      back:state.finalList.back&&[...state.finalList.back]},finalSplit:state.finalSplit,
+    finalList:{front:finalListCopy(state.finalList.front),
+      back:finalListCopy(state.finalList.back)},finalSplit:state.finalSplit,
+    shortSides:[...mcShortSides],
     // and so is the template they had picked. Without this a batch that loaded
     // its own template left it selected: the next look at the picker named the
     // batch's layout, and loading "the same one" quietly did nothing.
@@ -56050,13 +56081,17 @@ function pcBuilderKeep(){
     tplName:(document.getElementById('templateName')||{}).value||'',
     tplFolders:(document.getElementById('templateFolders')||{}).value||''};
 }
+// a page list copied with its short mark (see mcApplyArt): a plain copy lost it,
+// and the line was then saved without the pages that had not come down
+const finalListCopy=l=>l&&Object.assign([...l],l._short?{_short:l._short}:{});
 async function pcBuilderRestore(keep){
   applyPrintState(keep.meta);
   // the layout starts its own artwork loading, and that landed after the
   // design list was put back and replaced it — so it is waited for first
   await printArtReady().catch(()=>{});
   state.final.front=keep.final.front; state.final.back=keep.final.back;
-  state.finalList={front:keep.finalList.front&&[...keep.finalList.front],back:keep.finalList.back&&[...keep.finalList.back]}; state.finalSplit=keep.finalSplit;
+  state.finalList={front:finalListCopy(keep.finalList.front),back:finalListCopy(keep.finalList.back)}; state.finalSplit=keep.finalSplit;
+  mcShortSides.clear(); (keep.shortSides||[]).forEach(x=>mcShortSides.add(x));
   // the toggle and its hints follow the setting: a split line's apply left the
   // box ticked, and the next change read the box and flipped the operator's setting
   { const tg=document.getElementById('finalSplitToggle'); if(tg) tg.checked=!!state.finalSplit;
@@ -56092,7 +56127,10 @@ let pcBootKeep=null, pcLeftAs='custom';
 // the builder as it stands before anybody has worked on it
 window.addEventListener('load',()=>{ if(!pcBootKeep) try{ pcBootKeep=pcBuilderKeep(); }catch(e){} });
 function pcLeaveBuilder(){
-  if(mcBorrowing) return;
+  // a Magic Create line open in the builder is the line's sheet, not the tile's
+  // work: filed as the tile's, it came back on the next Custom Template visit.
+  // The tile's own work is put back from mcHomeState when the line closes.
+  if(mcBorrowing||mcWinItem||mcHomeState) return;
   try{ pcModeKeep[pcMode]=pcBuilderKeep(); pcLeftAs=pcMode; }catch(e){}
 }
 async function pcOpenMode(m){
