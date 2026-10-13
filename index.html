@@ -14830,10 +14830,12 @@ function enhancePages(side){
     seen.add(d.img); return true;
   });
 }
-// One picture upscaled for printing at the side's size: the new data, image
-// and name, or null when it is already as large as the upscaler goes.
-async function upscaleArtPicture(side,o,show){
-  const img=o.img, dpi=artDpiOf(side,img);
+// One picture upscaled for printing at `dpi` (null: no printed size known):
+// the new data, image and name, or null when it is already as large as the
+// upscaler goes. keepUntagged leaves a file that never said its size saying
+// nothing still — a gift tag fits such a picture to its placeholder.
+async function upscaleArtPicture(o,dpi,show,keepUntagged){
+  const img=o.img;
   const long=Math.max(img.naturalWidth,img.naturalHeight);
   // Below 300 DPI, exactly as much as 300 needs, four times at most — more
   // pixels than the print can use only slow every fill and export after this.
@@ -14866,7 +14868,7 @@ async function upscaleArtPicture(side,o,show){
   let tag=null;
   try{ tag=imageDpi(o.data); }catch(e){}
   const k=c.width/img.naturalWidth;
-  const dx=tag&&tag.x>0?tag.x*k:dpi?dpi*k:0, dy=tag&&tag.y>0?tag.y*k:dx;
+  const dx=tag&&tag.x>0?tag.x*k:dpi&&!keepUntagged?dpi*k:0, dy=tag&&tag.y>0?tag.y*k:dx;
   // a trim the crop (or the PDF) stamped in is fractions of the picture, so
   // it carries over to the bigger copy unchanged
   artTrimFrac(img);
@@ -14896,7 +14898,7 @@ async function enhanceArt(side){
       for(let i=0;i<pages.length;i++){
         const d=pages[i], was=d.img;
         const pre=pages.length>1?`Page ${i+1} of ${pages.length} · `:'';
-        const got=await upscaleArtPicture(side,d,t=>{ txt.textContent=pre+t; });
+        const got=await upscaleArtPicture(d,artDpiOf(side,d.img),t=>{ txt.textContent=pre+t; });
         if(!got) continue;
         // the same picture may sit on more than one page entry
         state.finalList[side].forEach(e=>{ if(e.img===was) Object.assign(e,got); });
@@ -14909,7 +14911,7 @@ async function enhanceArt(side){
       return n>0;
     }
     const img=o.img;
-    const got=await upscaleArtPicture(side,o,t=>{ txt.textContent=t; });
+    const got=await upscaleArtPicture(o,artPrintDpi(side),t=>{ txt.textContent=t; });
     if(!got){
       artEnhancing[side]=false; refreshArtQuality();
       const dpi=artPrintDpi(side);
@@ -37227,6 +37229,7 @@ function gtRenderOrder(){
           <div class="combo-panel" role="listbox" data-gt-design-panel>${gtDesignPanel('',l.designId)}</div>
         </div>
       </div>
+      ${gtEnhanceRow(d)}
       ${words}
       ${d?`<button type="button" class="btn-outline btn-sm" data-gt-add-lfield
         style="width:100%;margin-top:8px;">+ Text on this line only</button>`:''}
@@ -37236,6 +37239,78 @@ function gtRenderOrder(){
   // design, or a line rebuilt, is a change it has to be told about
   if(typeof mcGtLiveSync==='function') mcGtLiveSync();
 }
+// ---------- Enhance on a one-off design ----------
+// A one-off is the customer's own picture — a screenshot, a WhatsApp photo —
+// and the one kind of design that comes in soft. Library designs are the
+// shop's own files and are left as they are. Enhanced in place: every line on
+// that one-off prints the sharper copy, under a new file name so a Magic line
+// keeps the new picture rather than the one it filed before.
+const gtEnhancing=new Map();   // design id -> the progress line while it runs
+function gtEnhanceable(d){
+  return !!(d&&d.adhoc&&!gtIsPdfFile(d.file)&&gtImgs.get(d.id));
+}
+// the picture's DPI at the size it prints on the tag, or null
+function gtDesignDpi(d){
+  const img=gtImgs.get(d.id); if(!img||!img.naturalWidth) return null;
+  const t=gtTagBox(), f=gtFitD(d,img.naturalWidth,img.naturalHeight,t.w,t.h);
+  const w=f.w*((d.art&&d.art.s)||1);
+  return w>0?img.naturalWidth/(w/25.4):null;
+}
+function gtEnhanceText(d){
+  const busy=gtEnhancing.get(d.id); if(busy) return escapeHtml(busy);
+  const img=gtImgs.get(d.id), dpi=gtDesignDpi(d);
+  const px=img.naturalWidth+' × '+img.naturalHeight+' px';
+  if(!dpi) return px;
+  const low=dpi<PRINT_DPI*0.95;
+  return `<span class="${low?'low':'ok'}">${Math.round(dpi)} DPI</span> · ${px}`+(low?' · will print soft':'');
+}
+function gtEnhanceRow(d){
+  if(!gtEnhanceable(d)) return '';
+  return `<div class="art-quality" data-gt-enh="${d.id}"><span data-art-dpi>${gtEnhanceText(d)}</span>
+    <button type="button" class="btn-outline btn-sm" data-gt-enhance="${d.id}"
+      ${gtEnhancing.has(d.id)?'hidden':''} title="Upscale this one-off picture">✨ Enhance</button></div>`;
+}
+// the line(s) showing this design, told without rebuilding the list under the caret
+function gtEnhanceShow(id,html){
+  document.querySelectorAll(`#gtOrderList [data-gt-enh="${id}"] [data-art-dpi]`).forEach(el=>{ el.innerHTML=html; });
+}
+async function gtEnhanceDesign(id){
+  const d=gtDesign(id);
+  if(!gtEnhanceable(d)||gtEnhancing.has(id)) return false;
+  const img=gtImgs.get(id), file=d.file;
+  const say=t=>{ gtEnhancing.set(id,t); gtEnhanceShow(id,escapeHtml(t)); };
+  say('Loading the upscaler…');
+  document.querySelectorAll(`#gtOrderList [data-gt-enhance="${id}"]`).forEach(b=>{ b.hidden=true; });
+  let data=null;
+  try{ data=await fileToDataURL(gtAssets.get(file)); }catch(e){}
+  try{
+    const got=await upscaleArtPicture({img,data,name:d.name},gtDesignDpi(d),say,true);
+    if(!got){ gtEnhancing.delete(id); gtRenderOrder(); gtEnhanceShow(id,'<span class="low">Too large to upscale further</span>'); return false; }
+    // swapped for something else while it ran: the new picture is not this one's
+    if(gtImgs.get(id)!==img||d.file!==file){ gtEnhancing.delete(id); gtRenderOrder(); return false; }
+    const blob=await (await fetch(got.data)).blob();
+    const path='adhoc/'+d.id+'-'+Date.now()+'.png';
+    gtAssets.set(path,blob);
+    d.file=path;
+    gtImgs.set(id,got.img);
+    // the Offset bleed grown off the old picture is kept by id; the cut line is
+    // fractions of the picture, so it still lies where it did
+    [...gtGrown.keys()].forEach(k=>{ if(k.startsWith(id+'@')) gtGrown.delete(k); });
+    await gtSaveLib();
+    gtEnhancing.delete(id);
+    gtRenderOrder(); gtDraw();
+    return true;
+  }catch(err){
+    gtEnhancing.delete(id);
+    gtRenderOrder();
+    gtEnhanceShow(id,'<span class="low">Upscale failed</span> — '+escapeHtml((err&&err.message)||'unknown error'));
+    return false;
+  }
+}
+document.getElementById('gtOrderList').addEventListener('click',e=>{
+  const b=e.target.closest('[data-gt-enhance]');
+  if(b) gtEnhanceDesign(b.dataset.gtEnhance);
+});
 // which word is open. One at a time: opening a word puts the last one away.
 let gtOpenWord='';
 function gtSyncWords(){
