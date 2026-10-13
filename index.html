@@ -9641,6 +9641,16 @@ function pngWithDpi(dataURL,dpiX,dpiY,key,text){
     for(let i=0;i<tb.length;i++) extra[4+i]=tb.charCodeAt(i)&0xFF;
     xv.setUint32(8+body.length,crc32(extra.subarray(4,8+body.length)));
   }
+  // no resolution to give (the source said none): only the text goes in, and
+  // the picture keeps saying nothing about its printed size
+  if(!(dpiX>0)){
+    if(!extra.length) return dataURL;
+    const o=new Uint8Array(33+extra.length);
+    for(let i=0;i<33;i++) o[i]=head.charCodeAt(i);
+    o.set(extra,33);
+    let b=''; for(const x of o) b+=String.fromCharCode(x);
+    return dataURL.slice(0,comma+1)+btoa(b)+b64.slice(44);
+  }
   const out=new Uint8Array(54+extra.length);
   out.set(extra,54);
   for(let i=0;i<33;i++) out[i]=head.charCodeAt(i);
@@ -11899,6 +11909,9 @@ let phBand=null;
 const phSel=new Set();
 const phSelected=()=>state.placeholders.filter(p=>phSel.has(p.id));
 function phSelSync(){
+  // boxes replaced since they were picked (a new grid, Clear, a template) are
+  // not still "selected": Align and Rotate lit up over nothing
+  for(const id of [...phSel]) if(!state.placeholders.some(p=>p.id===id)) phSel.delete(id);
   const n=phSel.size;
   const el=document.getElementById('alignCount');
   if(el) el.textContent=n?`${n} selected`:'nothing selected';
@@ -12596,7 +12609,9 @@ document.addEventListener('keydown',e=>{
     e.preventDefault();
     state.placeholders=state.placeholders.filter(p=>!phSel.has(p.id));
     phSel.clear();
-    renderPlaceholderList(); phSelSync(); drawAll();
+    // and the design tally, as the set window's Delete does: fewer boxes is
+    // more sheets
+    renderPlaceholderList(); phSelSync(); renderDesignLines(); updateCalc(); refreshArtInputs(); drawAll();
     return;
   }
   if(!move) return;
@@ -12685,6 +12700,7 @@ function phDuplicateSelected(){
 }
 document.getElementById('phDupSelBtn').addEventListener('click',phDuplicateSelected);
 function renderPlaceholderList(){
+  if(typeof phSelSync==='function') try{ phSelSync(); }catch(e){}
   const u=state.paper.unit;
   document.querySelectorAll('.unitHint').forEach(e=>e.textContent=u);
   const wrap=document.getElementById('phListWrap');
@@ -12861,7 +12877,11 @@ function phPopSetSize(wMm,hMm){
       drawAll(); return;
     }
     if(k==='label'){ ph.label=t.value; drawAll(); return; }
-    const v=toMm(parseFloat(t.value)||0,u);
+    // a box cleared to type a new figure is not a figure: the card collapsed
+    // to nothing wide or jumped to the paper's edge as the old one was deleted
+    const raw=parseFloat(t.value);
+    if(!isFinite(raw)||((k==='w'||k==='h')&&raw<=0)) return;
+    const v=toMm(raw,u);
     if(k==='x')ph.xMm=v; else if(k==='y')ph.yMm=v;
     else if(k==='w')ph.wMm=v; else if(k==='h')ph.hMm=v; else return;
     drawAll();
@@ -13273,7 +13293,17 @@ async function cropMake(img,box,trim,name,bgTol){
   out.getContext('2d').drawImage(src,box.x,box.y,box.w,box.h,0,0,box.w,box.h);
   let data=out.toDataURL('image/png');
   const real=artRealMm(img);
-  const dx=real&&real.w>0?P.W/(real.w/25.4):300, dy=real&&real.h>0?P.H/(real.h/25.4):dx;
+  // a file that gave no resolution is not given one: stamped 300 DPI, a
+  // screenshot that filled the card shrank to its pixels/300 after any crop
+  const dx=real&&real.w>0?P.W/(real.w/25.4):null, dy=real&&real.h>0?P.H/(real.h/25.4):dx;
+  // a PDF's own trim goes with it when no trim was drawn here: lost, the whole
+  // page and its bleed were taken as the design
+  if(!trim){
+    artTrimFrac(img);
+    const t=img._pdfTrim;
+    if(t&&t.some(x=>x>0.0005))
+      trim={x:t[0]*P.W,y:t[1]*P.H,w:P.W*(1-t[0]-t[2]),h:P.H*(1-t[1]-t[3])};
+  }
   if(trim){
     const f=[(trim.x-box.x)/box.w,(trim.y-box.y)/box.h,
       (box.x+box.w-trim.x-trim.w)/box.w,(box.y+box.h-trim.y-trim.h)/box.h];
@@ -27760,7 +27790,12 @@ function applyPrintState(meta,name,whole,keepArt){
   // copies: a Magic Create line's stored design is handed in here, and the
   // builder edits paper and boxes in place — it rewrote the line in memory
   const cp=v=>v==null?v:JSON.parse(JSON.stringify(v));
+  const unitWas=state.paper&&state.paper.unit;
   state.paper=cp(meta.paper)||state.paper;
+  // the Add set boxes are typed in the paper's unit: 89 mm read as 89 inches
+  // added a set of cards as wide as the sheet. Emptied, they follow the card.
+  if(unitWas&&state.paper.unit!==unitWas) ['setCardW','setCardH'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value=''; });
   numShow(document.getElementById('paperW'),state.paper.w);
   numShow(document.getElementById('paperH'),state.paper.h);
   document.getElementById('paperUnit').value=state.paper.unit;
@@ -27876,6 +27911,9 @@ function applyPrintState(meta,name,whole,keepArt){
   if(!namesArt&&!keepArt) return;
   printArtLoading=null;
   const artGen=++printArtGen;
+  // the designs the layout names that could not be read, for an export to
+  // refuse on rather than print the sheet short (see mcRenderLine)
+  state.designsMissing=[];
   if(designs&&designs.length){
     // the last template's list is not this one's while this one's is read
     state.designs=[]; renderDesignLines(); drawAll();
@@ -27902,6 +27940,7 @@ function applyPrintState(meta,name,whole,keepArt){
       // a newer load has started since: this one's list is out of date
       if(artGen!==printArtGen) return;
       state.designs=out;
+      state.designsMissing=missing;
       renderDesignLines(); drawAll();
       if(missing.length) showMsg(msgEl,
         `Template loaded — ${missing.length} design(s) not reachable: ${escapeHtml(missing.join(', '))}. `
@@ -47510,8 +47549,10 @@ async function mcFieryPrint(idx){
       for(const e of entries){
         showMsg(msg,`Rendering ${saved.length+1} of ${entries.length} — ${escapeHtml(e.name)}…`,true);
         await new Promise(r=>setTimeout(r));
-        // a gift tag sheet's back is not sent when its front could not be made
-        if(e.tile==='giftTag'&&e.side==='back'&&e.set.every(it=>bad.has(it.id))) continue;
+        // a back is not sent when its front could not be made — a gift tag
+        // sheet's, a merged sheet's, or one order's: stock came out backs only
+        if(e.side==='back'&&(e.tile==='giftTag'||e.kind==='line'||e.meta&&e.meta.mergeCustom)
+          &&(e.set||[]).length&&e.set.every(it=>bad.has(it.id))) continue;
         try{
           mcBundleSkipped=new Set();
           const bytes=e.kind==='line'
@@ -47522,7 +47563,7 @@ async function mcFieryPrint(idx){
           saved.push(e.name);
         }catch(err){
           failed.push(`${e.name} (${(err&&err.message)||'unknown error'})`);
-          if(e.tile==='giftTag'&&e.side==='front') (e.set||[]).forEach(it=>bad.add(it.id));
+          if(e.side==='front') (e.set||[]).forEach(it=>bad.add(it.id));
         }
       }
     });
@@ -56281,6 +56322,7 @@ async function mcRenderLine(it,side){
   const pcWas=pcMode;
   pcMode=mcPcOf(it);
   try{
+    state.designsMissing=[];          // the last line's are not this one's
     applyPrintState(it.design);
     state.orderId=it.order_id;
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
@@ -56298,6 +56340,11 @@ async function mcRenderLine(it,side){
     if(side==='front'&&!(it.art&&it.art.front)&&mcDesignArt(it.design)
       &&!(state.final.front&&state.final.front.img)&&!(state.designs||[]).some(d=>d.img))
       throw new Error(`the design for ${it.order_id||it.sku||'a line'} could not be loaded from the designs folder`);
+    // and one of several that did not: the rest printed, the sheet came out
+    // short of it, and the line was marked downloaded all the same
+    if(side==='front'&&usingPreset()&&(state.designsMissing||[]).length)
+      throw new Error(`${state.designsMissing.join(', ')} for ${it.order_id||it.sku||'a line'} `
+        +'could not be loaded from the designs folder');
     // every sheet this line comes to, not the first one. A per-order sheet is
     // one page until the design list outgrows it — which is exactly what adding
     // extras does — and the pages past the first were being left off the PDF.
@@ -56498,8 +56545,9 @@ async function mcDownloadAll(){
         let bytes;
         // One line whose artwork will not load is that line's problem: it is
         // left unmarked and named at the end, and the rest still come out.
-        // a merged sheet's back is not written when its front could not be made
-        if((e.meta&&e.meta.mergeCustom||e.tile==='giftTag'&&e.side==='back')
+        // a merged sheet's back is not written when its front could not be made,
+        // nor one order's own Back.pdf beside no front, easy to print by mistake
+        if((e.meta&&e.meta.mergeCustom||e.side==='back'&&(e.tile==='giftTag'||e.kind==='line'))
           &&e.set.every(it=>bad.has(it.id))) continue;
         try{
           mcBundleSkipped=new Set();
@@ -56882,7 +56930,9 @@ function mcLayoutSig(d){
   if(!d) return '';
   const r=v=>Math.round((Number(v)||0)*10)/10;
   const pp=d.paper||{};
-  const phs=(d.placeholders||[]).map(ph=>[r(ph.xMm),r(ph.yMm),r(ph.wMm),r(ph.hMm)].join(','));
+  // a card's own turn too: the same box turned is a different card, and the
+  // lead line's turn was drawn for every line on the sheet
+  const phs=(d.placeholders||[]).map(ph=>[r(ph.xMm),r(ph.yMm),r(ph.wMm),r(ph.hMm),phRotOf(ph)].join(','));
   if(!phs.length) return '';
   const lay=d.layout||{};
   return [r(pp.wMm!=null?pp.wMm:pp.w),r(pp.hMm!=null?pp.hMm:pp.h),pp.unit||'',
@@ -56898,8 +56948,13 @@ function mcMergeSameKeyOf(it){
   // one back is drawn behind every card, so it has to be the same picture
   // turned and sized the same way
   const d=it.design||{}, ab=(d.art&&d.art.back)||{};
+  // — and bled and fitted the same, since the back is drawn with the lead
+  // line's bleed and fit: a line with 3mm bleed merged behind one with none
+  // printed its backs with a white edge
+  const bl=d.bleed||{};
   const bkHow=bk?[Number(d.rotate&&d.rotate.back)||0,Math.round((Number(ab.wMm)||0)*10),
-    Math.round((Number(ab.hMm)||0)*10)].join(','):'';
+    Math.round((Number(ab.hMm)||0)*10),bl.enabled?1:0,bl.enabled?Number(bl.mm)||0:0,
+    bl.enabled?String(bl.mode||''):'',String(d.artFit||'')].join(','):'';
   // a back of several pages is drawn as its first page behind every card on a
   // merged sheet, so a line carrying one prints as its own file instead
   if(it.art&&Array.isArray(it.art.backSplit)&&it.art.backSplit.length>1) return '';
@@ -56963,6 +57018,7 @@ async function mcMergeCustomLay(set){
       state.designs=[];
       state.final.front={data:null,img:null,name:''};
       state.final.back={data:null,img:null,name:''};
+      state.designsMissing=[];
       applyPrintState(it.design);
       await printArtReady().catch(()=>{});
       try{ await mcApplyArt(it); }catch(e){}
@@ -56991,6 +57047,9 @@ async function mcMergeCustomLay(set){
           data:f.data,img:f.img,file:f.file||null,source:f.source||null,sku:'',
           mcKey:'m:'+it.id,look:{...look,artFit:'card'},bleedOn:true,bleedMm:bleedAll,rotate:0});
       }
+      // a line one of whose designs would not load is left off whole: printed
+      // short, it was marked done with a card missing
+      if(got.length>before&&usingPreset()&&(state.designsMissing||[]).length) got.length=before;
       if(got.length===before){ missing.push((it.order_id||it.sku||'')+mcMergeWhy(it)); mcBundleSkipped.add(it.id); }
       if(!back&&state.final.back&&state.final.back.img){
         back=state.final.back; backBox={...state.art.back}; }
