@@ -29686,20 +29686,38 @@ function pdfCutScan(content,box){
   let outline=null;
   cands.forEach(c=>c.loops.forEach(l=>{ const b=bb(l.pts);
     if(b.w*b.h>=0.4*pageA&&(!outline||b.w*b.h>outline.b.w*outline.b.h)) outline={c,l,b}; }));
-  if(!outline) return null;
-  // Everything else red inside the outline is cut as well: a small circle is the
-  // punch hole, and any other shape — a slit, a notch — is a cut of its own.
-  const holes=[], extras=[], take=new Set([outline.c]);
-  const inside=b=>b.x0>=outline.b.x0&&b.x1<=outline.b.x1&&b.y0>=outline.b.y0&&b.y1<=outline.b.y1;
-  const sort=l=>{ const b=bb(l.pts);
-    if(isRound(b,l)) holes.push({pts:l.pts,b});
-    else{ const p=l.pts, a=p[0], z=p[p.length-1];
-      extras.push({pts:p,closed:!!l.closed||Math.hypot(a[0]-z[0],a[1]-z[1])<0.5}); } };
-  cands.forEach(c=>{ if(c===outline.c) return;
-    if(!c.loops.every(l=>inside(bb(l.pts)))) return;
-    take.add(c); c.loops.forEach(sort); });
-  // a compound path carrying the outline and the rest together goes whole
-  outline.c.loops.forEach(l=>{ if(l!==outline.l) sort(l); });
+  const holes=[], extras=[];
+  let sheet=null;
+  if(!outline){
+    // A whole sheet drawn as one page — a sticker sheet, each sticker its own red
+    // outline and none of them most of the page — is cut just as it is drawn:
+    // every closed red line is kept, the biggest as the main one and the rest
+    // beside it, so the page goes in as one design with all its cut lines. A
+    // small circle here is a round sticker, not a punch hole. Open red strokes,
+    // and specks under 3mm, are the artwork's and stay in it.
+    const shut=l=>{ const p=l.pts, a=p[0], z=p[p.length-1], b=bb(p);
+      return p.length>=3&&(!!l.closed||Math.hypot(a[0]-z[0],a[1]-z[1])<0.5)&&Math.max(b.w,b.h)>=8.5; };
+    sheet=cands.filter(c=>c.loops.length&&c.loops.every(shut));
+    if(!sheet.length) return null;
+    sheet.forEach(c=>c.loops.forEach(l=>{ const b=bb(l.pts);
+      if(!outline||b.w*b.h>outline.b.w*outline.b.h) outline={c,l,b}; }));
+    sheet.forEach(c=>c.loops.forEach(l=>{ if(l!==outline.l) extras.push({pts:l.pts,closed:true}); }));
+  }
+  const take=new Set(sheet||[outline.c]);
+  if(!sheet){
+    // Everything else red inside the outline is cut as well: a small circle is the
+    // punch hole, and any other shape — a slit, a notch — is a cut of its own.
+    const inside=b=>b.x0>=outline.b.x0&&b.x1<=outline.b.x1&&b.y0>=outline.b.y0&&b.y1<=outline.b.y1;
+    const sort=l=>{ const b=bb(l.pts);
+      if(isRound(b,l)) holes.push({pts:l.pts,b});
+      else{ const p=l.pts, a=p[0], z=p[p.length-1];
+        extras.push({pts:p,closed:!!l.closed||Math.hypot(a[0]-z[0],a[1]-z[1])<0.5}); } };
+    cands.forEach(c=>{ if(c===outline.c) return;
+      if(!c.loops.every(l=>inside(bb(l.pts)))) return;
+      take.add(c); c.loops.forEach(sort); });
+    // a compound path carrying the outline and the rest together goes whole
+    outline.c.loops.forEach(l=>{ if(l!==outline.l) sort(l); });
+  }
   const ranges=[...take].map(c=>[c.start,c.end]).sort((x,y)=>x[0]-y[0]);
   const out=[]; let from=0;
   ranges.forEach(([a,b])=>{ out.push(content.subarray(from,a)); out.push(new Uint8Array([10])); from=b; });
