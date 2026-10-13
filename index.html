@@ -35232,7 +35232,7 @@ function gtNestPlan(){
               t.more?JSON.stringify(t.more):0,(t.extra||[]).length]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
-  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId+'|'+(gtLineBleed(l)??'')),dsig,S.paperW,S.paperH,x0,y0,m,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
     S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,S.nestHole||0,marks,S.qrOn?(Number(S.qrDist)||10):0]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
   // A figure being typed (a gap, a size, a scale) changes the sheet on every
@@ -35268,7 +35268,7 @@ function gtNestPlan(){
   // (the most paper saved). Ties keep the first tried, which is the old way.
   // bl: how far each tag prints past its cut. Packed by cut lines alone, one
   // tag's bleed printed over the next tag, or over a registration dot.
-  const all=q.map((line,i)=>({i,line,sz:size.get(line.designId),bl:gtBleedOf(gtDesign(line.designId))||0}));
+  const all=q.map((line,i)=>({i,line,sz:size.get(line.designId),bl:gtBleedOf(gtDesign(line.designId),line)||0}));
   const orders=[
     (a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i,
     (a,b)=>b.sz.w*b.sz.h-a.sz.w*a.sz.h||b.sz.h-a.sz.h||a.i-b.i,
@@ -35801,13 +35801,23 @@ function gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc,side){
 // is given one on purpose in Bleed for this design. Designs already saved keep
 // whatever they were saved with, following the sheet's bleed included.
 function gtNewBleed(){ return {on:true,mm:0}; }
-function gtBleedOf(d){
+// line: the order line the tag is on. A line ticked for a bleed of its own
+// (Own bleed for this line) beats the design's and the sheet's — the same
+// design can bleed differently for one customer.
+function gtLineBleed(line){
+  const b=line&&line.bleed;
+  return b&&b.on?Math.max(0,Number(b.mm)||0):null;
+}
+// what a line's own bleed is kept as, wherever the line is copied to
+const gtLineBleedKept=l=>l&&l.bleed&&l.bleed.on?{bleed:{on:true,mm:Math.max(0,Number(l.bleed.mm)||0)}}:{};
+function gtBleedOf(d,line){
   // Cut to its own line drawn out past the artwork (an outset), the blade runs
   // through blank paper: nothing is printed past the cut. A coloured bleed there
   // reached into the next tag on a nested sheet.
   if(gtOwnCut(d)&&Number(d.trace.out)>0) return 0;
+  const lb=gtLineBleed(line);
   const own=d&&d.bleed;
-  const b=own&&own.on!==undefined?(own.on?Math.max(0,Number(own.mm)||0):0)
+  const b=lb!=null?lb:own&&own.on!==undefined?(own.on?Math.max(0,Number(own.mm)||0):0)
     :gtSheet.bleedOn?Math.max(0,Number(gtSheet.bleed)||0):0;
   return Math.max(b,gtArtBleedOf(d));
 }
@@ -36060,7 +36070,7 @@ function gtDrawTag(ctx,line,x,y,w,h,sc,forExport,vec){
   const img=gtImgGet(d.id);
   const A=gtTextRect(d,x,y,w,h);
   if(img&&img.naturalWidth)
-    gtPutArt(ctx,img,d.id,d.art,x,y,w,h,gtBleedOf(d),sc,vec,!!gtSheet.invertArt,null,d);
+    gtPutArt(ctx,img,d.id,d.art,x,y,w,h,gtBleedOf(d,line),sc,vec,!!gtSheet.invertArt,null,d);
   gtDrawFields(ctx,d,line,A.x,A.y,A.w,A.h,sc);
   if(!forExport&&gtSheet.showHole&&d.hole&&d.hole.on){
     // on the artwork as it is drawn, its scale and nudge in (see gtHoleRect)
@@ -36088,7 +36098,7 @@ function gtDrawBack(ctx,line,x,y,w,h,sc,forExport,vec){
   const d=gtDesign(line.designId); if(!d) return;
   const bk=gtBackOf(d);
   if(bk&&bk.img&&bk.img.naturalWidth)
-    gtPutArt(ctx,bk.img,bk.key,bk.art,x,y,w,h,gtBleedOf(d),sc,vec,false,gtBackBox(d,x,y,w,h));
+    gtPutArt(ctx,bk.img,bk.key,bk.art,x,y,w,h,gtBleedOf(d,line),sc,vec,false,gtBackBox(d,x,y,w,h));
   const A=gtTextRect(d,x,y,w,h);
   gtDrawFields(ctx,d,line,A.x,A.y,A.w,A.h,sc,'back');
   if(!forExport&&gtSheet.showHole&&d.hole&&d.hole.on){
@@ -37331,6 +37341,12 @@ function gtRenderOrder(){
         <label class="field qty" title="How many of this design">
           <input type="number" min="0" step="1" value="${l.qty}" data-gtl="qty"/></label>
         <button class="del-btn" data-gt-del-line title="Remove">×</button></div>
+      <div class="click-row" style="margin:4px 0 6px;align-items:center;gap:10px;">
+        <label class="click-tog" title="This line bleeds its own figure; every other line follows the sheet's bleed (or its design's own)">
+          <input type="checkbox" data-gtl="bleedOn"${l.bleed&&l.bleed.on?' checked':''}/>Own bleed for this line</label>
+        ${l.bleed&&l.bleed.on?`<label class="field" style="max-width:110px;margin:0;"><span>BLEED (mm)</span>
+          <input type="number" step="0.1" min="0" value="${round(Number(l.bleed.mm)||0)}" data-gtl="bleedMm"/></label>`:''}
+      </div>
       <div class="gt-pick">
         ${gtArt(l.designId)}
         <div class="combo" style="flex:1;min-width:0;">
@@ -37523,6 +37539,18 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
   const line=gtOrder.find(l=>l.id===card.dataset.gtLine); if(!line) return;
   const lk=e.target.dataset.gtl;
   if(lk==='qty'){ line.qty=Math.max(0,Math.floor(Number(e.target.value)||0)); gtDraw(); return; }
+  // a bleed of this line's own, starting at what it bleeds now
+  if(lk==='bleedOn'){
+    if(e.target.checked){ const d=gtDesign(line.designId);
+      line.bleed={on:true,mm:Math.round((d?gtBleedOf(d):(gtSheet.bleedOn?Number(gtSheet.bleed)||0:0))*10)/10}; }
+    else delete line.bleed;
+    gtNestCache=null; gtRenderOrder(); gtDraw(); return;
+  }
+  if(lk==='bleedMm'){
+    const v=parseFloat(e.target.value);
+    if(line.bleed&&isFinite(v)&&v>=0){ line.bleed.mm=v; gtNestCache=null; gtDraw(); }
+    return;
+  }
   const pid=e.target.dataset.gtp;
   if(pid){
     const t=gtLib.texts.find(x=>x.id===e.target.value);
@@ -46231,7 +46259,7 @@ async function mcPjPut(id,btn){
         qty, message:'', note:`From the saved gift tag sheet “${name}”`, image_url:'', raw:{},
         tile:'giftTag',
         sheet_item:{designId:l.designId,qty,extra_qty:0,vals:l.vals||{},
-          extra:(l.extra||[]).map(f=>({...f})),shape:l.shape||'',page,finish},
+          extra:(l.extra||[]).map(f=>({...f})),shape:l.shape||'',page,finish,...gtLineBleedKept(l)},
         status:'done', acted_by:mcMyId, acted_at:now
       });
     }
@@ -51346,6 +51374,7 @@ function mcOffSheetItem(it,was){
   const w=was||{}, out={};
   if(Object.keys(w.vals||{}).length) out.vals=w.vals;
   if((w.extra||[]).length) out.extra=w.extra;
+  if(w.bleed&&w.bleed.on) out.bleed=w.bleed;
   // the run a gift tag is on, and the copy of a one-off design it carries: a
   // line taken off a sheet and put back came back on the Matte run, and its
   // one-off was lost and its stored file left behind
@@ -55137,6 +55166,7 @@ const mcGtLine=it=>({id:'mc-'+it.id,
   // grouped by shape exactly as the sheet it was built on
   shape:(it.sheet_item&&it.sheet_item.shape)||'',
   finish:mcGtFinishOf(it),
+  ...gtLineBleedKept(it.sheet_item),
   extra:(((it.sheet_item&&it.sheet_item.extra)||[]).map(f=>({...f})))});
 
 function mcGiftWire(it){
@@ -55326,7 +55356,7 @@ function mcGiftWire(it){
   // save both read this, so what is looked at and what is kept cannot differ
   function mcGtCollectLine(){
     const c=collect();
-    return {id:'mc-'+it.id,designId:c.designId,qty:c.qty,vals:c.vals,extra:c.extra||[]};
+    return {id:'mc-'+it.id,designId:c.designId,qty:c.qty,vals:c.vals,extra:c.extra||[],...gtLineBleedKept(it.sheet_item)};
   }
   function drawWords(){
     const d=mcGtDesign(mcGtPick);
@@ -55864,7 +55894,7 @@ function mcGtAdoptOwnRows(home){
     const over=Math.max(0,Math.round(Number(row.qty)||0)-share.reduce((a,b)=>a+b,0));
     const rows=lines.map((it,i)=>{
       it.sheet_item={...(it.sheet_item||{}),designId:row.designId,qty:share[i]+(i===0?over:0),
-        vals:{...(row.vals||{})},extra:(row.extra||[]).map(f=>({...f})),
+        vals:{...(row.vals||{})},extra:(row.extra||[]).map(f=>({...f})),bleed:row.bleed&&row.bleed.on?{...row.bleed}:undefined,
         shape:row.shape||((it.sheet_item||{}).shape)||'',page:home.page,finish:home.finish};
       if(!home.ids.includes(it.id)) home.ids.push(it.id);
       return mcGtLine(it);
@@ -56018,6 +56048,7 @@ async function mcGtWriteBack(edited,home,asked){
     // sheets instead of sharing one.
     it.sheet_item={...(it.sheet_item||{}),
       designId:l.designId,qty:l.qty,vals:l.vals||{},extra:l.extra||[],
+      bleed:l.bleed&&l.bleed.on?{on:true,mm:Math.max(0,Number(l.bleed.mm)||0)}:undefined,
       // the extras are whatever the sheet now prints past the order; left as
       // they were, the line went on saying the old number of extras
       extra_qty:Math.max(0,(Number(l.qty)||0)-(Number(it.qty)||0)),
@@ -57315,7 +57346,7 @@ const PJ_KINDS={
         const d=gtDesign(l.designId);
         return {designId:l.designId,qty:Math.max(0,Math.round(Number(l.qty)||0)),
           vals:l.vals||{},extra:(l.extra||[]).map(f=>({...f})),
-          shape:l.shape||'',sku:l.sku||'',
+          shape:l.shape||'',sku:l.sku||'',...gtLineBleedKept(l),
           ...(d&&d.adhoc?{oneOff:{name:d.name||'',file:d.file||'',
             fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
             // how it sits, its own bleed and its traced cut line
@@ -57348,7 +57379,7 @@ const PJ_KINDS={
       if(page&&page!==gtMode&&typeof gtSetMode==='function') await gtSetMode(page);
       const lines=((row.data&&row.data.order)||[]).map(l=>({id:gtId('l'),
         designId:l.designId,qty:l.qty,vals:l.vals||{},extra:(l.extra||[]).map(f=>({...f})),
-        shape:l.shape||'',sku:l.sku||'',oneOff:l.oneOff||null}));
+        shape:l.shape||'',sku:l.sku||'',oneOff:l.oneOff||null,...gtLineBleedKept(l)}));
       // one-offs back in: from this session's keep, or off their Pigu folder
       await gtOneOffRestore(lines).catch(()=>{});
       const oneOffs=new Set(lines.filter(l=>l.oneOff).map(l=>l.id));
