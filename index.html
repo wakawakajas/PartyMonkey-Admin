@@ -6880,7 +6880,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
            its text and edges stay as sharp as the paper allows. Off, and every
            tag is drawn at 300dpi as it always was. -->
       <div class="click-row" style="margin-bottom:8px;">
-        <label class="click-tog"><input type="checkbox" id="gtVectorToggle" checked/>PDF artwork goes in whole</label>
+        <label class="click-tog" hidden><input type="checkbox" id="gtVectorToggle" checked/>PDF artwork goes in whole</label>
         <label class="click-tog"><input type="checkbox" id="gtPltToggle" checked/>Save the cut file (.plt)</label>
       </div>
       <div class="gt-export-grid">
@@ -7778,7 +7778,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
              download as that page rather than as a picture of it, so the
              colours it was drawn in are the colours that are printed. -->
         <div class="click-row" style="margin-top:9px;">
-          <label class="click-tog"><input type="checkbox" id="wholeArtToggle" checked/>PDF artwork goes in whole</label>
+          <label class="click-tog" hidden><input type="checkbox" id="wholeArtToggle" checked/>PDF artwork goes in whole</label>
         </div>
         <div id="exportMsgFront"></div>
       </div>
@@ -9791,6 +9791,64 @@ async function pdfSides(file){
   if(!back) return null;
   return {front:await pdfPageFile(bytes,0,file.name,'front')||file,back};
 }
+// A crop of a PDF kept a PDF: the same untouched drawing under a new
+// MediaBox round the box chosen (fractions of the page as drawn, top left at
+// 0,0), with the trim, where there is one, as its TrimBox ([l,t,r,b] fractions
+// of the box). Cropped as a picture, a sharp logo printed soft from then on.
+// null where the file cannot be read this way.
+async function pdfCropFile(bytes,fr,trimFr,fileName){
+  const enc=new TextEncoder();
+  let last=0; const alloc=()=>++last;
+  const catalog=alloc(), kids=alloc(), page=alloc(), content=alloc();
+  let em;
+  try{ em=await pdfLift.embedPage(bytes,0,alloc); }catch(e){ return null; }
+  const f=n=>(Math.round(n*1e4)/1e4).toString();
+  const cw=em.w*(fr.x1-fr.x0), ch=em.h*(fr.y1-fr.y0);
+  if(!(cw>0.5&&ch>0.5)) return null;
+  const draw=enc.encode(`q 1 0 0 1 ${f(-em.x-fr.x0*em.w)} ${f(-em.y-(1-fr.y1)*em.h)} cm /Fm0 Do Q`);
+  let boxes='';
+  if(trimFr&&trimFr.some(v=>v>0.0005)){
+    const [l,t,r,b]=trimFr, tb=[l*cw,b*ch,cw-r*cw,ch-t*ch];
+    if(tb[2]>tb[0]&&tb[3]>tb[1]) boxes=` /TrimBox [${tb.map(f).join(' ')}]`;
+  }
+  const objs=[
+    {num:catalog,parts:[enc.encode(`${catalog} 0 obj\n<< /Type /Catalog /Pages ${kids} 0 R >>\nendobj\n`)]},
+    {num:kids,parts:[enc.encode(`${kids} 0 obj\n<< /Type /Pages /Kids [${page} 0 R] /Count 1 >>\nendobj\n`)]},
+    {num:page,parts:[enc.encode(`${page} 0 obj\n<< /Type /Page /Parent ${kids} 0 R /MediaBox [0 0 ${f(cw)} ${f(ch)}]${boxes}`
+      +` /Resources << /XObject << /Fm0 ${em.form} 0 R >> >> /Contents ${content} 0 R >>\nendobj\n`)]},
+    {num:content,parts:[enc.encode(`${content} 0 obj\n<< /Length ${draw.length} >>\nstream\n`),draw,
+      enc.encode('\nendstream\nendobj\n')]},
+    ...em.objs];
+  const parts=[enc.encode('%PDF-1.7\n')], off=new Map();
+  let pos=parts[0].length;
+  objs.forEach(o=>{ off.set(o.num,pos); o.parts.forEach(q=>{ parts.push(q); pos+=q.length; }); });
+  let xref=`xref\n0 ${last+1}\n0000000000 65535 f \n`;
+  for(let n=1;n<=last;n++) xref+=off.has(n)?String(off.get(n)).padStart(10,'0')+' 00000 n \n':'0000000000 65535 f \n';
+  parts.push(enc.encode(xref+`trailer\n<< /Size ${last+1} /Root ${catalog} 0 R >>\nstartxref\n${pos}\n%%EOF\n`));
+  return new File(parts,String(fileName||'artwork.pdf'),{type:'application/pdf'});
+}
+// The page of a PDF drawn at about 1200 dpi (8000 px at most), wrapped as a
+// one-page PDF of its own (imgPdfBytes) - for the two cases a page cannot be
+// placed as it is: a file the export cannot copy, and Invert colours, which
+// has to be done to pixels. At that resolution it still prints sharp, where
+// the old stand-in was the 300dpi sheet. null when even this cannot be done.
+async function pdfHiResBytes(bytes,invert){
+  if(!window.pdfjsLib) return null;
+  const pdf=await pdfjsLib.getDocument({data:bytes.slice(0)}).promise;
+  const page=await pdf.getPage(1);
+  const b=page.getViewport({scale:1});
+  const scale=Math.min(1200/72,8000/Math.max(b.width,b.height));
+  const vp=page.getViewport({scale});
+  const c=document.createElement('canvas'); c.width=Math.round(vp.width); c.height=Math.round(vp.height);
+  const ctx=c.getContext('2d');
+  await page.render({canvasContext:ctx,viewport:vp,background:'rgba(0,0,0,0)'}).promise;
+  if(invert){
+    const id=ctx.getImageData(0,0,c.width,c.height), a=id.data;
+    for(let i=0;i<a.length;i+=4){ a[i]=255-a[i]; a[i+1]=255-a[i+1]; a[i+2]=255-a[i+2]; }
+    ctx.putImageData(id,0,0);
+  }
+  try{ return await imgPdfBytes(c); } finally{ c.width=c.height=0; try{ pdf.destroy(); }catch(e){} }
+}
 async function pdfPageFile(bytes,index,fileName,label,opts){
   const enc=new TextEncoder();
   let last=0; const alloc=()=>++last;
@@ -10836,7 +10894,7 @@ function renderSide(side,canvas,maxDim,opts){
     const cut=(c,x,y,w,h)=>{ const x0=Math.max(c.x,x), y0=Math.max(c.y,y),
       x1=Math.min(c.x+c.w,x+w), y1=Math.min(c.y+c.h,y+h);
       return {x:x0, y:y0, w:Math.max(0,x1-x0), h:Math.max(0,y1-y0)}; };
-    if(artPhase!=='ghost'&&opts.vec&&!invert){
+    if(artPhase!=='ghost'&&opts.vec&&(!invert||(opts.vec.inverted&&opts.vec.inverted(key)))){
       let vclip={x:clip.x+artShift.xMm, y:clip.y+artShift.yMm, w:clip.w, h:clip.h};
       const vHoles=holes.map(h=>({x:h.x+artShift.xMm, y:h.y+artShift.yMm, w:h.w, h:h.h}));
       const mx=ph.xMm+ph.wMm/2+artShift.xMm, my=ph.yMm+ph.hMm/2+artShift.yMm;
@@ -13417,9 +13475,23 @@ async function cropApplyGt(){
   try{
     const bg=cropUI.bg, cropped=!(box.x===0&&box.y===0&&box.w===img.naturalWidth&&box.h===img.naturalHeight);
     const cut=await cropMake(img,box,trim,d.name,bg?cropBgTol():0);
-    const blob=await (await fetch(cut.data)).blob();
+    let blob=null, ext='.png';
+    // a PDF cropped (not cleared of its background) stays a PDF, its page cut
+    // to the box, so it still prints sharp; the cropped picture is its preview
+    if(!bg&&gtIsPdfFile(d.file)&&gtAssets.get(d.file)){
+      try{
+        const src=gtAssets.get(d.file), lift=await gtCutLift(src,!!d.cutSheet);
+        const bytes=new Uint8Array(await (lift?lift.clean:src).arrayBuffer());
+        const W=img.naturalWidth, H=img.naturalHeight;
+        artTrimFrac(cut.img);
+        blob=await pdfCropFile(bytes,{x0:box.x/W,y0:box.y/H,x1:(box.x+box.w)/W,y1:(box.y+box.h)/H},
+          cut.img._pdfTrim||null,(d.name||'artwork')+'.pdf');
+        if(blob) ext='.pdf';
+      }catch(e){ blob=null; }
+    }
+    if(!blob) blob=await (await fetch(cut.data)).blob();
     // a new path, so nothing holding the old picture under the old name mixes them up
-    const path='adhoc/'+d.id+'-'+Date.now()+'.png';
+    const path='adhoc/'+d.id+'-'+Date.now()+ext;
     gtAssets.set(path,blob);
     d.file=path;
     gtImgs.set(d.id,cut.img);
@@ -13592,7 +13664,25 @@ async function cropOne(o,own){
     else{ b={x:Math.round(box.x/W*w),y:Math.round(box.y/H*h),w:Math.round(box.w/W*w),h:Math.round(box.h/H*h)}; t=null; }
     if(!b||b.w<2||b.h<2) return null;
   }
-  return await cropMake(o.img,b,t,o.name,cropUI.bg?cropBgTol():0);
+  const cut=await cropMake(o.img,b,t,o.name,cropUI.bg?cropBgTol():0);
+  if(cut) cut.box=b;
+  return cut;
+}
+// The fields a cropped design takes on. A PDF cropped without its background
+// taken out stays a PDF - its page cut to the box (pdfCropFile) - so it still
+// prints sharp; the cropped picture is only its preview.
+async function cropFresh(o,cut,bg){
+  const out={data:cut.data,img:cut.img,name:cut.name,file:null,source:null,mcPath:null};
+  if(bg||!cut.box||!artIsVector(o)||!o.img) return out;
+  try{
+    const bytes=await artPdfBytes(o); if(!bytes) return out;
+    const W=o.img.naturalWidth, H=o.img.naturalHeight, b=cut.box;
+    artTrimFrac(cut.img);
+    const pdf=await pdfCropFile(bytes,{x0:b.x/W,y0:b.y/H,x1:(b.x+b.w)/W,y1:(b.y+b.h)/H},
+      cut.img._pdfTrim||null,cut.name.replace(/\.png$/i,'.pdf'));
+    if(pdf) return {...out,file:pdf,name:pdf.name};
+  }catch(e){}
+  return out;
 }
 async function cropApply(){
   if(!cropUI) return;
@@ -13604,20 +13694,20 @@ async function cropApply(){
   const go=document.getElementById('cropGo'); go.disabled=true;
   try{
     const list=finalSplitList(side)?state.finalList[side]:null;
-    const fresh=cut=>({data:cut.data,img:cut.img,name:cut.name,file:null,source:null,mcPath:null});
     const bgDone=cropUI.bg, cropped=!(box.x===0&&box.y===0&&box.w===img.naturalWidth&&box.h===img.naturalHeight);
     let n=0;
     if(list){
       for(const d of list){
         if(!d.img) continue;
         const was=d.img, cut=await cropOne(d,was===img); if(!cut) continue;
-        Object.assign(d,fresh(cut));
-        if(state.final[side].img===was) state.final[side]={...state.final[side],...fresh(cut)};
+        const nf=await cropFresh(d,cut,bgDone);
+        Object.assign(d,nf);
+        if(state.final[side].img===was) state.final[side]={...state.final[side],...nf};
         n++;
       }
     }else{
       const cut=await cropOne(state.final[side],true);
-      state.final[side]={...state.final[side],...fresh(cut)};
+      state.final[side]={...state.final[side],...await cropFresh(state.final[side],cut,bgDone)};
       n=1;
     }
     // the turn upload chose fitted the picture's old shape; a crop that flips
@@ -29148,9 +29238,10 @@ function srgbIccProfile(){
 // in as the page it is. Anything that learns to export later reads this too,
 // by going through the writers below rather than rasterising for itself.
 const WHOLE_ART_KEY='pigu.wholeArt';
-function wholeArtOn(){
-  try{ return localStorage.getItem(WHOLE_ART_KEY)!=='0'; }catch(e){ return true; }
-}
+// Always on now: a PDF is placed as the file it is in every export, whatever
+// was once unticked. The switch was how a sharp logo went out as a soft
+// 300dpi picture without anybody seeing why.
+function wholeArtOn(){ return true; }
 function wholeArtSet(on){
   try{ localStorage.setItem(WHOLE_ART_KEY,on?'1':'0'); }catch(e){}
 }
@@ -30326,9 +30417,13 @@ async function printVectorSources(side){
     else want.push(['final:'+side,state.final[side]]);
   }
   for(const [key,o] of want){
-    let bytes=await artPdfBytes(o);
-    if(!bytes&&o&&o.img&&imgFinerThanSheet(o.img,side)) bytes=await imgPdfBytes(o.img).catch(()=>null);
-    if(bytes) out.set(key,{bytes,page:0});
+    let bytes=await artPdfBytes(o), inverted=false;
+    // Invert colours is done to pixels: a PDF is drawn at about 1200 dpi,
+    // inverted, and placed as that - not left to the 300dpi sheet
+    const inv=withLook(side,key.startsWith('d:')?o:null,()=>!!(state.bleed&&state.bleed.invert));
+    if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=!!bytes; }
+    else if(!bytes&&!inv&&o&&o.img&&imgFinerThanSheet(o.img,side)) bytes=await imgPdfBytes(o.img).catch(()=>null);
+    if(bytes) out.set(key,{bytes,page:0,inverted});
   }
   return out;
 }
@@ -30341,7 +30436,8 @@ async function printVectorSources(side){
 // whole {bx,by,mirror}: the bleed is made from the page itself, its edges
 // stretched (or turned over) out by bx/by mm - see gtBuildPdf. Answers 'whole'.
 function printVecTaker(forms,place){
-  return {take(key,rect,ext,clip,whole){
+  return {inverted:key=>!!(forms.get(key)&&forms.get(key).inverted),
+    take(key,rect,ext,clip,whole){
     if(!key||!forms.has(key)) return false;
     if(whole){
       place.push({key,rect,clip,ext:{l:whole.bx,r:whole.bx,t:whole.by,b:whole.by,mirror:!!whole.mirror}});
@@ -36305,13 +36401,15 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // (Stretch with no gap to cross already enlarges the page itself into the
   // bleed, seamless and sharp, so it is left to do that)
   const stretchWhole=gtSheet.bleedMode==='scale'&&!(gap.x>0.05||gap.y>0.05);
-  const own=!!(vec&&design&&b>0&&(gtOwnCut(design)||(slotPath&&!stretchWhole)));
+  let own=!!(vec&&design&&b>0&&(gtOwnCut(design)||(slotPath&&!stretchWhole)));
   // Grow is the artwork's own shape grown outward: the same as Extend only for
   // a picture with nothing see-through in it. And an edge trimmed off first
   // (Trim px) is done to the pixels, which a sliver of the page cannot follow.
+  // Those it is not: the page is still placed (sharp), with the bleed made
+  // from pixels round it - it used to drop the whole tag to a 300dpi picture
   if(own&&(!['extend','offset','mirror'].includes(gtSheet.bleedMode)
      ||(gtSheet.bleedMode==='offset'&&!gtArtOpaque(img))
-     ||(Number(gtSheet.bleedTrimPx)||0)>0)) vec=null;
+     ||(Number(gtSheet.bleedTrimPx)||0)>0)) own=false;
   // a placed page is clipped to the same shape the screen clips it to (see
   // gtClipToTrace): without it a circle-cut PDF went out as its whole square
   if(vec&&design&&b>0){
@@ -40973,11 +41071,17 @@ async function gtBuildPdf(count,render,sources){
   // designer set, which a picture of it never could.
   const forms=new Map();
   for(const [key,src] of (sources||new Map())){
-    try{
-      const em=await pdfLift.embedPage(src.bytes,src.page||0,alloc);
-      em.objs.forEach(o=>{ mark(o.num); o.parts.forEach(push); });
-      forms.set(key,em);
-    }catch(e){ /* unreadable: that design is drawn as pixels, as it always was */ }
+    let em=null;
+    try{ em=await pdfLift.embedPage(src.bytes,src.page||0,alloc); }
+    catch(e){
+      // a file this copier cannot read is drawn by the PDF reader instead, at
+      // about 1200 dpi, and placed as that - still sharp, never the 300dpi sheet
+      try{ const hi=await pdfHiResBytes(src.bytes,false); if(hi) em=await pdfLift.embedPage(hi,0,alloc); }catch(e2){ em=null; }
+    }
+    if(!em) continue;               // unreadable either way: drawn as pixels, as it always was
+    em.objs.forEach(o=>{ mark(o.num); o.parts.forEach(push); });
+    em.inverted=!!src.inverted;
+    forms.set(key,em);
   }
   const kids=[];
   for(let i=0;i<count;i++){
@@ -41171,7 +41275,8 @@ function gtVecTaker(forms,place){
   const me={turn:null,take(d,r,b,gap,clip,noInvert,whole){
     const put=o=>place.push(me.turn?{...o,turn:me.turn}:o);
     if(!forms.has(d.id)) return false;
-    if(gtSheet.invertArt&&!noInvert) return false;     // a placed page cannot be inverted
+    // a placed page cannot be inverted - unless it was drawn inverted for it
+    if(gtSheet.invertArt&&!noInvert&&!forms.get(d.id).inverted) return false;
     // whole: the bleed made from the page itself, out to the edge of the clip
     // on every side - see gtBuildPdf
     if(whole){
@@ -41211,11 +41316,25 @@ async function gtVectorSources(side){
     const d=gtDesign(line.designId); if(!d) continue;
     const bk=side==='back'?gtBackOf(d):null;
     const key=side==='back'?(bk&&bk.key):d.id, file=side==='back'?(bk&&bk.file):d.file;
-    if(!key||out.has(key)||!gtIsPdfFile(file)) continue;
+    if(!key||out.has(key)) continue;
+    // Invert colours touches the front artwork only (see gtVecTaker)
+    const inv=side!=='back'&&!!gtSheet.invertArt;
+    if(!gtIsPdfFile(file)){
+      // a picture finer than the 300dpi sheet at the size it prints on the
+      // tag goes in at every pixel it has, the way a PDF does
+      const img=side==='back'?null:gtImgs.get(d.id), dpi=img?gtDesignDpi(d):null;
+      if(!inv&&img&&dpi&&dpi>PRINT_SHEET_DPI*1.05){
+        try{ const bytes=await imgPdfBytes(img); if(bytes) out.set(key,{bytes,page:0}); }catch(e){}
+      }
+      continue;
+    }
     const blob=gtAssets.get(file); if(!blob) continue;
     try{
       const lift=side==='back'?null:await gtCutLift(blob,!!d.cutSheet);
-      out.set(key,{bytes:new Uint8Array(await (lift?lift.clean:blob).arrayBuffer()),page:0});
+      let bytes=new Uint8Array(await (lift?lift.clean:blob).arrayBuffer()), inverted=false;
+      // inverted at about 1200 dpi and placed as that, not left to the 300dpi sheet
+      if(inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=true; }
+      if(bytes) out.set(key,{bytes,page:0,inverted});
     }catch(e){}
   }
   return out;
