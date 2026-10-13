@@ -14927,7 +14927,7 @@ async function upscaleArtPicture(o,dpi,show,keepUntagged){
   // it carries over to the bigger copy unchanged
   artTrimFrac(img);
   const trim=img._pdfTrim, png=c.toDataURL('image/png');
-  const data=trim?pngWithDpi(png,dx||72*k,dy||72*k,'pigu-pdf',trim.map(n=>Math.max(0,n).toFixed(5)).join(','))
+  const data=trim?pngWithDpi(png,dx,dy,'pigu-pdf',trim.map(n=>Math.max(0,n).toFixed(5)).join(','))
     :dx?pngWithDpi(png,dx,dy):png;
   const up=await loadImage(data);
   const name=(o.name||'artwork').replace(/(\.[^.]+)?$/,'')+` · enhanced ×${shown}.png`;
@@ -14949,16 +14949,20 @@ async function enhanceArt(side){
     if(pages){
       // every page in turn; one that cannot go larger is left as it is
       let n=0;
+      const list0=state.finalList[side];
       for(let i=0;i<pages.length;i++){
+        // another line put on the builder meanwhile: its pages are not these
+        if(state.finalList[side]!==list0||!list0.includes(pages[i])) break;
         const d=pages[i], was=d.img;
         const pre=pages.length>1?`Page ${i+1} of ${pages.length} · `:'';
         const got=await upscaleArtPicture(d,artDpiOf(side,d.img),t=>{ txt.textContent=pre+t; });
         if(!got) continue;
         // the same picture may sit on more than one page entry
         // and is uploaded again on the line's save: its saved file is the old pixels
-        state.finalList[side].forEach(e=>{ if(e.img===was){ Object.assign(e,got); e.mcPath=''; } });
-        if(state.final[side].img===was) state.final[side]={...state.final[side],...got};
-        n++;
+        let hit=false;
+        (state.finalList[side]||[]).forEach(e=>{ if(e.img===was){ Object.assign(e,got); e.mcPath=''; hit=true; } });
+        if(state.final[side].img===was){ state.final[side]={...state.final[side],...got}; hit=true; }
+        if(hit) n++;
       }
       artEnhancing[side]=false;
       refreshSlots(); drawAll();
@@ -31180,6 +31184,16 @@ function gtCutTake(d){
     else x.trace.loop=f.outline;
     if(f.extras&&f.extras.length) x.trace.extra=f.extras; else delete x.trace.extra;
     changed=true;
+    // A sticker sheet is cut on its red lines exactly: an outset, round, CUT
+    // WIDTH/HEIGHT or added shape left from the single-sticker reading moved
+    // only the biggest sticker's line, and its punch circle is a sticker now -
+    // left on, it was cut twice
+    const sheet=!!x.cutSheet||gtCutSheetFiles.has(x.file);
+    if(sheet){
+      Object.assign(x.trace,{out:0,sm:0}); delete x.trace.rd; delete x.trace.cx; delete x.trace.cy; delete x.trace.more;
+      if(x.hole&&x.hole.on) x.hole={...x.hole,on:false};
+      return;
+    }
     const h=f.holes&&f.holes[0];
     if(fresh&&h&&!(x.hole&&x.hole.on))
       x.hole={on:true,x:h.u,y:h.v,d:Math.round(h.mm*10)/10};
@@ -31762,7 +31776,8 @@ async function gtMergeRun(){
   await gtIdbPut('piguFields',Object.assign({},map)).catch(()=>{});
   pf.fromDisk.forEach(k=>{
     const d=gtLib.designs.find(x=>x.adhoc&&x.file===k);
-    if(d&&map[k]){ const n=gtNormalizeDesign({...d,...map[k]}); d.fields=n.fields; d.hole=n.hole; d.back=n.back; d.art=n.art; d.bleed=n.bleed; d.trace=n.trace;
+    // cutSheet is only written when on: off there, it must not survive from here
+    if(d&&map[k]){ const n=gtNormalizeDesign({...d,cutSheet:undefined,...map[k]}); d.fields=n.fields; d.hole=n.hole; d.back=n.back; d.art=n.art; d.bleed=n.bleed; d.trace=n.trace;
       // a sticker sheet turned on or off there: the page is read again here
       if(!!n.cutSheet!==!!d.cutSheet){
         if(n.cutSheet){ d.cutSheet=true; gtCutSheetFiles.add(d.file); } else{ delete d.cutSheet; gtCutSheetFiles.delete(d.file); }
@@ -32039,6 +32054,11 @@ async function gtLoadLibRead(){
 // a hand-edited library.json should not be able to take the screen down.
 function gtNormalizeDesign(d){
   if(d.cutSheet&&d.file) gtCutSheetFiles.add(d.file);
+  // and taken off it when this design comes back without the flag and no
+  // other design on the file has it - a stale entry read the picture and cut
+  // lines as a sheet while the export lifted the page as a single sticker
+  else if(d.file&&gtCutSheetFiles.has(d.file)
+    &&!(gtLib.designs||[]).some(x=>x.id!==d.id&&x.file===d.file&&x.cutSheet)) gtCutSheetFiles.delete(d.file);
   return {id:d.id||gtId('d'),name:d.name||'Untitled',file:d.file||'',adhoc:!!d.adhoc,
     fields:(d.fields||[]).map(f=>({id:f.id||gtId('f'),name:f.name||'Text',def:f.def||'',
       font:f.font||'',size:Number(f.size)||6,color:f.color||'#232323',align:f.align||'center',
@@ -32398,6 +32418,9 @@ function gtDropMissing(present){
     if(!heir) return;
     ['trace','fields','bleed','back','art','hole','cutSeen','cutSheet'].forEach(k=>{
       if(old[k]!==undefined&&old[k]!==null) heir[k]=old[k]; });
+    // its own file has to be read as a sheet as well, picture and cut lines
+    if(heir.cutSheet&&heir.file&&!gtCutSheetFiles.has(heir.file)){
+      gtCutSheetFiles.add(heir.file); gtImgs.delete(heir.id); gtImgFailed.delete(heir.id); }
   });
   gone.forEach(id=>{ gtImgs.delete(id); gtOneOffKeep.delete(id); });
   gtLib.designs=gtLib.designs.filter(d=>!gone.has(d.id));
@@ -35084,7 +35107,10 @@ function gtNestPolyOf(d,sz){
   // are covered by it already.
   let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
   main.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); });
-  const out=gtTraceExtras(d,r).filter(p=>p.length>1&&p.some(([x,y])=>x<x0||x>x1||y<y0||y>y1));
+  // On a sticker sheet every extra is a sticker of its own, packed whatever
+  // its box: one sitting in the notch of a big L- or star-shaped one was
+  // otherwise left for another tag to be set down over.
+  const out=gtTraceExtras(d,r).filter(p=>p.length>1&&(d.cutSheet||p.some(([x,y])=>x<x0||x>x1||y<y0||y>y1)));
   if(out.length) main.parts=out.map(p=>p.slice());
   return main;
 }
@@ -36015,7 +36041,12 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // the bleed is made from the page too (gtBuildPdf, ext), exact in its own
   // CMYK; a bleed only pixels can make draws the tag whole, as the screen does.
   const own=!!(vec&&design&&b>0&&gtOwnCut(design));
-  if(own&&!['extend','offset','mirror'].includes(gtSheet.bleedMode)) vec=null;
+  // Grow is the artwork's own shape grown outward: the same as Extend only for
+  // a picture with nothing see-through in it. And an edge trimmed off first
+  // (Trim px) is done to the pixels, which a sliver of the page cannot follow.
+  if(own&&(!['extend','offset','mirror'].includes(gtSheet.bleedMode)
+     ||(gtSheet.bleedMode==='offset'&&!gtArtOpaque(img))
+     ||(Number(gtSheet.bleedTrimPx)||0)>0)) vec=null;
   // a placed page is clipped to the same shape the screen clips it to (see
   // gtClipToTrace): without it a circle-cut PDF went out as its whole square
   if(vec&&design&&b>0){
@@ -36050,6 +36081,22 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
       r.x*sc,r.y*sc,r.w*sc,r.h*sc);
   }
   ctx.restore();
+}
+// Whether a picture covers the whole of its box - nothing see-through anywhere.
+// Read once per picture, small.
+const gtOpaqueMemo=new WeakMap();
+function gtArtOpaque(img){
+  if(gtOpaqueMemo.has(img)) return gtOpaqueMemo.get(img);
+  let ok=false;
+  try{
+    const W=Math.max(1,Math.min(256,img.naturalWidth)), H=Math.max(1,Math.round(W*img.naturalHeight/img.naturalWidth));
+    const c=document.createElement('canvas'); c.width=W; c.height=H;
+    const x=c.getContext('2d'); x.drawImage(img,0,0,W,H);
+    const a=x.getImageData(0,0,W,H).data; ok=true;
+    for(let i=3;i<a.length;i+=4) if(a[i]<250){ ok=false; break; }
+  }catch(e){}
+  gtOpaqueMemo.set(img,ok);
+  return ok;
 }
 // the artwork as a hard mask at this size: every pixel it touches, opaque
 const gtPunchMasks=new WeakMap();
@@ -40443,18 +40490,20 @@ document.getElementById('gtArtFitBtn').addEventListener('click',()=>{
   const img=gtImgGet(d.id), T=gtTagBox();
   if(!img||!img.naturalWidth||!(T.w>0&&T.h>0)) return;
   const f=gtFitD(d,img.naturalWidth,img.naturalHeight,T.w,T.h);
-  let cw=f.w, ch=f.h, offX=0, offY=0;
-  const tt=d.trace;
-  if(artRealMm(img)&&tt&&tt.on&&tt.loop&&tt.loop.length>3){
-    const bb=gtCutAllBox(tt);
-    cw=(bb.u1-bb.u0)*f.w; ch=(bb.v1-bb.v0)*f.h;
-    offX=((bb.u0+bb.u1)/2-0.5)*f.w; offY=((bb.v0+bb.v1)/2-0.5)*f.h;
-  }
-  if(!(cw>0&&ch>0)) return;
-  const s=Math.min(T.w/cw,T.h/ch);
-  // scaled about the picture's middle, which the fit centred: an outline off
-  // that middle lands offX*s from it, so it is moved back by that much
-  d.art={s,dx:round(-offX*s),dy:round(-offY*s)};
+  // What has to fit: the cut line where there is one (and its outset, which is
+  // millimetres whatever the scale), the picture otherwise - measured where
+  // the plain fit put it, whichever way that fit was made
+  const tt=d.trace, cut=!!(tt&&tt.on&&tt.loop&&tt.loop.length>3);
+  const bb=cut?gtCutAllBox(tt):{u0:0,v0:0,u1:1,v1:1};
+  const out=cut?Math.max(0,Number(tt.out)||0):0;
+  const cw=(bb.u1-bb.u0)*f.w, ch=(bb.v1-bb.v0)*f.h;
+  if(!(cw>0&&ch>0)||!(T.w>2*out&&T.h>2*out)) return;
+  const s=Math.min((T.w-2*out)/cw,(T.h-2*out)/ch);
+  // gtArtDraw scales about the picture's middle; the nudge then carries that
+  // box's middle to the placeholder's
+  const px=f.x+f.w/2, py=f.y+f.h/2;
+  const cx=f.x+(bb.u0+bb.u1)/2*f.w, cy=f.y+(bb.v0+bb.v1)/2*f.h;
+  d.art={s,dx:round(T.w/2-px-(cx-px)*s),dy:round(T.h/2-py-(cy-py)*s)};
   gtArtWriteInputs(); gtArtChanged();
 });
 document.getElementById('gtArtBleedOwn').addEventListener('change',e=>{
@@ -40489,8 +40538,13 @@ document.getElementById('gtCutSheet').addEventListener('change',async e=>{
     if(on) x.cutSheet=true; else delete x.cutSheet;
     gtImgs.delete(x.id); gtImgFailed.delete(x.id); });
   if(on) gtCutSheetFiles.add(d.file); else gtCutSheetFiles.delete(d.file);
-  await gtImgLoad(d.id);
-  gtImgGet(d);
+  if(gtDesign(d.id)){ await gtImgLoad(d.id); gtImgGet(d); }
+  else{
+    // stashed while a folder is showing: gtImgLoad looks only in the library
+    const blob=gtAssets.get(d.file);
+    if(blob){ try{ gtImgs.set(d.id,await loadImage(await gtArtURL(blob,d.file,true))); }catch(err){ gtImgFailed.add(d.id); } }
+    gtCutTake(d);
+  }
   const f=gtCutFound.get(d.file);
   gtArtWriteInputs(); gtArtChanged();
   showMsg(document.getElementById('gtTraceMsg'),
@@ -53623,15 +53677,20 @@ function mcWinClose(){
   return p;
 }
 function mcWinCloseRun(){
-  mcAutoRun++;   // nothing still reading the folder for this line lands after it shuts
   // checked on mcWinItem rather than the 'open' class, so a window closed
   // from elsewhere (leaving the batch, completing it) is actually let go of
   // even while it was sitting minimised as the bubble, not the panel
-  if(!mcWinItem) return;
+  if(!mcWinItem){ mcAutoRun++; return; }
   if(mcBusy){ showMsg(document.getElementById('mcBatchMsg'),'An export is running — wait for it to finish.',false); return; }
   // the download list counting or drawing a sheet has the builder on loan:
-  // saved now, this line was given the borrowed sheet — another line's bleed
-  if(mcPlanDrawing){ showMsg(document.getElementById('mcBatchMsg'),'The download list is drawing a sheet — try again in a moment.',false); return; }
+  // saved now, this line was given the borrowed sheet — another line's bleed.
+  // Waited for rather than refused: a line deleted, or the batch left, closes
+  // the window without asking, and refused it stayed bound to a line gone
+  if(mcPlanDrawing){
+    showMsg(document.getElementById('mcBatchMsg'),'Closing as soon as the download list has finished drawing a sheet…',true);
+    return new Promise(res=>{ const t=setInterval(()=>{ if(mcPlanDrawing) return; clearInterval(t); res(mcWinCloseRun()); },150); });
+  }
+  mcAutoRun++;   // nothing still reading the folder for this line lands after it shuts
   return mcCommit().then(async ok=>{
     // A layout that did not save is still only on this screen. Handing the
     // builder back now would throw it away after saying it was kept.
@@ -53980,6 +54039,9 @@ async function mcCommit(){
         +escapeHtml(r.failed.join(' and the '))+' picture did not upload — save the line again.',false);
     }
   }catch(e){}
+  // another line was opened while the pictures uploaded: the builder is its
+  // now, and snapshotted here gave its layout, paper and weight to this one
+  if(mcWinItem!==it.id) return true;
   it.design=mcLineSnapshot();
   // and the paper and weight the builder was left on: changed there and then
   // closed, the export went on naming and printing the line's old figure
@@ -54577,9 +54639,12 @@ function mcCustomWire(it){
     // Only the artwork is looked for again, once the layout is down.
     // A layout picked by hand meanwhile (mcAutoRun) has this step stand down,
     // as an auto-layout does: both resetting and adding doubled the card.
+    // restore() bumps mcAutoRun itself: read before it, the look-again was
+    // already stale and never ran
+    const restoring=restore();
     const run=mcAutoRun;
     const live=()=>mcWinItem===it.id&&run===mcAutoRun;
-    restore().then(async()=>{
+    restoring.then(async()=>{
       if(!live()||pc) return;
       const ready=await mcDesignsReady(true).catch(()=>false);
       if(!ready||!live()) return;
@@ -54752,9 +54817,19 @@ async function mcKeepBuilderArt(it){
           out.push({path,name:d.name||'',qty:splitQty(d.qty),on:d.on!==false});
         }
         if(short){
+          // walked in the saved order: a page that did not come down keeps its
+          // place, and one that came back under a new path (enhanced) takes the
+          // place of the page it was - appended, it moved to the end and the
+          // side's own picture became another page
           const mine=new Map(out.map(x=>[x.path,x]));
-          const kept=was.filter(w=>mine.has(w.path)||short.includes(w.path)).map(w=>mine.get(w.path)||w);
-          out.forEach(x=>{ if(!was.some(w=>w.path===x.path)) kept.push(x); });
+          const fresh=out.filter(x=>!was.some(w=>w.path===x.path));
+          const kept=[];
+          was.forEach(w=>{
+            if(short.includes(w.path)) kept.push(w);
+            else if(mine.has(w.path)) kept.push(mine.get(w.path));
+            else if(fresh.length) kept.push(fresh.shift());
+          });
+          kept.push(...fresh);
           out.length=0; out.push(...kept);
         }
         const first=out.find(x=>x.on)||out[0];
@@ -54895,6 +54970,13 @@ async function mcArtDataURL(path){
 // opened: nothing of them is on screen, so a close must not read that as the
 // pages being taken off the line.
 const mcShortSides=new Set();
+// The Multiple Design pages of this side that did not come down when the line
+// was put on the builder (mcApplyArt) - all of them, where none did
+function mcSplitShort(side){
+  if(mcShortSides.has(side)) return ['(all)'];
+  const l=finalSplitList(side)&&state.finalList[side];
+  return l&&Array.isArray(l._short)?l._short:[];
+}
 async function mcApplyArt(it,live){
   const gone=()=>!!live&&!live();
   const art=it.art||{};
@@ -55974,11 +56056,20 @@ function mcGtOwnForBatch(home){
     const key=String(row.sku).trim().toLowerCase();
     const lines=mcItems.filter(it=>mcRowKey(it).trim().toLowerCase()===key
       &&!lent.has(String(it.id))&&!mcMergedKey(it)&&!mcIsExtraDesign(it)
-      &&(!it.tile||(it.tile==='giftTag'&&!(it.sheet_item&&it.sheet_item.designId
-        &&mcLinePage(it)&&mcLinePage(it)!==home.page))));
+      &&(!it.tile||(it.tile==='giftTag'&&mcGtAdoptable(it,home))));
     if(lines.length) out.push({row,lines});
   }
   return out;
+}
+// A gift tag line with a design already is only this loan's to fill when it is
+// on this page in this finish - a Gloss line (or one with no page yet) was
+// rewritten to the loan's Matte and design - and never a customer's one-off,
+// whose link to its artwork the new design cleared.
+function mcGtAdoptable(it,home){
+  const si=it.sheet_item||{};
+  if(si.oneOff) return false;
+  if(!si.designId) return true;
+  return mcLinePage(it)===home.page&&mcGtFinishOf(it)===home.finish;
 }
 // ...and those rows made the lines' own, lent like the rest, in the row's place
 function mcGtAdoptOwnRows(home){
@@ -56481,6 +56572,10 @@ async function mcRenderLine(it,side){
     if(side==='front'&&usingPreset()&&(state.designsMissing||[]).length)
       throw new Error(`${state.designsMissing.join(', ')} for ${it.order_id||it.sku||'a line'} `
         +'could not be loaded from the designs folder');
+    // the same for Multiple Design pages: one that would not download printed
+    // the line a design short, and marked it done
+    if(mcSplitShort(side).length)
+      throw new Error(`${mcSplitShort(side).length} of the ${side} pages for ${it.order_id||it.sku||'a line'} could not be downloaded`);
     // every sheet this line comes to, not the first one. A per-order sheet is
     // one page until the design list outgrows it — which is exactly what adding
     // extras does — and the pages past the first were being left off the PDF.
@@ -57186,6 +57281,7 @@ async function mcMergeCustomLay(set){
       // a line one of whose designs would not load is left off whole: printed
       // short, it was marked done with a card missing
       if(got.length>before&&usingPreset()&&(state.designsMissing||[]).length) got.length=before;
+      if(got.length>before&&!usingPreset()&&mcSplitShort('front').length) got.length=before;
       if(got.length===before){ missing.push((it.order_id||it.sku||'')+mcMergeWhy(it)); mcBundleSkipped.add(it.id); }
       if(!back&&state.final.back&&state.final.back.img){
         back=state.final.back; backBox={...state.art.back}; }
@@ -58188,6 +58284,8 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     const undoLine=mcUndoOf(it,MC_LINE_KEYS);
     if(untyped) it.tile='custom';
     const {patch:kept,failed}=await mcKeepBuilderArt(it);
+    // another line opened during the upload: the builder is no longer this one's
+    if(mcWinItem!==it.id){ undoLine(); mcSaveChipSaid('Another line was opened — save this one again.',false); return; }
     it.design=mcLineSnapshot();
     it.paper_type=state.paperType||it.paper_type||'';
     it.gsm=state.gsm||it.gsm||'';
