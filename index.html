@@ -29704,9 +29704,12 @@ function pdfCutScan(content,box,sheetOn){
     // small circle here is a round sticker, not a punch hole. Open red strokes,
     // and specks under 3mm, are the artwork's and stay in it.
     outline=null;
-    const shut=l=>{ const p=l.pts, a=p[0], z=p[p.length-1], b=bb(p);
-      return p.length>=3&&(!!l.closed||Math.hypot(a[0]-z[0],a[1]-z[1])<0.5)&&Math.max(b.w,b.h)>=8.5; };
-    sheet=cands.filter(c=>c.loops.length&&c.loops.every(shut));
+    // a path is taken whole: every loop of it closed, and its biggest 3mm or more,
+    // so a compound cut line keeps the small window inside it
+    const shut=l=>{ const p=l.pts, a=p[0], z=p[p.length-1];
+      return p.length>=3&&(!!l.closed||Math.hypot(a[0]-z[0],a[1]-z[1])<0.5); };
+    const big=l=>{ const b=bb(l.pts); return Math.max(b.w,b.h)>=8.5; };
+    sheet=cands.filter(c=>c.loops.length&&c.loops.every(shut)&&c.loops.some(big));
     if(!sheet.length) return null;
     sheet.forEach(c=>c.loops.forEach(l=>{ const b=bb(l.pts);
       if(!outline||b.w*b.h>outline.b.w*outline.b.h) outline={c,l,b}; }));
@@ -31080,10 +31083,6 @@ const gtCutFound=new Map();        // design file -> the cut line found on its p
 const gtCutPending=new Set();      // files whose line has not been given to their designs yet
 // sheet: the design is a sticker sheet, cut on every red line (see pdfCutScan)
 var gtCutSheetFiles=new Set();     // design files read as a sticker sheet
-function gtCutSheetSync(file){
-  if((gtLib.designs||[]).some(x=>x.file===file&&x.cutSheet)) gtCutSheetFiles.add(file);
-  else gtCutSheetFiles.delete(file);
-}
 function gtCutLift(blob,sheet){
   if(!blob||typeof blob.arrayBuffer!=='function') return Promise.resolve(null);
   sheet=!!sheet;
@@ -31712,7 +31711,12 @@ async function gtMergeRun(){
   await gtIdbPut('piguFields',Object.assign({},map)).catch(()=>{});
   pf.fromDisk.forEach(k=>{
     const d=gtLib.designs.find(x=>x.adhoc&&x.file===k);
-    if(d&&map[k]){ const n=gtNormalizeDesign({...d,...map[k]}); d.fields=n.fields; d.hole=n.hole; d.back=n.back; d.art=n.art; d.bleed=n.bleed; d.trace=n.trace; }
+    if(d&&map[k]){ const n=gtNormalizeDesign({...d,...map[k]}); d.fields=n.fields; d.hole=n.hole; d.back=n.back; d.art=n.art; d.bleed=n.bleed; d.trace=n.trace;
+      // a sticker sheet turned on or off there: the page is read again here
+      if(!!n.cutSheet!==!!d.cutSheet){
+        if(n.cutSheet){ d.cutSheet=true; gtCutSheetFiles.add(d.file); } else{ delete d.cutSheet; gtCutSheetFiles.delete(d.file); }
+        gtImgs.delete(d.id); gtImgFailed.delete(d.id);
+      } }
   });
   // each shape's kept placeholders one shape at a time, so two computers
   // working on two shapes both keep their work
@@ -40055,7 +40059,13 @@ function gtCutBox(d){
 function gtCutSizeWrite(){
   const d=gtCurrentDesign, wrap=document.getElementById('gtCutSizeWrap');
   const b=d&&d.trace&&d.trace.on?gtCutBox(d):null;
-  wrap.hidden=!b;
+  // A sticker sheet's lines are cut exactly as the PDF draws them: outset, round
+  // and size reach only the main line — one sticker of many — so they are off
+  const sheet=!!(d&&d.cutSheet&&d.trace&&d.trace.auto);
+  ['gtTraceOut','gtTraceSm','gtTraceRd','gtTraceBtn'].forEach(id=>document.getElementById(id).disabled=sheet);
+  if(sheet) document.getElementById('gtTraceThr').disabled=true;
+  document.querySelectorAll('#gtCutShapeSeg [data-gtcs]').forEach(x=>{ if(x.dataset.gtcs!=='none') x.disabled=sheet; });
+  wrap.hidden=!b||sheet;
   // An inset can go further than the artwork is wide. Rather than quietly cut
   // to the placeholder, or quietly lose the smaller pieces, it says so.
   const warn=document.getElementById('gtCutWarn');
@@ -40357,10 +40367,13 @@ document.getElementById('gtBleedModeSeg').addEventListener('click',async e=>{
 document.getElementById('gtCutSheet').addEventListener('change',async e=>{
   const d=gtCurrentDesign; if(!d) return;
   const on=e.target.checked;
-  (gtLib.designs||[]).forEach(x=>{ if(x.file!==d.file) return;
+  // a cut line being worked on is saved or thrown away first: its Discard
+  // would bring back a line read the other way
+  gtCutSettle();
+  [d,...(gtLib.designs||[]),...(gtOwnDesigns||[])].forEach(x=>{ if(x.file!==d.file) return;
     if(on) x.cutSheet=true; else delete x.cutSheet;
     gtImgs.delete(x.id); gtImgFailed.delete(x.id); });
-  gtCutSheetSync(d.file);
+  if(on) gtCutSheetFiles.add(d.file); else gtCutSheetFiles.delete(d.file);
   await gtImgLoad(d.id);
   gtImgGet(d);
   const f=gtCutFound.get(d.file);
@@ -57166,7 +57179,8 @@ const PJ_KINDS={
           ...(d&&d.adhoc?{oneOff:{name:d.name||'',file:d.file||'',
             fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
             // how it sits, its own bleed and its traced cut line
-            artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null}}:{})};
+            artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,
+            ...(d.cutSheet?{cutSheet:true}:{})}}:{})};
       });
       const sheet={};
       GT_JOB_SHEET_KEYS.forEach(k=>{ if(gtSheet[k]!==undefined) sheet[k]=gtSheet[k]; });
