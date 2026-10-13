@@ -55577,9 +55577,53 @@ function mcGtLentRows(){
     Object.values(gtOrders).forEach(list=>{ if(Array.isArray(list)&&list!==gtOrder) list.forEach(take); });
   return out;
 }
+// Rows of the page's own on the lent sheet that are a batch SKU's tags - the
+// SKU summary's Add puts one on per SKU, and Edit off the download list lends
+// only the lines that are already marked for this very sheet. The chip counted
+// them ("Save 12 lines") and Save wrote only the lent ones (7): the rest stayed
+// the page's, and their lines never heard about the sheet. Each is the SKU's
+// lines that are not on another sheet already, and nothing else.
+function mcGtOwnForBatch(home){
+  if(!home||!mcBatch||mcBatch.status!=='open'||typeof gtOrder==='undefined') return [];
+  const lent=new Set((home.ids||[]).map(String));
+  const out=[];
+  for(const row of gtOrder){
+    if(!row||mcGtLent(row)||row.mcNewFor||!row.designId||!row.sku) continue;
+    const key=String(row.sku).trim().toLowerCase();
+    const lines=mcItems.filter(it=>mcRowKey(it).trim().toLowerCase()===key
+      &&!lent.has(String(it.id))&&!mcMergedKey(it)&&!mcIsExtraDesign(it)
+      &&(!it.tile||(it.tile==='giftTag'&&!(it.sheet_item&&it.sheet_item.designId
+        &&mcLinePage(it)&&mcLinePage(it)!==home.page))));
+    if(lines.length) out.push({row,lines});
+  }
+  return out;
+}
+// ...and those rows made the lines' own, lent like the rest, in the row's place
+function mcGtAdoptOwnRows(home){
+  const own=mcGtOwnForBatch(home);
+  for(const {row,lines} of own){
+    // the row was one SKU at the total of its orders; each line takes its own
+    // share and the first takes whatever was typed over that
+    const share=lines.map(it=>Math.max(1,mcQty(it)||1));
+    const over=Math.max(0,Math.round(Number(row.qty)||0)-share.reduce((a,b)=>a+b,0));
+    const rows=lines.map((it,i)=>{
+      it.sheet_item={...(it.sheet_item||{}),designId:row.designId,qty:share[i]+(i===0?over:0),
+        vals:{...(row.vals||{})},extra:(row.extra||[]).map(f=>({...f})),
+        shape:row.shape||((it.sheet_item||{}).shape)||'',page:home.page,finish:home.finish};
+      if(!home.ids.includes(it.id)) home.ids.push(it.id);
+      return mcGtLine(it);
+    });
+    const at=gtOrder.indexOf(row);
+    gtOrder.splice(at,1,...rows);
+  }
+  if(own.length&&typeof gtRenderOrder==='function'){ gtRenderOrder(); if(typeof gtDraw==='function') gtDraw(); }
+  return own.length;
+}
 // Called on the way off the Gift Tag screen, whichever way somebody leaves it.
 async function mcGtReturn(){
   if(!mcGtHome) return;
+  // not in the middle of an export borrowing the sheet - that is not a save
+  if(!mcBusy) mcGtAdoptOwnRows(mcGtHome);
   const home=mcGtHome; mcGtHome=null;
   // Rows lent to a page that was then switched away from are parked in that
   // page's own order rather than sitting in gtOrder, and they are the batch's
@@ -55700,6 +55744,8 @@ async function mcGtAdoptNewRows(edited,home,asked){
 }
 async function mcGtWriteBack(edited,home,asked){
   await mcGtAdoptNewRows(edited,home,asked);
+  // how many tags reached their line - what the chip says it saved
+  let saved=0;
   for(const l of edited){
     const id=String(l.id||'').startsWith('mc-')?String(l.id).slice(3):null;
     const it=id?mcItem(id):null;
@@ -55740,7 +55786,7 @@ async function mcGtWriteBack(edited,home,asked){
       undoMarks();
       mcWarn(`${it.sku||'A tag'}: the changes made on the gift tag sheet did not save`
         +`${mcLastSaveError?': '+mcLastSaveError:''}. Open the line and save it again.`);
-    }
+    }else if(l.designId) saved++;
     mcRepaintRow(it);
   }
   // And the ones that are not in the list any more. A tag taken off with the ×
@@ -55755,6 +55801,7 @@ async function mcGtWriteBack(edited,home,asked){
     const it=mcItem(id);
     if(it) await mcUnmarkLine(it);
   }
+  return saved;
 }
 // ==================== export ====================
 function mcExportFolderLbl(){
@@ -57593,7 +57640,10 @@ function mcBuilderSaveSync(){
   const it=mcWinItem?mcItem(mcWinItem):null;
   const what=document.getElementById('mcSaveChipWhat');
   if(mode==='gift'){
-    const n=gtOrder.filter(l=>l&&l.designId).length;
+    // what Save will write: the lent rows, and the page's own rows that are a
+    // batch SKU's tags — not a row of the page's own that no line is for
+    const own=mcGtOwnForBatch(mcGtHome).reduce((t,o)=>t+o.lines.length,0);
+    const n=mcGtLentRows().filter(l=>l&&l.designId).length+own;
     what.textContent=`Save ${n} line${n===1?'':'s'} to the batch`;
     chip.title='Write these tags back onto the batch lines they came from. '
       +'Leaving this screen does it too — this is so you can see it happen.';
@@ -57660,19 +57710,23 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
       // Every lent row, not only the ones on the page on screen. After a page
       // switch they were parked elsewhere, this saw none of them, and wrote the
       // whole loan off the batch as if every tag had been taken off.
+      // the summary's own rows for batch SKUs first, so they are lent and saved too
+      mcGtAdoptOwnRows(mcGtHome);
       const lent=mcGtLentRows();
       mcCutCommit();             // Save to line saves the cut line on screen too
-      await mcGtWriteBack(lent,mcGtHome,true);
+      const want=lent.filter(l=>l&&l.designId).length;
+      const saved=await mcGtWriteBack(lent,mcGtHome,true);
       // and what is lent is now what is on the batch, so a tag taken off after
       // this is measured against this rather than against what was lent - the
       // batch's lines only, not a row that has not become one
       mcGtHome.ids=lent.filter(mcGtLent).map(l=>String(l.id).slice(3));
-      const n=lent.filter(l=>l&&l.designId).length;
       if(mcOnBatch()) mcRenderItems();
       mcSumAfterGtSave();
       mcSyncBatchButtons();
       if(mcWinItem) mcWinRender();
-      mcSaveChipSaid(`✓ ${n} line${n===1?'':'s'} saved`,true);
+      // said as what reached the lines, not what was on the sheet
+      if(saved<want){ mcSaveChipSaid(`${saved} of ${want} lines saved — see the message`,false); return; }
+      mcSaveChipSaid(`✓ ${saved} line${saved===1?'':'s'} saved`,true);
       return;
     }
     if(mode==='sheet'){
