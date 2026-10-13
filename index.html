@@ -27944,6 +27944,7 @@ function applyPrintState(meta,name,whole,keepArt){
           // the turn the same way round: a job saved on its side comes back on
           // its side, whatever the design has been remembered as since
           if(d.rotate!==undefined){ line.rotate=designRotOf(d); if(line.rotate) line.bleedTouched=true; }
+          if(d.mcLine) line.mcLine=d.mcLine;
           out.push(line);
         }catch(e){ missing.push(d.name||d.path); }
       }
@@ -37440,9 +37441,13 @@ function gtRenderOrder(){
           <input type="number" min="0" step="1" value="${l.qty}" data-gtl="qty"/></label>
         <button class="del-btn" data-gt-del-line title="Remove">×</button></div>
       <div class="click-row" style="margin:4px 0 6px;align-items:center;gap:10px;">
-        <label class="click-tog" title="This line bleeds its own figure; every other line follows the sheet's bleed (or its design's own)">
-          <input type="checkbox" data-gtl="bleedOn"${l.bleed&&l.bleed.on?' checked':''}/>Own bleed for this line</label>
-        ${l.bleed&&l.bleed.on?`<label class="field" style="max-width:110px;margin:0;"><span>BLEED (mm)</span>
+        ${d&&gtOwnCut(d)&&Number(d.trace.out)>0
+          // cut on a line drawn out past the artwork: nothing prints past the
+          // cut (gtBleedOf), so a line's own bleed would do nothing
+          ?'<span class="hint" style="margin:0;">No bleed — this design is cut on an outset line past its artwork</span>'
+          :`<label class="click-tog" title="This line bleeds its own figure; every other line follows the sheet's bleed (or its design's own)">
+          <input type="checkbox" data-gtl="bleedOn"${l.bleed&&l.bleed.on?' checked':''}/>Own bleed for this line</label>`}
+        ${l.bleed&&l.bleed.on&&!(d&&gtOwnCut(d)&&Number(d.trace.out)>0)?`<label class="field" style="max-width:110px;margin:0;"><span>BLEED (mm)</span>
           <input type="number" step="0.1" min="0" value="${round(Number(l.bleed.mm)||0)}" data-gtl="bleedMm"/></label>`:''}
       </div>
       <div class="gt-pick">
@@ -53347,7 +53352,10 @@ function mcSnapshot(){
       ?{path:front.source.path,name:front.name||''}:null,
     designs:(state.designs||[]).filter(d=>d.source&&d.source.path).map(d=>
       ({path:d.source.path,name:d.name,qty:d.qty,rotate:designRotOf(d),bleedOn:!!d.bleedOn,
-        bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null}))};
+        bleedMm:isFinite(Number(d.bleedMm))?Number(d.bleedMm):null,
+        // which line put the card there: reopened without it, the order's next
+        // line could not tell the sheet was its order's and started a fresh one
+        ...(d.mcLine?{mcLine:d.mcLine}:{})}))};
 }
 
 // ---------- the batch beside the builder, rather than over it ----------
@@ -54350,7 +54358,7 @@ async function mcAddPickedDesign(it,pick,sku,opts){
   const mine=(state.designs||[]).find(d=>d.mcLine&&d.mcLine===it.id);
   const same=mine||(!reset?(state.designs||[]).find(d=>d.source&&d.source.path===pick.path):null);
   if(mine) mine.qty=want;
-  else if(same) same.qty=Math.max(1,(Number(same.qty)||0)+want);
+  else if(same){ same.qty=Math.max(1,(Number(same.qty)||0)+want); if(!same.mcLine) same.mcLine=it.id; }
   else{
     let line=null;
     try{ line=await addDesignLine(pick,want,sku); }
@@ -56286,10 +56294,13 @@ async function mcGtAdoptNewRows(edited,home,asked){
   // history starts again from the sheet as it is now.
   if(adopted&&typeof UNDO!=='undefined'){ UNDO.past.gift=[]; UNDO.future.gift=[]; try{ syncUndoBtns(); }catch(e){} }
 }
+let mcGtWriteTried=0;
 async function mcGtWriteBack(edited,home,asked){
   await mcGtAdoptNewRows(edited,home,asked);
-  // how many tags reached their line - what the chip says it saved
-  let saved=0;
+  // how many tags reached their line - what the chip says it saved - and how
+  // many were tried (mcGtWriteTried): a row whose order prompt was cancelled,
+  // or whose line is gone, was never going to be, and counted as a failure
+  let saved=0; mcGtWriteTried=0;
   for(const l of edited){
     const id=String(l.id||'').startsWith('mc-')?String(l.id).slice(3):null;
     const it=id?mcItem(id):null;
@@ -56300,6 +56311,7 @@ async function mcGtWriteBack(edited,home,asked){
     // blank wiped the design Save to line had just put on, so the line read as
     // never saved the next time it was opened. The line is the newer of the two.
     if(!l.designId&&it.sheet_item&&it.sheet_item.designId) continue;
+    if(l.designId) mcGtWriteTried++;
     // what was changed over there, onto what the line already carries. Written
     // as a fresh object it lost the finish and the page every trip: the line
     // came back Matte and page-less, and two orders on one page then built two
@@ -58422,8 +58434,8 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
       mcGtAdoptOwnRows(mcGtHome);
       const lent=mcGtLentRows();
       mcCutCommit();             // Save to line saves the cut line on screen too
-      const want=lent.filter(l=>l&&l.designId).length;
       const saved=await mcGtWriteBack(lent,mcGtHome,true);
+      const want=mcGtWriteTried;
       // and what is lent is now what is on the batch, so a tag taken off after
       // this is measured against this rather than against what was lent - the
       // batch's lines only, not a row that has not become one
