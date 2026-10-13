@@ -32410,7 +32410,8 @@ async function gtImgLoad(id){
   const blob=d&&gtAssets.get(d.file);
   if(!blob||gtImgs.has(id)) return;
   try{
-    const img=await loadImage(await gtArtURL(blob,d.file,true));
+    const hi=await gtPiguHiGet(d);
+    const img=await loadImage(hi?await fileToDataURL(hi):await gtArtURL(blob,d.file,true));
     if(gen===gtHydrateGen) gtImgs.set(id,img);
   }catch(e){ gtImgFailed.add(id); }
 }
@@ -37811,9 +37812,21 @@ function gtRenderOrder(){
 // keeps the new picture rather than the one it filed before.
 const gtEnhancing=new Map();   // design id -> the progress line while it runs
 function gtEnhanceable(d){
-  // a design read off a Pigu folder is marked adhoc too, but it is the shop's
-  // own file, and given a new path it lost its saved words and came back twice
-  return !!(d&&d.adhoc&&!gtIsPiguFile(d.file)&&!gtIsPdfFile(d.file)&&gtImgs.get(d.id));
+  // every one-off picture, a Pigu folder one (Sticker, Magic Create) too. A PDF
+  // has none: it prints sharp as it is.
+  return !!(d&&d.adhoc&&!gtIsPdfFile(d.file)&&gtImgs.get(d.id));
+}
+// A Pigu folder one-off keeps its path - given a new one it lost its saved
+// words and came back twice, and the file in the folder is the customer's, not
+// written over. Its enhanced picture is kept in this browser against that path
+// instead, with the file's size and date, so a file replaced in the folder is
+// read afresh rather than covered by an old enhancement.
+const gtPiguHiKey=path=>'piguHi:'+path;
+const gtPiguSig=b=>b?b.size+':'+(b.lastModified||0):'';
+async function gtPiguHiGet(d){
+  if(!d||!gtIsPiguFile(d.file)) return null;
+  const rec=await gtIdbGet(gtPiguHiKey(d.file)).catch(()=>null);
+  return rec&&rec.blob&&rec.sig===gtPiguSig(gtAssets.get(d.file))?rec.blob:null;
 }
 // the picture's DPI at the size it prints on the tag, or null
 function gtDesignDpi(d){
@@ -37855,9 +37868,13 @@ async function gtEnhanceDesign(id){
     // swapped for something else while it ran: the new picture is not this one's
     if(gtImgs.get(id)!==img||d.file!==file){ gtEnhancing.delete(id); gtRenderOrder(); return false; }
     const blob=await (await fetch(got.data)).blob();
-    const path='adhoc/'+d.id+'-'+Date.now()+'.png';
-    gtAssets.set(path,blob);
-    d.file=path;
+    if(gtIsPiguFile(file)){
+      await gtIdbPut(gtPiguHiKey(file),{sig:gtPiguSig(gtAssets.get(file)),blob});
+    }else{
+      const path='adhoc/'+d.id+'-'+Date.now()+'.png';
+      gtAssets.set(path,blob);
+      d.file=path;
+    }
     gtImgs.set(id,got.img);
     // the Offset bleed grown off the old picture is kept by id; the cut line is
     // fractions of the picture, so it still lies where it did
