@@ -7401,6 +7401,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <div style="display:flex;gap:8px;margin-top:8px;">
               <button type="button" class="btn-outline btn-sm" id="gtCutAddRect" style="flex:1;">+ ▭ Rectangle</button>
               <button type="button" class="btn-outline btn-sm" id="gtCutAddCircle" style="flex:1;">+ ◯ Circle</button>
+              <button type="button" class="btn-outline btn-sm" id="gtCutAddLine" style="flex:1;" title="A straight cut, open at both ends - a slit or a fold-off line">+ ╱ Line</button>
             </div>
           </div>
           <!-- cut line changes are held here until Save: nothing about the cut
@@ -7464,6 +7465,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:9px;">
             <button class="btn-outline btn-sm" id="gtArtResetBtn" title="100%, centred in the placeholder">Back to original size</button>
             <button class="btn-outline btn-sm" id="gtArtFitBtn" title="Shrink or grow the whole design to fit inside the placeholder, centred">Fit to placeholder</button>
+            <button class="btn-outline btn-sm" id="gtArtTurnBtn" title="Turn the artwork a quarter clockwise - its cut line and punch hole turn with it, the words stay upright">↻ Rotate 90°</button>
           </div>
           <details class="gt-why"><summary>How the size works</summary>
             <p class="hint">A design comes in at the size its file was drawn at — 100% — centred in the placeholder, whatever size the placeholder is. This scales it from there and nudges it about, this design only. A file that does not say what size it was drawn at is fitted to the placeholder instead, and 100% is that fit.</p>
@@ -13459,7 +13461,8 @@ function cropSides(){
 // The Crop sheet on a gift tag one-off: the same sheet, the design's own
 // picture in place of a Front / Back side.
 function cropOpenGt(d){
-  const img=d&&gtImgGet(d.id);
+  // the file as it stands, not turned (gtTurnDesign): the crop is cut out of the file
+  const img=d&&gtImgGet(d.id)&&gtImgs.get(d.id);
   if(!img||!img.naturalWidth){ showMsg(document.getElementById('gtCropMsg'),'This design\'s picture is not loaded.',false); return; }
   cropUI={side:null,gt:d,img,P:null,box:{x:0,y:0,w:img.naturalWidth,h:img.naturalHeight},trim:null,mode:'none',drag:null,
     bg:false,bgC:null};
@@ -31440,9 +31443,13 @@ function gtCutTake(d){
     if(x.trace&&!x.trace.auto&&x.cutSeen===f.sig) return;
     const fresh=!x.trace||!x.trace.auto;
     x.cutSeen=f.sig;
-    if(fresh) x.trace={loop:f.outline,out:0,thr:50,sm:0,on:true,auto:true};
-    else x.trace.loop=f.outline;
-    if(f.extras&&f.extras.length) x.trace.extra=f.extras; else delete x.trace.extra;
+    // read off the file as it stands; a turned design holds its line turned
+    const tn=gtTurnOf(x), tp=q=>gtTurnPt(q,tn);
+    const outline=tn?f.outline.map(tp):f.outline;
+    const extras=tn&&f.extras?f.extras.map(e=>({...e,pts:(e.pts||[]).map(tp)})):f.extras;
+    if(fresh) x.trace={loop:outline,out:0,thr:50,sm:0,on:true,auto:true};
+    else x.trace.loop=outline;
+    if(extras&&extras.length) x.trace.extra=extras; else delete x.trace.extra;
     changed=true;
     // A sticker sheet is cut on its red lines exactly: an outset, round, CUT
     // WIDTH/HEIGHT or added shape left from the single-sticker reading moved
@@ -31455,8 +31462,10 @@ function gtCutTake(d){
       return;
     }
     const h=f.holes&&f.holes[0];
-    if(fresh&&h&&!(x.hole&&x.hole.on))
-      x.hole={on:true,x:h.u,y:h.v,d:Math.round(h.mm*10)/10};
+    if(fresh&&h&&!(x.hole&&x.hole.on)){
+      const [hu,hv]=gtTurnPt([h.u,h.v],tn);
+      x.hole={on:true,x:hu,y:hv,d:Math.round(h.mm*10)/10};
+    }
   };
   give(d);
   (gtLib.designs||[]).forEach(x=>{ if(x!==d&&x.file===d.file) give(x); });
@@ -31530,7 +31539,7 @@ window.addEventListener('beforeunload',e=>{
 // one-off means.
 const gtManDesign=d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.hole,
   artV:2,art:d.art,bleed:d.bleed,trace:d.trace,...(d.cutSeen?{cutSeen:d.cutSeen}:{}),
-  ...(d.cutSheet?{cutSheet:true}:{}),...(d.back?{back:d.back}:{})});
+  ...(d.cutSheet?{cutSheet:true}:{}),...(d.back?{back:d.back}:{}),...(d.turn?{turn:d.turn}:{})});
 function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
   gtKeepShape();
@@ -31628,7 +31637,7 @@ async function gtPiguFieldsSave(){
     // and a size set on it went back to the default each time
     const keep={fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
       artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,cutSeen:d.cutSeen||null,
-      ...(d.cutSheet?{cutSheet:true}:{})};
+      ...(d.cutSheet?{cutSheet:true}:{}),...(d.turn?{turn:d.turn}:{})};
     const now=JSON.stringify(keep);
     if(JSON.stringify(map[d.file]||null)!==now){ map[d.file]=JSON.parse(now); changed=true; }
   });
@@ -32038,6 +32047,7 @@ async function gtMergeRun(){
     const d=gtLib.designs.find(x=>x.adhoc&&x.file===k);
     // cutSheet is only written when on: off there, it must not survive from here
     if(d&&map[k]){ const n=gtNormalizeDesign({...d,cutSheet:undefined,...map[k]}); d.fields=n.fields; d.hole=n.hole; d.back=n.back; d.art=n.art; d.bleed=n.bleed; d.trace=n.trace;
+      if(n.turn) d.turn=n.turn; else delete d.turn;
       // a sticker sheet turned on or off there: the page is read again here
       if(!!n.cutSheet!==!!d.cutSheet){
         if(n.cutSheet){ d.cutSheet=true; gtCutSheetFiles.add(d.file); } else{ delete d.cutSheet; gtCutSheetFiles.delete(d.file); }
@@ -32341,6 +32351,8 @@ function gtNormalizeDesign(d){
     ...(d.cutSeen?{cutSeen:String(d.cutSeen)}:{}),
     // a sticker sheet: the PDF's every red line is its cut line (see pdfCutScan)
     ...(d.cutSheet?{cutSheet:true}:{}),
+    // its artwork turned a quarter, or more (see gtTurnDesign)
+    ...(gtTurnOf(d)?{turn:gtTurnOf(d)}:{}),
     art:d.artV===2
       ?{s:Number(d.art&&d.art.s)||1,dx:Number(d.art&&d.art.dx)||0,dy:Number(d.art&&d.art.dy)||0}
       :{s:1,dx:0,dy:0},
@@ -32373,8 +32385,11 @@ function gtNormalizeDesign(d){
          // further cut lines set by hand — rectangles and circles, each its middle
          // and size as fractions of the artwork's box, like the loop
          ...(Array.isArray(d.trace.more)&&d.trace.more.length
-             ?{more:d.trace.more.filter(m=>m&&(m.shape==='rect'||m.shape==='circle')
-                 &&Number(m.fw)>0&&Number(m.fh)>0).slice(0,9)      // 10 with the main one
+             ?{more:d.trace.more.filter(m=>m&&((m.shape==='rect'||m.shape==='circle')
+                 &&Number(m.fw)>0&&Number(m.fh)>0
+                 // a straight line: fw, fh are from its one end to the other, so
+                 // either may be 0 or less - only a line of no length is dropped
+                 ||m.shape==='line'&&isFinite(m.fw)&&isFinite(m.fh)&&(Number(m.fw)||Number(m.fh)))).slice(0,9)      // 10 with the main one
                  .map(m=>({shape:m.shape,u:Number(m.u)||0,v:Number(m.v)||0,fw:Number(m.fw),fh:Number(m.fh)}))}:{}),
          on:d.trace.on!==false} : null,
     // A picture of its own for the back, sized like the front's art. None means
@@ -32415,12 +32430,93 @@ async function gtImgLoad(id){
     if(gen===gtHydrateGen) gtImgs.set(id,img);
   }catch(e){ gtImgFailed.add(id); }
 }
+// ---------- a design's artwork turned a quarter ----------
+// Artwork does not always arrive standing the way the tag reads: a file drawn
+// sideways is turned here, 90 degrees at a time, clockwise. Only the artwork
+// turns - its cut line and punch hole go round with it, the words stay upright
+// and are laid out on the turned picture. Kept on the design as turn (0, 90,
+// 180, 270); the file itself is never touched, and a PDF still goes into the
+// export as its own page, placed turned (gtTurnRect).
+var gtTurnAny=false;               // any design turned at all - nothing to look up until one is
+function gtTurnOf(d){
+  const t=((Math.round((Number(d&&d.turn)||0)/90)*90)%360+360)%360;
+  if(t) gtTurnAny=true;
+  return t;
+}
+// the picture turned, made once per picture and turn. A canvas standing in for
+// the image: it answers naturalWidth/Height, its printed size (turned) and src
+// the way the image does, so nothing that draws or measures it needs telling.
+const gtTurnedArt=new WeakMap();
+function gtTurnImg(img,t){
+  if(!t||!img||!img.naturalWidth) return img;
+  let m=gtTurnedArt.get(img);
+  if(!m){ m=new Map(); gtTurnedArt.set(img,m); }
+  if(m.has(t)) return m.get(t);
+  const W=img.naturalWidth, H=img.naturalHeight, q=t%180!==0;
+  const c=document.createElement('canvas');
+  c.width=q?H:W; c.height=q?W:H;
+  const x=c.getContext('2d');
+  x.translate(c.width/2,c.height/2); x.rotate(t*Math.PI/180); x.drawImage(img,-W/2,-H/2);
+  const real=artRealMm(img);
+  c.naturalWidth=c.width; c.naturalHeight=c.height;
+  c._realMm=real?(q?{w:real.h,h:real.w}:{w:real.w,h:real.h}):null;
+  c.src=img.src; c._turnOf=img;
+  m.set(t,c);
+  return c;
+}
+// a point held in the picture's 0..1 box, carried round with the picture by t
+function gtTurnPt(q,t){
+  if(!Array.isArray(q)) return q;
+  let u=q[0], v=q[1];
+  for(let k=0;k<((t/90)|0)%4;k++){ const w=u; u=1-v; v=w; }
+  return [u,v];
+}
+// A placed page goes in at the rect the turned picture fills: the page's own
+// box is that rect turned back (same middle, sides swapped for a quarter), and
+// the build turns it about its middle (rot) - so the page stays the vector it is.
+function gtTurnRect(R,t){
+  if(!t) return R;
+  if(t===180) return {...R,rot:180};
+  const cx=R.x+R.w/2, cy=R.y+R.h/2;
+  return {x:cx-R.h/2,y:cy-R.w/2,w:R.h,h:R.w,rot:t};
+}
+// Turns a design a quarter clockwise: the picture, and with it everything held
+// in the picture's 0..1 box - the traced or drawn cut line, its extra cuts and
+// added shapes, and the punch hole.
+function gtTurnDesign(d){
+  if(!d) return;
+  const p=q=>gtTurnPt(q,90);
+  const t=d.trace;
+  if(t){
+    if(Array.isArray(t.loop)) t.loop=t.loop.map(p);
+    if(Array.isArray(t.extra)) t.extra=t.extra.map(e=>({...e,pts:(e.pts||[]).map(p)}));
+    if(Array.isArray(t.more)) t.more=t.more.map(m=>gtTurnMore(m));
+    const cx=t.cx, cy=t.cy;
+    if(cy!==undefined) t.cx=cy; else delete t.cx;
+    if(cx!==undefined) t.cy=cx; else delete t.cy;
+    if(t.refBox) t.refBox={w:t.refBox.h,h:t.refBox.w};
+  }
+  if(d.hole){ const hx=Number(d.hole.x)||0; d.hole.x=1-(Number(d.hole.y)||0); d.hole.y=hx; }
+  const n=(gtTurnOf(d)+90)%360;
+  if(n){ d.turn=n; gtTurnAny=true; } else delete d.turn;
+  gtNestCache=null;
+}
+// one added cut line carried a quarter round with its picture
+function gtTurnMore(m){
+  return m.shape==='line'?{...m,u:1-m.v,v:m.u,fw:-m.fh,fh:m.fw}:{...m,u:1-m.v,v:m.u,fw:m.fh,fh:m.fw};
+}
 // the picture of a design if it has been drawn; if not, it is asked for and the
 // screen redraws when it is there. low: a list row, behind what is being worked on.
 function gtImgGet(x,low){
   const id=x&&typeof x==='object'?x.id:x;
   const img=gtImgs.get(id);
-  if(img&&gtCutPending.size){ gtCutTake(x&&typeof x==='object'?x:gtDesign(id)); return img; }
+  if(img&&gtCutPending.size) gtCutTake(x&&typeof x==='object'?x:gtDesign(id));
+  // a design turned a quarter is seen turned by everything that asks for its
+  // picture: its fit, its cut line, its words' box and the sheet alike
+  if(img&&gtTurnAny){
+    const t=gtTurnOf(x&&typeof x==='object'?x:gtDesign(id));
+    return t?gtTurnImg(img,t):img;
+  }
   if(img||!id||gtImgFailed.has(id)) return img;
   const d=gtDesign(id);
   if(!d||!gtAssets.get(d.file)) return undefined;
@@ -32571,6 +32667,7 @@ async function gtHydrateBacks(){
   const want=new Set();
   if(gtSheet.backFile) want.add(gtSheet.backFile);
   if(gtSheetBack()) want.add(gtSheetBack());
+  Object.values(gtSheet.backByFinish||{}).forEach(f=>{ if(f&&typeof f==='string') want.add(f); });
   gtLib.designs.forEach(d=>{ if(d.back&&d.back.file) want.add(d.back.file); });
   for(const f of want){
     if(gtBackImgs.has(f)) continue;
@@ -33021,6 +33118,11 @@ function gtBackChrome(){
 // its words kept. The mapping is still there under the settings screen for
 // whoever wants to apply it by hand; nothing applies it on its own.
 async function gtApplyMode(){
+  // the sheet just read keeps the back of the run it was last on; a page whose
+  // run is now another takes that run's back (not while a batch has it on loan)
+  if(gtLoaded&&!(typeof mcGtHome!=='undefined'&&mcGtHome)&&gtBackFollowFinish(gtFinish)){
+    await gtHydrateBacks(); gtSaveLib(); gtSyncShapeSlots();
+  }
   gtPaintMode();
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
 }
@@ -33163,7 +33265,7 @@ async function gtReadPiguFolder(dir,folderName,keep){
       adhoc:true,fields:(was&&was.fields)||[],hole:was&&was.hole,back:was&&was.back,
       // one never seen before is new to the library: no bleed until given one
       artV:was&&was.artV,art:was&&was.art,bleed:was?was.bleed:gtNewBleed(),trace:was&&was.trace,
-      cutSeen:was&&was.cutSeen,cutSheet:was&&was.cutSheet});
+      cutSeen:was&&was.cutSeen,cutSheet:was&&was.cutSheet,turn:was&&was.turn});
     try{ gtImgs.set(id,await loadImage(await gtArtURL(blob,path,true))); }catch(err){}
     made.push(d);
   }
@@ -34389,6 +34491,13 @@ function gtTraceExtras(d,r){
   });
   const rd=Math.max(0,Number(t.rd)||0);
   (t.more||[]).forEach(m=>{
+    // a straight line is cut from one end to the other and left open
+    if(m.shape==='line'){
+      const cx=r.x+m.u*r.w, cy=r.y+m.v*r.h, dx=m.fw*r.w/2, dy=m.fh*r.h/2;
+      const p=[[cx-dx,cy-dy],[cx+dx,cy+dy]];
+      p.open=true; out.push(p);
+      return;
+    }
     // a rectangle takes the line's ROUND too, up to half its shorter side
     if(m.shape==='rect'&&rd>0){
       const w=m.fw*r.w, h=m.fh*r.h, x=r.x+m.u*r.w-w/2, y=r.y+m.v*r.h-h/2;
@@ -35519,7 +35628,7 @@ function gtNestPlan(){
   const ids=[...new Set(q.map(l=>l.designId))];
   const dsig=ids.map(id=>{
     const d=gtDesign(id), img=gtImgs.get(id), t=d&&d.trace;
-    return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],
+    return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],d&&d.turn||0,
             d&&d.file,img&&img.naturalWidth?[img.naturalWidth,img.naturalHeight]:0,
             t&&t.refBox?[t.refBox.w,t.refBox.h]:0,
             gtBleedOf(d),
@@ -35879,8 +35988,9 @@ function gtCutAllBox(t,noMore){
     if(isFinite(e.u0)){ b.u0=Math.min(b.u0,e.u0); b.v0=Math.min(b.v0,e.v0); b.u1=Math.max(b.u1,e.u1); b.v1=Math.max(b.v1,e.v1); }
   }
   if(!noMore) (t.more||[]).forEach(m=>{
-    b.u0=Math.min(b.u0,m.u-m.fw/2); b.u1=Math.max(b.u1,m.u+m.fw/2);
-    b.v0=Math.min(b.v0,m.v-m.fh/2); b.v1=Math.max(b.v1,m.v+m.fh/2);
+    const hw=Math.abs(m.fw)/2, hh=Math.abs(m.fh)/2;
+    b.u0=Math.min(b.u0,m.u-hw); b.u1=Math.max(b.u1,m.u+hw);
+    b.v0=Math.min(b.v0,m.v-hh); b.v1=Math.max(b.v1,m.v+hh);
   });
   return b;
 }
@@ -36187,7 +36297,7 @@ function gtArtBleedOf(d){
   const t=d.trace, S=gtSheet;
   const cap=S.bleedOn&&Number(S.bleed)>0?Number(S.bleed):2.5;
   const key=JSON.stringify([t.out,t.sm,t.loop.length,t.cx,t.cy,t.shape||'',t.rd||0,!!t.ownSize,
-    d.art&&[d.art.s,d.art.dx,d.art.dy],img.naturalWidth,img.naturalHeight,S.tagW,S.tagH,cap]);
+    d.art&&[d.art.s,d.art.dx,d.art.dy],d.turn||0,img.naturalWidth,img.naturalHeight,S.tagW,S.tagH,cap]);
   const had=gtArtBleedMemo.get(t);
   if(had&&had.key===key) return had.v;
   let v=0;
@@ -36430,7 +36540,9 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // a placed page with a made-up bleed: its page goes in at the trim and only
   // the ring of bleed around it is drawn here, the way the Custom Print
   // Template does it
-  const took=vec?vec.take({id:key},r,b,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
+  // a turned design's page is placed turned (gtTurnRect); a back never turns
+  const turn=design&&!box?gtTurnOf(design):0;
+  const took=vec?vec.take({id:key,turn},r,b,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
   if(took===true) return;
   ctx.save();
   ctx.beginPath();
@@ -36444,7 +36556,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
     ctx.closePath(); ctx.clip();
   }
   if(invert) ctx.filter='invert(1)';
-  gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,key,gap);
+  gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,turn?key+'@t'+turn:key,gap);
   // a pixel short of the trim, so the ring overlaps the placed page rather
   // than leaving a hairline of paper between them
   if(took==='ring') ctx.clearRect(r.x*sc+0.5,r.y*sc+0.5,r.w*sc-1,r.h*sc-1);
@@ -37634,7 +37746,7 @@ gtWireCombo('gtTextSearch','gtTextCaret','gtTextPanel',()=>gtRenderTextList());
 // how: 'low' asks for the picture behind whatever is being worked on, 'peek'
 // shows it only if it is already drawn. Thumbnails, not the full picture.
 function gtArt(id,cls,how){
-  const img=how==='peek'?gtImgs.get(id):gtImgGet(id,how==='low');
+  const img=how==='peek'?gtTurnImg(gtImgs.get(id),gtTurnAny?gtTurnOf(gtDesign(id)):0):gtImgGet(id,how==='low');
   return img&&img.src
     ? `<span class="gt-art ${cls||''}"><img src="${gtThumbOf(img)}" alt=""/></span>`
     : `<span class="gt-art ${cls||''}">✐</span>`;
@@ -37841,7 +37953,7 @@ async function gtPiguHiGet(d){
 }
 // the picture's DPI at the size it prints on the tag, or null
 function gtDesignDpi(d){
-  const img=gtImgs.get(d.id); if(!img||!img.naturalWidth) return null;
+  const img=gtImgs.get(d.id)&&gtImgGet(d); if(!img||!img.naturalWidth) return null;
   const t=gtTagBox(), f=gtFitD(d,img.naturalWidth,img.naturalHeight,t.w,t.h);
   const w=f.w*((d.art&&d.art.s)||1);
   return w>0?img.naturalWidth/(w/25.4):null;
@@ -39030,7 +39142,7 @@ function gtRenderDesignList(){
   // it heavy, and the search box is how anybody finds one
   const more=shown.length-150;
   el.innerHTML=shown.slice(0,150).map((d,i)=>{
-    const img=i<60?gtImgGet(d.id,true):gtImgs.get(d.id);
+    const img=i<60?gtImgGet(d.id,true):gtTurnImg(gtImgs.get(d.id),gtTurnOf(d));
     return `<div class="ph-card row-link" data-gt-design="${d.id}" data-id="${d.id}">
       <button class="del-btn" data-gt-del-design title="Take out of the library"
               style="float:right;">×</button>
@@ -40655,6 +40767,8 @@ function gtArtWriteInputs(){
   document.getElementById('gtArtScaleRange').value=Math.max(5,Math.min(GT_SCALE_MAX,pct));
   document.getElementById('gtArtDx').value=round(Number(a.dx)||0);
   document.getElementById('gtArtDy').value=round(Number(a.dy)||0);
+  const tb=document.getElementById('gtArtTurnBtn');
+  if(tb){ const t=gtTurnOf(d); tb.textContent='↻ Rotate 90°'+(t?' ('+t+'°)':''); tb.classList.toggle('on',!!t); }
   const own=!!(d.bleed&&d.bleed.on!==undefined);
   document.getElementById('gtArtBleedOwn').checked=own;
   document.getElementById('gtArtBleedMm').value=own?d.bleed.mm:gtSheet.bleed;
@@ -40898,19 +41012,33 @@ function gtCutMoreWrite(){
   list.innerHTML=more.map((m,i)=>`
     <div class="gt-cutmore" data-i="${i}" style="border:1px solid var(--line,#ddd);border-radius:8px;padding:8px;margin-top:6px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-        <b style="font-size:12px;">${i+2}. ${m.shape==='circle'?'◯ Circle':'▭ Rectangle'}</b>
+        <b style="font-size:12px;">${i+2}. ${m.shape==='circle'?'◯ Circle':m.shape==='line'?'╱ Line':'▭ Rectangle'}</b>
         <span style="flex:1;"></span>
         <button type="button" class="btn-outline btn-sm" data-act="dup" title="Another one the same">Copy</button>
         <button type="button" class="btn-outline btn-sm" data-act="del" title="Take this cut line off">✕</button>
       </div>
-      <div class="grid3e" style="grid-template-columns:repeat(4,1fr);">
+      <div class="grid3e" style="grid-template-columns:repeat(4,1fr);">${m.shape==='line'?`
+        <label class="field"><span>LENGTH mm</span><input type="number" step="0.1" min="0.5" data-k="len" value="${round(Math.hypot(m.fw*r.w,m.fh*r.h))}"/></label>
+        <label class="field" title="0 runs across, 90 straight up, -45 down to the right"><span>ANGLE °</span><input type="number" step="1" data-k="ang" value="${round(gtLineAng(m,r))}"/></label>`:`
         <label class="field"><span>WIDTH mm</span><input type="number" step="0.1" min="0.5" data-k="w" value="${round(m.fw*r.w)}"/></label>
-        <label class="field"><span>HEIGHT mm</span><input type="number" step="0.1" min="0.5" data-k="h" value="${round(m.fh*r.h)}"/></label>
+        <label class="field"><span>HEIGHT mm</span><input type="number" step="0.1" min="0.5" data-k="h" value="${round(m.fh*r.h)}"/></label>`}
         <label class="field"><span>X mm</span><input type="number" step="0.1" data-k="x" value="${round((m.u-0.5)*r.w)}"/></label>
         <label class="field"><span>Y mm</span><input type="number" step="0.1" data-k="y" value="${round((m.v-0.5)*r.h)}"/></label>
       </div>
     </div>`).join('');
-  ['gtCutAddRect','gtCutAddCircle'].forEach(id=>document.getElementById(id).disabled=more.length+1>=GT_CUT_MAX);
+  ['gtCutAddRect','gtCutAddCircle','gtCutAddLine'].forEach(id=>document.getElementById(id).disabled=more.length+1>=GT_CUT_MAX);
+}
+// A straight line's angle on the tag in degrees: 0 across, 90 straight up.
+function gtLineAng(m,r){
+  const a=Math.atan2(-m.fh*r.h,m.fw*r.w)*180/Math.PI;
+  return Math.abs(a)<1e-9?0:a;
+}
+// and set from a length and an angle, about the middle it has
+function gtLineSet(m,r,len,ang){
+  const a=ang*Math.PI/180;
+  m.fw=len*Math.cos(a)/r.w; m.fh=-len*Math.sin(a)/r.h;
+  if(Math.abs(m.fw)<1e-9) m.fw=0;
+  if(Math.abs(m.fh)<1e-9) m.fh=0;
 }
 function gtCutMoreAdd(shape){
   const d=gtCurrentDesign; if(!d||!d.trace) return;
@@ -40919,11 +41047,14 @@ function gtCutMoreAdd(shape){
   gtCutBegin(d);
   // a 20mm one in the middle of the artwork, square on the tag whatever its box
   const r=gtEditGeom().draw, s=Math.min(20,r.w*0.4,r.h*0.4);
-  d.trace.more=more.concat([{shape,u:0.5,v:0.5,fw:s/r.w,fh:s/r.h}]);
+  // a line: 20mm straight across the middle
+  d.trace.more=more.concat([shape==='line'?{shape,u:0.5,v:0.5,fw:Math.min(20,r.w*0.6)/r.w,fh:0}
+    :{shape,u:0.5,v:0.5,fw:s/r.w,fh:s/r.h}]);
   gtArtWriteInputs(); gtArtChanged();
 }
 document.getElementById('gtCutAddRect').addEventListener('click',()=>gtCutMoreAdd('rect'));
 document.getElementById('gtCutAddCircle').addEventListener('click',()=>gtCutMoreAdd('circle'));
+document.getElementById('gtCutAddLine').addEventListener('click',()=>gtCutMoreAdd('line'));
 document.getElementById('gtCutMoreList').addEventListener('click',e=>{
   const b=e.target.closest('[data-act]'), row=e.target.closest('[data-i]'), d=gtCurrentDesign;
   if(!b||!row||!d||!d.trace||!d.trace.more) return;
@@ -40945,7 +41076,9 @@ document.getElementById('gtCutMoreList').addEventListener('input',e=>{
   const m=d.trace.more[Number(row.dataset.i)]; if(!m) return;
   const r=gtEditGeom().draw;
   gtCutBegin(d);
-  if(inp.dataset.k==='w'){ if(!(v>=0.5)) return; m.fw=v/r.w; }
+  if(inp.dataset.k==='len'){ if(!(v>=0.5)) return; gtLineSet(m,r,v,gtLineAng(m,r)); }
+  else if(inp.dataset.k==='ang') gtLineSet(m,r,Math.hypot(m.fw*r.w,m.fh*r.h),v);
+  else if(inp.dataset.k==='w'){ if(!(v>=0.5)) return; m.fw=v/r.w; }
   else if(inp.dataset.k==='h'){ if(!(v>=0.5)) return; m.fh=v/r.h; }
   else if(inp.dataset.k==='x') m.u=0.5+v/r.w;
   else m.v=0.5+v/r.h;
@@ -40976,6 +41109,15 @@ document.getElementById('gtArtScaleRange').addEventListener('input',e=>gtArtSetS
     (d.art||(d.art={}))[key]=isFinite(v)?v:0;
     gtArtChanged();
   });
+});
+// a quarter turn of the artwork, cut line and hole with it (gtTurnDesign)
+document.getElementById('gtArtTurnBtn').addEventListener('click',()=>{
+  const d=gtCurrentDesign; if(!d) return;
+  // a cut line half-edited is saved or let go first: its undo is the line unturned
+  gtCutSettle();
+  gtTurnDesign(d);
+  gtArtWriteInputs(); gtArtChanged();
+  try{ gtRenderOrder(); gtRefreshLibraryUi(); }catch(e){}
 });
 document.getElementById('gtArtResetBtn').addEventListener('click',()=>{
   const d=gtCurrentDesign; if(!d) return;
@@ -41346,7 +41488,8 @@ function gtVecTaker(forms,place){
   // turn: set while a turned placeholder is drawn (gtRenderPage) - each page
   // placed then is turned with it
   const me={turn:null,take(d,r,b,gap,clip,noInvert,whole){
-    const put=o=>place.push(me.turn?{...o,turn:me.turn}:o);
+    // d.turn: the design's artwork turned, so its page goes in turned the same
+    const put=o=>{ if(d.turn) o={...o,rect:gtTurnRect(o.rect,d.turn)}; place.push(me.turn?{...o,turn:me.turn}:o); };
     if(!forms.has(d.id)) return false;
     // a placed page cannot be inverted - unless it was drawn inverted for it
     if(gtSheet.invertArt&&!noInvert&&!forms.get(d.id).inverted) return false;
@@ -41666,6 +41809,20 @@ async function gtFinishRestore(){
   document.querySelectorAll('#gtFinishSeg [data-gt-finish]')
     .forEach(x=>x.classList.toggle('on',x.dataset.gtFinish===gtFinish));
 }
+// The back picture belongs to the run it was set on. Matte and Gloss are one
+// sheet on one page, so a back uploaded for the Matte run printed on the Gloss
+// run too. Each finish keeps its own (backByFinish) and the sheet's back is
+// swapped for the run on screen. `from` is the run the sheet's back is for now.
+function gtBackFollowFinish(from){
+  const S=gtSheet, now=gtFinish;
+  const owner=S.backFinish||from||now;
+  if(owner===now){ S.backFinish=now; return false; }
+  const m=(S.backByFinish&&typeof S.backByFinish==='object')?S.backByFinish:(S.backByFinish={});
+  m[owner]=S.backFile||'';
+  S.backFile=typeof m[now]==='string'?m[now]:'';
+  S.backFinish=now;
+  return true;
+}
 document.getElementById('gtFinishSeg').addEventListener('click',async e=>{
   const b=e.target.closest('[data-gt-finish]'); if(!b) return;
   const was=gtFinish;
@@ -41683,6 +41840,10 @@ document.getElementById('gtFinishSeg').addEventListener('click',async e=>{
     (await gtFinishMap())[gtMode]=gtFinish;
     await gtIdbPut('gtFinish',{...gtFinishes}).catch(()=>{});
   }else gtFinishKeep();
+  // the run's own back picture, not the one the other run was printing
+  if(!onLoan&&gtBackFollowFinish(was)){
+    await gtHydrateBacks(); await gtSaveLib(); gtSyncShapeSlots(); gtDraw();
+  }
   if(onLoan&&was!==gtFinish){
     await mcGtOpenFull(mcGtHome.page,gtFinish).catch(()=>{});
     mcGtSetFinish(mcGtHome?mcGtHome.finish:gtFinish);
@@ -55802,7 +55963,7 @@ async function mcGtKeepOneOffOn(it,si){
   si.oneOff={id:d.id,name:d.name||'',file:d.file||path,path,
     fields:(d.fields||[]),hole:d.hole||null,...(d.back?{back:d.back}:{}),
     artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,
-    ...(d.cutSeen?{cutSeen:d.cutSeen}:{}),...(d.cutSheet?{cutSheet:true}:{})};
+    ...(d.cutSeen?{cutSeen:d.cutSeen}:{}),...(d.cutSheet?{cutSheet:true}:{}),...(d.turn?{turn:d.turn}:{})};
 }
 // The copies these lines are carrying, back into the library — only the ones
 // the library cannot already answer for, so a page still holding its one-offs
@@ -55826,7 +55987,7 @@ async function mcGtRehydrate(lines){
       const d=gtNormalizeDesign({id:one.id,name:one.name||'One-off',
         file:one.file||one.path,adhoc:true,fields:one.fields||[],hole:one.hole,back:one.back,
         ...(one.artV?{artV:one.artV}:{}),art:one.art,bleed:one.bleed,trace:one.trace,
-        cutSeen:one.cutSeen,cutSheet:one.cutSheet});
+        cutSeen:one.cutSeen,cutSheet:one.cutSheet,turn:one.turn});
       gtAssets.set(d.file,data);
       try{ gtImgs.set(d.id,await loadImage(await gtArtURL(data,d.file,true))); }catch(e){}
       gtLib.designs.push(d);
@@ -55956,7 +56117,7 @@ function mcGiftWire(it){
     // before its name is read, and a library of a few hundred is all names
     const left=rows.length-80;
     panel.innerHTML=rows.slice(0,80).map((d,i)=>{
-      const img=(q&&i<25)?gtImgGet(d.id,true):gtImgs.get(d.id);
+      const img=(q&&i<25)?gtImgGet(d.id,true):gtTurnImg(gtImgs.get(d.id),gtTurnOf(d));
       const shot=img&&img.src
         ? `<img class="mc-gt-shot" src="${escapeHtml(gtThumbOf(img))}" alt="" loading="lazy"/>`
         : '<span class="mc-gt-shot blank">◻</span>';
@@ -58223,7 +58384,7 @@ const PJ_KINDS={
             fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
             // how it sits, its own bleed and its traced cut line
             artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,
-            ...(d.cutSheet?{cutSheet:true}:{})}}:{})};
+            ...(d.cutSheet?{cutSheet:true}:{}),...(d.turn?{turn:d.turn}:{})}}:{})};
       });
       const sheet={};
       GT_JOB_SHEET_KEYS.forEach(k=>{ if(gtSheet[k]!==undefined) sheet[k]=gtSheet[k]; });
