@@ -34102,13 +34102,59 @@ function gtBaseDotsFind(){
     if(n<minPx) return [];
     // the middle of each pixel, not its corner: half a pixel short, every dot
     // read up and left of where it is printed
-    out.push({cx:rect.x+(sx/n+0.5)/pxPerMmX, cy:rect.y+(sy/n+0.5)/pxPerMmY, r});
+    // rm: its size as printed, off the dark it covers - what the PDF's own
+    // vector dot is drawn at (gtDotsVec)
+    out.push({cx:rect.x+(sx/n+0.5)/pxPerMmX, cy:rect.y+(sy/n+0.5)/pxPerMmY, r,
+      rm:Math.sqrt(n/Math.PI)/((pxPerMmX+pxPerMmY)/2)});
   }
   return out;
 }
 // Printed, so this draws on the export pass as readily as on the preview —
 // except when the dots are already in the picture underneath, where drawing
 // our own on top of them would just be a second, slightly-off dot.
+// The four dots in the PDF as vector circles, whichever way they come - drawn
+// by the sheet or read off the base layer - so the cutter's camera finds a
+// clean round edge at any print resolution rather than a 300dpi staircase.
+// The base layer's own pixels under each one are wiped first (gtDotsWipe), so
+// no soft rim of the old dot shows round the sharp one. A base layer whose four
+// dots cannot be found is left exactly as it is.
+function gtDotsVec(){
+  const S=gtSheet;
+  if(S.marksFromBase){
+    const m=gtBaseDots();
+    if(m.length!==4) return [];
+    // the size it is printed at, where that reads sensibly; the DOT ⌀ field otherwise
+    return m.map(d=>({cx:d.cx,cy:d.cy,r:(d.rm>d.r*0.5&&d.rm<d.r*1.6)?d.rm:d.r}));
+  }
+  return gtMarks();
+}
+// white over each dot's pixels, a little past its edge (white multiplies to nothing)
+function gtDotsWipe(ctx,sc,ox,oy){
+  const m=gtDotsVec(); if(!m.length) return;
+  ctx.save();
+  ctx.globalCompositeOperation='source-over';
+  ctx.fillStyle='#fff';
+  m.forEach(d=>{
+    ctx.beginPath();
+    ctx.arc((d.cx-(ox||0))*sc,(d.cy-(oy||0))*sc,(d.r*1.15+0.4)*sc,0,Math.PI*2);
+    ctx.fill();
+  });
+  ctx.restore();
+}
+function gtDotsPdfOps(hMm){
+  const m=gtDotsVec(); if(!m.length) return '';
+  const f=v=>(Math.round(v*1e4)/1e4).toString(), k=0.5522847498;
+  let ops='q 0 g\n';
+  m.forEach(d=>{
+    const x=mmToPt(d.cx), y=mmToPt(hMm-d.cy), r=mmToPt(d.r), c=r*k;
+    ops+=`${f(x+r)} ${f(y)} m `
+      +`${f(x+r)} ${f(y+c)} ${f(x+c)} ${f(y+r)} ${f(x)} ${f(y+r)} c `
+      +`${f(x-c)} ${f(y+r)} ${f(x-r)} ${f(y+c)} ${f(x-r)} ${f(y)} c `
+      +`${f(x-r)} ${f(y-c)} ${f(x-c)} ${f(y-r)} ${f(x)} ${f(y-r)} c `
+      +`${f(x+c)} ${f(y-r)} ${f(x+r)} ${f(y-c)} ${f(x+r)} ${f(y)} c f\n`;
+  });
+  return ops+'Q';
+}
 function gtDrawMarks(ctx,sc){
   if(gtSheet.marksFromBase) return;
   const m=gtMarks(); if(!m.length) return;
@@ -36921,6 +36967,8 @@ function gtBaseOver(sc){
     c.width=Math.max(1,Math.round(base.w*sc)); c.height=Math.max(1,Math.round(base.h*sc));
     const ctx=c.getContext('2d');
     ctx.drawImage(gtBaseImg,0,0,c.width,c.height);
+    // only a PDF takes this layer: its dots go in as vector over it (gtDotsPdfOps)
+    gtDotsWipe(ctx,c.width/base.w,base.x,base.y);
     const d=ctx.getImageData(0,0,c.width,c.height);
     c.width=c.height=0;
     return d;
@@ -36976,6 +37024,8 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   // With artwork placed under the render the base is the PDF's own layer over
   // it all instead (gtBaseOver), so it does not cover the placed pages.
   if(!vec&&!back) gtDrawBase(ctx,sc);
+  // a PDF's dots go in as vector (gtDotsPdfOps): the base layer's are wiped here
+  if(!vec&&!back&&gtQrVecPass) gtDotsWipe(ctx,sc,0,0);
   // the sheet's number, as a QR code, on the front only
   // (in a PDF it goes in as vector instead — gtQrPdfOps)
   if(!back&&!gtQrVecPass) try{ gtDrawQr(ctx,sc,page); }catch(e){}
@@ -37077,7 +37127,7 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   if(back&&!forExport) ctx.restore();
   // and the dots over everything, on the preview and on the printed sheet
   // alike — artwork that ran over one would blind the camera. The front's.
-  if(!back) gtDrawMarks(ctx,sc);
+  if(!back&&!(gtQrVecPass&&gtDotsVec().length)) gtDrawMarks(ctx,sc);
 }
 // ---------- closing in on the tag being edited ----------
 // A tag is a couple of centimetres on a sheet the size of a page: at the size
@@ -41644,7 +41694,7 @@ async function gtBuildSide(side,pages,plan,cuts){
     const ctx=c.getContext('2d');
     const out={imgData:ctx.getImageData(0,0,c.width,c.height),
                wMm:S.paperW,hMm:S.paperH,place,clear:!!vec,
-               ink:back?'':gtQrPdfOps(i,S.paperH),
+               ink:back?'':[gtDotsPdfOps(S.paperH),gtQrPdfOps(i,S.paperH)].filter(Boolean).join('\n'),
                // the words, then the base layer (the front's) multiplied over them
                over:words.concat((vec&&!back)?gtBaseOver(px/Math.max(S.paperW,S.paperH)):[])};
     setTimeout(()=>{ c.width=c.height=0; },0);
@@ -58428,7 +58478,7 @@ async function mcGiftBundle(lines,mode,side,guest){
       const imgData=ctx.getImageData(0,0,c.width,c.height);
       // the base layer is the front's
       return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH,place,clear:!!vec,
-              ink:back?'':gtQrPdfOps(i,gtSheet.paperH),
+              ink:back?'':[gtDotsPdfOps(gtSheet.paperH),gtQrPdfOps(i,gtSheet.paperH)].filter(Boolean).join('\n'),
               over:words.concat((vec&&!back)?gtBaseOver(px/Math.max(gtSheet.paperW,gtSheet.paperH)):[])};
     },sources);
     // handed to mcPut, which every caller saves this PDF through next
