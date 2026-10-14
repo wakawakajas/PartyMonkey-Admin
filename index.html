@@ -29162,6 +29162,39 @@ if(sb){
 // in as a PDF is not rendered at all: its page is placed under the render,
 // which is the only way its colours arrive as they were drawn.
 function mmToPt(mm){return mm*72/25.4;}
+// A picture going into a PDF with a soft mask keeps a colour under every pixel
+// the mask hides, and a canvas leaves those black. A viewer or RIP that scales
+// the picture blends its neighbours' colour into each edge pixel - so wherever
+// a see-through hole met colour (the bleed round a placed page, the edge of a
+// word) a hairline of that hidden black came through: dark lines round every
+// tag, gone at 1200 dpi, there at screen and print sizes. Each hidden pixel
+// next to a seen one takes the seen one's colour instead, a few pixels deep,
+// so whatever is blended in is the colour that is already there.
+function rgbaFillClear(imgData,depth){
+  const w=imgData.width,h=imgData.height,a=imgData.data,n=w*h;
+  const seen=new Uint8Array(n);
+  let any=false;
+  for(let i=0;i<n;i++){ if(a[i*4+3]) seen[i]=1; else any=true; }
+  if(!any) return;
+  for(let pass=1;pass<=(depth||4);pass++){
+    let grew=false;
+    for(let y=0;y<h;y++){
+      const row=y*w;
+      for(let x=0;x<w;x++){
+        const i=row+x; if(seen[i]) continue;
+        let j=-1;
+        if(x>0&&seen[i-1]&&seen[i-1]<=pass) j=i-1;
+        else if(x<w-1&&seen[i+1]&&seen[i+1]<=pass) j=i+1;
+        else if(y>0&&seen[i-w]&&seen[i-w]<=pass) j=i-w;
+        else if(y<h-1&&seen[i+w]&&seen[i+w]<=pass) j=i+w;
+        if(j<0) continue;
+        a[i*4]=a[j*4]; a[i*4+1]=a[j*4+1]; a[i*4+2]=a[j*4+2];
+        seen[i]=pass+1; grew=true;
+      }
+    }
+    if(!grew) break;
+  }
+}
 function rgbaToRawRgbScanlines(imgData){
   const w=imgData.width,h=imgData.height,data=imgData.data;
   const rowBytes=1+w*3; // leading filter-type byte (0 = None) per row, per PNG/FlateDecode predictor convention
@@ -30390,6 +30423,7 @@ async function imgPdfBytes(img){
   finally{ c.width=c.height=0; }
   let see=false;
   for(let i=3;i<id.data.length;i+=4) if(id.data[i]<255){ see=true; break; }
+  if(see) rgbaFillClear(id,4);
   const rgb=await deflateBytes(rgbaToRawRgbScanlines(id));
   const msk=see?await deflateBytes(rgbaToAlphaScanlines(id)):null;
   const enc=new TextEncoder(), parts=[], off=[]; let pos=0;
@@ -36649,7 +36683,10 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,turn?key+'@t'+turn:key,gap);
   // a pixel short of the trim, so the ring overlaps the placed page rather
   // than leaving a hairline of paper between them
-  if(took==='ring') ctx.clearRect(r.x*sc+0.5,r.y*sc+0.5,r.w*sc-1,r.h*sc-1);
+  // A whole pixel in, not half: at half, the ring's soft edge and the page's
+  // both let a little paper through on the same line, and it showed as a pale
+  // hairline round the tag at screen and print sizes
+  if(took==='ring') ctx.clearRect(r.x*sc+1,r.y*sc+1,r.w*sc-2,r.h*sc-2);
   // grown bleed over a placed page: punch out every pixel the artwork
   // itself covers, so the page underneath shows there and only the growth
   // (round the box, and round a cut-out's shape inside it) stays raster.
@@ -41539,6 +41576,8 @@ async function gtBuildPdf(count,render,sources){
     // placed below them — the others are transparent too, and a mask left off
     // there would print them as a sheet of black.
     const alpha=(clear||put.length)?rgbaToAlphaScanlines(imgData):null;
+    // what the mask hides takes its neighbours' colour, so no black is blended in
+    if(alpha) rgbaFillClear(imgData,4);
     const deflated=await deflateBytes(rgbaToRawRgbScanlines(imgData));
     const packedA=alpha?await deflateBytes(alpha):null;
     const imgNum=alloc(), maskNum=alpha?alloc():0, contentNum=alloc(), pageNum=alloc();
@@ -41618,6 +41657,7 @@ async function gtBuildPdf(count,render,sources){
     for(const o of (over||[])){
       const d=o.draw(); if(!d) continue;
       const a=rgbaToAlphaScanlines(d);
+      rgbaFillClear(d,4);
       const rgb=await deflateBytes(rgbaToRawRgbScanlines(d)), msk=await deflateBytes(a);
       const num=alloc(), mnum=alloc(), nm='Lw'+layers.length;
       mark(num); push(enc.encode(`${num} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${d.width} `
