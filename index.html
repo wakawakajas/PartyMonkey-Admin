@@ -36390,12 +36390,30 @@ function gtNewBleed(){ return {on:true,mm:0}; }
 // line: the order line the tag is on. A line ticked for a bleed of its own
 // (Own bleed for this line) beats the design's and the sheet's — the same
 // design can bleed differently for one customer.
+// the ways a bleed can be made (the sheet's Bleed style chips), for a line's own
+const GT_BLEED_MODES=['offset','scale','mirror','extend','content','ai'];
+const GT_BLEED_MODE_NAMES={offset:'Offset',scale:'Stretch',mirror:'Mirror',extend:'Extend edges',content:'Content-aware',ai:'AI fill'};
+// A line with a bleed style of its own is drawn in that style: the sheet's is
+// stood aside for the length of the line's drawing and put straight back, so
+// every part of the drawing and the placing that asks the sheet gets the line's
+function gtLineBleedMode(line){
+  const b=line&&line.bleed;
+  return b&&b.on&&GT_BLEED_MODES.includes(b.mode)?b.mode:null;
+}
+function gtWithLineMode(line,fn){
+  const m=gtLineBleedMode(line);
+  if(!m||m===gtSheet.bleedMode) return fn();
+  const was=gtSheet.bleedMode;
+  gtSheet.bleedMode=m;
+  try{ return fn(); } finally{ gtSheet.bleedMode=was; }
+}
 function gtLineBleed(line){
   const b=line&&line.bleed;
   return b&&b.on?Math.max(0,Number(b.mm)||0):null;
 }
 // what a line's own bleed is kept as, wherever the line is copied to
-const gtLineBleedKept=l=>({...(l&&l.bleed&&l.bleed.on?{bleed:{on:true,mm:Math.max(0,Number(l.bleed.mm)||0)}}:{}),
+const gtLineBleedKept=l=>({...(l&&l.bleed&&l.bleed.on?{bleed:{on:true,mm:Math.max(0,Number(l.bleed.mm)||0),
+    ...(GT_BLEED_MODES.includes(l.bleed.mode)?{mode:l.bleed.mode}:{})}}:{}),
   // and its own back (see gtBackOf), which travels with it the same way
   ...(l&&typeof l.back==='string'?{back:l.back}:{})});
 function gtBleedOf(d,line){
@@ -37062,7 +37080,7 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
     gtWithTurn(ctx,at,sc,back,u=>{
       gtDrawingSlot={s:u,back,d:gtDesign(line.designId)};
       if(vec) vec.turn=at.rot?{cx:at.x+at.w/2,cy:at.y+at.h/2,deg:(back?-1:1)*at.rot}:null;
-      try{ (back?gtDrawBack:gtDrawTag)(ctx,line,u.x,u.y,u.w,u.h,sc,forExport,vec); }
+      try{ gtWithLineMode(line,()=>(back?gtDrawBack:gtDrawTag)(ctx,line,u.x,u.y,u.w,u.h,sc,forExport,vec)); }
       finally{ gtDrawingSlot=null; if(vec) vec.turn=null; }
     });
   });
@@ -38048,7 +38066,9 @@ function gtRenderOrder(){
           :`<label class="click-tog" title="This line bleeds its own figure; every other line follows the sheet's bleed (or its design's own)">
           <input type="checkbox" data-gtl="bleedOn"${l.bleed&&l.bleed.on?' checked':''}/>Own bleed for this line</label>`}
         ${l.bleed&&l.bleed.on&&!(d&&gtOwnCut(d)&&Number(d.trace.out)>0)?`<label class="field" style="max-width:110px;margin:0;"><span>BLEED (mm)</span>
-          <input type="number" step="0.1" min="0" value="${round(Number(l.bleed.mm)||0)}" data-gtl="bleedMm"/></label>`:''}
+          <input type="number" step="0.1" min="0" value="${round(Number(l.bleed.mm)||0)}" data-gtl="bleedMm"/></label>
+          <label class="field" style="max-width:150px;margin:0;" title="How this line's bleed is made - the other lines keep the sheet's style"><span>BLEED STYLE</span>
+          <select data-gtl="bleedMode">${GT_BLEED_MODES.map(m=>`<option value="${m}"${(gtLineBleedMode(l)||gtSheet.bleedMode)===m?' selected':''}>${GT_BLEED_MODE_NAMES[m]}</option>`).join('')}</select></label>`:''}
       </div>
       <div class="gt-pick">
         ${gtArt(l.designId)}
@@ -38263,9 +38283,14 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
   // a bleed of this line's own, starting at what it bleeds now
   if(lk==='bleedOn'){
     if(e.target.checked){ const d=gtDesign(line.designId);
-      line.bleed={on:true,mm:Math.round((d?gtBleedOf(d):(gtSheet.bleedOn?Number(gtSheet.bleed)||0:0))*10)/10}; }
+      line.bleed={on:true,mm:Math.round((d?gtBleedOf(d):(gtSheet.bleedOn?Number(gtSheet.bleed)||0:0))*10)/10,
+        mode:GT_BLEED_MODES.includes(gtSheet.bleedMode)?gtSheet.bleedMode:'offset'}; }
     else delete line.bleed;
     gtNestCache=null; gtRenderOrder(); gtDraw(); return;
+  }
+  if(lk==='bleedMode'){
+    if(line.bleed&&GT_BLEED_MODES.includes(e.target.value)){ line.bleed.mode=e.target.value; gtNestCache=null; gtDraw(); }
+    return;
   }
   if(lk==='bleedMm'){
     const v=parseFloat(e.target.value);
@@ -41722,7 +41747,8 @@ async function gtBuildPdf(count,render,sources){
 // small once to ask for its fills, and the PDF waits for them all — never a
 // sheet printed with the stand-in edge because a fill was still going. Used by
 // this screen's export and by Magic Create's alike.
-const gtBleedFilled=()=>gtSheet.bleedMode==='content'||gtSheet.bleedMode==='ai';
+const gtBleedFilled=()=>gtSheet.bleedMode==='content'||gtSheet.bleedMode==='ai'
+  ||(gtOrder||[]).some(l=>{ const m=gtLineBleedMode(l); return m==='content'||m==='ai'; });
 async function gtFillBleeds(pages,plan,withBack){
   if(!gtBleedFilled()) return;
   // held until every fill has landed: a redraw of the screen in between asks
@@ -57258,7 +57284,8 @@ async function mcGtWriteBack(edited,home,asked){
     // sheets instead of sharing one.
     it.sheet_item={...(it.sheet_item||{}),
       designId:l.designId,qty:l.qty,vals:l.vals||{},extra:l.extra||[],
-      bleed:l.bleed&&l.bleed.on?{on:true,mm:Math.max(0,Number(l.bleed.mm)||0)}:undefined,
+      bleed:l.bleed&&l.bleed.on?{on:true,mm:Math.max(0,Number(l.bleed.mm)||0),
+        ...(GT_BLEED_MODES.includes(l.bleed.mode)?{mode:l.bleed.mode}:{})}:undefined,
       back:typeof l.back==='string'?l.back:undefined,
       // the extras are whatever the sheet now prints past the order; left as
       // they were, the line went on saying the old number of extras
