@@ -31269,7 +31269,8 @@ let gtSlotEdit=false, gtSelSlot=null;   // Contours on, and the placeholder in h
 const gtShapeSig=new Map();          // see gtKeepShape
 const gtSelSet=new Set();          // every placeholder picked, gtSelSlot among them
 let gtMarquee=null;                // the box being dragged out to pick several: {x0,y0,x1,y1} in mm
-const GT_SHEET_NEW={defaults6:true,nestOn:false,nestReal:false,paperW:317,paperH:449,pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:6,sideTrim:6,margin:6,gap:6,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{},marksFromBase:true,marksFromBaseV2:false,baseRemoved:false,backFile:'',slotDx:0,slotDy:0,backDx:0,backDy:0};
+const GT_SHEET_NEW={defaults6:true,nestOn:false,nestReal:false,paperW:317,paperH:449,pltInnerFirst:true,pltOvercut:0.5,markSpanOn:true,markSpanX:301.975,markSpanY:432.9,slotRadius:0,gridCols:0,gridRows:0,gridMode:'center',leadTrim:6,sideTrim:6,margin:6,gap:6,gapY:null,pltOn:true,bleedTrimPx:0,bleedFillGap:false,invertArt:false,distCols:0,distGapX:3,distGapY:3,distMargin:10,slotHole:null,shapeSlots:{},marksFromBase:true,marksFromBaseV2:false,baseRemoved:false,backFile:'',slotDx:0,slotDy:0,backDx:0,backDy:0,
+  byFinish:{},finishOf:'',backByFinish:{},backFinish:''};
 const gtSheet={paperW:317,paperH:449,tagW:60,tagH:40,margin:6,gap:6,
   showCut:true,showHole:true,layoutFile:'',layoutW:0,layoutH:0,
   // null rather than a number: the layout centres itself until it is told
@@ -32693,6 +32694,7 @@ async function gtHydrateBacks(){
   if(gtSheet.backFile) want.add(gtSheet.backFile);
   if(gtSheetBack()) want.add(gtSheetBack());
   Object.values(gtSheet.backByFinish||{}).forEach(f=>{ if(f&&typeof f==='string') want.add(f); });
+  Object.values(gtSheet.byFinish||{}).forEach(v=>{ if(v&&v.backFile&&typeof v.backFile==='string') want.add(v.backFile); });
   gtLib.designs.forEach(d=>{ if(d.back&&d.back.file) want.add(d.back.file); });
   for(const f of want){
     if(gtBackImgs.has(f)) continue;
@@ -33145,8 +33147,8 @@ function gtBackChrome(){
 async function gtApplyMode(){
   // the sheet just read keeps the back of the run it was last on; a page whose
   // run is now another takes that run's back (not while a batch has it on loan)
-  if(gtLoaded&&!(typeof mcGtHome!=='undefined'&&mcGtHome)&&gtBackFollowFinish(gtFinish)){
-    await gtHydrateBacks(); gtSaveLib(); gtSyncShapeSlots();
+  if(gtLoaded&&!(typeof mcGtHome!=='undefined'&&mcGtHome)&&gtFinishFollow(gtFinish)){
+    await gtFinishShow(); gtSaveLib();
   }
   gtPaintMode();
   gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
@@ -41872,19 +41874,49 @@ async function gtFinishRestore(){
   document.querySelectorAll('#gtFinishSeg [data-gt-finish]')
     .forEach(x=>x.classList.toggle('on',x.dataset.gtFinish===gtFinish));
 }
-// The back picture belongs to the run it was set on. Matte and Gloss are one
-// sheet on one page, so a back uploaded for the Matte run printed on the Gloss
-// run too. Each finish keeps its own (backByFinish) and the sheet's back is
-// swapped for the run on screen. `from` is the run the sheet's back is for now.
-function gtBackFollowFinish(from){
+// Each paper is its own sheet. Matte, Gloss and Sticker are one page with one
+// library, but each is run on its own paper: its own cutting file and
+// placeholders, its own grid, bleed and nesting, its own margin shift and its
+// own back picture. A cut line set up for the Matte run changed the Gloss
+// run's too. So the sheet on screen is the paper on screen's, and each other
+// paper's is kept in byFinish exactly as it was last saved - swapped in when
+// that paper is picked, here or by Magic Create, and never worked out again.
+// finishOf: the paper the sheet on screen belongs to. `from`: the paper it is
+// for where finishOf does not say (a sheet saved before papers kept their own).
+const GT_FINISH_KEYS=()=>[...GT_JOB_SHEET_KEYS,'slots','shapeSlots','layoutW','layoutH','layoutX','layoutY',
+  'backFile','slotDx','slotDy','backDx','backDy'];
+function gtFinishFollow(from){
   const S=gtSheet, now=gtFinish;
-  const owner=S.backFinish||from||now;
-  if(owner===now){ S.backFinish=now; return false; }
-  const m=(S.backByFinish&&typeof S.backByFinish==='object')?S.backByFinish:(S.backByFinish={});
-  m[owner]=S.backFile||'';
-  S.backFile=typeof m[now]==='string'?m[now]:'';
-  S.backFinish=now;
+  const owner=S.finishOf||S.backFinish||from||now;
+  if(owner===now){ S.finishOf=now; S.backFinish=now; return false; }
+  try{ gtKeepShape(); }catch(e){}
+  const cp=v=>v===undefined?undefined:JSON.parse(JSON.stringify(v));
+  const all=(S.byFinish&&typeof S.byFinish==='object')?S.byFinish:(S.byFinish={});
+  const mine={};
+  GT_FINISH_KEYS().forEach(k=>{ mine[k]=cp(k==='slots'?gtSlotsBase:S[k]); });
+  all[owner]=mine;
+  const next=all[now];
+  if(next){
+    GT_FINISH_KEYS().forEach(k=>{ if(k in next&&next[k]!==undefined) S[k]=cp(next[k]); });
+  }else{
+    // a paper never set up starts from the one on screen, all but its back:
+    // backs were kept per paper before anything else was (backByFinish)
+    const old=S.backByFinish&&typeof S.backByFinish==='object'?S.backByFinish[now]:undefined;
+    S.backFile=typeof old==='string'?old:'';
+  }
+  S.finishOf=now; S.backFinish=now;
+  // what this session held of the other paper's placeholders is not this one's
+  gtShapeSlots.clear(); gtShapeSig.clear();
+  gtLayout=null; gtLayoutFrom=''; gtNestCache=null;
+  try{ gtPickOnly(null); }catch(e){}
   return true;
+}
+// the paper's own sheet put on screen: its cutting file read in again
+async function gtFinishShow(){
+  try{ await gtHydrateBacks(); }catch(e){}
+  gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw();
+  await gtUndoLayout();
+  gtShapeLoaded();
 }
 document.getElementById('gtFinishSeg').addEventListener('click',async e=>{
   const b=e.target.closest('[data-gt-finish]'); if(!b) return;
@@ -41903,10 +41935,8 @@ document.getElementById('gtFinishSeg').addEventListener('click',async e=>{
     (await gtFinishMap())[gtMode]=gtFinish;
     await gtIdbPut('gtFinish',{...gtFinishes}).catch(()=>{});
   }else gtFinishKeep();
-  // the run's own back picture, not the one the other run was printing
-  if(!onLoan&&gtBackFollowFinish(was)){
-    await gtHydrateBacks(); await gtSaveLib(); gtSyncShapeSlots(); gtDraw();
-  }
+  // the run's own sheet - cut line, placeholders, back - as it was saved
+  if(!onLoan&&gtFinishFollow(was)){ await gtFinishShow(); await gtSaveLib(); }
   if(onLoan&&was!==gtFinish){
     await mcGtOpenFull(mcGtHome.page,gtFinish).catch(()=>{});
     mcGtSetFinish(mcGtHome?mcGtHome.finish:gtFinish);
@@ -56777,8 +56807,11 @@ async function mcGtOpenFull(page,finish){
     if(!own.length) gtJobBack=null;    // a new order: no saved sheet's back on it
     gtOrder=own.concat(lines.map(mcGtLine));
   }
-  // and the sheet says which run it is, because that is what names its PDF
+  // and the sheet says which run it is, because that is what names its PDF -
+  // and is that run's own sheet, its cut line as saved for that paper
+  const wasFin=gtFinish;
   mcGtSetFinish(fin);
+  if(typeof gtFinishFollow==='function'&&gtFinishFollow(wasFin)) await gtFinishShow();
   if(typeof gtRenderOrder==='function') gtRenderOrder();
   if(typeof gtDraw==='function') gtDraw();
   showScreen('tool-gift-tag');
@@ -56904,8 +56937,11 @@ async function mcGtReturn(){
     if(target) gtOrders[target]=(gtOrders[target]||[]).concat(back);
     else gtOrder=gtOrder.concat(back);
   }
-  // the run the batch set was the lent sheet's; the page goes back to its own
+  // the run the batch set was the lent sheet's; the page goes back to its own,
+  // and to that run's own sheet
+  const lentFin=typeof gtFinish!=='undefined'?gtFinish:null;
   if(typeof gtFinishRestore==='function') await gtFinishRestore();
+  if(typeof gtFinishFollow==='function'&&gtFinishFollow(lentFin)) await gtFinishShow();
   if(typeof gtRenderOrder==='function') gtRenderOrder();
   await mcGtWriteBack(edited,home,!mcBusy);
   // A row added on the sheet that did not become a line - its order not given,
@@ -58485,6 +58521,14 @@ const PJ_KINDS={
       const oneOffs=new Set(lines.filter(l=>l.oneOff).map(l=>l.id));
       lines.forEach(l=>{ delete l.oneOff; });
       gtOrder=add?gtOrder.concat(lines):lines;
+      // its paper first, and that paper's own sheet, so what the saved sheet
+      // brings goes onto that paper and not over another paper's cut line
+      if(row.data&&row.data.finish&&!add){
+        const wasFin=gtFinish;
+        gtFinish=row.data.finish;
+        if(typeof gtFinishFollow==='function'&&gtFinishFollow(wasFin)) await gtFinishShow();
+        try{ gtFinishKeep(); }catch(e){}
+      }
       // the sheet as it was kept: a sheet being added to is one somebody has set up, so it stays
       const kept=row.data&&row.data.sheet;
       if(kept&&!add){
