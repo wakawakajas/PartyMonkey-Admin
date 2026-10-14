@@ -6920,6 +6920,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <div class="upload-slot">
             <div class="thumb" id="gtBackThumb"><span class="ico">＋</span></div>
             <div class="info" id="gtBackInfo">No file — backs are blank</div>
+            <select id="gtBackPresetSel" title="One of the preset backs, for every line left on Default" style="max-width:150px;"></select>
             <button class="btn-outline btn-sm" id="gtBackBtn">Upload</button>
             <button class="btn-outline btn-sm" id="gtBackDelBtn" style="display:none;">Clear</button>
           </div>
@@ -31259,6 +31260,7 @@ const gtBackImgs=new Map();        // back picture file -> decoded Image (see gt
 // the order's: kept per page with it (gtJobBacks), gone when the order is
 // emptied or replaced, and never lent to a Magic Create batch.
 let gtJobBack=null;
+let gtBackListing=false;           // the preset backs are being read off the folder
 const gtSheetBack=()=>gtJobBack!==null&&gtOrder.length?gtJobBack:(gtSheet.backFile||'');
 let gtDir=null;                    // the chosen folder, once permission is in hand
 let gtOrder=[];
@@ -32695,6 +32697,7 @@ async function gtHydrateBacks(){
   if(gtSheetBack()) want.add(gtSheetBack());
   Object.values(gtSheet.backByFinish||{}).forEach(f=>{ if(f&&typeof f==='string') want.add(f); });
   Object.values(gtSheet.byFinish||{}).forEach(v=>{ if(v&&v.backFile&&typeof v.backFile==='string') want.add(v.backFile); });
+  (gtOrder||[]).forEach(l=>{ if(l&&l.back&&typeof l.back==='string') want.add(l.back); });
   gtLib.designs.forEach(d=>{ if(d.back&&d.back.file) want.add(d.back.file); });
   for(const f of want){
     if(gtBackImgs.has(f)) continue;
@@ -33091,8 +33094,14 @@ const gtSideOf=f=>(f&&f.side==='back')?'back':'front';
 // What prints on the back of a design: its own picture where it has one, the
 // sheet's otherwise, nothing with neither. key names it to the export, which
 // places a PDF back whole the way it places a front (gtVecTaker).
-function gtBackOf(d){
+function gtBackOf(d,line){
   if(!d||!gtBackOn()) return null;
+  // a back picked on the line itself: '' is blank, a path is that picture,
+  // fitted to the tag as the sheet's back is
+  if(line&&typeof line.back==='string'){
+    if(!line.back) return null;
+    return {file:line.back,own:false,line:true,key:'back:'+line.back,img:gtBackImgs.get(line.back)||null,art:{}};
+  }
   const own=!!(d.back&&d.back.file);
   const file=own?d.back.file:gtSheetBack();
   if(!file) return null;
@@ -33104,7 +33113,7 @@ function gtBackOf(d){
 // field or a picture that would not load is no back, or a blank page goes out.
 const gtHasBack=(d,line)=>{
   if(!d||!gtBackOn()) return false;
-  const bk=gtBackOf(d);
+  const bk=gtBackOf(d,line);
   if(bk&&bk.img&&bk.img.naturalWidth) return true;
   return gtFieldsOf(d,line).some(f=>gtSideOf(f)==='back'&&String(gtVal(line,f).text||'').trim());
 };
@@ -33116,7 +33125,7 @@ const gtSheetHasBack=()=>gtBackOn()&&gtQueue().some(l=>gtHasBack(gtDesign(l.desi
 function gtBackUnread(){
   if(!gtBackOn()) return [];
   const bad=new Set();
-  gtQueue().forEach(l=>{ const bk=gtBackOf(gtDesign(l.designId));
+  gtQueue().forEach(l=>{ const bk=gtBackOf(gtDesign(l.designId),l);
     if(bk&&!(bk.img&&bk.img.naturalWidth)) bad.add(bk.file.split('/').pop()||bk.file); });
   return [...bad];
 }
@@ -36352,7 +36361,9 @@ function gtLineBleed(line){
   return b&&b.on?Math.max(0,Number(b.mm)||0):null;
 }
 // what a line's own bleed is kept as, wherever the line is copied to
-const gtLineBleedKept=l=>l&&l.bleed&&l.bleed.on?{bleed:{on:true,mm:Math.max(0,Number(l.bleed.mm)||0)}}:{};
+const gtLineBleedKept=l=>({...(l&&l.bleed&&l.bleed.on?{bleed:{on:true,mm:Math.max(0,Number(l.bleed.mm)||0)}}:{}),
+  // and its own back (see gtBackOf), which travels with it the same way
+  ...(l&&typeof l.back==='string'?{back:l.back}:{})});
 function gtBleedOf(d,line){
   // Cut to its own line drawn out past the artwork (an outset), the blade runs
   // through blank paper: nothing is printed past the cut. A coloured bleed there
@@ -36723,7 +36734,7 @@ function gtBackBox(d,x,y,w,h){
 }
 function gtDrawBack(ctx,line,x,y,w,h,sc,forExport,vec){
   const d=gtDesign(line.designId); if(!d) return;
-  const bk=gtBackOf(d);
+  const bk=gtBackOf(d,line);
   if(bk&&bk.img&&bk.img.naturalWidth)
     gtPutArt(ctx,bk.img,bk.key,bk.art,x,y,w,h,gtBleedOf(d,line),sc,vec,false,gtBackBox(d,x,y,w,h));
   const A=gtTextRect(d,x,y,w,h);
@@ -37913,6 +37924,14 @@ function gtAskAge(line){
 }
 function gtRenderOrder(){
   if(!gtOrder.length) gtJobBack=null;        // the job's back went with its order
+  // the preset backs, read off the folder in the background: the list is
+  // drawn again once they are in, if any came in that were not there
+  if(gtBackOn()&&!gtBackListing){
+    gtBackListing=true;
+    const had=gtBackPresets.join('|');
+    gtBackPresetList().then(l=>{ gtBackListing=false; gtBackPresetSelWrite(); if(l.join('|')!==had&&gtOrder.length) gtRenderOrder(); })
+      .catch(()=>{ gtBackListing=false; });
+  }
   // the batch's Save chip counts these rows, so it is told whenever they change
   try{ if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync(); }catch(e){}
   const wrap=document.getElementById('gtOrderList');
@@ -38004,6 +38023,7 @@ function gtRenderOrder(){
           <div class="combo-panel" role="listbox" data-gt-design-panel>${gtDesignPanel('',l.designId)}</div>
         </div>
       </div>
+      ${gtBackRow(l,d)}
       ${gtEnhanceRow(d)}
       ${words}
       ${d?`<button type="button" class="btn-outline btn-sm" data-gt-add-lfield
@@ -38202,6 +38222,7 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
   const line=gtOrder.find(l=>l.id===card.dataset.gtLine); if(!line) return;
   const lk=e.target.dataset.gtl;
   if(lk==='qty'){ line.qty=Math.max(0,Math.floor(Number(e.target.value)||0)); gtDraw(); return; }
+  if(lk==='back'){ gtLineBackSet(line,e.target.value); return; }
   // a bleed of this line's own, starting at what it bleeds now
   if(lk==='bleedOn'){
     if(e.target.checked){ const d=gtDesign(line.designId);
@@ -38242,6 +38263,15 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
 document.getElementById('gtOrderList').addEventListener('click',async e=>{
   const card=e.target.closest('[data-gt-line]'); if(!card) return;
   const line=gtOrder.find(l=>l.id===card.dataset.gtLine);
+  if(line&&e.target.closest('[data-gt-back-oneoff]')){
+    const path=await gtTakeBack(GT_BACK_ONEOFF); if(!path) return;
+    await gtLineBackSet(line,path); gtSaveSoon(); return;
+  }
+  if(line&&e.target.closest('[data-gt-back-ai]')){
+    const file=await gtPickFile('.ai,.pdf,application/pdf,application/postscript');
+    if(file){ gtAi.forBack=line.id; gtAiOpen(file); }
+    return;
+  }
   if(line&&e.target.closest('[data-gt-add-lfield]')){
     (line.extra||(line.extra=[])).push(gtNewLineField(line));
     gtRenderOrder(); gtDraw();
@@ -38942,6 +38972,70 @@ function gtBulkApply(list){
     :`✓ ${list.length} placeholder${list.length===1?'':'s'} changed`,!off);
 }
 document.getElementById('gtBulkAllBtn').addEventListener('click',()=>gtBulkApply(gtSheet.slots));
+// ---------- a back of its own for each line ----------
+// The front is picked per line - a design from the library, a one-off, a page
+// out of an Illustrator file - and the back is picked the same way: the
+// line's Default (the design's own back, else the sheet's), Blank, one of the
+// preset backs, a one-off upload, or a page out of an Illustrator file.
+// line.back: unset = Default, '' = Blank, a path = that picture.
+var GT_BACK_ONEOFF='backs-oneoff';
+var gtBackPresets=[];
+async function gtBackPresetList(){
+  const set=new Set([...gtAssets.keys()].filter(k=>/^backs\//.test(k)));
+  if(/^backs\//.test(gtSheet.backFile||'')) set.add(gtSheet.backFile);
+  (gtLib.designs||[]).forEach(d=>{ if(d.back&&/^backs\//.test(d.back.file||'')) set.add(d.back.file); });
+  if(gtDir){
+    try{
+      if(await gtDirOk(gtDir)){
+        const dh=await gtDir.getDirectoryHandle('backs');
+        for await (const e of dh.values())
+          if(e.kind==='file'&&/\.(png|jpe?g|webp|pdf|ai)$/i.test(e.name)) set.add('backs/'+e.name);
+      }
+    }catch(e){}
+  }
+  gtBackPresets=[...set].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'}));
+  return gtBackPresets;
+}
+const gtBackName=p=>(String(p||'').split('/').pop()||'Back').replace(/\.[^.]+$/,'');
+// what Default comes to on this line, said in the list
+function gtBackDefaultName(d){
+  const own=d&&d.back&&d.back.file;
+  const f=own?d.back.file:gtSheetBack();
+  return f?gtBackName(f)+(own?' (design)':' (sheet)'):'blank';
+}
+function gtBackRow(l,d){
+  if(!gtBackOn()||!d) return '';
+  const v=typeof l.back==='string'?l.back:'*';
+  const bk=gtBackOf(d,l), pic=bk&&bk.img&&bk.img.naturalWidth?bk.img:null;
+  const list=gtBackPresets.slice();
+  const extra=l.back&&!list.includes(l.back)?l.back:null;
+  return `<div class="gt-pick" style="margin-top:6px;">
+    <span class="gt-art">${pic?`<img src="${gtThumbOf(pic)}" alt=""/>`:'⬚'}</span>
+    <label class="field" style="flex:1;min-width:0;margin:0;"><span>BACK</span>
+      <select data-gtl="back">
+        <option value="*"${v==='*'?' selected':''}>Default — ${escapeHtml(gtBackDefaultName(d))}</option>
+        <option value=""${v===''?' selected':''}>Blank</option>
+        ${list.map(p=>`<option value="${escapeHtml(p)}"${v===p?' selected':''}>${escapeHtml(gtBackName(p))}</option>`).join('')}
+        ${extra?`<option value="${escapeHtml(extra)}" selected>One-off: ${escapeHtml(gtBackName(extra))}</option>`:''}
+      </select></label>
+    <button type="button" class="btn-outline btn-sm" data-gt-back-oneoff title="A back picture for this line only">One-off…</button>
+    <button type="button" class="btn-outline btn-sm" data-gt-back-ai title="A page, or a part of one, out of an Illustrator or PDF file">From AI…</button>
+  </div>`;
+}
+// the sheet's own back picked from the presets, like a line's
+function gtBackPresetSelWrite(){
+  const el=document.getElementById('gtBackPresetSel'); if(!el) return;
+  const cur=gtSheet.backFile||'', list=gtBackPresets.slice();
+  if(cur&&!list.includes(cur)) list.push(cur);
+  el.innerHTML='<option value="">— Blank —</option>'+list.map(p=>
+    `<option value="${escapeHtml(p)}"${p===cur?' selected':''}>${escapeHtml(gtBackName(p))}</option>`).join('');
+}
+// a line's back set, its picture read in, and the sheet drawn again
+async function gtLineBackSet(line,v){
+  if(v==='*') delete line.back; else line.back=v;
+  try{ await gtHydrateBacks(); }catch(e){}
+  gtRenderOrder(); gtDraw();
+}
 // Margin shift, back: where each tag's back is printed, moved this far (as seen
 // on the back), the cut being the front's. Drawn in gtRenderPage.
 [['gtBackDx','backDx'],['gtBackDy','backDy']].forEach(([id,key])=>{
@@ -39216,6 +39310,7 @@ function gtSyncShapeSlots(){
     document.getElementById('gtBackInfo').textContent+=' · this saved sheet prints '
       +(gtJobBack?(gtJobBack.split('/').pop()||'its own'):'blank backs');
   document.getElementById('gtBackBtn').textContent=gtSheet.backFile?'Replace':'Upload';
+  gtBackPresetSelWrite();
   document.getElementById('gtBackDelBtn').style.display=gtSheet.backFile?'':'none';
   const st=document.getElementById('gtMarksFromBaseStatus');
   if(gtSheet.marksFromBase){
@@ -39536,12 +39631,18 @@ document.getElementById('gtBaseBtn').addEventListener('click',async()=>{
 // A back picture, the sheet's or a design's: kept in backs/ in the library
 // folder, where the folder scan never mistakes it for a design. PNG, JPG or
 // PDF — a PDF goes into the back PDF whole, like a front one.
-async function gtTakeBack(){
+async function gtTakeBack(folder){
   await gtEnsureDir(true);
   const file=await gtPickFile('image/png,image/jpeg,image/webp,application/pdf,'
     +'.png,.jpg,.jpeg,.webp,.pdf,.ai');
   if(!file) return null;
-  const path=await gtAssetPath('backs',file);
+  return gtBackKeep(file,folder);
+}
+// A back picture kept: a preset in backs/ (offered on every line from then on),
+// a one-off in backs-oneoff/ - written to the library folder with the rest so a
+// saved sheet still finds it, but never offered as a preset.
+async function gtBackKeep(file,folder){
+  const path=await gtAssetPath(folder||'backs',file);
   gtAssets.set(path,file);
   gtBackImgs.delete(path);
   try{ gtBackImgs.set(path,await loadImage(await gtArtURL(file,file.name))); }
@@ -39554,6 +39655,11 @@ document.getElementById('gtBackBtn').addEventListener('click',async()=>{
   gtSheet.backFile=path; gtJobBack=null;
   await gtSaveLib();
   gtSyncShapeSlots(); gtDraw();
+});
+document.getElementById('gtBackPresetSel').addEventListener('change',async e=>{
+  gtSheet.backFile=e.target.value||''; gtJobBack=null;
+  try{ await gtHydrateBacks(); }catch(err){}
+  await gtSaveLib(); gtSyncShapeSlots(); gtRenderOrder(); gtDraw();
 });
 document.getElementById('gtBackDelBtn').addEventListener('click',async()=>{
   gtSheet.backFile=''; gtJobBack=null;
@@ -39692,6 +39798,7 @@ async function gtAiOpen(file){
 }
 document.getElementById('gtAiClose').addEventListener('click',()=>{
   document.getElementById('gtAiModal').classList.remove('open');
+  gtAi.forBack=null;
   gtAi.pdf=null; gtAi.base=null; gtAi.sel=null;
 });
 document.getElementById('gtAiPrev').addEventListener('click',()=>{ if(gtAi.page>1) gtAiShow(gtAi.page-1); });
@@ -39749,7 +39856,15 @@ document.getElementById('gtAiTake').addEventListener('click',async()=>{
   const blob=await new Promise(r=>c.toBlob(r,'image/png'));
   document.getElementById('gtAiModal').classList.remove('open');
   gtAi.pdf=null; gtAi.base=null; gtAi.sel=null;
+  // opened from a line's Back: the page is that line's one-off back
+  const forBack=gtAi.forBack; gtAi.forBack=null;
   if(!blob) return;
+  if(forBack){
+    const line=gtOrder.find(l=>l.id===forBack); if(!line) return;
+    const file=new File([blob],(gtAi.name||'Back')+'.png',{type:'image/png'});
+    const path=await gtBackKeep(file,GT_BACK_ONEOFF); if(!path) return;
+    await gtLineBackSet(line,path); gtSaveSoon(); return;
+  }
   const d=await gtAdhocDesign(blob,(gtAi.name||'Artwork')+'.png');
   // straight onto the line being worked on where there is one, exactly as a
   // pasted picture goes — this is the same errand by another road
@@ -39767,7 +39882,7 @@ document.getElementById('gtAiTake').addEventListener('click',async()=>{
 });
 document.getElementById('gtAddAiBtn').addEventListener('click',async()=>{
   const file=await gtPickFile('.ai,.pdf,application/pdf,application/postscript');
-  if(file) gtAiOpen(file);
+  if(file){ gtAi.forBack=null; gtAiOpen(file); }
 });
 
 const gtAdhocSaid=d=>showMsg(document.getElementById('gtLibMsg'),
@@ -41645,7 +41760,7 @@ async function gtVectorSources(side){
   if(!wholeArtOn()) return out;
   for(const line of gtQueue()){
     const d=gtDesign(line.designId); if(!d) continue;
-    const bk=side==='back'?gtBackOf(d):null;
+    const bk=side==='back'?gtBackOf(d,line):null;
     const key=side==='back'?(bk&&bk.key):d.id, file=side==='back'?(bk&&bk.file):d.file;
     if(!key||out.has(key)) continue;
     // Invert colours touches the front artwork only (see gtVecTaker)
@@ -57104,6 +57219,7 @@ async function mcGtWriteBack(edited,home,asked){
     it.sheet_item={...(it.sheet_item||{}),
       designId:l.designId,qty:l.qty,vals:l.vals||{},extra:l.extra||[],
       bleed:l.bleed&&l.bleed.on?{on:true,mm:Math.max(0,Number(l.bleed.mm)||0)}:undefined,
+      back:typeof l.back==='string'?l.back:undefined,
       // the extras are whatever the sheet now prints past the order; left as
       // they were, the line went on saying the old number of extras
       extra_qty:Math.max(0,(Number(l.qty)||0)-(Number(it.qty)||0)),
