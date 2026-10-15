@@ -304,7 +304,7 @@ class Fiery:
         except FieryError:
             return set()
 
-    def upload(self, name: str, pdf: Any, preset_id: str) -> str:
+    def upload(self, name: str, pdf: Any, preset_id: str, copies: int = 0) -> str:
         """The job's id on the Fiery. The upload's own answer is read first;
         where it does not say, the job is found as the one that was not there
         a moment ago.
@@ -319,6 +319,13 @@ class Fiery:
         if preset_id:
             head += (f"--{boundary}\r\nContent-Disposition: form-data; "
                      f'name="preset"\r\n\r\n{preset_id}\r\n').encode("utf-8")
+        if copies:
+            # Copies go in with the file: an Automation key may not change a
+            # job afterwards (PUT /jobs/<id> is 401), and a preset carries its
+            # own copy count, which would otherwise stand.
+            attrs = json.dumps({"numcopies": str(int(copies))})
+            head += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                     f'name="attributes"\r\n\r\n{attrs}\r\n').encode("utf-8")
         safe = name.replace('"', "'")
         head += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
                  f'filename="{safe}"\r\nContent-Type: application/pdf\r\n\r\n').encode("utf-8")
@@ -400,6 +407,17 @@ class Fiery:
                 return True
             time.sleep(5)
         return False
+
+    def copies(self, job_id: str) -> int:
+        """The job's copy count as the Fiery has it, 0 if it does not say."""
+        out = self._call("GET", "/jobs/" + urllib.parse.quote(job_id))
+        job = out
+        if isinstance(out, dict) and isinstance(out.get("data"), dict):
+            job = out["data"].get("item") if isinstance(out["data"].get("item"), dict) else out["data"]
+        try:
+            return int(str(_first(job, "num copies", "numcopies", "copies") or "0").strip())
+        except (ValueError, AttributeError):
+            return 0
 
     def set_copies(self, job_id: str, copies: int) -> None:
         self._call("PUT", "/jobs/" + urllib.parse.quote(job_id),
@@ -922,10 +940,12 @@ def upload_one(fiery: Fiery, row: dict) -> tuple[str, int]:
     else:
         pdf = _only_pages(_as_pdf(send), pages)
         size = len(pdf)
-    job_id = fiery.upload(name, pdf, str(row.get("preset_id") or ""))
     copies = max(1, int(row.get("copies") or 1))
+    job_id = fiery.upload(name, pdf, str(row.get("preset_id") or ""), copies)
     try:
-        fiery.set_copies(job_id, copies)
+        # sent with the file; set again only where the Fiery did not take it
+        if fiery.copies(job_id) != copies:
+            fiery.set_copies(job_id, copies)
     except FieryError as exc:
         # Never printed with the wrong count: the job stays held, and says so.
         raise FieryError(f"The job is on the Fiery, held -- its copies could not "
