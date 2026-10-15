@@ -34112,7 +34112,8 @@ function gtDotsMissingMsg(){
   if(n===4) return '';
   return !gtBaseRect()
     ? 'the base layer (the registration dots picture) has not loaded, so the cut file would have no registration and the cutter would cut without scanning. Pick the base layer again under Cut line & marks, then save.'
-    : 'the four registration dots could not be found in the base layer, so the cut file would have no registration and the cutter would cut without scanning. Check DOT ⌀ / INSET under Cut line & marks.';
+    : 'no registration dot could be found in the base layer’s '+(gtBaseDotsMiss.length?gtBaseDotsMiss.join(', '):'four')
+      +(gtBaseDotsMiss.length===1?' corner':' corners')+', so the cut file would have no registration and the cutter would cut without scanning. The base layer needs a solid black round dot (1.5 to 12 mm) within 45 mm of each corner of the sheet - check it is the registration picture for this paper.';
 }
 function gtMarks(){
   const S=gtSheet;
@@ -34143,7 +34144,69 @@ function gtBaseDots(){
   const S=gtSheet, im=gtBaseImg, key=S.baseFile+'|'+S.markDia+'|'+S.markInset+'|'+S.paperW+'x'+S.paperH+'|'+(im?(im.naturalWidth||0)+'x'+(im.naturalHeight||0):'-');
   if(key!==gtBaseDotsKey){ gtBaseDotsCache=null; gtBaseDotsKey=key; }
   if(gtBaseDotsCache) return gtBaseDotsCache;
-  return (gtBaseDotsCache=gtBaseDotsFind());
+  const hit=gtBaseDotsFind();
+  return (gtBaseDotsCache=hit.length===4?hit:gtBaseDotsBlobs());
+}
+// The corners gtBaseDotsBlobs could not find a dot in, for the message that
+// stops a save - read off the last search
+let gtBaseDotsMiss=[];
+// Found without the DOT ⌀ / INSET fields: in each corner of the picture, up
+// to 45 mm in, the round solid dark shape nearest the corner. A sheet whose
+// fields had been changed (or never matched its picture) had dots the search
+// above walked straight past, and the save stopped with "cannot be found".
+function gtBaseDotsBlobs(){
+  gtBaseDotsMiss=[];
+  const rect=gtBaseRect();
+  if(!gtBaseImg||!gtBaseImg.naturalWidth||!rect) return [];
+  const iw=gtBaseImg.naturalWidth, ih=gtBaseImg.naturalHeight;
+  let data;
+  try{
+    const cnv=document.createElement('canvas'); cnv.width=iw; cnv.height=ih;
+    const cctx=cnv.getContext('2d',{willReadFrequently:true});
+    cctx.drawImage(gtBaseImg,0,0);
+    data=cctx.getImageData(0,0,iw,ih).data;
+  }catch(e){ return []; }
+  const pxX=iw/rect.w, pxY=ih/rect.h, px=(pxX+pxY)/2;
+  const winW=Math.min(iw>>1,Math.round(45*pxX)), winH=Math.min(ih>>1,Math.round(45*pxY));
+  const dark=(x,y)=>{ const p=(y*iw+x)*4;
+    return data[p+3]>=128&&(0.299*data[p]+0.587*data[p+1]+0.114*data[p+2])<90; };
+  const minA=Math.PI*Math.pow(0.75*px,2), maxA=Math.PI*Math.pow(6*px,2);   // 1.5 to 12 mm across
+  const names=['bottom-left','bottom-right','top-right','top-left'];
+  // same order as gtMarks(): bottom-left, bottom-right, top-right, top-left
+  const corners=[[0,ih-winH,0,ih],[iw-winW,ih-winH,iw,ih],[iw-winW,0,iw,0],[0,0,0,0]];
+  const out=[];
+  corners.forEach(([x0,y0,cxp,cyp],k)=>{
+    const seen=new Uint8Array(winW*winH);
+    let best=null;
+    for(let yy=0;yy<winH;yy++) for(let xx=0;xx<winW;xx++){
+      const i=yy*winW+xx; if(seen[i]) continue; seen[i]=1;
+      if(!dark(x0+xx,y0+yy)) continue;
+      // one dark shape, flooded
+      const st=[i]; let n=0,sx=0,sy=0,mnx=xx,mxx=xx,mny=yy,mxy=yy,edge=false;
+      while(st.length){
+        const j=st.pop(), jx=j%winW, jy=(j/winW)|0;
+        n++; sx+=jx; sy+=jy;
+        if(jx<mnx)mnx=jx; if(jx>mxx)mxx=jx; if(jy<mny)mny=jy; if(jy>mxy)mxy=jy;
+        if(jx===0||jy===0||jx===winW-1||jy===winH-1) edge=true;
+        for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){
+          const nx=jx+dx, ny=jy+dy;
+          if(nx<0||ny<0||nx>=winW||ny>=winH) continue;
+          const q=ny*winW+nx; if(seen[q]) continue; seen[q]=1;
+          if(dark(x0+nx,y0+ny)) st.push(q);
+        }
+      }
+      if(edge||n<minA||n>maxA) continue;
+      const bw=mxx-mnx+1, bh=mxy-mny+1;
+      // round and solid: a disc fills about 0.785 of its box
+      if(bw/bh<0.8||bw/bh>1.25||n/(bw*bh)<0.65) continue;
+      const cx=x0+sx/n+0.5, cy=y0+sy/n+0.5, dd=Math.hypot(cx-cxp,cy-cyp);
+      if(!best||dd<best.dd) best={cx,cy,n,dd};
+    }
+    if(!best){ gtBaseDotsMiss.push(names[k]); return; }
+    const rm=Math.sqrt(best.n/Math.PI)/px;
+    out.push({cx:rect.x+best.cx/pxX, cy:rect.y+best.cy/pxY, r:rm, rm});
+  });
+  return gtBaseDotsMiss.length?[]:out;
 }
 function gtBaseDotsFind(){
   const S=gtSheet, rect=gtBaseRect();
