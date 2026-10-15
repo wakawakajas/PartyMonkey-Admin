@@ -6997,7 +6997,9 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <label class="field"><span>UP, DOT TO DOT (mm)</span><input type="number" step="0.001" min="1" id="gtMarkSpanY" value="432.9"/></label>
           </div>
           <p class="hint" id="gtMarkSpanStatus" style="margin:4px 0 0;"></p>
-          <div class="click-row" style="margin-top:10px;">
+          <!-- not offered: with the app's own dots gone, the base layer's are the
+               only ones there are - off, the sheet had none (gtDotsFromBase) -->
+          <div class="click-row" style="margin-top:10px;display:none;">
             <label class="click-tog"><input type="checkbox" id="gtMarksFromBase" checked/>Find the dots in my base layer</label>
           </div>
           <p class="hint" id="gtMarksFromBaseStatus" style="margin:4px 0 0;display:none;"></p>
@@ -34074,15 +34076,32 @@ function gtMarkSpanSync(){
   });
   const ins=document.getElementById('gtMarkInset'); if(ins) ins.disabled=on&&!!gtMarkSpan();
   const st=document.getElementById('gtMarkSpanStatus'); if(!st) return;
-  if(!on||S.marksFromBase){ st.textContent=''; return; }
+  if(!on||gtDotsFromBase()){ st.textContent=''; return; }
   const sp=gtMarkSpan();
   st.textContent=sp
     ? `✓ Cut file header TB25,${Math.round(sp.x*40)},${Math.round(sp.y*40)} — the same as your cutter's jobs.`
     : `⚠ The paper (${round(S.paperW)} × ${round(S.paperH)} mm) is too small for that spacing — the inset is used instead.`;
 }
+// The dots come off the base layer whenever the app is not drawing its own -
+// and it no longer does (marksOn is forced off on load). A sheet saved with
+// "Find the dots in my base layer" off (the Sticker paper's) then had no dots
+// at all: no vector dots in the PDF, and a .plt with no CR;TB25 registration
+// header, so the cutter never scanned and cut straight from the paper corner.
+function gtDotsFromBase(){ return !!gtSheet.marksFromBase||!gtSheet.marksOn; }
+// Why a cut file cannot be made to register, or '' when it can. Without four
+// dots the .plt goes out with no registration header and the cutter cuts at
+// once from the paper corner, so the export stops instead.
+function gtDotsMissingMsg(){
+  if(gtSheet.pltFromMark===false) return '';
+  let n=0; try{ n=(gtMarks()||[]).length; }catch(e){}
+  if(n===4) return '';
+  return !gtBaseRect()
+    ? 'the base layer (the registration dots picture) has not loaded, so the cut file would have no registration and the cutter would cut without scanning. Pick the base layer again under Cut line & marks, then save.'
+    : 'the four registration dots could not be found in the base layer, so the cut file would have no registration and the cutter would cut without scanning. Check DOT ⌀ / INSET under Cut line & marks.';
+}
 function gtMarks(){
   const S=gtSheet;
-  if(S.marksFromBase) return gtBaseDots();
+  if(gtDotsFromBase()) return gtBaseDots();
   if(!S.marksOn) return [];
   const r=Math.max(0.5,(Number(S.markDia)||5)/2);
   // the cutter's own spacing, centred on the sheet, where the paper takes it
@@ -34167,8 +34186,7 @@ function gtBaseDotsFind(){
 // no soft rim of the old dot shows round the sharp one. A base layer whose four
 // dots cannot be found is left exactly as it is.
 function gtDotsVec(){
-  const S=gtSheet;
-  if(S.marksFromBase){
+  if(gtDotsFromBase()){
     const m=gtBaseDots();
     if(m.length!==4) return [];
     // the size it is printed at, where that reads sensibly; the DOT ⌀ field otherwise
@@ -34204,7 +34222,7 @@ function gtDotsPdfOps(hMm){
   return ops+'Q';
 }
 function gtDrawMarks(ctx,sc){
-  if(gtSheet.marksFromBase) return;
+  if(gtDotsFromBase()) return;
   const m=gtMarks(); if(!m.length) return;
   ctx.save();
   ctx.fillStyle='#000';
@@ -38520,7 +38538,7 @@ function gtWriteSheetInputs(){
   document.getElementById('gtBleedToggle').checked=!!gtSheet.bleedOn;
   document.getElementById('gtBleedAmount').value=gtSheet.bleed;
   document.getElementById('gtMarksToggle').checked=gtSheet.marksOn!==false;
-  document.getElementById('gtMarksFromBase').checked=!!gtSheet.marksFromBase;
+  document.getElementById('gtMarksFromBase').checked=gtDotsFromBase();
   document.getElementById('gtVectorToggle').checked=wholeArtOn();
   document.getElementById('gtPltFromMark').checked=gtSheet.pltFromMark!==false;
   document.getElementById('gtMarkDia').value=gtSheet.markDia;
@@ -39383,7 +39401,7 @@ function gtSyncShapeSlots(){
   gtBackPresetSelWrite();
   document.getElementById('gtBackDelBtn').style.display=gtSheet.backFile?'':'none';
   const st=document.getElementById('gtMarksFromBaseStatus');
-  if(gtSheet.marksFromBase){
+  if(gtDotsFromBase()){
     st.style.display='';
     st.textContent=!baseOn
       ? 'No base layer uploaded yet — nothing to look in.'
@@ -42221,6 +42239,8 @@ async function gtExport(print){
     // out alone under the name it always had.
     const unread=gtBackUnread();
     if(unread.length){ showMsg(out,'Stopped — '+gtBackUnreadMsg(unread),false); return; }
+    const noDots=gtSheet.pltOn!==false?gtDotsMissingMsg():'';
+    if(noDots){ showMsg(out,'Stopped — '+noDots,false); return; }
     const twoSided=gtSheetHasBack();
     const filename=twoSided?`${base}_Front.pdf`:`${base}.pdf`;
     const backName=twoSided?`${base}_Back.pdf`:'';
@@ -58660,6 +58680,7 @@ async function mcGiftBundle(lines,mode,side,guest){
     // the gift tag screen's own export takes it — when the page wants one.
     // The back has none: the blade follows the front.
     const cuts=(!back&&gtSheet.pltOn!==false)?[]:null;
+    if(cuts){ const noDots=gtDotsMissingMsg(); if(noDots) throw new Error(noDots); }
     const bytes=await gtBuildPdf(pages,async(i,forms)=>{
       // A shape of its own is a sheet of its own, and the sheet has to be put
       // on it before it is drawn — the same pass the gift tag screen makes,
