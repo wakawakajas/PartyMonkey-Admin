@@ -942,14 +942,28 @@ def upload_one(fiery: Fiery, row: dict) -> tuple[str, int]:
         size = len(pdf)
     copies = max(1, int(row.get("copies") or 1))
     job_id = fiery.upload(name, pdf, str(row.get("preset_id") or ""), copies)
+    # Sent with the file; set again only where the Fiery did not take it. Read
+    # straight after the upload, a job still spooling shows the preset's count
+    # (or none) and only says the real one once it is in -- so it is read
+    # again for a while before being called wrong. The Automation key may not
+    # change a job, so a refused set is read once more before it is a failure.
+    have = 0
     try:
-        # sent with the file; set again only where the Fiery did not take it
-        if fiery.copies(job_id) != copies:
-            fiery.set_copies(job_id, copies)
+        for _ in range(15):
+            have = fiery.copies(job_id)
+            if have == copies:
+                return job_id, size
+            time.sleep(2)
+        fiery.set_copies(job_id, copies)
     except FieryError as exc:
+        try:
+            if fiery.copies(job_id) == copies:
+                return job_id, size
+        except FieryError:
+            pass
         # Never printed with the wrong count: the job stays held, and says so.
         raise FieryError(f"The job is on the Fiery, held -- its copies could not "
-                         f"be set to {copies}: {exc}") from exc
+                         f"be set to {copies} (it has {have}): {exc}") from exc
     return job_id, size
 
 
