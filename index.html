@@ -46746,9 +46746,10 @@ const MC_TILES={
       label:p.name+' Gift Tag',page:p.mode})),
     bundles:mcGiftBundles,
     // a sheet with a back on any of its tags is two files, front then back
-    sides:b=>mcGiftSides(b.set,b.meta&&b.meta.mode,b.meta&&b.meta.guest),
-    make:e=>mcGiftBundle(e.set,e.meta&&e.meta.mode,e.side,e.meta&&e.meta.guest),
-    preview:(e,c,dim,page)=>mcGiftPreview(e.set,e.meta&&e.meta.mode,c,dim,page,e.side,e.meta&&e.meta.guest)
+    // each on its own paper's sheet (meta.finish), as Edit opens it
+    sides:b=>mcGiftSides(b.set,b.meta&&b.meta.mode,b.meta&&b.meta.guest,b.meta&&b.meta.finish),
+    make:e=>mcGiftBundle(e.set,e.meta&&e.meta.mode,e.side,e.meta&&e.meta.guest,e.meta&&e.meta.finish),
+    preview:(e,c,dim,page)=>mcGiftPreview(e.set,e.meta&&e.meta.mode,c,dim,page,e.side,e.meta&&e.meta.guest,e.meta&&e.meta.finish)
   },
   // The batch's own print sheet: one design off the designs folder to a line,
   // at that line's quantity, all of them on one template. It is what the SKU
@@ -58920,7 +58921,12 @@ const mcSideName=(name,side)=>String(name||'').replace(/(\.pdf)?$/i,
 // it has a back (gtSheetHasBack), or one whose back picture would not read —
 // that back then fails by name rather than the sheet going out one-sided.
 // [null] is the one file under the name it always had.
-async function mcGiftSides(lines,mode,guest){
+// whether the sheet has a back is its paper's own back picture
+function mcGiftSides(lines,mode,guest,fin){
+  if(typeof gtSheetHasBack!=='function') return Promise.resolve([null]);
+  return mcGtTurn(()=>mcGtOnFinish(mode,fin,()=>mcGiftSidesRun(lines,mode,guest)));
+}
+async function mcGiftSidesRun(lines,mode,guest){
   if(typeof gtSheetHasBack!=='function') return [null];
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
@@ -58948,7 +58954,32 @@ async function mcGtTurn(job){
   gtExportBusy=true;
   try{ return await job(); }finally{ gtExportBusy=false; }
 }
-function mcGiftPreview(...a){ return mcGtTurn(()=>mcGiftPreviewRun(...a)); }
+// A batch's sheet is its paper's sheet: Matte, Gloss and Sticker each keep
+// their own layout - nesting and its turns, cut line, placeholders, back
+// (gtFinishFollow). Drawn on whichever paper the gift tag page was last left
+// on, a Gloss sheet set to turn tags on Auto came out on the Matte layout in
+// Ready to download - tags straight, more sheets - while Edit, which opens
+// the paper's own, showed it right. Swapped in for the job, then back.
+async function mcGtOnFinish(mode,fin,job){
+  if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
+  if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
+  fin=(fin==='Gloss'||fin==='Sticker'||fin==='Matte')?fin:null;
+  if(!fin||typeof gtFinishFollow!=='function'||fin===gtFinish) return job();
+  const was=gtFinish;
+  gtFinish=fin;
+  let swapped=false;
+  try{
+    swapped=gtFinishFollow(was);
+    if(swapped) await gtFinishShow();
+    return await job();
+  }finally{
+    gtFinish=was;
+    try{ if(swapped&&gtFinishFollow(fin)) await gtFinishShow(); }catch(e){}
+  }
+}
+function mcGiftPreview(lines,mode,canvas,dim,page,side,guest,fin){
+  return mcGtTurn(()=>mcGtOnFinish(mode,fin,()=>mcGiftPreviewRun(lines,mode,canvas,dim,page,side,guest)));
+}
 async function mcGiftPreviewRun(lines,mode,canvas,dim,page,side,guest){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
@@ -58990,7 +59021,9 @@ async function mcGiftPreviewRun(lines,mode,canvas,dim,page,side,guest){
 }
 // side: 'back' builds the back of the sheet (gtBuildSide's), anything else the
 // front with its cut files.
-function mcGiftBundle(...a){ return mcGtTurn(()=>mcGiftBundleRun(...a)); }
+function mcGiftBundle(lines,mode,side,guest,fin){
+  return mcGtTurn(()=>mcGtOnFinish(mode,fin,()=>mcGiftBundleRun(lines,mode,side,guest)));
+}
 async function mcGiftBundleRun(lines,mode,side,guest){
   mcPendingCuts=null;
   const back=side==='back';
