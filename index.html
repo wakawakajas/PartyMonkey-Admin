@@ -35133,7 +35133,7 @@ async function gtCutFiles(){
         throw new Error('the cutting file "'+gtShapeLabel(at.shape)+'" could not be loaded.');
       // the paper and the dots are caught per sheet: two shapes on one order can
       // be two different sheet sizes, and the file is measured off its own
-      out.push({text:gtPltSheet(at),name:gtPltSheetName(at),...gtPltLook(),shape:at.shape});
+      out.push({text:gtPltSheet(at),name:gtPltSheetName(at,i),...gtPltLook(),shape:at.shape});
     }
     return out;
   }finally{
@@ -36943,15 +36943,24 @@ function gtDrawBack(ctx,line,x,y,w,h,sc,forExport,vec){
 // The number of a sheet: the next free one, counting on from there page by page.
 // Spent when the sheets are exported, so what was printed is never printed again.
 const GT_QR_FIRST=990001, GT_QR_SIZE=10, GT_QR_TEXT=2.4, GT_QR_GAP=3;
-const gtQrNumber=page=>(Math.max(0,Math.floor(Number(gtSheet.qrNext))||GT_QR_FIRST))+Math.max(0,page|0);
+// One count for every page: Festive, Custom and Sticker each kept their own
+// next number, so a Magic Create run over two pages printed the same codes on
+// both and the second sheet's cut file came out 990004-2.plt. The count is
+// kept on this computer (pltNext) and in each page's library; the higher wins.
+let gtNoGlobal=0;
+gtIdbGet('pltNext').then(v=>{ v=Math.floor(Number(v)); if(v>gtNoGlobal){ gtNoGlobal=v; try{ gtQrSync(); }catch(e){} } }).catch(()=>{});
+const gtQrBase=()=>Math.max(Math.max(0,Math.floor(Number(gtSheet.qrNext))||GT_QR_FIRST),gtNoGlobal||0);
+const gtQrNumber=page=>gtQrBase()+Math.max(0,page|0);
+function gtNoSet(v){ gtSheet.qrNext=v; gtNoGlobal=v; gtIdbPut('pltNext',v).catch(()=>{}); }
 // A run's numbers spent: the next sheet starts at `next`. Only while the sheet
 // is still where the run began (base) - a run saved twice, or a second cut file
 // out of one run, spends them once - and only on the page the run was built on.
+// Spent whether or not the code is printed: every cut file takes a number.
+// Not tied to the page any more - the count is the same on all of them.
 function gtQrSpend(mode,base,next){
-  if(!gtSheet.qrOn||!(next>base)) return false;
-  if(mode&&mode!==gtMode) return false;
+  if(!(next>base)) return false;
   if(gtQrNumber(0)!==base) return false;
-  gtSheet.qrNext=next;
+  gtNoSet(next);
   try{ gtQrSync(); }catch(e){}
   gtNestCache=null;
   try{ gtDraw(); }catch(e){}
@@ -37128,7 +37137,7 @@ function gtQrSync(){
   const on=document.getElementById('gtQrOn'); if(!on) return;
   on.checked=!!gtSheet.qrOn;
   const nx=document.getElementById('gtQrNext'), ds=document.getElementById('gtQrDist');
-  if(document.activeElement!==nx) nx.value=Math.floor(Number(gtSheet.qrNext))||GT_QR_FIRST;
+  if(document.activeElement!==nx) nx.value=gtQrBase();
   if(document.activeElement!==ds) ds.value=Number(gtSheet.qrDist)||10;
   const calc=document.getElementById('gtQrCalc');
   if(calc){
@@ -37138,13 +37147,13 @@ function gtQrSync(){
       ? (typeof qrcode==='function'
           ? `This order: ${pages===1?a:a+' to '+z}. Each cut file is saved as its number.`
           : '⚠ The QR code library has not loaded — check the connection and reload.')
-      : 'Off — cut files are named by order, as before.';
+      : `No code printed. Cut files still take the running number: ${pages===1?a:a+' to '+z}.`;
   }
 }
 document.getElementById('gtQrOn').addEventListener('change',e=>{ gtSheet.qrOn=e.target.checked; gtNestCache=null; gtQrSync(); gtRenderSlots(); gtDraw(); gtSaveSoon(); });
 document.getElementById('gtQrNext').addEventListener('input',e=>{
   const v=Math.floor(parseFloat(e.target.value));
-  if(isFinite(v)&&v>=0){ gtSheet.qrNext=v; gtQrSync(); gtDraw(); gtSaveSoon(); }
+  if(isFinite(v)&&v>=0){ gtNoSet(v); gtQrSync(); gtDraw(); gtSaveSoon(); }
 });
 document.getElementById('gtQrDist').addEventListener('input',e=>{
   const v=parseFloat(e.target.value);
@@ -42004,7 +42013,7 @@ async function gtBuildSide(side,pages,plan,cuts){
     // and placeholders while its cut file is taken from the plan's
     if(at&&at.shape!==S.layoutFile&&!await gtShowShape(at.shape))
       throw new Error('the cutting file "'+gtShapeLabel(at.shape)+'" (sheet '+(i+1)+') could not be loaded — nothing was saved.');
-    if(cuts){ try{ cuts.push({text:gtPltSheet(at),name:gtPltSheetName(at)||'GT',...gtPltLook()}); }catch(e){ cuts.push(null); } }
+    if(cuts){ try{ cuts.push({text:gtPltSheet(at),name:gtPltSheetName(at,i)||'GT',...gtPltLook()}); }catch(e){ cuts.push(null); } }
     const px=Math.min(6000,Math.round(Math.max(S.paperW,S.paperH)/25.4*300));
     const c=document.createElement('canvas');
     const place=[];
@@ -42046,7 +42055,7 @@ document.getElementById('gtPltPreviewBtn').addEventListener('click',async()=>{
     gtPltView.at=0; gtPltView.raw=false; gtPltView.ask=null;
     pltSfWrite(null);
     // the QR numbers these sheets carry, spent when one of them is saved
-    gtPltView.qr=gtSheet.qrOn?{mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(gtPltView.sheets.length)}:null;
+    gtPltView.qr={mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(gtPltView.sheets.length)};
     document.getElementById('gtPltTitle').textContent=
       `Cut file · ${gtPltView.sheets.length} sheet${gtPltView.sheets.length===1?'':'s'}`;
     document.getElementById('gtPltModal').classList.add('open');
@@ -42105,7 +42114,7 @@ document.getElementById('gtPltTravelBtn').addEventListener('click',()=>{
 });
 // ---------- the thumb drive the cutter reads ----------
 // Chosen once and remembered. Every cut file goes straight onto it as GT1.plt,
-// GT2.plt … one per sheet, numbered afresh each export; a drive not plugged in
+// GT2.plt … one per sheet; a drive not plugged in
 // or not allowed yet gets the same names in Downloads instead.
 const GT_THUMB_KEY='pltThumbDir';
 async function gtThumbGet(){ try{ return await gtIdbGet(GT_THUMB_KEY)||null; }catch(e){ return null; } }
@@ -42119,8 +42128,8 @@ async function gtThumbSync(){
   const el=document.getElementById('gtThumbState'); if(!el) return;
   const d=await gtThumbGet();
   el.textContent=d
-    ? `Cut files go onto ${d.name}, named by the last 4 of the order ID, or the design name if there is none (Downloads if it is not plugged in).`
-    : 'No thumb drive chosen — cut files download, named by the last 4 of the order ID, or the design name if there is none.';
+    ? `Cut files go onto ${d.name}, named by the sheet's running number (Downloads if it is not plugged in).`
+    : "No thumb drive chosen — cut files download, named by the sheet's running number.";
 }
 // A cut file is named for the order it cuts: the last four characters of the
 // order ID, the codes of every order on the sheet joined where there are
@@ -42143,12 +42152,14 @@ function gtSheetLines(at){
 }
 // A sheet with no order ID at all (made on the gift tag screen, not from a
 // Magic Create batch) is named for its first design instead, so it still saves.
-function gtPltSheetName(at){
-  // with the QR code on, a sheet's cut file is named by the number printed on it
-  if(gtSheet.qrOn&&at){
-    const pl=gtPagePlan(), i=pl.findIndex(p=>p.shape===at.shape&&p.at===at.at);
-    if(i>=0) return String(gtQrNumber(i));
+// i: the sheet's place in the run, where the caller knows it.
+function gtPltSheetName(at,i){
+  // A cut file is named by its sheet's running number, the one the QR code
+  // carries when it is printed - on every page, QR on or off.
+  if(!(i>=0)&&at){
+    const pl=gtPagePlan(); i=pl.findIndex(p=>p.shape===at.shape&&p.at===at.at);
   }
+  if(i>=0) return String(gtQrNumber(i));
   const ls=gtSheetLines(at);
   const ids=[...new Set(ls.map(gtLineOrderId).filter(Boolean))];
   let base=ids.map(x=>x.slice(-4)).join('_');
@@ -42402,7 +42413,7 @@ async function gtExport(print){
     };
     await save(filename,bytes);
     // these numbers are on paper now; the next export starts after them
-    if(S.qrOn) gtQrSpend(gtMode,gtQrNumber(0),gtQrNumber(pages));
+    if(S.qrOn||S.pltOn!==false) gtQrSpend(gtMode,gtQrNumber(0),gtQrNumber(pages));
     // spaced a little, as the cut files are: a browser drops the second of a burst
     if(backBytes){ if(!dir) await new Promise(r=>setTimeout(r,400)); await save(backName,backBytes); }
     // One cut file per sheet, because that is how the cutter is fed: a sheet is
@@ -58804,7 +58815,7 @@ async function mcGiftBundle(lines,mode,side,guest){
         throw new Error('the cutting file "'+gtShapeLabel(at.shape)+'" (sheet '+(i+1)+') could not be loaded — nothing was saved.');
       if(cuts){
         const a=at||{slots:gtSheet.slots,queue:gtQueue(),start:i*gtSheet.slots.length};
-        const name=gtPltSheetName(a);
+        const name=gtPltSheetName(a,i);
         try{ cuts.push({text:gtPltSheet(a),name,...gtPltLook()}); }catch(e){ cuts.push(null); }
       }
       const px=Math.min(6000,Math.round(Math.max(gtSheet.paperW,gtSheet.paperH)/25.4*300));
@@ -58823,7 +58834,7 @@ async function mcGiftBundle(lines,mode,side,guest){
     // handed to mcPut, which every caller saves this PDF through next
     if(cuts) mcPendingCuts=cuts.filter(Boolean);
     // and the QR numbers it printed, spent when it is saved
-    mcPendingQr=(!back&&gtSheet.qrOn)?{mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(pages)}:null;
+    mcPendingQr=(!back&&(gtSheet.qrOn||cuts))?{mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(pages)}:null;
     return bytes;
   }finally{
     unMerge();
