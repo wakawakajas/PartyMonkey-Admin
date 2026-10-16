@@ -31632,7 +31632,11 @@ const gtManDesign=d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.ho
 function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
   gtKeepShape();
-  return {version:2,sheet:{...gtSheet,slots:gtSlotsBase},
+  // the running number as it stands, not whatever the sheet object holds: an
+  // Undo put an old one back on it, and every other computer then took it
+  let runNo={};
+  try{ runNo={runNo:gtNoNow(),runSet:gtNo.set}; }catch(e){}
+  return {version:2,sheet:{...gtSheet,slots:gtSlotsBase,...runNo},
     designs:own.filter(d=>!d.adhoc&&!d.mcLent).map(d=>gtManDesign({...d,trace:gtTraceKept(d),art:gtArtKept(d)})),
     fonts:gtLib.fonts.filter(f=>!f.mcLent).map(f=>({id:f.id,name:f.name,file:f.file})),
     texts:gtLib.texts.map(t=>({id:t.id,name:t.name,text:t.text,font:t.font||undefined})),
@@ -31992,18 +31996,23 @@ async function gtReadAll(dir){
     .map(f=>Number(f.man.born)||f.at));
   const best=new Map();          // key -> {t, val} or {t, gone:true}
   const offer=(k,c)=>{ const b=best.get(k);
-    // The running number is the highest any computer has reached, not the
-    // newest: one that printed later from an older count would have handed
-    // the rest back numbers already on paper.
+    // The running number is not the newest save but the furthest count (see
+    // gtNo): one that printed later from an older count would have handed the
+    // rest back numbers already on paper. Its runSet goes with it.
     if(k==='s:runNo'&&b&&!b.gone&&!c.gone){
-      if((Number(c.val)||0)>(Number(b.val)||0)) best.set(k,{...c,t:Math.max(c.t,b.t)});
+      const A={n:Number(c.val)||0,set:c.set||0}, B={n:Number(b.val)||0,set:b.set||0};
+      if(A.set>B.set||(A.set===B.set&&A.n>B.n)) best.set(k,{...c,t:Math.max(c.t,b.t)});
       return;
     }
     if(!b||c.t>b.t) best.set(k,c); };
   for(const f of files){
     const st=f.name==='library.json'?null:(f.man.stamps||{});
     const t=k=>st?(Number(st[k])||0):Math.min(f.at,born)-0.5;
-    for(const [k,v] of gtKeyed(f.man)) offer(k,{t:t(k),val:v});
+    const runSet=Number((f.man.sheet||{}).runSet)||0;
+    for(const [k,v] of gtKeyed(f.man)){
+      if(k==='s:runSet') continue;            // taken with runNo, below
+      offer(k,{t:t(k),val:v,...(k==='s:runNo'?{set:runSet}:{})});
+    }
     Object.entries(f.man.gone||{}).forEach(([k,when])=>offer(k,{t:Number(when)||0,gone:true}));
   }
   const man={version:3,sheet:{},designs:[],fonts:[],texts:[],piguFields:{}};
@@ -32024,6 +32033,7 @@ async function gtReadAll(dir){
     if(k.startsWith('p:')) man.piguFields[k.slice(2)]=copy(c.val);
     else if(k.startsWith('s:')) man.sheet[k.slice(2)]=copy(c.val);
   });
+  { const r=best.get('s:runNo'); if(r&&!r.gone&&r.set) man.sheet.runSet=r.set; }
   const mine=files.find(f=>f.name===`library.${gtPcId}.json`);
   return {sig,man,stamps,gone,born:mine?(Number(mine.man.born)||mine.at):0};
 }
@@ -32171,8 +32181,7 @@ async function gtMergeRun(){
     gtSheet[k]=JSON.parse(J(disk.sheet[k]));
   }
   // and the running number, the moment a colleague's run has gone past it
-  const rn=Math.floor(Number(disk.sheet.runNo));
-  if(rn>(Math.floor(Number(gtSheet.runNo))||0)){ gtSheet.runNo=rn; try{ gtNoFold(); gtQrSync(); }catch(e){} }
+  try{ if(gtNoTake(gtNoInSheet(disk.sheet))){ gtSheet.runNo=gtNo.n; gtSheet.runSet=gtNo.set; gtQrSync(); } }catch(e){}
   // what the shape on screen was when it came in, so this computer's next save
   // does not write it back over a colleague's newer placeholders for it
   if(ss.fromDisk.has(gtSheet.layoutFile)) gtShapeSig.set(gtSheet.layoutFile,J(gtSheet.slots));
@@ -35137,7 +35146,7 @@ async function gtCutFiles(){
     await gtShapesInHand();
     const plan=gtPagePlan();
     await gtNoSkipUsed([await gtThumbReady(false)],plan.length);
-    const out=[];
+    const out=[]; out.base=gtNoFreeze();
     for(let i=0;i<plan.length;i++){
       const at=plan[i];
       // a shape that will not load would be cut on the last one's paper
@@ -35149,6 +35158,7 @@ async function gtCutFiles(){
     }
     return out;
   }finally{
+    gtNoThaw();
     try{ if(S.layoutFile!==wasShape) await gtShowShape(wasShape); }catch(e){}
     gtPage=wasPage;
     try{ gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw(); }catch(e){}
@@ -36955,41 +36965,90 @@ function gtDrawBack(ctx,line,x,y,w,h,sc,forExport,vec){
 // The number of a sheet: the next free one, counting on from there page by page.
 // Spent when the sheets are exported, so what was printed is never printed again.
 const GT_QR_FIRST=990001, GT_QR_SIZE=10, GT_QR_TEXT=2.4, GT_QR_GAP=3;
-// Reset to 990001 on 2026-10-16: the count is kept as runNo / pltRunNo, and
-// the qrNext / pltNext every page and computer counted under before are not
-// read any more.
+// Reset to 990001 on 2026-10-16: the count is kept as runNo / runSet (each
+// page's library) and pltRun (this computer); the qrNext / pltNext every page
+// and computer counted under before are not read any more.
 // One count for every page: Festive, Custom and Sticker each kept their own
 // next number, so a Magic Create run over two pages printed the same codes on
-// both and the second sheet's cut file came out 990004-2.plt. The count is
-// kept on this computer (pltRunNo) and in each page's library; the higher wins.
-let gtNoGlobal=0;
-// Started from the highest any page has reached: before the count was shared
-// Festive could be at 990010 and Sticker at 990004, and Sticker's next run
-// would have printed 990004 to 990010 again.
-(async()=>{
-  let hi=0;
-  for(const k of ['pltRunNo','lib','lib:custom','lib:sticker']){
-    try{ const r=await gtIdbGet(k);
-      const v=Math.floor(Number(k==='pltRunNo'?r:r&&r.manifest&&r.manifest.sheet&&r.manifest.sheet.runNo));
-      if(v>hi) hi=v; }catch(e){}
-  }
-  if(hi>gtNoGlobal){ gtNoGlobal=hi; gtIdbPut('pltRunNo',hi).catch(()=>{}); try{ gtQrSync(); }catch(e){} }
-})();
-// a page whose library has gone further (read off its folder, or another
-// computer's run) raises the count; it never lowers it
-function gtNoFold(){
-  const v=Math.floor(Number(gtSheet.runNo));
-  if(v>gtNoGlobal){ gtNoGlobal=v; gtIdbPut('pltRunNo',v).catch(()=>{}); }
+// both and the second sheet's cut file came out 990004-2.plt.
+// The count is {n, set}: n the next number, set when somebody last typed one
+// into NEXT NUMBER (0 for never). The later `set` wins - a number typed in is
+// meant, even lower than before - and between two of the same `set` the
+// higher n, so a run on any page or any computer only ever moves it on.
+let gtNo={n:0,set:0};
+const gtNoOf=(n,set)=>({n:Math.max(0,Math.floor(Number(n))||0),set:Math.max(0,Number(set)||0)});
+const gtNoBeats=(a,b)=>a.set>b.set||(a.set===b.set&&a.n>b.n);
+// a count read from anywhere: taken when it is ahead of the one held
+function gtNoTake(c){
+  if(!c||!(c.n>0)||!gtNoBeats(c,gtNo)) return false;
+  gtNo={n:c.n,set:c.set};
+  gtIdbPut('pltRun',{...gtNo}).catch(()=>{});
+  return true;
 }
-// Numbers whose cut file is already on the drive are passed over before a run
-// is drawn: the cutter reads the QR and takes the file of that name, and a
-// clash came out as 990004-2.plt beside a sheet printed 990004.
+// the page on screen's library, read off its folder or another computer's run
+function gtNoFold(){
+  if(typeof gtSheet==='undefined'||!gtSheet) return;
+  gtNoTake(gtNoOf(gtSheet.runNo,gtSheet.runSet));
+}
+// what is in a library's sheet settings, or in this browser's copy of one
+const gtNoInSheet=sh=>sh?gtNoOf(sh.runNo,sh.runSet):null;
+// Started from the furthest any page has reached on this computer.
+(async()=>{
+  try{ const r=await gtIdbGet('pltRun'); if(r) gtNoTake(gtNoOf(r.n,r.set)); }catch(e){}
+  try{ const r=await gtIdbGet('pltRunNo'); if(r) gtNoTake(gtNoOf(r,0)); }catch(e){}
+  for(const k of ['lib','lib:custom','lib:sticker']){
+    try{ const r=await gtIdbGet(k); gtNoTake(gtNoInSheet(r&&r.manifest&&r.manifest.sheet)); }catch(e){}
+  }
+  try{ gtQrSync(); }catch(e){}
+})();
+// Every page's library, before a run is numbered: a computer that only ever
+// works on the Sticker page never opens Festive, and would otherwise not know
+// a colleague's Festive run had already printed 990001 to 990010. Each folder
+// gets 8 seconds; a NAS that does not answer leaves the count as it is.
+async function gtNoReadPages(){
+  if(typeof GT_PAGES==='undefined') return;
+  const one=async p=>{
+    const dir=await gtIdbGet(p.dir).catch(()=>null);
+    if(dir){
+      if(!await gtDirOk(dir)) return;
+      const all=await gtReadAll(dir);
+      gtNoTake(gtNoInSheet(all&&all.man&&all.man.sheet));
+      return;
+    }
+    const rec=await gtIdbGet(p.lib).catch(()=>null);
+    gtNoTake(gtNoInSheet(rec&&rec.manifest&&rec.manifest.sheet));
+  };
+  for(const p of GT_PAGES){
+    await Promise.race([one(p).catch(()=>{}),new Promise(r=>setTimeout(r,8000))]);
+  }
+  gtNoFold();
+}
+// The count as it stands; while a run is being drawn, that run's own start,
+// so a colleague's save read in half-way cannot move the sheets after it onto
+// numbers never checked against the drive.
+let gtNoFrozen=null;
+const gtNoNow=()=>{ gtNoFold(); return gtNo.n||GT_QR_FIRST; };
+const gtQrBase=()=>gtNoFrozen!=null?gtNoFrozen:gtNoNow();
+const gtQrNumber=page=>gtQrBase()+Math.max(0,page|0);
+// typed: from NEXT NUMBER, which dates it and so lets it go lower
+function gtNoSet(v,typed){
+  gtNo={n:Math.max(0,Math.floor(Number(v))||0),set:typed?Date.now():gtNo.set};
+  gtSheet.runNo=gtNo.n; gtSheet.runSet=gtNo.set;
+  gtIdbPut('pltRun',{...gtNo}).catch(()=>{});
+}
+// the run about to be drawn starts here and stays here until it is finished
+function gtNoFreeze(){ gtNoFrozen=gtNoNow(); return gtNoFrozen; }
+function gtNoThaw(){ gtNoFrozen=null; }
+// Every page's library first, then numbers whose cut file is already on the
+// drive passed over: the cutter reads the QR and takes the file of that name,
+// and a clash came out as 990004-2.plt beside a sheet printed 990004.
 async function gtNoSkipUsed(dirs,pages){
+  await gtNoReadPages().catch(()=>{});
   dirs=(dirs||[]).filter(Boolean); pages=Math.max(1,pages|0);
   if(!dirs.length) return;
   const has=async n=>{ for(const d of dirs){
     try{ await d.getFileHandle(n+'.plt'); return true; }catch(e){} } return false; };
-  let base=gtQrBase(), moved=false;
+  let base=gtNoNow(), moved=false;
   for(let guard=0;guard<500;guard++){
     let hit=-1;
     for(let i=0;i<pages;i++) if(await has(base+i)){ hit=i; break; }
@@ -36998,18 +37057,12 @@ async function gtNoSkipUsed(dirs,pages){
   }
   if(moved){ gtNoSet(base); try{ gtQrSync(); }catch(e){} gtSaveSoon(); }
 }
-const gtQrBase=()=>Math.max(Math.max(0,Math.floor(Number(gtSheet.runNo))||GT_QR_FIRST),gtNoGlobal||0);
-const gtQrNumber=page=>gtQrBase()+Math.max(0,page|0);
-function gtNoSet(v){ gtSheet.runNo=v; gtNoGlobal=v; gtIdbPut('pltRunNo',v).catch(()=>{}); }
 // A run's numbers spent: everything below `next` is on paper. Taken as
 // "at least next", never lowered, so a run saved twice spends once - and a run
-// whose count was raised mid-way (a colleague's save read in while it was
-// being drawn) still has its own numbers spent, where before the run was
-// refused for no longer starting where the count stood, and its numbers were
-// handed out again. Spent whether or not the code is printed; the same count
-// on every page.
+// whose count was raised mid-way still has its own numbers spent. Spent
+// whether or not the code is printed; the same count on every page.
 function gtQrSpend(mode,base,next){
-  if(!(next>base)||!(next>gtQrBase())) return false;
+  if(!(next>base)||!(next>gtNoNow())) return false;
   gtNoSet(next);
   try{ gtQrSync(); }catch(e){}
   gtNestCache=null;
@@ -37207,7 +37260,7 @@ document.getElementById('gtQrNext').addEventListener('input',e=>{
   const v=Math.floor(parseFloat(e.target.value));
   // a number typed in is meant: the names this session has handed out are
   // forgotten, or reprinting 990001 saved its cut file as 990001-2.plt
-  if(isFinite(v)&&v>=0){ gtNoSet(v); gtPltRun.used=new Set(); gtQrSync(); gtDraw(); gtSaveSoon(); }
+  if(isFinite(v)&&v>=0){ gtNoSet(v,true); gtPltRun.used=new Set(); gtQrSync(); gtDraw(); gtSaveSoon(); }
 });
 document.getElementById('gtQrDist').addEventListener('input',e=>{
   const v=parseFloat(e.target.value);
@@ -42109,7 +42162,9 @@ document.getElementById('gtPltPreviewBtn').addEventListener('click',async()=>{
     gtPltView.at=0; gtPltView.raw=false; gtPltView.ask=null;
     pltSfWrite(null);
     // the QR numbers these sheets carry, spent when one of them is saved
-    gtPltView.qr={mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(gtPltView.sheets.length)};
+    // the numbers these sheets were named with, however the count moved since
+    const b0=files.base||gtQrNumber(0);
+    gtPltView.qr={mode:gtMode,base:b0,next:b0+gtPltView.sheets.length};
     document.getElementById('gtPltTitle').textContent=
       `Cut file · ${gtPltView.sheets.length} sheet${gtPltView.sheets.length===1?'':'s'}`;
     document.getElementById('gtPltModal').classList.add('open');
@@ -42434,9 +42489,12 @@ async function gtExport(print){
     }
     // the thumb drive asked for before the render, while the tap still counts —
     // after a minute of rendering the browser would no longer let it be asked
-    if(gtSheet.pltOn!==false){
-      const th=await gtThumbReady(true);
+    // every page's count read, used numbers passed over, and the run's start
+    // held there until it is saved (gtNoFreeze)
+    if(gtSheet.pltOn!==false||gtSheet.qrOn){
+      const th=gtSheet.pltOn!==false?await gtThumbReady(true):null;
       await gtNoSkipUsed([th,dir],pages);
+      gtNoFreeze();
     }
     showMsg(out,`Rendering ${pages} sheet(s) at print resolution…`,true);
     swapped=true;
@@ -42487,6 +42545,7 @@ async function gtExport(print){
   }finally{
     // put back on every path out, failed render included
     if(swapped) await gtExportRestore(wasShape,wasPage);
+    gtNoThaw();
     gtExportBusy=false; btn.disabled=false; pbtn.disabled=false;
   }
 }
@@ -42702,7 +42761,9 @@ undoDef('gift',{
     fonts:gtLib.fonts,texts:gtLib.texts,base:gtDefaultShape,jobBack:gtJobBack,nest:gtNestGeom()}; },
   put:v=>{
     gtOrder=v.order||[];
-    Object.assign(gtSheet,v.sheet||{});
+    // the running number is not an edit to undo: numbers spent stay spent
+    const run={runNo:gtSheet.runNo,runSet:gtSheet.runSet};
+    Object.assign(gtSheet,v.sheet||{},run);
     // the sheet brought back is one paper's: that paper is put back on screen
     // with it, or a Gloss run went out on the Matte cut line it had undone to
     if(gtSheet.finishOf&&gtSheet.finishOf!==gtFinish&&['Matte','Gloss','Sticker'].includes(gtSheet.finishOf)){
@@ -51029,6 +51090,8 @@ async function mcGtReadNames(page){
     if(dir){
       if(await gtDirOk(dir)){
         const man=(await gtReadAll(dir)).man||{};
+        // and how far that page has counted (see gtNo)
+        try{ gtNoTake(gtNoInSheet(man.sheet)); }catch(e){}
         return (man.designs||[]).map(d=>({id:d.id,name:d.name}));
       }
       mcGtShut[page.mode]=true;
@@ -58862,8 +58925,10 @@ async function mcGiftBundle(lines,mode,side,guest){
     const cuts=(!back&&gtSheet.pltOn!==false)?[]:null;
     if(cuts){ const noDots=gtDotsMissingMsg(); if(noDots) throw new Error(noDots); }
     // the thumb drive, and the export folder the cut files go into without one
-    if(!back&&(cuts||gtSheet.qrOn))
+    if(!back&&(cuts||gtSheet.qrOn)){
       await gtNoSkipUsed([await gtThumbReady(false),await exportFolderReady(false).catch(()=>null)],pages);
+      gtNoFreeze();
+    }
     const bytes=await gtBuildPdf(pages,async(i,forms)=>{
       // A shape of its own is a sheet of its own, and the sheet has to be put
       // on it before it is drawn — the same pass the gift tag screen makes,
@@ -58897,6 +58962,7 @@ async function mcGiftBundle(lines,mode,side,guest){
     mcPendingQr=(!back&&(gtSheet.qrOn||cuts))?{mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(pages)}:null;
     return bytes;
   }finally{
+    gtNoThaw();
     unMerge();
     gtOrder=keep; gtJobBack=jb; gtNestCache=null;
     // back onto the sheet this started on, whatever the last page was cut to
