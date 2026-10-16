@@ -37096,13 +37096,22 @@ function gtNoThaw(){ gtNoFrozen=null; }
 // and a clash came out as 990004-2.plt beside a sheet printed 990004.
 async function gtNoSkipUsed(dirs,pages,own){
   await gtNoReadPages().catch(()=>{});
-  // a reprint is meant to land on its own numbers: nothing passed over, and
-  // its cut files written over the old ones (gtPltReprint)
-  if(own!==false&&gtNoOnceHere()!=null) return;
   dirs=(dirs||[]).filter(Boolean); pages=Math.max(1,pages|0);
-  if(!dirs.length) return;
   const has=async n=>{ for(const d of dirs){
     try{ await d.getFileHandle(n+'.plt'); return true; }catch(e){} } return false; };
+  // A reprint lands on its own numbers: nothing passed over, and the ones
+  // already printed have their cut files written over (gtPltReprint). The
+  // ones it runs past the count onto are new - one with a cut file already on
+  // the drive is another computer's sheet, and the reprint stops rather than
+  // print that number on this sheet with its file saved as -2 beside it.
+  const o=own===false?null:gtNoOnceHere();
+  if(o!=null){
+    const now=gtNoNow();
+    for(let i=0;i<pages;i++) if(o+i>=now&&await has(o+i))
+      throw new Error(`${o+i}.plt is already on the drive — reprint fewer sheets, or set NEXT NUMBER back to ${now}.`);
+    return;
+  }
+  if(!dirs.length) return;
   let base=gtNoNow(), moved=false;
   for(let guard=0;guard<500;guard++){
     let hit=-1;
@@ -37320,7 +37329,7 @@ function gtQrSync(){
       : `No code printed. Cut files still take the running number: ${pages===1?a:a+' to '+z}.`;
     // a lower number typed in is one run's start, not the count
     if(gtNoOnceHere()!=null&&gtNoFrozen==null&&(gtSheet.qrOn||gtSheet.pltOn!==false))
-      calc.textContent+=` Reprint: this one run only — after it the count carries on from ${gtNoNow()}.`;
+      calc.textContent+=` Reprint: this one run only — after it the count carries on from ${Math.max(gtNoNow(),gtNoOnceHere()+pages)}.`;
   }
 }
 document.getElementById('gtQrOn').addEventListener('change',e=>{ gtSheet.qrOn=e.target.checked; gtNestCache=null; gtQrSync(); gtRenderSlots(); gtDraw(); gtSaveSoon(); });
@@ -58915,7 +58924,21 @@ async function mcGiftSides(lines,mode,guest){
   }
   finally{ unMerge(); gtOrder=keep; gtJobBack=jb; gtNestCache=null; }
 }
-async function mcGiftPreview(lines,mode,canvas,dim,page,side,guest){
+// Magic Create's gift tag sheets and the gift tag screen's own export take
+// turns: both hold the running number's start while they draw, and run side
+// by side they printed the same numbers and spent only one run of them.
+// Magic Create waits for the gift tag screen's export to finish (a proof or a
+// sheet count that failed instead came out blank, or counted 0 sheets).
+async function mcGtTurn(job){
+  for(let t=0;gtExportBusy;t++){
+    if(t>2400) throw new Error('the gift tag screen is still exporting — wait for it to finish.');
+    await new Promise(r=>setTimeout(r,250));
+  }
+  gtExportBusy=true;
+  try{ return await job(); }finally{ gtExportBusy=false; }
+}
+function mcGiftPreview(...a){ return mcGtTurn(()=>mcGiftPreviewRun(...a)); }
+async function mcGiftPreviewRun(lines,mode,canvas,dim,page,side,guest){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
   // what the file will be is what is proofed, one-off copies included
@@ -58956,7 +58979,8 @@ async function mcGiftPreview(lines,mode,canvas,dim,page,side,guest){
 }
 // side: 'back' builds the back of the sheet (gtBuildSide's), anything else the
 // front with its cut files.
-async function mcGiftBundle(lines,mode,side,guest){
+function mcGiftBundle(...a){ return mcGtTurn(()=>mcGiftBundleRun(...a)); }
+async function mcGiftBundleRun(lines,mode,side,guest){
   mcPendingCuts=null;
   const back=side==='back';
   if(typeof gtBuildPdf!=='function') throw new Error('the gift tag tool has not loaded');
