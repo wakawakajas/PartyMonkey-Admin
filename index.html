@@ -33263,6 +33263,8 @@ let gtModeAsked=false;
 async function gtSetModeNow(m,save){
   const next=gtModeOk(m);
   gtModeAsked=true;
+  // a reprint start typed on one page is not another page's
+  try{ if(gtNoOnce&&gtNoOnce.mode!==next) gtNoOnce=null; }catch(e){}
   if(next===gtMode&&gtLoaded){
     if(await gtMergeFromDisk().catch(()=>false)) gtWriteSheetInputs();
     await gtApplyMode(); return;
@@ -35140,7 +35142,7 @@ async function gtCutFiles(){
     await gtShapesInHand();
     const plan=gtPagePlan();
     await gtNoSkipUsed([await gtThumbReady(false)],plan.length);
-    const out=[]; out.base=gtNoFreeze();
+    const out=[]; out.base=gtNoFreeze(plan.length);
     for(let i=0;i<plan.length;i++){
       const at=plan[i];
       // a shape that will not load would be cut on the last one's paper
@@ -36972,7 +36974,14 @@ const GT_QR_FIRST=990001, GT_QR_SIZE=10, GT_QR_TEXT=2.4, GT_QR_GAP=3;
 // carries on from the highest ever printed, so a reprint never rewinds
 // everybody onto numbers already on paper.
 let gtNo={n:0};
-let gtNoOnce=null;     // a lower typed start for the next run, this computer only
+// a lower typed start for the next run: {n, mode} - this computer, this page,
+// the gift tag screen's own export or cut file only. Magic Create never takes
+// it, and a page switch drops it.
+let gtNoOnce=null;
+const gtNoOnceHere=()=>gtNoOnce&&gtNoOnce.mode===gtMode?gtNoOnce.n:null;
+// the cut file names of a reprint: written over the old ones on the drive,
+// not saved beside them as -2
+let gtPltReprint=new Set();
 const gtNoOf=n=>({n:Math.max(0,Math.floor(Number(n))||0)});
 // a count read from anywhere: taken when it is ahead of the one held
 function gtNoTake(c){
@@ -37035,7 +37044,7 @@ const gtNoNow=()=>{ gtNoFold(); return gtNo.n||GT_QR_FIRST; };
 // read in half-way cannot move the later sheets onto numbers never checked
 // against the drive.
 let gtNoFrozen=null;
-const gtNoStart=()=>gtNoOnce!=null?gtNoOnce:gtNoNow();
+const gtNoStart=()=>{ const o=gtNoOnceHere(); return o!=null?o:gtNoNow(); };
 const gtQrBase=()=>gtNoFrozen!=null?gtNoFrozen:gtNoStart();
 const gtQrNumber=page=>gtQrBase()+Math.max(0,page|0);
 // the count moved on (never back): a run spent, numbers on the drive passed over
@@ -37050,22 +37059,33 @@ function gtNoType(v){
   v=Math.floor(Number(v));
   if(!(v>=1)) return false;
   if(v>=gtNoNow()){ gtNoOnce=null; gtNoSet(v); }
-  else gtNoOnce=v;
+  else gtNoOnce={n:v,mode:gtMode};
   return true;
 }
 // the run about to be drawn starts here and stays here until it is finished
-function gtNoFreeze(){ gtNoFrozen=gtNoStart(); return gtNoFrozen; }
+// own: the gift tag screen's own run, which takes a reprint start; Magic
+// Create passes false and always starts from the count
+function gtNoFreeze(pages,own){
+  const o=own===false?null:gtNoOnceHere();
+  gtNoFrozen=o!=null?o:gtNoNow();
+  gtPltReprint=new Set();
+  if(o!=null) for(let i=0;i<Math.max(1,pages|0);i++) gtPltReprint.add(String(o+i));
+  return gtNoFrozen;
+}
 function gtNoThaw(){ gtNoFrozen=null; }
 // Every page's library first, then numbers whose cut file is already on the
 // drive passed over: the cutter reads the QR and takes the file of that name,
 // and a clash came out as 990004-2.plt beside a sheet printed 990004.
-async function gtNoSkipUsed(dirs,pages){
+async function gtNoSkipUsed(dirs,pages,own){
   await gtNoReadPages().catch(()=>{});
+  // a reprint is meant to land on its own numbers: nothing passed over, and
+  // its cut files written over the old ones (gtPltReprint)
+  if(own!==false&&gtNoOnceHere()!=null) return;
   dirs=(dirs||[]).filter(Boolean); pages=Math.max(1,pages|0);
   if(!dirs.length) return;
   const has=async n=>{ for(const d of dirs){
     try{ await d.getFileHandle(n+'.plt'); return true; }catch(e){} } return false; };
-  let base=gtNoStart(), moved=false;
+  let base=gtNoNow(), moved=false;
   for(let guard=0;guard<500;guard++){
     let hit=-1;
     for(let i=0;i<pages;i++) if(await has(base+i)){ hit=i; break; }
@@ -37073,8 +37093,7 @@ async function gtNoSkipUsed(dirs,pages){
     base+=hit+1; moved=true;
   }
   if(!moved) return;
-  if(gtNoOnce!=null&&base<gtNoNow()) gtNoOnce=base;
-  else{ gtNoOnce=null; gtNoSet(base); gtSaveSoon(); }
+  gtNoSet(base); gtSaveSoon();
   try{ gtQrSync(); }catch(e){}
 }
 // A run's numbers spent: everything below `next` is on paper, so the count
@@ -37082,10 +37101,13 @@ async function gtNoSkipUsed(dirs,pages){
 // typed lower start is used up with it, and the count carries on from the
 // highest ever printed. Spent whether or not the code is printed; the same
 // count on every page.
-function gtQrSpend(mode,base,next){
+// keepOnce: a cut file saved from the preview - the reprint's PDF is still
+// to come, on the same numbers
+function gtQrSpend(mode,base,next,keepOnce){
   if(!(next>base)) return false;
-  const was=gtNoOnce; gtNoOnce=null;
-  if(!(next>gtNoNow())&&was==null) return false;
+  const reprint=gtNoOnceHere()!=null&&base===gtNoOnceHere();
+  if(reprint&&!keepOnce) gtNoOnce=null;
+  if(!(next>gtNoNow())&&!reprint) return false;
   gtNoSet(next);
   try{ gtQrSync(); }catch(e){}
   gtNestCache=null;
@@ -37277,16 +37299,23 @@ function gtQrSync(){
       : gtSheet.pltOn===false?'Off — no code printed and no cut file.'
       : `No code printed. Cut files still take the running number: ${pages===1?a:a+' to '+z}.`;
     // a lower number typed in is one run's start, not the count
-    if(gtNoOnce!=null&&gtNoFrozen==null&&(gtSheet.qrOn||gtSheet.pltOn!==false))
+    if(gtNoOnceHere()!=null&&gtNoFrozen==null&&(gtSheet.qrOn||gtSheet.pltOn!==false))
       calc.textContent+=` Reprint: this one run only — after it the count carries on from ${gtNoNow()}.`;
   }
 }
 document.getElementById('gtQrOn').addEventListener('change',e=>{ gtSheet.qrOn=e.target.checked; gtNestCache=null; gtQrSync(); gtRenderSlots(); gtDraw(); gtSaveSoon(); });
-document.getElementById('gtQrNext').addEventListener('input',e=>{
-  const v=Math.floor(parseFloat(e.target.value));
+// Taken when the box is left (Enter or a click away), not on every key: a
+// count only goes up, and a stray digit typed on the end (9900115) became
+// the count for every page and computer. A jump of 100 or more is asked.
+document.getElementById('gtQrNext').addEventListener('change',e=>{
+  const v=Math.floor(parseFloat(e.target.value)), now=gtNoNow();
+  if(v>=now+100&&!confirm(`Move the running number on from ${now} to ${v}, on every page and computer?\n\nIt cannot be moved back.`)){
+    e.target.value=gtQrBase(); return;
+  }
   // a number typed in is meant: the names this session has handed out are
   // forgotten, or reprinting 990001 saved its cut file as 990001-2.plt
   if(gtNoType(v)){ gtPltRun.used=new Set(); gtQrSync(); gtDraw(); gtSaveSoon(); }
+  else e.target.value=gtQrBase();
 });
 document.getElementById('gtQrDist').addEventListener('input',e=>{
   const v=parseFloat(e.target.value);
@@ -42309,7 +42338,7 @@ function gtPltSheetName(at,i){
 async function gtPltUnique(base,fresh,dir){
   if(fresh) gtPltRun.used=new Set();
   gtPltRun.at=Date.now();
-  const onDrive=async n=>{ if(!dir) return false;
+  const onDrive=async n=>{ if(!dir||gtPltReprint.has(String(n))) return false;
     try{ await dir.getFileHandle(n+'.plt'); return true; }catch(e){ return false; } };
   let nm=base, k=1;
   while(gtPltRun.used.has(nm.toLowerCase())||await onDrive(nm)) nm=base+'-'+(++k);
@@ -42357,7 +42386,7 @@ document.getElementById('gtPltSaveBtn').addEventListener('click',async()=>{
   // A cut file saved is a cut file that can be fed to the cutter, named by the
   // QR number on its sheet: those numbers are spent, so the sheet printed next
   // never carries a code that already has a cut file out there.
-  if(gtPltView.qr) gtQrSpend(gtPltView.qr.mode,gtPltView.qr.base,gtPltView.qr.next);
+  if(gtPltView.qr) gtQrSpend(gtPltView.qr.mode,gtPltView.qr.base,gtPltView.qr.next,true);
   await gtThumbReady(true);
   const nm=S.file||(S.name+'.plt');
   const b=new Blob([pltWithSf(S.text,pltSfRead())],{type:'application/vnd.hp-HPGL'});
@@ -42520,7 +42549,7 @@ async function gtExport(print){
     if(gtSheet.pltOn!==false||gtSheet.qrOn){
       const th=gtSheet.pltOn!==false?await gtThumbReady(true):null;
       await gtNoSkipUsed([th,dir],pages);
-      gtNoFreeze();
+      gtNoFreeze(pages);
     }
     showMsg(out,`Rendering ${pages} sheet(s) at print resolution…`,true);
     swapped=true;
@@ -58887,7 +58916,11 @@ async function mcGiftPreview(lines,mode,canvas,dim,page,side,guest){
     // properly, the way the tool turns it, or the tags land on the wrong cuts
     gtPage=at;
     if(typeof gtGoPage==='function') await gtGoPage(at);
-    gtRenderPage(canvas,at,dim,false,null,null,side==='back'?'back':'front');
+    // numbered from the count, as the file will be - never a reprint start
+    // typed on the gift tag screen
+    const fz=gtNoFrozen; gtNoFrozen=gtNoNow();
+    try{ gtRenderPage(canvas,at,dim,false,null,null,side==='back'?'back':'front'); }
+    finally{ gtNoFrozen=fz; }
     return pages;
   }
   finally{
@@ -58954,8 +58987,8 @@ async function mcGiftBundle(lines,mode,side,guest){
     if(cuts){ const noDots=gtDotsMissingMsg(); if(noDots) throw new Error(noDots); }
     // the thumb drive, and the export folder the cut files go into without one
     if(!back&&(cuts||gtSheet.qrOn)){
-      await gtNoSkipUsed([await gtThumbReady(false),await exportFolderReady(false).catch(()=>null)],pages);
-      gtNoFreeze();
+      await gtNoSkipUsed([await gtThumbReady(false),await exportFolderReady(false).catch(()=>null)],pages,false);
+      gtNoFreeze(pages,false);
     }
     const bytes=await gtBuildPdf(pages,async(i,forms)=>{
       // A shape of its own is a sheet of its own, and the sheet has to be put
