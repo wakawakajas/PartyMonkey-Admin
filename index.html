@@ -42716,6 +42716,8 @@ function undoCtxOk(key){
 }
 function undoKeep(key){
   const def=UNDO.defs[key]; if(!def) return;
+  // a batch's other paper swapped in for a moment is not a step (mcGtOnFinish)
+  try{ if(mcGtSwapping>0) return; }catch(e){}
   // an export borrows the builder sheet by sheet; what it lays out is not a step
   try{ if(mcBusy) return; }catch(e){}
   undoCtxOk(key);
@@ -58960,21 +58962,55 @@ async function mcGtTurn(job){
 // on, a Gloss sheet set to turn tags on Auto came out on the Matte layout in
 // Ready to download - tags straight, more sheets - while Edit, which opens
 // the paper's own, showed it right. Swapped in for the job, then back.
+// While another paper's sheet is in for a batch, nothing of it is an undo
+// step: a proof's slow cut file read let the 400 ms undo timer catch the Gloss
+// sheet, and one Ctrl+Z back on the Matte page switched the page to Gloss.
+let mcGtSwapping=0;
 async function mcGtOnFinish(mode,fin,job){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
   fin=(fin==='Gloss'||fin==='Sticker'||fin==='Matte')?fin:null;
-  if(!fin||typeof gtFinishFollow!=='function'||fin===gtFinish) return job();
+  if(!fin||typeof gtFinishFollow!=='function') return job();
+  // the paper the sheet itself is, not what gtFinish says: on a loan's other
+  // page the two can disagree, and a bundle on gtFinish's paper went out on
+  // the sheet of the other one
+  const owner=gtSheet.finishOf||gtFinish;
+  if(owner===fin){
+    if(gtFinish===fin) return job();
+    const was=gtFinish; gtFinish=fin;
+    try{ return await job(); }finally{ gtFinish=was; }
+  }
   const was=gtFinish;
+  const all=gtSheet.byFinish&&typeof gtSheet.byFinish==='object'?gtSheet.byFinish:null;
+  const had=!!(all&&all[fin]);
+  // the screen's own paper's cut lines and placeholders as this session holds
+  // them: put straight back after, not read again off the folder every proof
+  const keepSlots=new Map(gtShapeSlots), keepSig=new Map(gtShapeSig);
+  const keepLayout=gtLayout, keepFrom=gtLayoutFrom;
+  mcGtSwapping++;
+  clearTimeout(UNDO.timer);
   gtFinish=fin;
   let swapped=false;
   try{
-    swapped=gtFinishFollow(was);
+    swapped=gtFinishFollow(owner);
     if(swapped) await gtFinishShow();
     return await job();
   }finally{
+    try{
+      if(swapped){
+        gtFinish=owner;
+        gtFinishFollow(fin);
+        // a paper never set up is not set up by being looked at
+        if(!had&&gtSheet.byFinish) delete gtSheet.byFinish[fin];
+        gtShapeSlots.clear(); keepSlots.forEach((v,k)=>gtShapeSlots.set(k,v));
+        gtShapeSig.clear(); keepSig.forEach((v,k)=>gtShapeSig.set(k,v));
+        gtLayout=keepLayout; gtLayoutFrom=keepFrom; gtNestCache=null;
+        await gtFinishShow();
+      }
+    }catch(e){}
     gtFinish=was;
-    try{ if(swapped&&gtFinishFollow(fin)) await gtFinishShow(); }catch(e){}
+    clearTimeout(UNDO.timer);
+    mcGtSwapping--;
   }
 }
 function mcGiftPreview(lines,mode,canvas,dim,page,side,guest,fin){
