@@ -7013,7 +7013,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <div class="sect-label">QR code for the cutter</div>
           <p class="hint" style="margin:0 0 8px;">Switched on and off by the <b>QR code</b> tick above the sheet.</p>
           <div class="grid2" style="margin-top:9px;">
-            <label class="field"><span>NEXT NUMBER</span><input type="number" step="1" min="0" id="gtQrNext" value="990001"/></label>
+            <label class="field"><span>NEXT NUMBER</span><input type="text" inputmode="numeric" pattern="[0-9]*" id="gtQrNext" value="990001"/></label>
             <label class="field"><span>ABOVE THE DOT (mm)</span><input type="number" step="0.5" min="2" id="gtQrDist" value="10"/></label>
           </div>
           <div class="calc" id="gtQrCalc" style="margin-top:8px;"></div>
@@ -36960,7 +36960,9 @@ function gtDrawBack(ctx,line,x,y,w,h,sc,forExport,vec){
 // ---------- the QR code the cutter reads ----------
 // The number of a sheet: the next free one, counting on from there page by page.
 // Spent when the sheets are exported, so what was printed is never printed again.
-const GT_QR_FIRST=990001, GT_QR_SIZE=10, GT_QR_TEXT=2.4, GT_QR_GAP=3;
+// GT_QR_MAX: a count above it is a slip (a digit typed on the end, 9900115),
+// never a real one - read from anywhere it is ignored, so it cannot stick
+const GT_QR_FIRST=990001, GT_QR_MAX=1999999, GT_QR_SIZE=10, GT_QR_TEXT=2.4, GT_QR_GAP=3;
 // Reset to 990001 on 2026-10-16: the count is kept as runNo (each page's
 // library) and pltRun (this computer); the qrNext / pltNext every page and
 // computer counted under before are not read any more.
@@ -36978,11 +36980,22 @@ let gtNo={n:0};
 // the gift tag screen's own export or cut file only. Magic Create never takes
 // it, and a page switch drops it.
 let gtNoOnce=null;
-const gtNoOnceHere=()=>gtNoOnce&&gtNoOnce.mode===gtMode?gtNoOnce.n:null;
+// The order a reprint's cut file was saved for from the preview: its PDF may
+// follow on the same numbers, but only for that same order, and not after
+// half an hour - a cut file saved and walked away from left the reprint
+// waiting, and the next order on the page printed 990014 again.
+const gtNoOrderSig=()=>{ try{ return JSON.stringify((gtOrder||[]).map(l=>[l.id,l.designId,Number(l.qty)||0])); }catch(e){ return ''; } };
+function gtNoOnceHere(){
+  if(!gtNoOnce||gtNoOnce.mode!==gtMode) return null;
+  if(gtNoOnce.sig!=null&&(gtNoOnce.sig!==gtNoOrderSig()||Date.now()-gtNoOnce.at>30*60000)){
+    gtNoOnce=null; return null;
+  }
+  return gtNoOnce.n;
+}
 // the cut file names of a reprint: written over the old ones on the drive,
 // not saved beside them as -2
 let gtPltReprint=new Set();
-const gtNoOf=n=>({n:Math.max(0,Math.floor(Number(n))||0)});
+const gtNoOf=n=>{ n=Math.max(0,Math.floor(Number(n))||0); return {n:n>GT_QR_MAX?0:n}; };
 // a count read from anywhere: taken when it is ahead of the one held
 function gtNoTake(c){
   if(!c||!(c.n>gtNo.n)) return false;
@@ -37057,7 +37070,7 @@ function gtNoSet(v){
 // is a start for this computer's next run only
 function gtNoType(v){
   v=Math.floor(Number(v));
-  if(!(v>=1)) return false;
+  if(!(v>=1)||v>GT_QR_MAX) return false;
   if(v>=gtNoNow()){ gtNoOnce=null; gtNoSet(v); }
   else gtNoOnce={n:v,mode:gtMode};
   return true;
@@ -37110,6 +37123,8 @@ function gtQrSpend(mode,base,next,keepOnce){
   if(!(next>base)) return false;
   const reprint=gtNoOnceHere()!=null&&base===gtNoOnceHere();
   if(reprint&&!keepOnce) gtNoOnce=null;
+  // kept for the PDF of this same order only (gtNoOnceHere)
+  if(reprint&&keepOnce){ gtNoOnce.sig=gtNoOrderSig(); gtNoOnce.at=Date.now(); }
   if(!(next>gtNoNow())&&!reprint) return false;
   gtNoSet(next);
   try{ gtQrSync(); }catch(e){}
@@ -37309,14 +37324,16 @@ function gtQrSync(){
 document.getElementById('gtQrOn').addEventListener('change',e=>{ gtSheet.qrOn=e.target.checked; gtNestCache=null; gtQrSync(); gtRenderSlots(); gtDraw(); gtSaveSoon(); });
 // Taken when the box is left (Enter or a click away), not on every key: a
 // count only goes up, and a stray digit typed on the end (9900115) became
-// the count for every page and computer. A jump of 100 or more is asked.
+// the count for every page and computer. Any move on is asked; a box of
+// plain text, so a spinner click cannot move it.
 document.getElementById('gtQrNext').addEventListener('change',e=>{
   const v=Math.floor(parseFloat(e.target.value)), now=gtNoNow();
-  if(v>=now+100&&!confirm(`Move the running number on from ${now} to ${v}, on every page and computer?\n\nIt cannot be moved back.`)){
+  if(v>now&&v<=GT_QR_MAX&&!confirm(`Move the running number on from ${now} to ${v}, on every page and computer?\n\nIt cannot be moved back.`)){
     e.target.value=gtQrBase(); return;
   }
   // a number typed in is meant: the names this session has handed out are
   // forgotten, or reprinting 990001 saved its cut file as 990001-2.plt
+  if(v>GT_QR_MAX) alert(`${v} is not a running number — it goes up to ${GT_QR_MAX}.`);
   if(gtNoType(v)){ gtPltRun.used=new Set(); gtQrSync(); gtDraw(); gtSaveSoon(); }
   else e.target.value=gtQrBase();
 });
