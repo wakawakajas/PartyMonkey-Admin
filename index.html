@@ -33257,7 +33257,14 @@ async function gtApplyMode(){
 // finds there is nothing left to do, which is the truth.
 let gtModeJob=Promise.resolve();
 function gtSetMode(m,save){
-  const run=()=>gtSetModeNow(m,save);
+  // Another page waits while a batch has one of this page's other papers
+  // swapped in (mcGtOnFinish): switched mid-swap, the page left kept the
+  // batch's paper as its own and the swap back landed on the new page's sheet.
+  // The same page goes straight on - the batch's own job asks for it.
+  const run=async()=>{
+    try{ while(mcGtSwapping>0&&gtModeOk(m)!==gtMode) await new Promise(r=>setTimeout(r,100)); }catch(e){}
+    return gtSetModeNow(m,save);
+  };
   gtModeJob=gtModeJob.then(run,run);
   return gtModeJob;
 }
@@ -42447,6 +42454,8 @@ async function gtFinishMap(){
   return gtFinishes;
 }
 async function gtFinishKeep(page){
+  // a batch's paper swapped in for a moment is not the page's run
+  try{ if(mcGtSwapping>0) return; }catch(e){}
   // A batch's sheet sets the run it was lent for, not the page's own: kept
   // here, a page switch saved the batch's Gloss over the page's Matte for good.
   // The page's run comes back when the batch takes its sheet back (mcGtReturn).
@@ -58974,7 +58983,7 @@ async function mcGtOnFinish(mode,fin,job){
   // the paper the sheet itself is, not what gtFinish says: on a loan's other
   // page the two can disagree, and a bundle on gtFinish's paper went out on
   // the sheet of the other one
-  const owner=gtSheet.finishOf||gtFinish;
+  const owner=gtSheet.finishOf||gtSheet.backFinish||gtFinish;
   if(owner===fin){
     if(gtFinish===fin) return job();
     const was=gtFinish; gtFinish=fin;
@@ -58987,8 +58996,11 @@ async function mcGtOnFinish(mode,fin,job){
   // them: put straight back after, not read again off the folder every proof
   const keepSlots=new Map(gtShapeSlots), keepSig=new Map(gtShapeSig);
   const keepLayout=gtLayout, keepFrom=gtLayoutFrom;
+  const page=gtMode;
+  // an edit still waiting on its undo timer is taken as a step now, not lost
+  if(UNDO.timer){ clearTimeout(UNDO.timer); UNDO.timer=null;
+    try{ const k=undoKeyNow(); if(k) undoKeep(k); }catch(e){} }
   mcGtSwapping++;
-  clearTimeout(UNDO.timer);
   gtFinish=fin;
   let swapped=false;
   try{
@@ -58997,7 +59009,9 @@ async function mcGtOnFinish(mode,fin,job){
     return await job();
   }finally{
     try{
-      if(swapped){
+      // on the page it was swapped on only (gtSetMode waits, but never put
+      // one page's paper onto another's sheet)
+      if(swapped&&gtMode===page){
         gtFinish=owner;
         gtFinishFollow(fin);
         // a paper never set up is not set up by being looked at
@@ -59008,7 +59022,7 @@ async function mcGtOnFinish(mode,fin,job){
         await gtFinishShow();
       }
     }catch(e){}
-    gtFinish=was;
+    if(gtMode===page) gtFinish=was;
     clearTimeout(UNDO.timer);
     mcGtSwapping--;
   }
