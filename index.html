@@ -35125,6 +35125,7 @@ async function gtCutFiles(){
   try{
     await gtShapesInHand();
     const plan=gtPagePlan();
+    await gtNoSkipUsed([await gtThumbReady(false)],plan.length);
     const out=[];
     for(let i=0;i<plan.length;i++){
       const at=plan[i];
@@ -36948,7 +36949,41 @@ const GT_QR_FIRST=990001, GT_QR_SIZE=10, GT_QR_TEXT=2.4, GT_QR_GAP=3;
 // both and the second sheet's cut file came out 990004-2.plt. The count is
 // kept on this computer (pltNext) and in each page's library; the higher wins.
 let gtNoGlobal=0;
-gtIdbGet('pltNext').then(v=>{ v=Math.floor(Number(v)); if(v>gtNoGlobal){ gtNoGlobal=v; try{ gtQrSync(); }catch(e){} } }).catch(()=>{});
+// Started from the highest any page has reached: before the count was shared
+// Festive could be at 990010 and Sticker at 990004, and Sticker's next run
+// would have printed 990004 to 990010 again.
+(async()=>{
+  let hi=0;
+  for(const k of ['pltNext','lib','lib:custom','lib:sticker']){
+    try{ const r=await gtIdbGet(k);
+      const v=Math.floor(Number(k==='pltNext'?r:r&&r.manifest&&r.manifest.sheet&&r.manifest.sheet.qrNext));
+      if(v>hi) hi=v; }catch(e){}
+  }
+  if(hi>gtNoGlobal){ gtNoGlobal=hi; gtIdbPut('pltNext',hi).catch(()=>{}); try{ gtQrSync(); }catch(e){} }
+})();
+// a page whose library has gone further (read off its folder, or another
+// computer's run) raises the count; it never lowers it
+function gtNoFold(){
+  const v=Math.floor(Number(gtSheet.qrNext));
+  if(v>gtNoGlobal){ gtNoGlobal=v; gtIdbPut('pltNext',v).catch(()=>{}); }
+}
+// Numbers whose cut file is already on the drive are passed over before a run
+// is drawn: the cutter reads the QR and takes the file of that name, and a
+// clash came out as 990004-2.plt beside a sheet printed 990004.
+async function gtNoSkipUsed(dirs,pages){
+  dirs=(dirs||[]).filter(Boolean); pages=Math.max(1,pages|0);
+  if(!dirs.length) return;
+  const has=async n=>{ for(const d of dirs){
+    try{ await d.getFileHandle(n+'.plt'); return true; }catch(e){} } return false; };
+  let base=gtQrBase(), moved=false;
+  for(let guard=0;guard<500;guard++){
+    let hit=-1;
+    for(let i=0;i<pages;i++) if(await has(base+i)){ hit=i; break; }
+    if(hit<0) break;
+    base+=hit+1; moved=true;
+  }
+  if(moved){ gtNoSet(base); try{ gtQrSync(); }catch(e){} gtSaveSoon(); }
+}
 const gtQrBase=()=>Math.max(Math.max(0,Math.floor(Number(gtSheet.qrNext))||GT_QR_FIRST),gtNoGlobal||0);
 const gtQrNumber=page=>gtQrBase()+Math.max(0,page|0);
 function gtNoSet(v){ gtSheet.qrNext=v; gtNoGlobal=v; gtIdbPut('pltNext',v).catch(()=>{}); }
@@ -37134,6 +37169,7 @@ function gtQrNumSpot(B,num,page){
   return hit||best;
 }
 function gtQrSync(){
+  gtNoFold();
   const on=document.getElementById('gtQrOn'); if(!on) return;
   on.checked=!!gtSheet.qrOn;
   const nx=document.getElementById('gtQrNext'), ds=document.getElementById('gtQrDist');
@@ -42380,7 +42416,10 @@ async function gtExport(print){
     }
     // the thumb drive asked for before the render, while the tap still counts —
     // after a minute of rendering the browser would no longer let it be asked
-    if(gtSheet.pltOn!==false) await gtThumbReady(true);
+    if(gtSheet.pltOn!==false){
+      const th=await gtThumbReady(true);
+      await gtNoSkipUsed([th,dir],pages);
+    }
     showMsg(out,`Rendering ${pages} sheet(s) at print resolution…`,true);
     swapped=true;
     // where the order runs over several shapes each sheet is rendered on its
@@ -58804,6 +58843,7 @@ async function mcGiftBundle(lines,mode,side,guest){
     // The back has none: the blade follows the front.
     const cuts=(!back&&gtSheet.pltOn!==false)?[]:null;
     if(cuts){ const noDots=gtDotsMissingMsg(); if(noDots) throw new Error(noDots); }
+    if(!back&&(cuts||gtSheet.qrOn)) await gtNoSkipUsed([await gtThumbReady(false)],pages);
     const bytes=await gtBuildPdf(pages,async(i,forms)=>{
       // A shape of its own is a sheet of its own, and the sheet has to be put
       // on it before it is drawn — the same pass the gift tag screen makes,
