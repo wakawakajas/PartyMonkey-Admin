@@ -16691,7 +16691,7 @@ function showScreen(name,viaBack){
   // a batch that lent its sheet to the Gift Tag screen takes it back on
   // the way out, whichever way somebody leaves
   if(name!=='tool-gift-tag'&&name!=='tool-gift-tag-design'&&!(gtLentOut&&name==='magic-batch'))
-    mcGtReturn();
+    mcGtReturn().catch(err=>{ try{ mcWarn('The gift tag sheet could not be taken back: '+((err&&err.message)||err)); }catch(e){} });
   // walking off the builder any other way spends the batch's ticket back, so
   // a Back pressed much later somewhere else is not sent to a stale batch
   mcDropBatchTicket(name);
@@ -58974,13 +58974,32 @@ async function mcGiftSidesRun(lines,mode,guest){
 // by side they printed the same numbers and spent only one run of them.
 // Magic Create waits for the gift tag screen's export to finish (a proof or a
 // sheet count that failed instead came out blank, or counted 0 sheets).
-async function mcGtTurn(job){
-  for(let t=0;gtExportBusy;t++){
-    if(t>2400) throw new Error('the gift tag screen is still exporting — wait for it to finish.');
-    await new Promise(r=>setTimeout(r,250));
-  }
-  gtExportBusy=true;
-  try{ return await job(); }finally{ gtExportBusy=false; }
+// First come, first served: each turn waits for the one asked before it.
+// Waiting by polling, Open full builder lost to every sheet a background count
+// or a download took in the gap - it waited out the whole run, then failed.
+// Nothing waiting and nothing running, a turn starts at once (the return made
+// on the way off the screen has its first part done before the next line).
+let mcGtQueue=Promise.resolve(), mcGtPending=0;
+function mcGtTurn(job){
+  let release; const mine=new Promise(r=>{ release=r; });
+  const prev=mcGtQueue; mcGtQueue=mine;
+  const idle=mcGtPending===0&&!gtExportBusy;
+  mcGtPending++;
+  const run=async()=>{
+    gtExportBusy=true;
+    try{ return await job(); }finally{ gtExportBusy=false; }
+  };
+  const go=idle?run():(async()=>{
+    const turn=await Promise.race([prev.then(()=>true),new Promise(r=>setTimeout(()=>r(false),600000))]);
+    if(!turn) throw new Error('Magic Create is still busy with a gift tag sheet — try again in a moment.');
+    // the gift tag screen's own export is not in the queue: it is waited for
+    for(let t=0;gtExportBusy;t++){
+      if(t>2400) throw new Error('the gift tag screen is still exporting — wait for it to finish.');
+      await new Promise(r=>setTimeout(r,250));
+    }
+    return run();
+  })();
+  return go.finally(()=>{ mcGtPending--; release(); });
 }
 // A batch's sheet is its paper's sheet: Matte, Gloss and Sticker each keep
 // their own layout - nesting and its turns, cut line, placeholders, back
