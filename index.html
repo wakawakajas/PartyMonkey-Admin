@@ -31807,10 +31807,18 @@ async function gtWouldEmpty(man){
   return true;
 }
 let gtWouldEmptyWhat='';
+// saves under way, however they were asked for (most call gtSaveLib straight)
+var gtSaveInFlight=0;
 async function gtSaveLib(){
   // Never with a batch's other paper swapped in (mcGtOnFinish): put off until
   // the swap is over, whichever of the many ways the save was asked for
   try{ if(mcGtSwapping>0){ gtSaveSoon(); return; } }catch(e){}
+  // and a swap waits for this one to finish (it awaits the folder before it
+  // reads the sheet, and read the swapped-in paper's)
+  gtSaveInFlight++;
+  try{ return await gtSaveLibRun(); }finally{ gtSaveInFlight--; }
+}
+async function gtSaveLibRun(){
   // see gtLibLoaded — never save over a library that could not be read
   if(!gtLibLoaded){
     if(!gtSaveWarned){
@@ -49254,17 +49262,17 @@ let mcPlanCountStep=null, mcPlanCountRun=0;
 async function mcPlanCountAll(){
   const run=++mcPlanCountRun, plan=mcPlan;
   const c=document.createElement('canvas');
-  for(const e of plan){
-    if(run!==mcPlanCountRun||plan!==mcPlan) return;
-    if(e.sheets>0) continue;
+  const stale=()=>run!==mcPlanCountRun||plan!==mcPlan;
+  // A gift tag file is not counted while the sheet is out on loan or the gift
+  // tag screen is open: counted then, it turned the sheet being worked on to
+  // another page or paper. It goes to the back and the rest are counted
+  // meanwhile, rather than every file after it waiting (in split view, for good).
+  const held=e=>e.tile==='giftTag'&&(mcGtHome||/^tool-gift-tag/.test(String(currentScreen||'')));
+  const one=async e=>{
     // a proof being drawn or a download running has the builder; wait for it
-    // and a gift tag file waits while the sheet is out on loan, or the gift
-    // tag screen is open: counted then, it turned the sheet being worked on
-    // to another page or paper
-    while(mcPlanDrawing||mcBusy||mcPlanCountStep||(e.tile==='giftTag'&&(mcGtHome
-      ||/^tool-gift-tag/.test(String(currentScreen||''))))){
+    while(mcPlanDrawing||mcBusy||mcPlanCountStep||held(e)){
       await new Promise(r=>setTimeout(r,200));
-      if(run!==mcPlanCountRun||plan!==mcPlan) return;
+      if(stale()) return false;
     }
     mcPlanCountStep=(async()=>{
       mcPlanDrawing=true;
@@ -49273,8 +49281,21 @@ async function mcPlanCountAll(){
       finally{ mcPlanDrawing=false; }
     })();
     await mcPlanCountStep; mcPlanCountStep=null;
-    if(run===mcPlanCountRun&&plan===mcPlan) mcRenderPlan();
+    if(!stale()) mcRenderPlan();
     await new Promise(r=>setTimeout(r,30));
+    return true;
+  };
+  const later=[];
+  for(const e of plan){
+    if(stale()) return;
+    if(e.sheets>0) continue;
+    if(held(e)){ later.push(e); continue; }
+    if(!await one(e)) return;
+  }
+  for(const e of later){
+    if(stale()) return;
+    if(e.sheets>0) continue;
+    if(!await one(e)) return;
   }
 }
 // Paper to get out for a set of files: each stock's sheets, a back riding on
@@ -59038,6 +59059,7 @@ async function mcGtOnFinish(mode,fin,job){
     // spent) is written first, on this paper's sheet - nothing awaited
     // between here and the swap, so none can start in the gap
     if(gtSaving||gtSaveTimer!=null){ await gtSaveFlush(); continue; }
+    if(gtSaveInFlight>0){ await new Promise(r=>setTimeout(r,50)); continue; }
     break;
   }
   fin=(fin==='Gloss'||fin==='Sticker'||fin==='Matte')?fin:null;
