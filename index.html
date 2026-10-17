@@ -33262,12 +33262,19 @@ function gtSetMode(m,save){
   // batch's paper as its own and the swap back landed on the new page's sheet.
   // The same page goes straight on - the batch's own job asks for it.
   const run=async()=>{
-    try{ while(mcGtSwapping>0&&gtModeOk(m)!==gtMode) await new Promise(r=>setTimeout(r,100)); }catch(e){}
-    return gtSetModeNow(m,save);
+    gtModeRunning++;
+    try{
+      // never for ever: ten minutes, then the page goes anyway
+      try{ for(let t=0;mcGtSwapping>0&&gtModeOk(m)!==gtMode&&t<6000;t++) await new Promise(r=>setTimeout(r,100)); }catch(e){}
+      return await gtSetModeNow(m,save);
+    }finally{ gtModeRunning--; }
   };
   gtModeJob=gtModeJob.then(run,run);
   return gtModeJob;
 }
+// page switches under way (counted from when one starts its turn): a batch's
+// paper swap waits for them, see mcGtOnFinish
+let gtModeRunning=0;
 let gtModeAsked=false;
 async function gtSetModeNow(m,save){
   const next=gtModeOk(m);
@@ -42520,6 +42527,10 @@ async function gtFinishShow(){
 }
 document.getElementById('gtFinishSeg').addEventListener('click',async e=>{
   const b=e.target.closest('[data-gt-finish]'); if(!b) return;
+  // not while Magic Create has another paper's sheet in for a moment
+  // (mcGtOnFinish): the swap back undid the click and the buttons said Sticker
+  // over the Matte sheet
+  try{ for(let t=0;mcGtSwapping>0&&t<6000;t++) await new Promise(r=>setTimeout(r,100)); }catch(err){}
   const was=gtFinish;
   gtFinish=b.dataset.gtFinish;
   document.querySelectorAll('#gtFinishSeg [data-gt-finish]')
@@ -58977,7 +58988,15 @@ async function mcGtTurn(job){
 let mcGtSwapping=0;
 async function mcGtOnFinish(mode,fin,job){
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
-  if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
+  // A page switch already under way finishes first, and the batch's page is
+  // on screen, before anything is swapped: one that got going just before the
+  // swap moved the page away under it, the job then asked for its own page
+  // back and waited for a swap that was waiting for it - for good.
+  for(let t=0;t<6000;t++){
+    if(gtModeRunning>0){ await new Promise(r=>setTimeout(r,50)); continue; }
+    if(mode&&mode!==gtMode&&typeof gtSetMode==='function'){ await gtSetMode(mode); continue; }
+    break;
+  }
   fin=(fin==='Gloss'||fin==='Sticker'||fin==='Matte')?fin:null;
   if(!fin||typeof gtFinishFollow!=='function') return job();
   // the paper the sheet itself is, not what gtFinish says: on a loan's other
@@ -59006,6 +59025,7 @@ async function mcGtOnFinish(mode,fin,job){
   try{
     swapped=gtFinishFollow(owner);
     if(swapped) await gtFinishShow();
+    if(gtMode!==page) throw new Error('the gift tag page changed while the sheet was being set up — try again.');
     return await job();
   }finally{
     try{
