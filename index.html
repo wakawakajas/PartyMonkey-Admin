@@ -9386,6 +9386,9 @@ function pcCatValue(c,k){
   if(!c||k<0) return '';
   const count=Math.max(0,Math.floor(Number(c.count)||0));
   if(k>=count) return '';
+  // one card's words changed on the card itself (clicked on the sheet)
+  const own=c.cardText;
+  if(own&&Object.prototype.hasOwnProperty.call(own,k)) return String(own[k]);
   const lines=c.lines||[];
   // more cards wanted than lines: the list runs again from the top — one word
   // with How many at 10 is that word on ten cards
@@ -9407,8 +9410,24 @@ function pcNameSize(c,name){
 function pcNameOn(ph,page){
   const c=ph&&pcCatById(ph.cat); if(!c) return null;
   const slots=pcCatSlots(c), i=slots.indexOf(phTwinSrc(ph)||ph); if(i<0) return null;
-  const name=pcCatValue(c,(page||0)*slots.length+i);
-  return name&&name.trim()?{c,name:name.trim()}:null;
+  const k=(page||0)*slots.length+i;
+  const name=pcCatValue(c,k);
+  return name&&name.trim()?{c,k,name:name.trim()}:null;
+}
+// This one card's words, typed on the card: its line in the list where the
+// list has a line for every card (so the list shows it too), else kept for
+// this card alone - numbering, or a list run again from the top, where the
+// same line is on other cards as well. A SIZE given to the old words follows.
+function pcSetCardText(c,k,v,old){
+  const lines=c.lines||[], count=Math.max(0,Math.floor(Number(c.count)||0));
+  if(lines.length>=count&&k<lines.length&&!(c.cardText&&Object.prototype.hasOwnProperty.call(c.cardText,k))){
+    c.lines=lines.slice(); c.lines[k]=v;
+  }else c.cardText={...(c.cardText||{}),[k]:v};
+  const m=c.nameSize, ok=String(old||'').trim(), nk=String(v).trim();
+  if(m&&ok!==nk&&Object.prototype.hasOwnProperty.call(m,ok)){
+    c.nameSize={...m,[nk]:m[ok]};
+    if(!(c.lines||[]).some(l=>String(l).trim()===ok)) delete c.nameSize[ok];
+  }
 }
 const pcCatById=id=>(state.cats||[]).find(c=>c.id===id)||null;
 // this category's boxes, in the order the sheet is filled — bottom row first,
@@ -12454,6 +12473,9 @@ pcCatRoots.forEach(r=>r.addEventListener('input',e=>{
   const c=pcCatOf(el); if(!c) return;
   const f=el.dataset.cf;
   if(f==='name'){ c.name=el.value; drawAll(); return; }
+  // words typed on single cards (pcSetCardText) go when the words they were
+  // made from are changed here: they would sit on whichever card is now there
+  if(f==='pattern'||f==='lines'||f==='start') delete c.cardText;
   if(f==='pattern'){ c.pattern=el.value; drawAll(); return; }
   if(f==='color'){ c.color=el.value; drawAll(); return; }
   if(f==='lines'){
@@ -12533,7 +12555,7 @@ pcCatRoots.forEach(r=>r.addEventListener('click',e=>{
   card.querySelector('[data-cpane="list"]').style.display=toList?'':'none';
   // going back to numbering drops the list, or it would keep winning over it
   if(!toList&&(c.lines||[]).length){
-    c.lines=[];
+    c.lines=[]; delete c.cardText;
     const ta=card.querySelector('[data-cf="lines"]'); if(ta) ta.value='';
   }
   pcListMode[c.id]=toList;
@@ -13004,7 +13026,8 @@ function pcNameRow(ph){
   const on=pcNameOn(ph,state.page); if(!on) return '';
   const own=pcNameSize(on.c,on.name), base=Math.max(0.8,Number(on.c.sizeMm)||6);
   return `<div class="sect-label">This name</div>
-    <div class="hint" style="margin:0 0 6px;font-weight:600;color:var(--ink);white-space:pre-wrap;">${escapeHtml(on.name)}</div>
+    <label class="field" style="margin:0 0 6px;"><span>WORDS — THIS CARD ONLY</span>
+      <input type="text" data-pop="nametext" value="${escapeHtml(on.name)}" aria-label="This card's words"/></label>
     <div class="grid2">
       <label class="field"><span>SIZE (MM) — THIS NAME ONLY</span>
         <input type="number" step="0.5" min="0.8" data-pop="namesize" value="${own!=null?own:''}" placeholder="${base} (group)"/></label>
@@ -13044,6 +13067,13 @@ function phPopSetSize(wMm,hMm){
       return;
     }
     if(!ph) return;
+    if(k==='nametext'){
+      const on=pcNameOn(ph,state.page), v=String(t.value||'').trim();
+      // cleared, the card keeps what it had until something is typed
+      if(!on||!v) return;
+      pcSetCardText(on.c,on.k,v,on.name);
+      drawAll(); return;
+    }
     if(k==='namesize'){
       const on=pcNameOn(ph,state.page); if(!on) return;
       const v=parseFloat(t.value);
@@ -13063,6 +13093,8 @@ function phPopSetSize(wMm,hMm){
     drawAll();
   });
   el.addEventListener('change',e=>{
+    // the list in the text panel shows a name changed on its card
+    if(e.target.closest('[data-pop="nametext"]')){ if(typeof pcTextPanelSync==='function') pcTextPanelSync(); return; }
     const t=e.target.closest('[data-pop="cat"]'); if(!t) return;
     phSetBoxes(phPop.no).forEach(q=>{ q.cat=t.value; });
     if(typeof pcRenderCats==='function') pcRenderCats();
@@ -28068,7 +28100,8 @@ function applyPrintState(meta,name,whole,keepArt){
   // guarantee that keeps words off the Custom Template sheet.
   state.cats=Array.isArray(meta.cats)
     ? meta.cats.map(c=>({...c,lines:Array.isArray(c.lines)?c.lines.slice():[],
-        nameSize:c.nameSize&&typeof c.nameSize==='object'?{...c.nameSize}:undefined})) : [];
+        nameSize:c.nameSize&&typeof c.nameSize==='object'?{...c.nameSize}:undefined,
+        cardText:c.cardText&&typeof c.cardText==='object'?{...c.cardText}:undefined})) : [];
   state.showCut=meta.showCut!==false;
   document.getElementById('cutToggle').checked=state.showCut;
   state.cutColor=meta.cutColor||'red';
