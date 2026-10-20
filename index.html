@@ -59023,22 +59023,44 @@ const mcSideName=(name,side)=>String(name||'').replace(/(\.pdf)?$/i,
 // that back then fails by name rather than the sheet going out one-sided.
 // [null] is the one file under the name it always had.
 // whether the sheet has a back is its paper's own back picture
+// The back picture is the one thing of the paper's sheet this asks about, so it
+// is looked up rather than the whole sheet swapped in (mcGtOnFinish): that read
+// the paper's cut file and drew the sheet twice for every Gloss/Sticker sheet,
+// each time the Ready to download list opened - which is what it waited on.
 function mcGiftSides(lines,mode,guest,fin){
   if(typeof gtSheetHasBack!=='function') return Promise.resolve([null]);
-  return mcGtTurn(()=>mcGtOnFinish(mode,fin,()=>mcGiftSidesRun(lines,mode,guest)));
+  return mcGtTurn(()=>mcGiftSidesRun(lines,mode,guest,fin));
 }
-async function mcGiftSidesRun(lines,mode,guest){
+// The back picture this paper's sheet has, as gtFinishFollow would swap it in;
+// null where the sheet in hand is already that paper's.
+function mcGtPaperBack(fin){
+  fin=(fin==='Gloss'||fin==='Sticker'||fin==='Matte')?fin:null;
+  const S=gtSheet, owner=S.finishOf||S.backFinish||gtFinish;
+  if(!fin||owner===fin) return null;
+  const next=S.byFinish&&typeof S.byFinish==='object'?S.byFinish[fin]:null;
+  if(next) return ('backFile' in next&&next.backFile!==undefined)?next.backFile:null;
+  const old=S.backByFinish&&typeof S.backByFinish==='object'?S.backByFinish[fin]:undefined;
+  return typeof old==='string'?old:'';
+}
+async function mcGiftSidesRun(lines,mode,guest,fin){
   if(typeof gtSheetHasBack!=='function') return [null];
   if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
+  for(let t=0;gtModeRunning>0&&t<6000;t++) await new Promise(r=>setTimeout(r,50));
   if(mode&&mode!==gtMode&&typeof gtSetMode==='function') await gtSetMode(mode);
   await mcGtRehydrate(lines);
+  // every paper's back picture, read once and kept
+  try{ await gtHydrateBacks(); }catch(e){}
   // a batch prints the library's back, never a saved sheet's job override
   const keep=gtOrder, jb=gtJobBack;
   gtOrder=lines.map(mcGtLine); gtJobBack=null;
   let unMerge=()=>{};
   try{
     unMerge=await mcGtMergeOpen(lines,guest);
-    return (gtSheetHasBack()||gtBackUnread().length)?['front','back']:[null];
+    // the paper's back in for the question alone - nothing awaited in between
+    const back=mcGtPaperBack(fin), was=gtSheet.backFile;
+    if(back!==null) gtSheet.backFile=back;
+    try{ return (gtSheetHasBack()||gtBackUnread().length)?['front','back']:[null]; }
+    finally{ gtSheet.backFile=was; }
   }
   finally{ unMerge(); gtOrder=keep; gtJobBack=jb; gtNestCache=null; }
 }
