@@ -32299,11 +32299,61 @@ async function gtOneOffRestore(lines){
   if(n) await gtHydrateBacks().catch(()=>{});
   return n;
 }
+// Each page's library as it was left, so coming back to it does not read every
+// design file off the folder again and decode its pictures (two thousand files,
+// seconds a time - and Magic Create goes between Festive and Custom for every
+// sheet it lays out). Used only when the folder is the same one and its
+// library files are exactly as they were (gtLibSig): then it is the library
+// that would have been read. Anything else, it is read as it always was.
+const gtLibKept={};
+function gtLibKeepPut(mode){
+  delete gtLibKept[mode];
+  if(!gtDir||!gtLibLoaded||gtFolderPending||!gtLibDiskText) return;
+  try{
+    gtLibKept[mode]={dir:gtDir,sig:gtLibDiskText,
+      designs:gtLib.designs,fonts:gtLib.fonts,texts:gtLib.texts,
+      ownDesigns:gtOwnDesigns,piguLoaded:gtPiguLoaded,
+      assets:new Map(gtAssets),imgs:new Map(gtImgs),backImgs:new Map(gtBackImgs),
+      layout:gtLayout,baseImg:gtBaseImg,layoutFrom:gtLayoutFrom,baseFrom:gtBaseFrom,
+      folderName:gtLibFolderName,defaultShape:gtDefaultShape,
+      shapeSlots:new Map(gtShapeSlots),shapeSig:new Map(gtShapeSig),
+      sheet:JSON.parse(JSON.stringify(gtSheet)),
+      base:gtLibBase,stamps:gtStamps,gone:gtGone,born:gtBorn};
+  }catch(e){ delete gtLibKept[mode]; }
+}
+async function gtLibKeepTake(){
+  const k=gtLibKept[gtMode]; delete gtLibKept[gtMode];
+  if(!k||!gtDir||gtFolderPending) return false;
+  try{
+    if(!await gtDir.isSameEntry(k.dir)||!await gtDirOk(gtDir)) return false;
+    if(await gtLibSig(gtDir)!==k.sig) return false;
+  }catch(e){ return false; }
+  gtHydrateGen++;
+  gtImgQueue.length=0; gtImgFailed.clear();
+  gtLib.designs=k.designs; gtLib.fonts=k.fonts; gtLib.texts=k.texts;
+  gtOwnDesigns=k.ownDesigns; gtPiguLoaded=k.piguLoaded;
+  gtAssets.clear(); k.assets.forEach((v,p)=>gtAssets.set(p,v));
+  gtImgs.clear(); k.imgs.forEach((v,p)=>gtImgs.set(p,v));
+  gtBackImgs.clear(); k.backImgs.forEach((v,p)=>gtBackImgs.set(p,v));
+  gtJobBack=null;
+  gtLayout=k.layout; gtBaseImg=k.baseImg; gtLayoutFrom=k.layoutFrom; gtBaseFrom=k.baseFrom;
+  gtLibFolderName=k.folderName; gtDefaultShape=k.defaultShape;
+  gtShapeSlots.clear(); k.shapeSlots.forEach((v,p)=>gtShapeSlots.set(p,v));
+  gtShapeSig.clear(); k.shapeSig.forEach((v,p)=>gtShapeSig.set(p,v));
+  gtPickOnly(null);
+  Object.keys(gtSheet).forEach(p=>{ delete gtSheet[p]; });
+  Object.assign(gtSheet,k.sheet);
+  gtLibLoaded=true; gtSaveWarned=false;
+  gtLibDiskText=k.sig; gtLibBase=k.base; gtStamps=k.stamps; gtGone=k.gone; gtBorn=k.born;
+  gtNestCache=null;
+  gtShapeLoaded();
+  return true;
+}
 async function gtLoadLib(){
   gtOneOffStash();
   // the order outlives the library read, and so does the back it came with
   const jb=gtJobBack;
-  try{ await gtLoadLibRead(); }
+  try{ if(!await gtLibKeepTake()) await gtLoadLibRead(); }
   finally{
     await gtOneOffRestore(gtOrder).catch(()=>{});
     gtJobBack=gtOrder.length?jb:null;
@@ -33347,6 +33397,8 @@ async function gtSetModeNow(m,save){
   gtOrders[gtMode]=gtOrder; gtJobBacks[gtMode]=gtOrder.length?gtJobBack:null;
   // and so was its run (Matte / Gloss / Sticker)
   if(gtLoaded) await gtFinishKeep(gtMode);
+  // and its library, as it is, for coming back to (gtLibKept)
+  if(gtLoaded) gtLibKeepPut(gtMode);
   gtMode=next;
   gtPaintMode();       // the title moves now, not once the folder is read
   if(save!==false) await gtIdbPut('gtMode',gtMode).catch(()=>{});
