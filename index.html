@@ -48781,6 +48781,7 @@ function mcPlanEditWhat(e){
 }
 async function mcPlanEdit(i){
   const e=mcPlan[i]; if(!e||mcBusy||mcPlanDrawing) return;
+  mcPlanShots=null;      // what is changed there is not on the sheets kept
   const msg=document.getElementById('mcPlanMsg');
   const shut=()=>document.getElementById('mcPlanSheet').classList.remove('open');
   mcPlanDrawing=true; mcRenderPlan();
@@ -49223,7 +49224,7 @@ async function mcFieryPrint(idx){
   const run=new Set();
   try{
     // the sheet count that ran behind the Send dialog finishes first
-    while(mcPlanCountStep) await mcPlanCountStep;
+    await mcPlanCountYield();
     await mcWinCommitAndPark();
     await mcBorrowBuilder(async()=>{
       for(const e of entries){
@@ -49279,7 +49280,7 @@ async function mcFieryCountSheets(entries){
   if(entries.every(e=>e.sheets>0)) return entries.map(e=>e.sheets);
   const out=[];
   const c=document.createElement('canvas');
-  while(mcPlanCountStep) await mcPlanCountStep;
+  await mcPlanCountYield();
   // published as the step in progress, so the background counter, a download
   // and the Send that follows all wait for it: two borrows of the one builder at
   // once left the operator's layout replaced by a batch's
@@ -49296,44 +49297,56 @@ async function mcFieryCountSheets(entries){
 // The Ready to download list counts every file's sheets in the background, one
 // at a time between proofs, so each row can say how many sheets it is and the
 // head of the list how much paper of each kind to get out.
-let mcPlanCountStep=null, mcPlanCountRun=0;
+let mcPlanCountStep=null, mcPlanCountRun=0, mcPlanWant=0;
+// Somebody who needs the builder - a proof, a send: the count lets go of it
+// after the file in hand rather than at the end of its run.
+async function mcPlanCountYield(){
+  mcPlanWant++;
+  try{ while(mcPlanCountStep) await mcPlanCountStep; }
+  finally{ mcPlanWant--; }
+}
 async function mcPlanCountAll(){
   const run=++mcPlanCountRun, plan=mcPlan;
   const c=document.createElement('canvas');
   const stale=()=>run!==mcPlanCountRun||plan!==mcPlan;
   // A gift tag file is not counted while the sheet is out on loan or the gift
   // tag screen is open: counted then, it turned the sheet being worked on to
-  // another page or paper. It goes to the back and the rest are counted
+  // another page or paper. It is passed over and the rest are counted
   // meanwhile, rather than every file after it waiting (in split view, for good).
   const held=e=>e.tile==='giftTag'&&(mcGtHome||/^tool-gift-tag/.test(String(currentScreen||'')));
-  const one=async e=>{
+  const tried=new Set();
+  // As many files as it can on one borrow of the builder: each borrow puts the
+  // operator's own layout back and draws it again, and that, once per file,
+  // was most of the wait.
+  for(;;){
+    if(stale()) return;
+    const left=plan.filter(e=>!(e.sheets>0)&&!tried.has(e));
+    if(!left.length) return;
+    const free=left.filter(e=>!held(e));
     // a proof being drawn or a download running has the builder; wait for it
-    while(mcPlanDrawing||mcBusy||mcPlanCountStep||held(e)){
+    if(!free.length||mcPlanDrawing||mcBusy||mcPlanCountStep||mcPlanWant){
       await new Promise(r=>setTimeout(r,200));
-      if(stale()) return false;
+      continue;
     }
     mcPlanCountStep=(async()=>{
       mcPlanDrawing=true;
-      try{ await mcBorrowBuilder(async()=>{ e.sheets=await mcCountEntrySheets(e,c); }); }
-      catch(err){ e.sheets=0; e.countFailed=true; }
+      let at=null;
+      try{ await mcBorrowBuilder(async()=>{
+        for(const e of free){
+          if(stale()||mcPlanWant||mcBusy) break;
+          if(held(e)) continue;
+          at=e; tried.add(e);
+          e.sheets=await mcCountEntrySheets(e,c);
+          at=null;
+          if(!stale()) mcRenderPlan();
+        }
+      }); }
+      catch(err){ if(at){ at.sheets=0; at.countFailed=true; } }
       finally{ mcPlanDrawing=false; }
     })();
     await mcPlanCountStep; mcPlanCountStep=null;
     if(!stale()) mcRenderPlan();
     await new Promise(r=>setTimeout(r,30));
-    return true;
-  };
-  const later=[];
-  for(const e of plan){
-    if(stale()) return;
-    if(e.sheets>0) continue;
-    if(held(e)){ later.push(e); continue; }
-    if(!await one(e)) return;
-  }
-  for(const e of later){
-    if(stale()) return;
-    if(e.sheets>0) continue;
-    if(!await one(e)) return;
   }
 }
 // Paper to get out for a set of files: each stock's sheets, a back riding on
@@ -50045,9 +50058,55 @@ document.getElementById('mcFieryStopBtn').addEventListener('click',async()=>{
 // the drawing rather than being worked out separately: what is being paged
 // through is the layout that was just built, not a second opinion about it.
 let mcPlanPage=0, mcPlanPages=1, mcPlanDrawing=false;
+// The sheets of the proof on screen drawn while it was laid out: every sheet
+// turned to was a whole borrow of the builder - laid out, drawn, the
+// operator's own put back - and waited first for the background count. The
+// next few are drawn in the same go and kept, so Next and Previous show them
+// at once. Only for the file on show, at that size; a Look starts afresh.
+const MC_PLAN_AHEAD=3;
+let mcPlanShots=null;      // {e,dim,pages,shots:Map(page → canvas)}
+let mcPlanMore=null;       // the drawing in progress wants its next sheets kept
+const mcPlanDim=stage=>{
+  // as big as the pop-up and the window allow: this is a proof, and a proof
+  // read at postage-stamp size proves nothing
+  const w=Math.max(240,(stage.clientWidth||640)-20);
+  const h=Math.round(window.innerHeight*0.62);
+  return Math.max(360,Math.max(w,h));
+};
+// Called by a preview with the sheet asked for already drawn and the layout
+// still on the builder: the sheets after it (and the one before) drawn too.
+async function mcPlanMoreRun(pages,at,draw){
+  const keep=mcPlanMore; if(!keep) return;
+  mcPlanMore=null;            // once per drawing
+  const order=[];
+  for(let j=at+1;j<pages&&j<=at+MC_PLAN_AHEAD;j++) order.push(j);
+  if(at>0) order.push(at-1);
+  // the sheet asked for is on screen before the rest are drawn
+  if(order.length) await new Promise(r=>setTimeout(r));
+  for(const j of order){
+    if(mcPlanWant||mcBusy) break;
+    const cv=document.createElement('canvas');
+    try{ await draw(cv,j); keep.set(j,cv); }catch(e){ break; }
+  }
+}
+function mcPlanShotShow(i,page){
+  const s=mcPlanShots, e=mcPlan[i];
+  if(!s||!e||s.e!==e||typeof page!=='number'||mcPlanDrawing||mcBusy) return false;
+  const stage=document.getElementById('mcPlanStage');
+  const cv=s.shots.get(page);
+  if(!cv||s.dim!==mcPlanDim(stage)) return false;
+  const c=document.getElementById('mcPlanCanvas');
+  c.width=cv.width; c.height=cv.height;
+  c.getContext('2d').drawImage(cv,0,0);
+  mcPlanAt=i; mcPlanPage=page; mcPlanPages=s.pages;
+  mcPlanPager(); mcPlanZoomApply();
+  return true;
+}
 async function mcShowPlanEntry(i,page){
+  // a sheet already drawn for this proof is simply shown
+  if(mcPlanShotShow(i,page)) return;
   // the builder is borrowed by a download; drawing a proof swaps it mid-file
-  while(mcPlanCountStep) await mcPlanCountStep;
+  await mcPlanCountYield();
   const e=mcPlan[i]; if(!e||mcPlanDrawing||mcBusy) return;
   const msg=document.getElementById('mcPlanMsg');
   const stage=document.getElementById('mcPlanStage');
@@ -50057,32 +50116,46 @@ async function mcShowPlanEntry(i,page){
   mcPlanAt=i; mcRenderPlan();
   stage.style.display='';
   showMsg(msg,'Laying it out…',true);
-  // as big as the pop-up and the window allow: this is a proof, and a proof
-  // read at postage-stamp size proves nothing
-  const w=Math.max(240,(stage.clientWidth||640)-20);
-  const h=Math.round(window.innerHeight*0.62);
-  const dim=Math.max(360,Math.max(w,h));
+  const dim=mcPlanDim(stage);
+  // a fresh Look draws afresh; turning a page keeps what this proof has
+  const same=mcPlanShots&&mcPlanShots.e===e&&mcPlanShots.dim===dim&&typeof page==='number';
+  const shots=same?mcPlanShots.shots:new Map();
+  mcPlanShots=null;
+  const more=new Map();
   mcPlanDrawing=true;
   try{
     await mcBorrowBuilder(async()=>{
-      if(e.kind==='line'){
-        // the face this line was built on, or a place card proofs as empty
-        // boxes — the same rule the render itself follows
-        pcMode=mcPcOf(e.it);
-        applyPrintState(e.it.design);
-        state.orderId=e.it.order_id;
-        await mcApplyArt(e.it);
-        // every sheet the file will have — extras can run a line onto a second
-        mcPlanPages=Math.max(1,sheetCount());
-        if(mcPlanPage>=mcPlanPages) mcPlanPage=mcPlanPages-1;
-        renderSide(e.side,c,dim,{page:mcPlanPage});
-      }else{
-        mcMergeNote='';
-        mcPlanPages=Math.max(1,await MC_TILES[e.tile].preview(e,c,dim,mcPlanPage)||1);
-        if(mcPlanPage>=mcPlanPages) mcPlanPage=mcPlanPages-1;
-      }
+      mcPlanMore=more;
+      try{
+        if(e.kind==='line'){
+          // the face this line was built on, or a place card proofs as empty
+          // boxes — the same rule the render itself follows
+          pcMode=mcPcOf(e.it);
+          applyPrintState(e.it.design);
+          state.orderId=e.it.order_id;
+          await mcApplyArt(e.it);
+          // every sheet the file will have — extras can run a line onto a second
+          mcPlanPages=Math.max(1,sheetCount());
+          if(mcPlanPage>=mcPlanPages) mcPlanPage=mcPlanPages-1;
+          renderSide(e.side,c,dim,{page:mcPlanPage});
+          await mcPlanMoreRun(mcPlanPages,mcPlanPage,(cv,j)=>renderSide(e.side,cv,dim,{page:j}));
+        }else{
+          mcMergeNote='';
+          mcPlanPages=Math.max(1,await MC_TILES[e.tile].preview(e,c,dim,mcPlanPage)||1);
+          if(mcPlanPage>=mcPlanPages) mcPlanPage=mcPlanPages-1;
+        }
+      }finally{ mcPlanMore=null; }
       e.sheets=mcPlanPages;
     });
+    // this sheet and those drawn ahead, kept for the pager
+    const mine=document.createElement('canvas');
+    mine.width=c.width; mine.height=c.height;
+    mine.getContext('2d').drawImage(c,0,0);
+    more.set(mcPlanPage,mine);
+    more.forEach((cv,j)=>shots.set(j,cv));
+    // no more than a handful held at a time: these are big canvases
+    [...shots.keys()].filter(j=>Math.abs(j-mcPlanPage)>MC_PLAN_AHEAD+1).forEach(j=>shots.delete(j));
+    if(mcPlan[i]===e) mcPlanShots={e,dim,pages:mcPlanPages,shots};
     msg.innerHTML='';
     if(mcMergeNote){ showMsg(msg,escapeHtml(mcMergeNote),false); mcMergeNote=''; }
   }catch(err){
@@ -58866,7 +58939,9 @@ async function mcMergeCustomPreview(e,canvas,dim,page){
   mcMergeNote=missing&&missing.length
     ?`Not on this sheet — artwork could not be loaded: ${missing.join(', ')}`:'';
   try{
-    renderSide(e.side||'front',canvas,dim,{page:Math.max(0,Math.min(pages-1,Number(page)||0))});
+    const at=Math.max(0,Math.min(pages-1,Number(page)||0));
+    renderSide(e.side||'front',canvas,dim,{page:at});
+    await mcPlanMoreRun(pages,at,(cv,j)=>renderSide(e.side||'front',cv,dim,{page:j}));
   }finally{ pcMode=pcWas; }
   return pages;
 }
@@ -58881,6 +58956,7 @@ async function mcPrintPreview(lines,template,canvas,dim,page){
   const {pages}=await mcPrintLay(lines,template);
   const at=Math.max(0,Math.min(pages-1,Number(page)||0));
   renderSide('front',canvas,dim,{page:at});
+  await mcPlanMoreRun(pages,at,(cv,j)=>renderSide('front',cv,dim,{page:j}));
   return pages;
 }
 // and the same two for the gift tag side, so the plan can ask every tile the
@@ -59206,6 +59282,14 @@ async function mcGiftPreviewRun(lines,mode,canvas,dim,page,side,guest){
     const fz=gtNoFrozen; gtNoFrozen=gtNoNow();
     try{ gtRenderPage(canvas,at,dim,false,null,null,side==='back'?'back':'front'); }
     finally{ gtNoFrozen=fz; }
+    // the next sheets of the proof while this sheet is laid out (mcPlanMoreRun)
+    await mcPlanMoreRun(pages,at,async(cv,j)=>{
+      gtPage=j;
+      if(typeof gtGoPage==='function') await gtGoPage(j);
+      const fz2=gtNoFrozen; gtNoFrozen=gtNoNow();
+      try{ gtRenderPage(cv,j,dim,false,null,null,side==='back'?'back':'front'); }
+      finally{ gtNoFrozen=fz2; }
+    });
     return pages;
   }
   finally{
