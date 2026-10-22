@@ -11493,6 +11493,57 @@ function pcLibBoxRect(k,b,img,line){
   const x0=Math.min(...xs), y0=Math.min(...ys);
   return {xMm:mx+x0, yMm:my+y0, wMm:Math.max(...xs)-x0, hMm:Math.max(...ys)-y0};
 }
+// A colour font (letters in the text colour with a fixed white shine built in,
+// like PM SheepBubble) gets no outline from strokeText: Chrome strokes nothing
+// on a colour glyph. Its outline is built instead: the words filled again and
+// again round a circle as wide as the outline, all painted the outline colour,
+// under the letters. Any other font is stroked as before.
+const pmColourFontSeen=new Map();
+function pmIsColourFont(ctx){
+  const key=ctx.font.replace(/[\d.]+px/,'');
+  if(pmColourFontSeen.has(key)) return pmColourFontSeen.get(key);
+  // not loaded yet: draws in a fallback for now, asked again next time
+  if(!document.fonts.check(ctx.font)) return false;
+  const cv=document.createElement('canvas'); cv.width=320; cv.height=110;
+  const c=cv.getContext('2d');
+  c.font=ctx.font.replace(/[\d.]+px/,'80px'); c.textBaseline='alphabetic'; c.fillStyle='#ff0000';
+  c.fillText('HBo8',6,90);
+  // red asked for, white came back: the font paints its own colours
+  const d=c.getImageData(0,0,cv.width,cv.height).data;
+  let colour=false;
+  for(let i=0;i<d.length;i+=4) if(d[i+3]>220&&d[i+1]>200&&d[i+2]>200){ colour=true; break; }
+  cv.width=cv.height=0;
+  pmColourFontSeen.set(key,colour);
+  return colour;
+}
+function pmStrokeText(ctx,t,x,y){
+  if(!pmIsColourFont(ctx)){ ctx.strokeText(t,x,y); return; }
+  const r=ctx.lineWidth/2, m=ctx.getTransform(), mt=ctx.measureText(t);
+  // only the patch the words and their outline cover, in canvas pixels
+  const L=x-mt.actualBoundingBoxLeft-r, R=x+mt.actualBoundingBoxRight+r;
+  const T=y-mt.actualBoundingBoxAscent-r, B=y+mt.actualBoundingBoxDescent+r;
+  const pts=[[L,T],[R,T],[L,B],[R,B]].map(([u,v])=>[m.a*u+m.c*v+m.e, m.b*u+m.d*v+m.f]);
+  const W=ctx.canvas.width, H=ctx.canvas.height;
+  const px0=Math.max(0,Math.floor(Math.min(...pts.map(p=>p[0])))-2), py0=Math.max(0,Math.floor(Math.min(...pts.map(p=>p[1])))-2);
+  const px1=Math.min(W,Math.ceil(Math.max(...pts.map(p=>p[0])))+2), py1=Math.min(H,Math.ceil(Math.max(...pts.map(p=>p[1])))+2);
+  if(px1<=px0||py1<=py0) return;
+  const cv=document.createElement('canvas'); cv.width=px1-px0; cv.height=py1-py0;
+  const c=cv.getContext('2d');
+  c.setTransform(m.a,m.b,m.c,m.d,m.e-px0,m.f-py0);
+  c.font=ctx.font; c.textAlign=ctx.textAlign; c.textBaseline=ctx.textBaseline; c.direction=ctx.direction;
+  if('letterSpacing' in ctx) c.letterSpacing=ctx.letterSpacing;
+  // steps round the circle about a pixel and a half apart, and a ring at half
+  // the width too so thin gaps and small counters fill solid
+  const rpx=r*Math.hypot(m.a,m.b), n=Math.min(180,Math.max(16,Math.ceil(2*Math.PI*rpx/1.5)));
+  c.fillText(t,x,y);
+  for(const k of [0.5,1]) for(let i=0;i<n;i++){
+    const a=2*Math.PI*i/n; c.fillText(t,x+r*k*Math.cos(a),y+r*k*Math.sin(a));
+  }
+  c.setTransform(1,0,0,1,0,0);
+  c.globalCompositeOperation='source-in'; c.fillStyle=ctx.strokeStyle; c.fillRect(0,0,cv.width,cv.height);
+  ctx.save(); ctx.setTransform(1,0,0,1,0,0); ctx.drawImage(cv,px0,py0); ctx.restore();
+  cv.width=cv.height=0;
+}
 function pcDrawWords(ctx,sc,c,words,bx,by,bw,bh,fam,align){
       const own=pcNameSize(c,words);
       ctx.save();
@@ -11506,7 +11557,7 @@ function pcDrawWords(ctx,sc,c,words,bx,by,bw,bh,fam,align){
       // what stands outside the letter is the thickness keyed in
       const ow=Math.max(0,Number(c.ow)||0)*sc;
       if(ow>0){ ctx.strokeStyle=c.oc||'#FFFFFF'; ctx.lineWidth=ow*2; ctx.lineJoin='round'; ctx.miterLimit=2; }
-      const put=(t,x,y)=>{ if(ow>0) ctx.strokeText(t,x,y); ctx.fillText(t,x,y); };
+      const put=(t,x,y)=>{ if(ow>0) pmStrokeText(ctx,t,x,y); ctx.fillText(t,x,y); };
       const curve=Number(c.curve)||0;
       // the Chinese can be given its own gap from the English and its own
       // size. A gap drops the spaces typed at each change-over and puts a mark
@@ -37250,7 +37301,7 @@ function gtDrawField(ctx,f,v,bx,by,bw,bh,sc){
     ctx.lineWidth=ow*2;
     ctx.lineJoin='round'; ctx.miterLimit=2;
   }
-  const put=(t,x,ty)=>{ if(ow>0) ctx.strokeText(t,x,ty); ctx.fillText(t,x,ty); };
+  const put=(t,x,ty)=>{ if(ow>0) pmStrokeText(ctx,t,x,ty); ctx.fillText(t,x,ty); };
   const fit=gtFitText(ctx,v.text,gtFamily(v.font),v.size,sc,bw,bh);
   const lines=fit.lines, lh=fit.size*1.25;
   ctx.textAlign=v.align;
