@@ -6856,10 +6856,10 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         </div>
           <div id="gtLibMsg"></div>
           <div id="gtComboBringWrap" style="display:none;margin-top:8px;">
-            <div class="sect-label">Live from the Pigu 2 folders</div>
+            <div class="sect-label">Live from the page folders</div>
             <div class="calc" id="gtComboLiveState">—</div>
             <button class="btn-outline" id="gtComboReloadBtn" style="width:100%;margin-top:6px;">↻ Read the folders again</button>
-            <p class="hint" style="margin:6px 0 0;">Designs come straight from Festive Gift Tag, Custom Gift Tag and Sticker in this page’s own root (Pigu 2) — those folders are only read. A design changed here is saved in this page’s folder and stops following its folder. Fonts and shapes are this page’s own.</p>
+            <p class="hint" style="margin:6px 0 0;">This page’s folder is the main folder (e.g. Pigu New). Designs come straight from the Festive Gift Tag, Custom Gift Tag and Sticker folders inside it — those are only read. Fonts and shapes are the main folder’s fonts and Shape. A design changed here is saved in the main folder and stops following its own.</p>
           </div>
           <details class="gt-why"><summary>What it does</summary>
             <p class="hint">One file holding every design, font and phrase. Send it on; whoever opens it imports once and has the lot. Importing adds what is new and leaves what is already there alone.</p>
@@ -31838,7 +31838,7 @@ function gtPieceEditOf(d){
     // read again anyway), its own bleed, punch hole, size and turn
     const own=x.trace&&!x.trace.auto?gtTraceKept(x):null;
     const bl=x.bleedOf===null||JSON.stringify(x.bleed||null)!==x.bleedOf;
-    const art=gtArtKept(x), artOwn=art&&(Number(art.s)!==1||Number(art.dx)||Number(art.dy));
+    const art=gtArtKept(x), artOwn=art&&(Number(art.s)!==1||Number(art.dx)||Number(art.dy)||art.kx!=null);
     const e={...(x.wordsCut?{wordsCut:true}:{}),...(own?{trace:own}:{}),...(bl?{bleed:x.bleed||null}:{}),
       ...(x.hole&&x.hole.on?{hole:x.hole}:{}),...(artOwn?{art}:{}),...(x.turn?{turn:x.turn}:{})};
     if(k&&((x.fields||[]).length||Object.keys(e).length)) out[k]={fields:x.fields||[],...e};
@@ -32291,7 +32291,8 @@ async function gtSaveLibRun(){
       +'holds library.backup-… files, each the whole library as it was then.',false);
     return;
   }
-  if(gtDir&&await gtDirOk(gtDir)&&await gtDirIsPiguRoot(gtDir)){
+  // Custom Gift Tag 2 is the one page whose folder is meant to hold them
+  if(gtMode!=='combo'&&gtDir&&await gtDirOk(gtDir)&&await gtDirIsPiguRoot(gtDir)){
     const m=document.getElementById('gtLibMsg');
     if(m) showMsg(m,`Not saving: “${escapeHtml(gtDir.name)}” holds the page folders (Festive Gift Tag, `
       +'Custom Gift Tag, Sticker) — it is not this page’s own folder. Choose this page’s own folder under '
@@ -33016,7 +33017,9 @@ function gtNormalizeDesign(d){
     // its artwork turned a quarter, or more (see gtTurnDesign)
     ...(gtTurnOf(d)?{turn:gtTurnOf(d)}:{}),
     art:d.artV===2
-      ?{s:Number(d.art&&d.art.s)||1,dx:Number(d.art&&d.art.dx)||0,dy:Number(d.art&&d.art.dy)||0}
+      ?{s:Number(d.art&&d.art.s)||1,dx:Number(d.art&&d.art.dx)||0,dy:Number(d.art&&d.art.dy)||0,
+        // where its cut line was held when the picture alone was nudged (gtCutShift)
+        ...(d.art&&d.art.kx!=null?{kx:Number(d.art.kx)||0,ky:Number(d.art.ky)||0}:{})}
       :{s:1,dx:0,dy:0},
     // and its own bleed, where it has one. No `on` at all means it follows the
     // sheet — which is a different instruction from "no bleed on this one".
@@ -33417,6 +33420,7 @@ async function gtScanRun(){
   await Promise.all([gtShapeList(),gtLibList()]);
   if(gtDedupeLib()) added=Math.max(added,1);
   if(listed.designs&&listed.root&&present.size) added+=gtDropMissing(present);
+  if(gtMode==='combo') gtComboFonts();     // fonts just found, for the live designs' words
   if(added){ await gtHydrate(); await gtSaveLib(); }
   return added;
 }
@@ -33719,7 +33723,7 @@ const GT_MODE_HINT={
   festive:'Your festive library folder \u2014 its designs, fonts, shapes and saved words.',
   custom:'Your custom tag folder \u2014 a library of its own, nothing shared with Festive.',
   sticker:'Your sticker folder \u2014 a library of its own, nothing shared with Festive or Custom.',
-  combo:'Festive, Custom and Sticker designs together \u2014 read live from Pigu 2, the three pages are left as they are.'};
+  combo:'Festive, Custom and Sticker designs together \u2014 read live from the main folder, the three pages are left as they are.'};
 function gtPaintMode(){
   const t=document.getElementById('gtTitle');
   if(t) t.textContent=GT_MODE_TITLE[gtMode];
@@ -35626,7 +35630,8 @@ function gtTracePlace(d,r,extra){
     byLoop.set(key,hit);
   }
   if(!extra) gtTraceLast={d,parts:hit.parts};
-  return hit.rel?hit.rel.map(([x,y])=>[x+r.x,y+r.y]):null;
+  const k=gtCutShift(d), ox=r.x+(k?k.x:0), oy=r.y+(k?k.y:0);
+  return hit.rel?hit.rel.map(([x,y])=>[x+ox,y+oy]):null;
 }
 // The cuts inside the outline that came with the design's PDF, placed on the same
 // rect the outline is — as drawn, with no outset and no smoothing, and open
@@ -35635,6 +35640,7 @@ function gtTracePlace(d,r,extra){
 function gtTraceExtras(d,r){
   const t=d&&d.trace;
   if(!t||!t.on||!t.loop||t.loop.length<4||!r) return [];
+  r=gtCutShifted(d,r);
   const out=(t.extra||[]).map(e=>{
     const p=e.pts.map(([u,v])=>[r.x+u*r.w,r.y+v*r.h]);
     p.open=!e.closed; return p;
@@ -35704,7 +35710,22 @@ function gtFitRectOf(d,slot){
 // The rect a design's punch hole is placed on: the artwork as drawn - its
 // scale and nudge in. Against the plain fit, a design scaled down to 39% had
 // its hole land past the edge of the tag, where nothing showed it.
-function gtHoleRect(d,slot){ return gtArtRectOf(d,slot); }
+function gtHoleRect(d,slot){ return gtCutRectOf(d,slot); }
+// Nudge X / Y moves the picture alone: the cut line, its punch hole and the back
+// stay where they were. art.kx / ky is the nudge they were last set against
+// (written the first time the picture is nudged), and they are placed that far
+// back from where the picture now sits. A design without them - every one from
+// before, and one put back by Fit or Back to original size - has its line ride
+// on the picture as it always did. A sticker sheet's lines are its stickers, so
+// they always go with the picture.
+function gtCutShift(d){
+  const a=d&&d.art, t=d&&d.trace;
+  if(!a||a.kx==null||d.cutSheet||!(t&&t.on&&t.loop&&t.loop.length>3)) return null;
+  const x=(Number(a.kx)||0)-(Number(a.dx)||0), y=(Number(a.ky)||0)-(Number(a.dy)||0);
+  return x||y?{x,y}:null;
+}
+const gtCutShifted=(d,r)=>{ const k=gtCutShift(d); return k?{...r,x:r.x+k.x,y:r.y+k.y}:r; };
+function gtCutRectOf(d,slot){ return gtCutShifted(d,gtArtRectOf(d,slot)); }
 function gtArtRectOf(d,slot){
   const img=d&&gtImgGet(d.id);
   if(!img||!img.naturalWidth) return {x:slot.x,y:slot.y,w:slot.w,h:slot.h};
@@ -36815,7 +36836,7 @@ function gtNestPlan(){
   const ids=[...new Set(q.map(l=>l.designId))];
   const dsig=ids.map(id=>{
     const d=gtDesign(id), img=gtImgs.get(id), t=d&&d.trace;
-    return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy],d&&d.turn||0,
+    return [id,!!(img&&img.naturalWidth),d&&d.art&&[d.art.s,d.art.dx,d.art.dy,d.art.kx,d.art.ky],d&&d.turn||0,
             d&&d.file,img&&img.naturalWidth?[img.naturalWidth,img.naturalHeight]:0,
             t&&t.refBox?[t.refBox.w,t.refBox.h]:0,
             gtBleedOf(d),
@@ -37540,15 +37561,23 @@ const gtLineBleedKept=l=>({...(l&&l.bleed&&l.bleed.on?{bleed:{on:true,mm:Math.ma
   // line is made again from its batch row, and lost it every time
   ...(l&&typeof l.split==='boolean'?{split:l.split}:{})});
 function gtBleedOf(d,line){
-  // Cut to its own line drawn out past the artwork (an outset), the blade runs
-  // through blank paper: nothing is printed past the cut. A coloured bleed there
-  // reached into the next tag on a nested sheet.
-  if(gtOwnCut(d)&&Number(d.trace.out)>0) return 0;
+  // Cut to its own line drawn out past the artwork (an outset) it bleeds too:
+  // the artwork is grown out to the line and past it (gtArtGrow). A nested
+  // sheet leaves room for the bleed between tags (bl in the packing).
   const lb=gtLineBleed(line);
   const own=d&&d.bleed;
   const b=lb!=null?lb:own&&own.on!==undefined?(own.on?Math.max(0,Number(own.mm)||0):0)
     :gtSheet.bleedOn?Math.max(0,Number(gtSheet.bleed)||0):0;
   return Math.max(b,gtArtBleedOf(d));
+}
+// How far the picture is grown to make a bleed of b: out to its own cut line
+// where that runs past it - an outset, or the picture nudged off the line - and
+// b on from there, so the bleed is b past the cut all round.
+function gtArtGrow(d,b){
+  const t=d&&d.trace;
+  if(!(b>0)||!(t&&t.on&&t.loop&&t.loop.length>3)||d.cutSheet) return b;
+  const k=gtCutShift(d);
+  return b+Math.max(0,Number(t.out)||0)+(k?Math.max(Math.abs(k.x),Math.abs(k.y)):0);
 }
 // Artwork that carries its own bleed - cut to a line drawn inside the picture
 // (a minus outset, a shape drawn on it) - prints that far past the cut. With
@@ -37562,7 +37591,7 @@ function gtArtBleedOf(d){
   const t=d.trace, S=gtSheet;
   const cap=S.bleedOn&&Number(S.bleed)>0?Number(S.bleed):2.5;
   const key=JSON.stringify([t.out,t.sm,t.loop.length,t.cx,t.cy,t.shape||'',t.rd||0,!!t.ownSize,
-    d.art&&[d.art.s,d.art.dx,d.art.dy],d.turn||0,img.naturalWidth,img.naturalHeight,S.tagW,S.tagH,cap]);
+    d.art&&[d.art.s,d.art.dx,d.art.dy,d.art.kx,d.art.ky],d.turn||0,img.naturalWidth,img.naturalHeight,S.tagW,S.tagH,cap]);
   const had=gtArtBleedMemo.get(t);
   if(had&&had.key===key) return had.v;
   let v=0;
@@ -37837,7 +37866,8 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // Template does it
   // a turned design's page is placed turned (gtTurnRect); a back never turns
   const turn=design&&!box?gtTurnOf(design):0;
-  const took=vec?vec.take({id:key,turn},r,b,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
+  const g=design?gtArtGrow(cutOf,b):b;
+  const took=vec?vec.take({id:key,turn},r,g,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
   if(took===true) return;
   ctx.save();
   ctx.beginPath();
@@ -37851,7 +37881,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
     ctx.closePath(); ctx.clip();
   }
   if(invert) ctx.filter='invert(1)';
-  gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,b,sc,gtSheet.bleedMode,turn?key+'@t'+turn:key,gap);
+  gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,g,sc,gtSheet.bleedMode,turn?key+'@t'+turn:key,gap);
   // a pixel short of the trim, so the ring overlaps the placed page rather
   // than leaving a hairline of paper between them
   // A whole pixel in, not half: at half, the ring's soft edge and the page's
@@ -37959,7 +37989,7 @@ function gtDrawTag(ctx,line,x,y,w,h,sc,forExport,vec){
 // the cut, which follows that rect (gtArtRectOf). x,y,w,h is the placeholder
 // at its mirrored place.
 function gtBackBox(d,x,y,w,h){
-  const R=gtArtRectOf(d,{x,y,w,h});
+  const R=gtCutRectOf(d,{x,y,w,h});
   return {x:x+w-(R.x-x)-R.w,y:R.y,w:R.w,h:R.h};
 }
 function gtDrawBack(ctx,line,x,y,w,h,sc,forExport,vec){
@@ -39460,13 +39490,9 @@ function gtRenderOrder(){
           <input type="number" min="0" step="1" value="${l.qty}" data-gtl="qty"/></label>
         <button class="del-btn" data-gt-del-line title="Remove">×</button></div>
       <div class="click-row" style="margin:4px 0 6px;align-items:center;gap:10px;">
-        ${d&&gtOwnCut(d)&&Number(d.trace.out)>0
-          // cut on a line drawn out past the artwork: nothing prints past the
-          // cut (gtBleedOf), so a line's own bleed would do nothing
-          ?'<span class="hint" style="margin:0;">No bleed — this design is cut on an outset line past its artwork</span>'
-          :`<label class="click-tog" title="This line bleeds its own figure; every other line follows the sheet's bleed (or its design's own)">
+        ${`<label class="click-tog" title="This line bleeds its own figure; every other line follows the sheet's bleed (or its design's own)">
           <input type="checkbox" data-gtl="bleedOn"${l.bleed&&l.bleed.on?' checked':''}/>Own bleed for this line</label>`}
-        ${l.bleed&&l.bleed.on&&!(d&&gtOwnCut(d)&&Number(d.trace.out)>0)?`<label class="field" style="max-width:110px;margin:0;"><span>BLEED (mm)</span>
+        ${l.bleed&&l.bleed.on?`<label class="field" style="max-width:110px;margin:0;"><span>BLEED (mm)</span>
           <input type="number" step="0.1" min="0" value="${round(Number(l.bleed.mm)||0)}" data-gtl="bleedMm"/></label>
           <label class="field" style="max-width:150px;margin:0;" title="How this line's bleed is made - the other lines keep the sheet's style"><span>BLEED STYLE</span>
           <select data-gtl="bleedMode">${GT_BLEED_MODES.map(m=>`<option value="${m}"${(gtLineBleedMode(l)||gtSheet.bleedMode)===m?' selected':''}>${GT_BLEED_MODE_NAMES[m]}</option>`).join('')}</select></label>`:''}
@@ -40855,7 +40881,7 @@ function gtRenderDesignList(){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">'
       +(gtMode==='combo'
         ? (gtComboKind?'— none from '+escapeHtml(GT_MODE_TITLE[gtComboKind])+' —'
-          :'— none yet · see Live from the Pigu 2 folders below —')
+          :'— none yet · see Live from the page folders below —')
         : gtMode!=='festive'
         ? '— nothing in the Pigu folders yet · give a folder a shape under ⚙ —'
         : '— none yet —')+'</p>';
@@ -41582,6 +41608,25 @@ function gtComboAdoptEdited(){
   // the list says "changed here" from now, not from the next time it is drawn
   if(n) setTimeout(()=>{ try{ gtRenderDesignList(); }catch(e){} },0);
 }
+// a live design's font, by the name its own page knows it by: the fonts here
+// are found in the folder after the designs are read, so its words are put in
+// the font of that name again once they are (gtComboFonts)
+const gtLiveFontName=new Map();
+function gtComboFonts(){
+  const byName=new Map(gtLib.fonts.map(f=>[String(f.name||'').toLowerCase(),f.id]));
+  const have=new Set(gtLib.fonts.map(f=>f.id));
+  const fix=list=>(list||[]).forEach(f=>{
+    if(!f||!f.font||have.has(f.font)) return;
+    const id=byName.get(gtLiveFontName.get(f.font)||''); if(id) f.font=id; });
+  gtLib.designs.forEach(d=>{
+    if(!d.live) return;
+    const same=gtLiveSnap.get(d.id)===gtLiveLook(d);
+    fix(d.fields);
+    if(d.pieceEdit&&typeof d.pieceEdit==='object') Object.values(d.pieceEdit).forEach(v=>{ if(v&&typeof v==='object') fix(v.fields); });
+    // not a change made here: what it is compared with moves too
+    if(same) gtLiveSnap.set(d.id,gtLiveLook(d));
+  });
+}
 let gtComboLiveNote='';
 async function gtComboLive(ask){
   if(gtMode!=='combo') return;
@@ -41591,10 +41636,11 @@ async function gtComboLive(ask){
   gtLib.designs=gtLib.designs.filter(d=>!d.live);
   gtLiveSnap.clear();
   [...gtAssets.keys()].forEach(k=>{ if(GT_LIVE_PATH.test(k)&&!gtLib.designs.some(d=>d.file===k||(d.back&&d.back.file===k))) gtAssets.delete(k); });
-  const root=await gtRootDirGet();
-  const name=await gtDirNameGet();
-  if(!root||!name){
-    gtComboLiveNote='Not linked yet — type Custom Gift Tag 2 as the folder name above, then Choose folder and pick your Pigu 2 folder.';
+  // the page's own folder is the main folder itself (Pigu New): its fonts/
+  // and Shape/ are the page's, and the three page folders sit inside it
+  const root=gtDir;
+  if(!root){
+    gtComboLiveNote='Not linked yet — press Choose folder and pick your main folder (e.g. Pigu New).';
     gtComboLivePaint(); return;
   }
   if(!await gtComboReadOnly(root,ask)){
@@ -41613,8 +41659,8 @@ async function gtComboLive(ask){
     let man=null;
     try{ man=(await gtReadAll(dir)).man; }catch(e){}
     if(!man){ notes.push(GT_MODE_TITLE[kind]+': no library'); continue; }
-    const theirFont=new Map((man.fonts||[]).map(f=>[f.id,String(f.name||'').toLowerCase()]));
-    const fontOf=id=>{ if(!id) return id; const n=theirFont.get(id); return (n&&fontByName.get(n))||id; };
+    (man.fonts||[]).forEach(f=>{ if(f&&f.id) gtLiveFontName.set(f.id,String(f.name||'').toLowerCase()); });
+    const fontOf=id=>{ if(!id) return id; const n=gtLiveFontName.get(id); return (n&&fontByName.get(n))||id; };
     const fixFields=list=>(list||[]).map(f=>({...f,font:fontOf(f.font)}));
     const files=[], made=[];
     for(const x of man.designs||[]){
@@ -41837,7 +41883,7 @@ function gtDrawDesign(){
     const bk=gtBackOf(d);
     if(bk&&bk.img&&bk.img.naturalWidth){
       // into the front artwork's rect turned over, as gtBackBox has it
-      const B={x:tag.w-draw.x-draw.w,y:draw.y,w:draw.w,h:draw.h};
+      const C=gtCutShifted(d,draw), B={x:tag.w-C.x-C.w,y:C.y,w:C.w,h:C.h};
       const f=gtFit(bk.img.naturalWidth,bk.img.naturalHeight,B.w,B.h);
       const r=gtArtDraw({art:bk.art},f,B.x,B.y);
       gtDrawArt(ctx,bk.img,r.x,r.y,r.w,r.h,gtBleedOf(d),sc,gtSheet.bleedMode,bk.key,
@@ -41846,7 +41892,7 @@ function gtDrawDesign(){
   }else if(img){
     ctx.save();
     gtClipToTrace(ctx,d,draw,gtBleedOf(d),sc);
-    gtDrawArt(ctx,img,draw.x,draw.y,draw.w,draw.h,gtBleedOf(d),sc,gtSheet.bleedMode,d.id,
+    gtDrawArt(ctx,img,draw.x,draw.y,draw.w,draw.h,gtArtGrow(d,gtBleedOf(d)),sc,gtSheet.bleedMode,d.id,
       {x:Math.max(draw.x,tag.w-(draw.x+draw.w)),y:Math.max(draw.y,tag.h-(draw.y+draw.h))});
     ctx.restore();
   }
@@ -41900,7 +41946,8 @@ function gtDrawDesign(){
   if(d.hole.on){
     ctx.save(); ctx.strokeStyle='#B24C25'; ctx.lineWidth=1.5;
     ctx.beginPath();
-    ctx.arc((draw.x+d.hole.x*draw.w)*sc,(draw.y+d.hole.y*draw.h)*sc,Math.max(2,d.hole.d/2*sc),0,Math.PI*2);
+    const H=gtCutShifted(d,draw);
+    ctx.arc((H.x+d.hole.x*H.w)*sc,(H.y+d.hole.y*H.h)*sc,Math.max(2,d.hole.d/2*sc),0,Math.PI*2);
     ctx.stroke(); ctx.restore();
   }
   // and the cut line over everything, as the sheet draws it — the design's own
@@ -43063,7 +43110,10 @@ document.getElementById('gtArtScaleRange').addEventListener('input',e=>gtArtSetS
   document.getElementById(id).addEventListener('input',e=>{
     const d=gtCurrentDesign; if(!d) return;
     const v=parseFloat(e.target.value);
-    (d.art||(d.art={}))[key]=isFinite(v)?v:0;
+    const a=d.art||(d.art={});
+    // the cut line held where it is now, before the picture moves (gtCutShift)
+    if(a.kx==null){ a.kx=Number(a.dx)||0; a.ky=Number(a.dy)||0; }
+    a[key]=isFinite(v)?v:0;
     gtArtChanged();
   });
 });
