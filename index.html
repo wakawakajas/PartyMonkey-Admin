@@ -7405,6 +7405,14 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <div class="click-row" id="gtNestEachRow" style="margin-top:6px;display:none;">
             <label class="click-tog" title="On: each sticker on the sheet is a tag of its own, cut on its own red line and nested on its own - the line on the order is the whole set. Off: the sheet prints and cuts as one block, laid out as it is drawn."><input type="checkbox" id="gtNestEach"/>Break up into separate stickers by default</label>
           </div>
+          <!-- a broken-up sheet's stickers, each opened here to be given words
+               (a cake topper's age); a sticker opened, the way back to its sheet -->
+          <div id="gtPiecesRow" style="margin-top:8px;display:none;"></div>
+          <!-- cut round the words as well as the artwork, traced again for every
+               order's own words (see gtWordsCut) -->
+          <div class="click-row" id="gtWordsCutRow" style="margin-top:6px;display:none;">
+            <label class="click-tog" title="For words that stand off the artwork, like the age on a cake topper: the cut line goes round the artwork and the words together, keeping the same gap the cut line has now, and is traced again for every order's own words."><input type="checkbox" id="gtWordsCut"/>Cut round the artwork and the words (traced again for each order)</label>
+          </div>
           <div class="chips" id="gtCutShapeSeg" style="margin:9px 0 0;">
             <button type="button" class="chip chip-state" data-gtcs="none" title="No cut line of its own - the tag is cut to its placeholder">None</button>
             <button type="button" class="chip chip-state on" data-gtcs="trace" title="Follow the edge of the artwork">Traced</button>
@@ -31553,7 +31561,8 @@ Object.defineProperty(gtSheet,'slots',{configurable:true,enumerable:true,
   get(){ const e=gtNestEntry(); return e?e.slots:gtSlotsBase; },
   set(v){ gtSlotsBase=v; }});
 let gtLayoutFrom='', gtBaseFrom=''; // which file each was built from, so neither is rebuilt for nothing
-const gtDesign=id=>gtLib.designs.find(d=>d.id===id)||(gtSetPieceById&&gtSetPieceById.get(id))||null;
+const gtDesign=id=>gtLib.designs.find(d=>d.id===id)||(gtSetPieceById&&gtSetPieceById.get(id))
+  ||(gtWordsCutById&&gtWordsCutById.get(id))||null;
 // The page's library is the whole of what it offers: the two do not share one.
 const gtDesignsInView=()=>gtLib.designs;
 const gtFont=id=>gtLib.fonts.find(f=>f.id===id)||null;
@@ -31686,6 +31695,20 @@ async function gtSetsReady(lines){
     await Promise.all((list||[]).map(x=>gtImgLoad(x.id)));
   }));
 }
+// A sheet's stickers are made again on every visit, so what was set on one in
+// the design editor - the words on a cake topper, cutting round them - is kept
+// on the sheet's own design, by the sticker's number
+function gtPieceEditOf(d){
+  const rec=d&&gtSetPieces.get(d.id);
+  if(!rec||!rec.list) return d&&d.pieceEdit;
+  const out={};
+  rec.list.forEach(x=>{
+    const k=Number(String(x.id).split('~')[1]);
+    if(k&&((x.fields||[]).length||x.wordsCut)) out[k]={fields:x.fields||[],...(x.wordsCut?{wordsCut:true}:{})};
+  });
+  d.pieceEdit=out;
+  return out;
+}
 function gtSetBuild(d){
   const blob=gtAssets.get(d.file);
   const had=gtSetPieces.get(d.id);
@@ -31702,6 +31725,9 @@ function gtSetBuild(d){
       const x=gtNormalizeDesign({id:`${d.id}~${k+1}`,name:`${d.name} ${k+1}`,file:path,adhoc:true,
         fields:[],bleed:d.bleed?{...d.bleed}:null});
       x.setOf=d.id;
+      // what was set on this sticker before: its words, and cutting round them
+      const pe=d.pieceEdit&&d.pieceEdit[k+1];
+      if(pe){ x.fields=gtNormalizeDesign({fields:pe.fields||[]}).fields; if(pe.wordsCut) x.wordsCut=true; }
       // its own red line, the way a design's PDF gives one (a small circle in
       // it is a window, not a punch - see gtCutTake)
       const lift=await gtCutLift(files[k],false).catch(()=>null);
@@ -31863,6 +31889,7 @@ window.addEventListener('beforeunload',e=>{
 const gtManDesign=d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.hole,
   artV:2,art:d.art,bleed:d.bleed,trace:d.trace,...(d.cutSeen?{cutSeen:d.cutSeen}:{}),
   ...(d.cutSheet?{cutSheet:true}:{}),...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),
+  ...(d.wordsCut?{wordsCut:true}:{}),...(d.pieceEdit&&Object.keys(d.pieceEdit).length?{pieceEdit:d.pieceEdit}:{}),
   ...(d.back?{back:d.back}:{}),...(d.turn?{turn:d.turn}:{})});
 function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
@@ -31872,7 +31899,7 @@ function gtManifest(){
   let runNo={};
   try{ runNo={runNo:gtNoNow()}; }catch(e){}
   return {version:2,sheet:{...gtSheet,slots:gtSlotsBase,...runNo},
-    designs:own.filter(d=>!d.adhoc&&!d.mcLent).map(d=>gtManDesign({...d,trace:gtTraceKept(d),art:gtArtKept(d)})),
+    designs:own.filter(d=>!d.adhoc&&!d.mcLent).map(d=>gtManDesign({...d,trace:gtTraceKept(d),art:gtArtKept(d),pieceEdit:gtPieceEditOf(d)})),
     fonts:gtLib.fonts.filter(f=>!f.mcLent).map(f=>({id:f.id,name:f.name,file:f.file})),
     texts:gtLib.texts.map(t=>({id:t.id,name:t.name,text:t.text,font:t.font||undefined})),
     // the words set on Pigu-folder designs — see gtPiguFields. Kept only in
@@ -32783,6 +32810,13 @@ function gtNormalizeDesign(d){
     ...(d.cutSheet?{cutSheet:true}:{}),
     // and nested a sticker at a time rather than as one block (see gtSetPiecesOf)
     ...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),
+    // cut round its artwork and each order's words (see gtWordsCut)
+    ...(d.wordsCut?{wordsCut:true}:{}),
+    // what was set on each of its stickers - words, and cutting round them -
+    // by the sticker's number on the sheet (see gtSetBuild)
+    ...(d.pieceEdit&&typeof d.pieceEdit==='object'&&Object.keys(d.pieceEdit).length
+      ?{pieceEdit:Object.fromEntries(Object.entries(d.pieceEdit).map(([k,v])=>[k,
+        {fields:gtNormalizeDesign({fields:(v&&v.fields)||[]}).fields,...(v&&v.wordsCut?{wordsCut:true}:{})}]))}:{}),
     // its artwork turned a quarter, or more (see gtTurnDesign)
     ...(gtTurnOf(d)?{turn:gtTurnOf(d)}:{}),
     art:d.artV===2
@@ -34916,7 +34950,10 @@ function gtSimplify(pts,tol){
 function gtTraceDesign(d,thr){
   const img=gtImgGet(d.id);
   if(!img||!img.naturalWidth) return null;
-  const {inside,W,H}=gtTraceMask(img,thr);
+  return gtTraceLoopOf(gtTraceMask(img,thr));
+}
+// the outline of a mask (gtTraceMask), in 0..1 of the mask's own box
+function gtTraceLoopOf({inside,W,H}){
   // padded two pixels all round with background, so every line closes
   const P=2, PW=W+2*P, PH=H+2*P;
   let f=new Float32Array(PW*PH);
@@ -34944,6 +34981,136 @@ function gtTraceDesign(d,thr){
   const r4=n=>Math.round(n*1e4)/1e4;
   return thin.map(([x,y])=>[r4((x-P)/(W-1)),r4((y-P)/(H-1))]);
 }
+// ---------- a cut line round the artwork and the words ----------
+// A cake topper with the customer's age on it: the number sits half off the
+// artwork, and the cut has to go round both, a different shape for every age.
+// A design with wordsCut is traced again for each order's words - the picture
+// and that line's words drawn together, grown by the gap the design's own cut
+// keeps round its artwork, and the one outline round all of it taken. Each
+// different set of words is a design of its own here (gtWordsCut), the same in
+// every way but its cut line, so the sheet, the nest, the PDF and the cut file
+// all go by it as they go by any design. Made when first wanted, never saved.
+var gtWordsCuts=new Map();         // design id + words -> that design cut round them
+// the coloured part of a picture or drawing - anything but empty and near
+// white - with its inner holes filled: what a white border is a border round
+function gtInkMask(src,W,H){
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const x=c.getContext('2d',{willReadFrequently:true});
+  x.drawImage(src,0,0,W,H);
+  const px=x.getImageData(0,0,W,H).data; c.width=c.height=0;
+  const ink=new Uint8Array(W*H);
+  for(let i=0;i<W*H;i++){ const r=px[i*4],g=px[i*4+1],b=px[i*4+2],a=px[i*4+3];
+    ink[i]=a>128&&!(r>232&&g>232&&b>232)?1:0; }
+  return gtFillHoles(ink,W,H);
+}
+function gtFillHoles(m,W,H){
+  const out=new Uint8Array(W*H).fill(1), st=[];
+  const go=i=>{ if(!m[i]&&out[i]){ out[i]=0; st.push(i); } };
+  for(let x=0;x<W;x++){ go(x); go((H-1)*W+x); }
+  for(let y=0;y<H;y++){ go(y*W); go(y*W+W-1); }
+  while(st.length){ const i=st.pop(), x=i%W;
+    if(x>0) go(i-1); if(x<W-1) go(i+1); if(i>=W) go(i-W); if(i<W*(H-1)) go(i+W); }
+  return out;
+}
+// how far every pixel is from the mask, in pixels (0 inside it)
+function gtDistTo(m,W,H){
+  const D=new Float32Array(W*H);
+  for(let i=0;i<W*H;i++) D[i]=m[i]?0:1e9;
+  const S=1.4142;
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){ const i=y*W+x; let v=D[i];
+    if(x>0) v=Math.min(v,D[i-1]+1); if(y>0) v=Math.min(v,D[i-W]+1);
+    if(x>0&&y>0) v=Math.min(v,D[i-W-1]+S); if(x<W-1&&y>0) v=Math.min(v,D[i-W+1]+S); D[i]=v; }
+  for(let y=H-1;y>=0;y--) for(let x=W-1;x>=0;x--){ const i=y*W+x; let v=D[i];
+    if(x<W-1) v=Math.min(v,D[i+1]+1); if(y<H-1) v=Math.min(v,D[i+W]+1);
+    if(x<W-1&&y<H-1) v=Math.min(v,D[i+W+1]+S); if(x>0&&y<H-1) v=Math.min(v,D[i+W-1]+S); D[i]=v; }
+  return D;
+}
+const gtGrowMask=(m,W,H,r)=>{ const D=gtDistTo(m,W,H), o=new Uint8Array(W*H); for(let i=0;i<W*H;i++) o[i]=D[i]<=r?1:0; return o; };
+const gtShrinkMask=(m,W,H,r)=>{ const n=new Uint8Array(W*H); for(let i=0;i<W*H;i++) n[i]=m[i]?0:1;
+  const D=gtDistTo(n,W,H), o=new Uint8Array(W*H); for(let i=0;i<W*H;i++) o[i]=D[i]>r?1:0; return o; };
+const gtLoopLen=l=>{ let s=0; for(let i=0;i<l.length;i++){ const p=l[i], q=l[(i+1)%l.length]; s+=Math.hypot(q[0]-p[0],q[1]-p[1]); } return s; };
+// How far the design's cut sits outside the coloured part of its artwork, in
+// mm, on average: a white border round the artwork is part of that gap, and so
+// is the cut's own outset. The words get the same.
+const gtWordsGapOf=new WeakMap();
+function gtWordsGap(d,P,img){
+  const t=d.trace, own=Math.max(0,Number(t.out)||0);
+  if(gtWordsGapOf.has(t.loop)) return gtWordsGapOf.get(t.loop);
+  let gap=Math.max(1.5,own);
+  const s=Math.min(1,GT_TRACE_PX/Math.max(img.naturalWidth,img.naturalHeight));
+  const W=Math.max(8,Math.round(img.naturalWidth*s)), H=Math.max(8,Math.round(img.naturalHeight*s));
+  // measured from the cut line in: how far each point of it is from the
+  // nearest coloured pixel, the middle of those taken - a white border, and
+  // artwork in several parts, measure the same way
+  const D=gtDistTo(gtInkMask(img,W,H),W,H), far=[];
+  t.loop.forEach(([u,v])=>{ const x=Math.round(u*(W-1)), y=Math.round(v*(H-1));
+    if(x>=0&&y>=0&&x<W&&y<H&&D[y*W+x]<1e8) far.push(D[y*W+x]); });
+  if(far.length){
+    far.sort((a,b)=>a-b);
+    gap=Math.min(8,Math.max(0.5,far[far.length>>1]*P.w/W+own));
+  }
+  gtWordsGapOf.set(t.loop,gap);
+  return gap;
+}
+function gtWordsCut(d,line){
+  if(!d||!d.wordsCut||d.cutSheet||!d.trace||!d.trace.on||d.trace.shape||!Array.isArray(d.trace.loop)) return d;
+  const fields=gtFieldsOf(d,line).filter(f=>gtSideOf(f)!=='back');
+  const said=fields.map(f=>{ const v=gtVal(line,f);
+    return String(v.text||'').trim()?[f.id,v.text,v.font,v.size,v.rot,v.curve,v.dx,v.dy,v.bw,v.bh,v.ow,v.align,f.x,f.y,f.w,f.h]:null; })
+    .filter(Boolean);
+  if(!said.length) return d;
+  const key=d.id+'#'+JSON.stringify([said,d.trace.loop.length,d.trace.out,d.art]);
+  const had=gtWordsCuts.get(key);
+  if(had) return had;
+  const img=gtImgGet(d.id);
+  if(!img||!img.naturalWidth) return d;
+  const ref=gtFitRef();
+  const f=gtFitD(d,img.naturalWidth,img.naturalHeight,ref.w||60,ref.h||40);
+  const A={x:0,y:0,w:f.w,h:f.h};
+  const P=gtArtDraw(d,{x:0,y:0,w:f.w,h:f.h},0,0);
+  if(!(P.w>0&&P.h>0)) return d;
+  const gap=gtWordsGap(d,P,img), own=Math.max(0,Number(d.trace.out)||0);
+  // everything that is drawn, and room round it to grow into
+  let x0=P.x, y0=P.y, x1=P.x+P.w, y1=P.y+P.h;
+  fields.forEach(fl=>{ const r=gtFieldRect(line,fl,A), c=[r.x+r.w/2,r.y+r.h/2];
+    const h=r.rot?Math.hypot(r.w,r.h)/2:0, hw=h||r.w/2, hh=h||r.h/2;
+    x0=Math.min(x0,c[0]-hw); y0=Math.min(y0,c[1]-hh); x1=Math.max(x1,c[0]+hw); y1=Math.max(y1,c[1]+hh); });
+  const pad=Math.max(gap,own)+2; x0-=pad; y0-=pad; x1+=pad; y1+=pad;
+  const sc=Math.min(20,GT_TRACE_PX/Math.max(x1-x0,y1-y0));
+  const W=Math.max(8,Math.round((x1-x0)*sc)), H=Math.max(8,Math.round((y1-y0)*sc));
+  // the words alone, grown by the gap
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const ctx=c.getContext('2d');
+  ctx.translate(-x0*sc,-y0*sc);
+  const wc=gtWordsCatch; gtWordsCatch=null;        // drawn here, not handed to a PDF being built
+  try{ gtDrawFields(ctx,d,line,A.x,A.y,A.w,A.h,sc); }finally{ gtWordsCatch=wc; }
+  const words=gtGrowMask(gtInkMask(c,W,H),W,H,gap*sc);
+  // the design's own cut, exactly as it is, filled in
+  const k=c.getContext('2d'); k.setTransform(1,0,0,1,0,0); k.clearRect(0,0,W,H);
+  k.beginPath();
+  d.trace.loop.forEach(([u,v],i)=>{ const X=((P.x+u*P.w)-x0)*sc, Y=((P.y+v*P.h)-y0)*sc; i?k.lineTo(X,Y):k.moveTo(X,Y); });
+  k.closePath(); k.fillStyle='#000'; k.fill();
+  let cut=gtInkMask(c,W,H);
+  c.width=c.height=0;
+  if(own>0) cut=gtGrowMask(cut,W,H,own*sc);
+  // the two together, the corner where they meet eased by a millimetre
+  const both=new Uint8Array(W*H);
+  for(let i=0;i<W*H;i++) both[i]=words[i]||cut[i]?1:0;
+  const r=Math.max(1,sc*1);
+  const inside=gtShrinkMask(gtGrowMask(both,W,H,r),W,H,r);
+  const loop=gtTraceLoopOf({inside,W,H});
+  if(!loop) return d;
+  const r4=n=>Math.round(n*1e4)/1e4;
+  // from the drawing's box back to the picture's, which is what a cut is held in
+  const pic=loop.map(([u,v])=>[r4((x0+u*(x1-x0)-P.x)/P.w),r4((y0+v*(y1-y0)-P.y)/P.h)]);
+  const t={...d.trace,loop:pic,out:0,sm:0.3,auto:false};
+  delete t.cx; delete t.cy; delete t.rd;
+  const v={...d,id:d.id+'#'+(gtWordsCuts.size+1),trace:t,wordsOf:d.id};
+  gtWordsCuts.set(key,v); gtWordsCutById.set(v.id,v);
+  gtImgs.set(v.id,img);
+  return v;
+}
+var gtWordsCutById=new Map();      // gtWordsCut's designs by their own id
 // A closed polyline with points added along each side, every corner kept.
 function gtDensify(pts,step){
   const out=[], n=pts.length;
@@ -35661,11 +35828,14 @@ function gtQueue(lines){
     // a sheet nested a sticker at a time: each of its stickers is a tag, as
     // many of each as the line asks for. Until they are made it is the one block.
     const ps=gtLineSplits(l,d)?gtSetPiecesOf(d):null;
+    // and a design cut round its words is cut round this line's (gtWordsCut)
     if(ps&&ps.length){
-      for(let i=0;i<n;i++) ps.forEach(p=>out.push(gtSetLine(l,p)));
+      const cut=ps.map(p=>gtWordsCut(p,l));
+      for(let i=0;i<n;i++) cut.forEach(p=>out.push(gtSetLine(l,p)));
       return;
     }
-    for(let i=0;i<n;i++) out.push(l);
+    const w=gtWordsCut(d,l);
+    for(let i=0;i<n;i++) out.push(w===d?l:gtSetLine(l,w));
   });
   return out;
 }
@@ -36842,6 +37012,15 @@ function gtDrawCurved(ctx,text,cx,y,deg,paint){
 // rather than the design growing one every tag would have to leave empty.
 const gtFieldsOf=(d,line)=>!d?[]
   :((line&&line.extra&&line.extra.length)?d.fields.concat(line.extra):d.fields);
+// What an order line is asked to fill in. A sticker sheet broken up has no
+// words of its own - its stickers do (a cake topper's age), so the line is
+// asked for theirs, once each however many stickers share one.
+function gtLineFieldsOf(d,line){
+  if(!d||!gtLineSplits(line,d)) return gtFieldsOf(d,line);
+  const seen=new Set(), out=[];
+  (gtSetPiecesOf(d)||[]).forEach(p=>(p.fields||[]).forEach(f=>{ if(!seen.has(f.id)){ seen.add(f.id); out.push(f); } }));
+  return out.concat((line&&line.extra)||[]);
+}
 function gtNewLineField(line){
   const n=(line.extra||[]).length+1;
   return {id:gtId('f'),name:'This line '+n,def:'',font:'',size:5,color:'#232323',
@@ -37221,6 +37400,10 @@ function gtClipToTrace(ctx,d,r,b,sc){
   return true;
 }
 function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
+  // a design cut round its words keeps its artwork to the cut it came with:
+  // the number is drawn over it, and what lay round the artwork on its sheet
+  // (another sticker's edge) is not printed into the room made for the number
+  const cutOf=design&&design.wordsOf&&gtDesign(design.wordsOf)||design;
   const B=box||{x,y,w,h};
   const f=design?gtFitD(design,img.naturalWidth,img.naturalHeight,B.w,B.h):gtFit(img.naturalWidth,img.naturalHeight,B.w,B.h);
   const r=gtArtDraw({art},f,B.x,B.y);
@@ -37239,7 +37422,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // line runs - not to the placeholder it was put in. Clipped to the box, a
   // one-off bigger than its placeholder came out cropped.
   if(design&&!box&&gtCutsOwnLine(design)){
-    const keep=gtTraceLast, p=gtTracePlace(design,r,b>0?b:0);
+    const keep=gtTraceLast, p=gtTracePlace(cutOf,r,b>0?b:0);
     gtTraceLast=keep;                 // the editor's own reading of its loop
     if(p&&p.length){
       let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
@@ -37278,7 +37461,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // a placed page is clipped to the same shape the screen clips it to (see
   // gtClipToTrace): without it a circle-cut PDF went out as its whole square
   if(vec&&design&&b>0){
-    const tp=gtTracePlace(design,r,b);
+    const tp=gtTracePlace(cutOf,r,b);
     if(tp&&tp.length>3) clip={...clip,path:tp};
   }
   if(vec&&slotPath) clip={...clip,path:slotPath};
@@ -37294,7 +37477,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   ctx.rect(clip.x*sc,clip.y*sc,clip.w*sc,clip.h*sc);
   ctx.clip();
   // a traced design is printed to its own shape plus the bleed, not to a box
-  if(design) gtClipToTrace(ctx,design,r,b,sc);
+  if(design) gtClipToTrace(ctx,cutOf,r,b,sc);
   if(slotPath){
     ctx.beginPath();
     slotPath.forEach(([px,py],k)=>k?ctx.lineTo(px*sc,py*sc):ctx.moveTo(px*sc,py*sc));
@@ -38162,7 +38345,7 @@ document.getElementById('gtOrderList').addEventListener('focusin',e=>{
   const fid=String((e.target.dataset&&e.target.dataset.gtf)||'').split('|')[0];
   if(fid&&gtBackOn()&&!gtSlotEdit){
     const l=gtOrder.find(x=>x.id===card.dataset.gtLine), d=l&&gtDesign(l.designId);
-    const f=d&&gtFieldsOf(d,l).find(x=>x.id===fid);
+    const f=d&&gtLineFieldsOf(d,l).find(x=>x.id===fid);
     if(f&&gtSideOf(f)!==gtSheetSide){
       gtSheetSide=gtSideOf(f); gtLock=null;
       if(gtZoomOn&&gtZoomAt) gtZoomAt={x:gtSheet.paperW-gtZoomAt.x,y:gtZoomAt.y};
@@ -38762,7 +38945,7 @@ function gtFontOptions(sel){
 // design's own number where it is.
 const GT_AGE=/^\s*\d{1,2}\s*$/;
 function gtAgeFields(d,line){
-  return gtFieldsOf(d,line).filter(f=>GT_AGE.test(f.def||''));
+  return gtLineFieldsOf(d,line).filter(f=>GT_AGE.test(f.def||''));
 }
 // A tag with last week's age on it still looks like a finished tag, so it is
 // never the thing that is spotted in the proof. Every line whose age was left
@@ -38822,7 +39005,7 @@ function gtRenderOrder(){
   wrap.innerHTML='<div class="ph-list list-full">'+gtOrder.map((l,i)=>{
     const d=gtDesign(l.designId);
     const A=gtArtBox(l.designId);
-    const own=gtFieldsOf(d,l);
+    const own=gtLineFieldsOf(d,l);
     const mine=new Set((l.extra||[]).map(f=>f.id));
     // Once a design is picked, the words are all that is on show. Everything a
     // word can be set in is behind the word itself and opens by tapping it, one
@@ -41182,6 +41365,7 @@ function gtDrawDesign(){
 // the cut line of the tag in the editor as one loop in mm (tag at 0,0): its
 // traced line, the placeholder's shape, or the tag's own rectangle
 function gtDesignCutLoop(d,draw,slot,w,h){
+  d=gtWordsCut(d,null);            // round its own words too, where it is cut round them
   const traced=gtTracePlace(d,draw);
   if(traced&&traced.length>3) return traced;
   try{
@@ -41216,6 +41400,7 @@ function gtDrawBleedZone(ctx,d,draw,slot,sc,tw,th,b,vx0,vy0,vw,vh){
   ctx.restore();
 }
 function gtDrawDesignCut(ctx,d,draw,slot,sc,w,h){
+  d=gtWordsCut(d,null);            // round its own words too, where it is cut round them
   const traced=gtTracePlace(d,draw);
   if(traced){
     ctx.save();
@@ -41962,6 +42147,9 @@ function gtArtWriteInputs(){
   // by style: a click-row's own display:flex wins over hidden
   document.getElementById('gtNestEachRow').style.display=!d.cutSheet||!gtIsPdfFile(d.file)||d.setOf?'none':'';
   document.getElementById('gtNestEach').checked=!!(d.cutSheet&&d.nestEach);
+  gtPiecesRowWrite(d);
+  document.getElementById('gtWordsCutRow').style.display=t&&t.on&&!t.shape&&!d.cutSheet?'':'none';
+  document.getElementById('gtWordsCut').checked=!!d.wordsCut;
   const shape=!t||!t.on?'none':(t.shape||'trace');
   document.querySelectorAll('#gtCutShapeSeg [data-gtcs]').forEach(b=>b.classList.toggle('on',b.dataset.gtcs===shape));
   // threshold and Trace are for reading the artwork's edge — a drawn shape has none
@@ -42376,6 +42564,40 @@ document.getElementById('gtCutSheet').addEventListener('change',async e=>{
   showMsg(document.getElementById('gtTraceMsg'),
     on?(f?`✓ ${1+((f.extras||[]).length)} cut lines taken from the PDF.`:'No closed red line found in this PDF.')
       :"Back to the PDF's single cut line.",!on||!!f);
+});
+// A broken-up sheet lists its stickers to be opened one at a time; a sticker
+// opened says which sheet it is from and goes back to it
+function gtPiecesRowWrite(d){
+  const row=document.getElementById('gtPiecesRow'); if(!row) return;
+  if(d&&d.setOf){
+    const home=gtDesign(d.setOf);
+    row.style.display='';
+    row.innerHTML=`<button type="button" class="btn-outline btn-sm" data-gt-piece-home="${escapeHtml(d.setOf)}" style="width:100%;">← Back to ${escapeHtml(home?home.name:'the whole sheet')}</button>`;
+    return;
+  }
+  const ps=d&&d.cutSheet&&d.nestEach?gtSetPiecesOf(d):null;
+  if(!ps||!ps.length){ row.style.display='none'; row.innerHTML=''; return; }
+  row.style.display='';
+  row.innerHTML=`<div class="hint" style="margin:0 0 6px;">Its stickers - open one to put words on it, like a cake topper's age:</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;">${ps.map((p,i)=>
+      `<button type="button" class="btn-outline btn-sm" data-gt-piece="${escapeHtml(p.id)}"${(p.fields||[]).length?' style="border-color:var(--blueprint);"':''}>${i+1}${(p.fields||[]).length?' ✎':''}</button>`).join('')}</div>`;
+}
+document.getElementById('gtPiecesRow').addEventListener('click',e=>{
+  const b=e.target.closest('[data-gt-piece],[data-gt-piece-home]'); if(!b) return;
+  const d=gtDesign(b.dataset.gtPiece||b.dataset.gtPieceHome); if(!d) return;
+  gtCutSettle();
+  gtCurrentDesign=d;
+  showScreen('tool-gift-tag-design');
+  window.scrollTo(0,0);
+});
+document.getElementById('gtWordsCut').addEventListener('change',e=>{
+  const d=gtCurrentDesign; if(!d) return;
+  if(e.target.checked) d.wordsCut=true; else delete d.wordsCut;
+  gtNestCache=null;
+  showMsg(document.getElementById('gtTraceMsg'),e.target.checked
+    ?'The cut line now goes round the words too - each order is traced with its own words.'
+    :'Back to cutting round the artwork only.',true);
+  gtArtChanged();
 });
 // The same sticker sheet as a set: every sticker nested on its own, or the
 // whole sheet as one block
@@ -57682,7 +57904,7 @@ function mcGiftWire(it){
     const d=mcGtDesign(mcGtPick);
     if(!d){ words.innerHTML=''; return; }
     const line=mcGtLine(it);
-    const fields=(typeof gtFieldsOf==='function')?gtFieldsOf(d,line):(d.fields||[]);
+    const fields=(typeof gtLineFieldsOf==='function')?gtLineFieldsOf(d,line):(d.fields||[]);
     if(!fields.length){
       words.innerHTML='<p class="hint" style="margin:0;">This design has no words on it.</p>';
       return;
