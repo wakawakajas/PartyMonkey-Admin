@@ -6787,6 +6787,13 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
 
         <div class="gt-sub">
           <div class="sect-label">Designs</div>
+          <!-- Custom Gift Tag 2 only: which of the three pages' designs to show -->
+          <div class="seg" id="gtComboKindSeg" style="display:none;margin-bottom:8px;">
+            <button type="button" class="on" data-gt-combo-kind="">All</button>
+            <button type="button" data-gt-combo-kind="festive">Festive</button>
+            <button type="button" data-gt-combo-kind="custom">Custom</button>
+            <button type="button" data-gt-combo-kind="sticker">Sticker</button>
+          </div>
           <label class="field"><span>SEARCH DESIGNS</span>
           <input type="text" id="gtDesignSearch" placeholder="Type a name, e.g. Kuromi" autocomplete="off"/></label>
           <div class="calc" id="gtDesignCount" style="margin-top:8px;"></div>
@@ -31674,7 +31681,9 @@ let gtLayoutFrom='', gtBaseFrom=''; // which file each was built from, so neithe
 const gtDesign=id=>gtLib.designs.find(d=>d.id===id)||(gtSetPieceById&&gtSetPieceById.get(id))
   ||(gtWordsCutById&&gtWordsCutById.get(id))||null;
 // The page's library is the whole of what it offers: the two do not share one.
-const gtDesignsInView=()=>gtLib.designs;
+// on Custom Gift Tag 2, the designs of the page picked over the list (gtComboKind)
+const gtDesignsInView=()=>gtMode==='combo'&&gtComboKind
+  ?gtLib.designs.filter(d=>d.kind===gtComboKind):gtLib.designs;
 const gtFont=id=>gtLib.fonts.find(f=>f.id===id)||null;
 // a font that failed to load, or a field left on the default, falls back to the
 // app's own face rather than to whatever the browser feels like
@@ -33706,6 +33715,8 @@ function gtPaintMode(){
   if(h) h.textContent=GT_MODE_HINT[gtMode]||'';
   const bring=document.getElementById('gtComboBringWrap');
   if(bring) bring.style.display=gtMode==='combo'?'':'none';
+  const kinds=document.getElementById('gtComboKindSeg');
+  if(kinds) kinds.style.display=gtMode==='combo'?'flex':'none';
   gtBackChrome();
 }
 // ---------- the back of the tag ----------
@@ -40825,7 +40836,10 @@ function gtRenderDesignList(){
   const mine=gtDesignsInView();
   if(!mine.length){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">'
-      +(gtMode!=='festive'
+      +(gtMode==='combo'
+        ? (gtComboKind?'— none from '+escapeHtml(GT_MODE_TITLE[gtComboKind])+' yet · press it under Bring in designs —'
+          :'— none yet · press Festive, Custom or Sticker under Bring in designs —')
+        : gtMode!=='festive'
         ? '— nothing in the Pigu folders yet · give a folder a shape under ⚙ —'
         : '— none yet —')+'</p>';
     if(count) count.textContent='';
@@ -40835,7 +40849,7 @@ function gtRenderDesignList(){
   if(count) count.textContent=q
     ? `${shown.length} of ${mine.length} design${mine.length===1?'':'s'}`
     : `${mine.length} design${mine.length===1?'':'s'}`
-      +(gtMode!=='festive'?' · one-off, from the Pigu folders':'');
+      +(gtMode!=='festive'&&gtMode!=='combo'?' · one-off, from the Pigu folders':'');
   if(!shown.length){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">— nothing matches —</p>';
     return;
@@ -41539,6 +41553,15 @@ async function gtComboSource(mode){
   const assets=rec.assets||{};
   return {man:rec.manifest,read:async f=>{ if(!assets[f]) throw new Error('missing'); return assets[f]; }};
 }
+// which page's designs Custom Gift Tag 2 shows: '' for all of them
+let gtComboKind='';
+document.getElementById('gtComboKindSeg').addEventListener('click',e=>{
+  const b=e.target.closest('[data-gt-combo-kind]'); if(!b) return;
+  gtComboKind=b.dataset.gtComboKind;
+  document.querySelectorAll('#gtComboKindSeg [data-gt-combo-kind]')
+    .forEach(x=>x.classList.toggle('on',x===b));
+  gtRenderDesignList();
+});
 let gtComboBusy=false;
 async function gtComboBringIn(mode){
   const msg=document.getElementById('gtLibMsg');
@@ -41566,16 +41589,46 @@ async function gtComboBringIn(mode){
         if(!gtAssets.has(t)) return t;
       }
     };
-    // the sheet comes over only when this page has none, as Import does
+    // The cutting file is the sheet's, one per paper (gtFinishFollow). The
+    // first page brought in gives the whole sheet, as Import does; each one
+    // after gives the papers this page has no cutting file for yet - Sticker's
+    // sheet onto the Sticker paper, Festive's onto Matte and Gloss.
     const sh=man.sheet;
+    const sheetFiles=v=>[v.layoutFile,v.baseFile,v.backFile].filter(f=>f&&typeof f==='string');
     if(sh&&!gtSheet.layoutFile&&sh.layoutFile&&await copy(sh.layoutFile,sh.layoutFile)){
       const files=[sh.baseFile,sh.backFile];
-      Object.values(sh.byFinish||{}).forEach(v=>{ if(v) files.push(v.layoutFile,v.baseFile,v.backFile); });
+      Object.values(sh.byFinish||{}).forEach(v=>{ if(v) files.push(...sheetFiles(v)); });
       for(const f of new Set(files.filter(f=>f&&typeof f==='string'))) await copy(f,f);
       Object.assign(gtSheet,JSON.parse(JSON.stringify(sh)));
       if(gtSheet.bleedMode==='aware') gtSheet.bleedMode='mirror';
       gtShapeSlots.clear(); gtPickOnly(null);
       added++;
+    }else if(sh&&gtSheet.layoutFile){
+      const theirs={};
+      Object.entries(sh.byFinish||{}).forEach(([p,v])=>{ if(v&&v.layoutFile) theirs[p]=v; });
+      const theirOwn=sh.finishOf||sh.backFinish;
+      if(theirOwn&&sh.layoutFile){
+        theirs[theirOwn]=Object.fromEntries(GT_FINISH_KEYS().filter(k=>k in sh).map(k=>[k,sh[k]]));
+        theirs[theirOwn].base=sh.layoutFile;
+      }
+      const mineOn=gtSheet.finishOf||gtFinish;
+      const all=(gtSheet.byFinish&&typeof gtSheet.byFinish==='object')?gtSheet.byFinish:(gtSheet.byFinish={});
+      for(const [paper,v0] of Object.entries(theirs)){
+        if(paper===mineOn||(all[paper]&&all[paper].layoutFile)) continue;
+        const v=JSON.parse(JSON.stringify(v0)), moved={};
+        let ok=true;
+        for(const f of new Set(sheetFiles(v))){
+          const to=gtAssets.has(f)?freePath(f):f;
+          if(!await copy(f,to)){ ok=false; break; }
+          moved[f]=to;
+        }
+        if(!ok) continue;
+        ['layoutFile','baseFile','backFile','base'].forEach(k=>{ if(moved[v[k]]) v[k]=moved[v[k]]; });
+        if(v.shapeSlots&&typeof v.shapeSlots==='object')
+          v.shapeSlots=Object.fromEntries(Object.entries(v.shapeSlots).map(([k,x])=>[moved[k]||k,x]));
+        all[paper]=v;
+        added++;
+      }
     }
     const fontPath={};
     for(const f of man.fonts||[]){
