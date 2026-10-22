@@ -31717,7 +31717,9 @@ function gtPieceEditOf(d){
   const rec=d&&gtSetPieces.get(d.id);
   // stickers that could not be made this time say nothing about what was set
   if(!rec||!rec.list||!rec.list.length) return d&&d.pieceEdit;
-  const out={};
+  // said with the sheet they were set on: other artwork, or another number of
+  // stickers, does not take them by number (see gtSetBuild)
+  const out={file:d.file,n:rec.n||rec.list.length};
   rec.list.forEach(x=>{
     const k=Number(String(x.id).split('~')[1]);
     // and a cut line traced or drawn on it by hand (the one from the PDF is
@@ -31729,6 +31731,7 @@ function gtPieceEditOf(d){
       ...(x.hole&&x.hole.on?{hole:x.hole}:{}),...(artOwn?{art}:{}),...(x.turn?{turn:x.turn}:{})};
     if(k&&((x.fields||[]).length||Object.keys(e).length)) out[k]={fields:x.fields||[],...e};
   });
+  if(Object.keys(out).length<=2){ d.pieceEdit={}; return {}; }
   d.pieceEdit=out;
   return out;
 }
@@ -31754,11 +31757,18 @@ function gtSetBuild(d){
   const live=()=>gtSetPieces.get(d.id)===rec;
   rec.p=(async()=>{
     const files=blob?await pdfSheetPieces(blob).catch(()=>null):null;
+    rec.n=(files||[]).length;
+    // set on this sheet as it stands, or not at all: replaced, or with another
+    // number of stickers on it, what was set by number is not theirs
+    const peAll=d.pieceEdit&&(!d.pieceEdit.file||d.pieceEdit.file===d.file)
+      &&(!d.pieceEdit.n||d.pieceEdit.n===rec.n)?d.pieceEdit:null;
+    const mine=[];                   // what this making has put down, to take up if it is overtaken
+    const undo=()=>{ mine.forEach(x=>{ if(gtSetPieceById.get(x.id)===x) gtSetPieceById.delete(x.id); gtAssets.delete(x.file); }); return []; };
     const list=[];
     for(let k=0;k<(files||[]).length;k++){
-      if(!live()) return [];
+      if(!live()) return undo();
       const path=`adhoc/set-${d.id}-${rec.gen}-${k+1}.pdf`;
-      const pe=d.pieceEdit&&d.pieceEdit[k+1];
+      const pe=peAll&&peAll[k+1];
       const x=gtNormalizeDesign({id:`${d.id}~${k+1}`,name:`${d.name} ${k+1}`,file:path,adhoc:true,
         fields:(pe&&pe.fields)||[],bleed:pe&&pe.bleed!==undefined?pe.bleed:(d.bleed?{...d.bleed}:null),
         hole:pe&&pe.hole,artV:2,art:pe&&pe.art,turn:pe&&pe.turn});
@@ -31771,16 +31781,17 @@ function gtSetBuild(d){
       // its own red line, the way a design's PDF gives one (a small circle in
       // it is a window, not a punch - see gtCutTake)
       const lift=await gtCutLift(files[k],false).catch(()=>null);
-      if(!lift||!live()) continue;
+      if(!lift) continue;
+      if(!live()) return undo();
       gtAssets.set(path,files[k]);
       gtCutFound.set(path,lift.cut); gtCutPending.add(path);
       gtCutTake(x);
       // a line made by hand on this sticker before wins over the PDF's, as on any design
       if(peTrace){ x.trace=peTrace; x.cutSeen=lift.cut.sig; }
-      if(!x.trace) continue;
-      gtSetPieceById.set(x.id,x); list.push(x);
+      if(!x.trace){ gtAssets.delete(path); continue; }
+      gtSetPieceById.set(x.id,x); list.push(x); mine.push(x);
     }
-    if(!live()) return [];
+    if(!live()) return undo();
     rec.list=list;
     try{ gtNestCache=null; gtDraw(); }catch(e){}
     return list;
@@ -32868,7 +32879,8 @@ function gtNormalizeDesign(d){
     // what was set on each of its stickers - words, and cutting round them -
     // by the sticker's number on the sheet (see gtSetBuild)
     ...(d.pieceEdit&&typeof d.pieceEdit==='object'&&Object.keys(d.pieceEdit).length
-      ?{pieceEdit:Object.fromEntries(Object.entries(d.pieceEdit).map(([k,v])=>[k,
+      ?{pieceEdit:Object.fromEntries(Object.entries(d.pieceEdit).filter(([k])=>/^\d+$/.test(k)||k==='file'||k==='n')
+        .map(([k,v])=>k==='file'?[k,String(v)]:k==='n'?[k,Number(v)||0]:[k,
         {fields:gtNormalizeDesign({fields:(v&&v.fields)||[]}).fields,...(v&&v.wordsCut?{wordsCut:true}:{}),
          ...(v&&v.trace&&gtNormalizeDesign({trace:v.trace}).trace?{trace:gtNormalizeDesign({trace:v.trace}).trace}:{}),
          ...(v&&v.bleed!==undefined?{bleed:v.bleed}:{}),...(v&&v.hole?{hole:v.hole}:{}),
@@ -35130,10 +35142,14 @@ function gtWordsCut(d,line){
   const fields=gtFieldsOf(d,line).filter(f=>gtSideOf(f)!=='back');
   // a face still loading would be traced as the stand-in it is drawn in, and
   // kept: it is asked for, and the sheet drawn again once it is in
+  // A face with no file behind it never arrives, and waiting on it redrew
+  // the sheet for ever (see gtFontAsk) - it is traced as what is drawn.
   const faceIn=id=>{ if(!id) return 1;
     if(gtFontsDone.has(id)&&!gtFontJobs.has(id)) return 1;
     const job=gtFontLoad(id);
-    if(job&&job.then) job.then(()=>{ gtNestCache=null; try{ gtDraw(); }catch(e){} });
+    if(!gtFontJobs.has(id)) return 1;
+    if(!gtWordsFaceWait.has(id)){ gtWordsFaceWait.add(id);
+      job.then(()=>{ gtWordsFaceWait.delete(id); gtNestCache=null; try{ gtDraw(); }catch(e){} }); }
     return 0; };
   const said=fields.map(f=>{ const v=gtVal(line,f);
     return String(v.text||'').trim()?[f.id,v.text,v.font,faceIn(v.font),v.size,v.rot,v.curve,v.dx,v.dy,v.bw,v.bh,v.ow,v.align,f.x,f.y,f.w,f.h]:null; })
@@ -35145,7 +35161,8 @@ function gtWordsCut(d,line){
   const t0=d.trace;
   const key=d.id+'#'+JSON.stringify([said,d.file,lp.length,lp[0],lp[lp.length>>1],t0.out,t0.rd,t0.cx,t0.cy,t0.sm,d.art,d.turn||0,ref.w,ref.h]);
   const had=gtWordsCuts.get(key);
-  if(had) return had;
+  // used again: to the back of the line, so the ones let go are the unused
+  if(had){ gtWordsCuts.delete(key); gtWordsCuts.set(key,had); gtWordsUsed.add(had.id); return had; }
   const img=gtImgGet(d.id);          // turned, as its cut line is held
   if(!img||!img.naturalWidth) return d;
   // a picture that says nothing of its size is fitted to the placeholder by
@@ -35200,14 +35217,7 @@ function gtWordsCut(d,line){
   // a bleed, a hole or a name changed there is this one's at once
   const v=Object.create(d);
   v.id=d.id+'#'+(++gtWordsCutSeq); v.trace=t; v.wordsOf=d.id;
-  // a word typed a letter at a time leaves a cut behind for every letter:
-  // the oldest are let go once there are many (made again if asked for)
-  if(gtWordsCuts.size>=300){
-    [...gtWordsCuts.keys()].slice(0,100).forEach(kk=>{ const o=gtWordsCuts.get(kk);
-      gtWordsCuts.delete(kk); gtWordsCutById.delete(o.id); gtImgs.delete(o.id); });
-    gtNestCache=null;
-  }
-  gtWordsCuts.set(key,v); gtWordsCutById.set(v.id,v);
+  gtWordsCuts.set(key,v); gtWordsCutById.set(v.id,v); gtWordsUsed.add(v.id);
   // the picture as it was read, not turned: gtImgGet turns it by the turn the
   // copy carries, and a turned one was turned twice
   if(gtImgs.has(d.id)) gtImgs.set(v.id,gtImgs.get(d.id));
@@ -35215,6 +35225,21 @@ function gtWordsCut(d,line){
 }
 var gtWordsCutById=new Map();      // gtWordsCut's designs by their own id
 let gtWordsCutSeq=0;
+const gtWordsFaceWait=new Set();   // faces being waited on to cut round, each once
+const gtWordsUsed=new Set();       // the cuts the last look at the order used
+// A word typed a letter at a time leaves a cut behind for every letter. The
+// least lately used are let go once there are many more than the order itself
+// uses - between looks at the order, never during one, so no tag on the sheet
+// loses the cut it is standing on.
+function gtWordsPrune(){
+  const keep=gtWordsUsed.size;
+  gtWordsUsed.clear();
+  const cap=Math.max(300,keep*2);
+  if(gtWordsCuts.size<=cap) return;
+  [...gtWordsCuts.keys()].slice(0,gtWordsCuts.size-cap+Math.ceil(cap/4)).forEach(kk=>{
+    const o=gtWordsCuts.get(kk); gtWordsCuts.delete(kk); gtWordsCutById.delete(o.id); gtImgs.delete(o.id); });
+  gtNestCache=null;
+}
 // A closed polyline with points added along each side, every corner kept.
 function gtDensify(pts,step){
   const out=[], n=pts.length;
@@ -35920,6 +35945,7 @@ function gtPltSyncChrome(){
 // the places added for it - which go on the end of the run. The list's own
 // order is kept within each. A sheet with no cutting file is left as listed.
 function gtQueue(lines){
+  if(!lines) gtWordsPrune();
   const out=[];
   let list=lines||gtOrder;
   const own=l=>gtOwnCut(gtDesign(l&&l.designId));
@@ -41519,14 +41545,19 @@ function gtDrawBleedZone(ctx,d,draw,slot,sc,tw,th,b,vx0,vy0,vw,vh){
       if(!ps||!ps.length) return b;
       // the sticker whose middle is nearest this line's middle
       let cx=0,cy=0; L.forEach(([x,y])=>{ cx+=x; cy+=y; }); cx/=L.length; cy/=L.length;
-      let best=null,bd=Infinity;
+      let best=null,bd=Infinity; const tn=gtTurnOf(d);
       ps.forEach(p=>{ if(!p.sheetUV) return;
-        const dx=draw.x+p.sheetUV[0]*draw.w-cx, dy=draw.y+p.sheetUV[1]*draw.h-cy, dd=dx*dx+dy*dy;
+        const uv=tn?gtTurnPt(p.sheetUV,tn):p.sheetUV;
+        const dx=draw.x+uv[0]*draw.w-cx, dy=draw.y+uv[1]*draw.h-cy, dd=dx*dx+dy*dy;
         if(dd<bd){ bd=dd; best=p; } });
       return best?gtBleedOf(best):b;
     };
     ctx.strokeStyle='#2B7FFF'; ctx.lineWidth=1.25; ctx.setLineDash([5,4]);
-    gtTraceExtras(d,draw).filter(L=>!L.open&&L.length>3).forEach(L=>{
+    // a window, or a shape added inside a sticker, bleeds into its hole - no edge outside it
+    const box=L=>{ let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity; L.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); }); return {x0,y0,x1,y1}; };
+    const closed=gtTraceExtras(d,draw).filter(L=>!L.open&&L.length>3), all=[loop,...closed].map(box);
+    const within=(b,i)=>all.some((o,j)=>j!==i&&b.x0>=o.x0&&b.y0>=o.y0&&b.x1<=o.x1&&b.y1<=o.y1&&(o.x1-o.x0)*(o.y1-o.y0)>(b.x1-b.x0)*(b.y1-b.y0));
+    closed.filter((L,i)=>!within(all[i+1],i+1)).forEach(L=>{
       const bb=bleedAt(L); if(!(bb>0)) return;
       let o=null; try{ o=gtOffsetLoop(L,bb); }catch(e){ o=null; }
       if(o&&o.length>3){ ctx.beginPath(); path(o); ctx.stroke(); }
@@ -42732,10 +42763,14 @@ function gtPiecesRowWrite(d){
         style="height:auto;min-height:0;padding:4px 6px;display:flex;flex-direction:column;align-items:center;gap:2px;${(p.fields||[]).length?'border-color:var(--blueprint);':''}">
         ${shot(p)}<span style="font-size:12px;">${i+1}${(p.fields||[]).length?' ✎':''}</span></button>`).join('')}</div>`;
   // pictures not drawn yet: drawn, and the row again with them
-  const want=ps.filter(p=>!gtImgs.has(p.id));
-  if(want.length) Promise.all(want.map(p=>gtImgLoad(p.id))).then(()=>{
-    if(gtCurrentDesign===d&&currentScreen==='tool-gift-tag-design') gtPiecesRowWrite(d); });
+  // one that will not draw is left blank rather than asked for again and again
+  const want=ps.filter(p=>!gtImgs.has(p.id)&&!gtImgFailed.has(p.id)&&!gtPiecesAsked.has(p.id));
+  want.forEach(p=>gtPiecesAsked.add(p.id));
+  if(want.length) Promise.all(want.map(p=>gtImgLoad(p.id).catch(()=>{}))).then(()=>{
+    want.forEach(p=>{ if(!gtImgs.has(p.id)) gtImgFailed.add(p.id); gtPiecesAsked.delete(p.id); });
+    if(want.some(p=>gtImgs.has(p.id))&&gtCurrentDesign===d&&currentScreen==='tool-gift-tag-design') gtPiecesRowWrite(d); });
 }
+const gtPiecesAsked=new Set();     // sticker pictures being drawn for their buttons
 // The sticker numbers over a broken-up sheet on the design screen, where each
 // sticker sits - the same numbers as the buttons below it and the stickers'
 // own names
@@ -42747,9 +42782,11 @@ function gtDrawPieceNumbers(ctx,d,draw,sc){
   const r=Math.max(9,Math.min(16,4*sc));
   ctx.font=`600 ${Math.round(r*1.1)}px 'IBM Plex Sans',sans-serif`;
   ctx.textAlign='center'; ctx.textBaseline='middle';
+  const tn=gtTurnOf(d);              // a turned sheet's stickers go round with it
   ps.forEach((p,i)=>{
     if(!p.sheetUV) return;
-    const X=(draw.x+p.sheetUV[0]*draw.w)*sc, Y=(draw.y+p.sheetUV[1]*draw.h)*sc;
+    const uv=tn?gtTurnPt(p.sheetUV,tn):p.sheetUV;
+    const X=(draw.x+uv[0]*draw.w)*sc, Y=(draw.y+uv[1]*draw.h)*sc;
     ctx.beginPath(); ctx.arc(X,Y,r,0,Math.PI*2);
     ctx.fillStyle='#0C447C'; ctx.fill();
     ctx.lineWidth=2; ctx.strokeStyle='#FFFFFF'; ctx.stroke();
@@ -57779,7 +57816,7 @@ async function mcGtKeepOneOffOn(it,si){
   si.oneOff={id:d.id,name:d.name||'',file:d.file||path,path,
     fields:(d.fields||[]),hole:d.hole||null,...(d.back?{back:d.back}:{}),
     artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,
-    ...(d.cutSeen?{cutSeen:d.cutSeen}:{}),...(d.cutSheet?{cutSheet:true}:{}),...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),...(d.turn?{turn:d.turn}:{}),...(d.wordsCut?{wordsCut:true}:{}),...(d.pieceEdit?{pieceEdit:gtPieceEditOf(d)}:{})};
+    ...(d.cutSeen?{cutSeen:d.cutSeen}:{}),...(d.cutSheet?{cutSheet:true}:{}),...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),...(d.turn?{turn:d.turn}:{}),...(d.wordsCut?{wordsCut:true}:{}),...(d.cutSheet&&gtPieceEditOf(d)?{pieceEdit:gtPieceEditOf(d)}:{})};
 }
 // The copies these lines are carrying, back into the library — only the ones
 // the library cannot already answer for, so a page still holding its one-offs
@@ -60426,7 +60463,7 @@ const PJ_KINDS={
             fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
             // how it sits, its own bleed and its traced cut line
             artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,
-            ...(d.cutSheet?{cutSheet:true}:{}),...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),...(d.turn?{turn:d.turn}:{}),...(d.wordsCut?{wordsCut:true}:{}),...(d.pieceEdit?{pieceEdit:gtPieceEditOf(d)}:{})}}:{})};
+            ...(d.cutSheet?{cutSheet:true}:{}),...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),...(d.turn?{turn:d.turn}:{}),...(d.wordsCut?{wordsCut:true}:{}),...(d.cutSheet&&gtPieceEditOf(d)?{pieceEdit:gtPieceEditOf(d)}:{})}}:{})};
       });
       const sheet={};
       GT_JOB_SHEET_KEYS.forEach(k=>{ if(gtSheet[k]!==undefined) sheet[k]=gtSheet[k]; });
