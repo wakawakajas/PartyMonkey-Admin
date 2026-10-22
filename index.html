@@ -36101,7 +36101,7 @@ function gtNestPlan(){
               t.more?JSON.stringify(t.more):0,(t.extra||[]).length]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
-  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId+'|'+(gtLineBleed(l)??'')),dsig,S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId+'|'+(gtLineBleed(l)??'')+'|'+(l.shape||'')),dsig,Object.keys(gtFolderShapes||{}).length,S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
     S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,S.nestHole||0,marks,gtDotClear(),S.qrOn?(Number(S.qrDist)||10):0]);
   if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
   // A figure being typed (a gap, a size, a scale) changes the sheet on every
@@ -36116,16 +36116,40 @@ function gtNestPlan(){
   }
   // A tag with no cut line of its own, where nesting kept the cutting file's
   // shape: that shape, at the size the file gave it, outline and all.
-  const NC=S.nestCut&&S.nestCut.file?S.nestCut:null, ncLay=NC?gtNestCutLayout(NC.file):null;
-  const ncSh=ncLay&&ncLay.shapes&&ncLay.shapes[NC.shape]||null;
+  // The cutting file a line names of its own - Magic Create's pick, or its
+  // design's folder's - comes first: a merged or nested Magic Create sheet kept
+  // one shape for every tag, and an Arch Sticker line was cut to a rectangle.
+  const gtNcOfFile=path=>{
+    if(!path) return null;
+    if(S.nestCut&&S.nestCut.file===path) return S.nestCut;
+    const lay=gtNestCutLayout(path); if(!lay||!lay.shapes||!lay.shapes.length) return null;
+    const kept=(S.shapeSlots&&S.shapeSlots[path])||gtShapeSlots.get(path);
+    const sl=(kept&&Array.isArray(kept.slots)?kept.slots:[]).filter(x=>x&&x.shape!=null&&lay.shapes[x.shape]);
+    if(sl.length){
+      const c=new Map(); sl.forEach(x=>c.set(x.shape,(c.get(x.shape)||0)+1));
+      const most=[...c.entries()].sort((a,b)=>b[1]-a[1])[0][0], rep=sl.find(x=>x.shape===most);
+      return {file:path,shape:most,w:rep.w,h:rep.h};
+    }
+    // never on a sheet here: the size it comes in at, as gtRebuildSlotsLaid gives it
+    const [,,vw,vh]=lay.vb, k=lay.mm?lay.mm.w/vw:Math.min(S.paperW/vw,S.paperH/vh), sh=lay.shapes[0];
+    return {file:path,shape:0,w:sh.bbox.w*k,h:sh.bbox.h*(lay.mm?lay.mm.h/vh:k)};
+  };
+  const lineNc=new Map();
+  q.forEach(l=>{
+    if(lineNc.has(l.designId)) return;
+    const d=gtDesign(l.designId), folder=d&&typeof gtPiguFolderOf==='function'?gtPiguFolderOf(d):'';
+    lineNc.set(l.designId,gtNcOfFile((l&&l.shape)||(folder&&gtFolderShapes[folder])||''));
+  });
+  const ncFor=id=>lineNc.get(id)||(S.nestCut&&S.nestCut.file?S.nestCut:null);
   const flagOf=id=>{
-    const d=gtDesign(id);
+    const d=gtDesign(id), NC=ncFor(id);
+    const ncLay=NC?gtNestCutLayout(NC.file):null, ncSh=ncLay&&ncLay.shapes&&ncLay.shapes[NC.shape]||null;
     if(!ncSh||gtOwnCut(d)||!(NC.w>0&&NC.h>0)) return null;
     const sx=NC.w/ncSh.bbox.w, sy=NC.h/ncSh.bbox.h;
     const stepVb=GT_PLT_STEP/Math.max(1e-6,Math.max(sx,sy));
     let poly=null;
     try{ poly=gtFlatten(ncSh.d,ncSh.m,stepVb).map(([x,y])=>[(x-ncSh.bbox.x)*sx,(y-ncSh.bbox.y)*sy]); }catch(e){ poly=null; }
-    return {sz:{w:NC.w,h:NC.h},poly:poly&&poly.length>2?poly:null};
+    return {nc:NC,sz:{w:NC.w,h:NC.h},poly:poly&&poly.length>2?poly:null};
   };
   const flags=new Map(ids.map(id=>[id,flagOf(id)]));
   const size=new Map(ids.map(id=>[id,flags.get(id)?flags.get(id).sz:gtNestSizeOf(gtDesign(id))]));
@@ -36285,7 +36309,7 @@ function gtNestPlan(){
     pg.items.forEach((a,k)=>{
       const {it,pos}=a, b=box(a);
       const fl=flags.get(it.line.designId);
-      slots.push({id:'n'+at+'_'+k,shape:fl?NC.shape:null,...(fl?{nestCut:NC.file}:{}),added:true,
+      slots.push({id:'n'+at+'_'+k,shape:fl?fl.nc.shape:null,...(fl?{nestCut:fl.nc.file}:{}),added:true,
         x:Math.round((ox+pos.x+(pos.bw>0?0:(it.bl||0)))*100)/100,y:Math.round((oy+pos.y+(pos.bw>0?0:(it.bl||0)))*100)/100,w:b.w,h:b.h,
         ...(turnOf(pos)?{rot:turnOf(pos)}:{}),
         // Add holes on a nested sheet: every tag punched, from its own top
