@@ -7378,6 +7378,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
               <label class="field"><span>ROTATE °</span><input type="number" step="1" id="gtTextRot"/></label>
               <label class="field"><span>OUTLINE</span><input type="text" id="gtTextOc" placeholder="#FFFFFF"/></label>
               <label class="field"><span>OUTLINE MM</span><input type="number" step="0.1" min="0" id="gtTextOw"/></label>
+              <label class="field" title="How far apart the lines sit (Ctrl+Enter makes a second line): 1 is close, 1.25 as before"><span>LINE SPACING</span><input type="number" step="0.05" min="0.5" max="3" id="gtTextLh" placeholder="1.25"/></label>
               <label class="field"><span>LABEL</span><input type="text" id="gtTextName"/></label>
             </div>
           </div>
@@ -32936,6 +32937,9 @@ function gtNormalizeDesign(d){
       font:f.font||'',size:Number(f.size)||6,color:f.color||'#232323',align:f.align||'center',
       rot:Number(f.rot)||0,curve:Number(f.curve)||0,group:f.group||'',
       oc:f.oc||'#FFFFFF',ow:Number(f.ow)||0,
+      // the gap from one line of words to the next, as a share of their size
+      // (said only where it is not the 1.25 every text had before)
+      ...(Number(f.lh)>0&&Number(f.lh)!==1.25?{lh:Math.max(0.5,Math.min(3,Number(f.lh)))}:{}),
       // which side of the tag it prints on. Only a back says so: every design
       // written before there was a back is all front, and stays written that way
       ...(f.side==='back'?{side:'back'}:{}),
@@ -35244,7 +35248,7 @@ function gtWordsCut(d,line){
       job.then(()=>{ gtWordsFaceWait.delete(id); gtNestCache=null; try{ gtDraw(); }catch(e){} }); }
     return 0; };
   const said=fields.map(f=>{ const v=gtVal(line,f);
-    return String(v.text||'').trim()?[f.id,v.text,v.font,faceIn(v.font),v.size,v.rot,v.curve,v.dx,v.dy,v.bw,v.bh,v.ow,v.align,f.x,f.y,f.w,f.h]:null; })
+    return String(v.text||'').trim()?[f.id,v.text,v.font,faceIn(v.font),v.size,v.rot,v.curve,v.dx,v.dy,v.bw,v.bh,v.ow,v.align,v.lh,f.x,f.y,f.w,f.h]:null; })
     .filter(Boolean);
   if(!said.length) return d;
   const lk=line&&line.id?line.id+'|'+d.id:null;
@@ -37255,13 +37259,13 @@ function gtWrap(ctx,text,maxW){
 // too tall does the size come down, a step at a time. The size keyed in stays
 // the control: it is the largest the words will ever be drawn, so making it
 // bigger or smaller still does what it says even on a name that had to shrink.
-function gtFitText(ctx,text,family,size,sc,bw,bh){
+function gtFitText(ctx,text,family,size,sc,bw,bh,lh=1.25){
   let s=Math.max(0.8,size);
   for(let i=0;i<40;i++){
     ctx.font=(s*sc)+'px '+family;
     const lines=gtWrap(ctx,text,bw*sc);
     const widest=lines.reduce((m,l)=>Math.max(m,ctx.measureText(l).width),0);
-    if((widest<=bw*sc&&lines.length*s*1.25<=bh)||s<=0.8) return {lines,size:s};
+    if((widest<=bw*sc&&((lines.length-1)*lh+1.25)*s<=bh)||s<=0.8) return {lines,size:s};
     s=Math.max(0.8,s*0.93);
   }
   ctx.font=(s*sc)+'px '+family;
@@ -37334,6 +37338,8 @@ function gtVal(line,f){
           // an outline round the letters, in mm; nothing at all at zero
           oc:v.oc||f.oc||'#FFFFFF', ow:v.ow===undefined?(Number(f.ow)||0):(Number(v.ow)||0),
           align:v.align||f.align||'center',
+          // line spacing: how far apart a second line sits, times the size
+          lh:Math.max(0.5,Math.min(3,Number(v.lh)||Number(f.lh)||1.25)),
           dx:Number(v.dx)||0, dy:Number(v.dy)||0,
           // the box itself, in mm, where the line has been given one; zero is
           // "as the design has it" rather than a box of no width
@@ -37411,12 +37417,13 @@ function gtDrawField(ctx,f,v,bx,by,bw,bh,sc){
     ctx.lineJoin='round'; ctx.miterLimit=2;
   }
   const put=(t,x,ty)=>{ if(ow>0) pmStrokeText(ctx,t,x,ty); ctx.fillText(t,x,ty); };
-  const fit=gtFitText(ctx,v.text,gtFamily(v.font),v.size,sc,bw,bh);
-  const lines=fit.lines, lh=fit.size*1.25;
+  const fit=gtFitText(ctx,v.text,gtFamily(v.font),v.size,sc,bw,bh,v.lh);
+  const lines=fit.lines, lh=fit.size*v.lh;
   ctx.textAlign=v.align;
   const tx=v.align==='left'?bx:v.align==='right'?bx+bw:bx+bw/2;
   // the block of lines is centred in the box, whatever it grew to
-  let ty=by+(bh-lines.length*lh)/2+lh*0.8;
+  const one=fit.size*1.25, tall=(lines.length-1)*lh+one;
+  let ty=by+(bh-tall)/2+one*0.8;
   // a bent line is centred on its arc whatever the field's own alignment is:
   // there is no left edge to hang it off once it is on a circle
   lines.forEach(ln=>{
@@ -39362,6 +39369,8 @@ function gtRenderOrder(){
               <input type="number" step="0.5" min="0" value="${round(v.bh||f.h*A.h)}" data-gtf="${f.id}|bh"/></label>
             <label class="field"><span>OUTLINE THICKNESS</span>
               <input type="number" step="0.05" min="0" value="${round(v.ow)}" data-gtf="${f.id}|ow"/></label>
+            <label class="field" title="How far apart the lines sit: 1 is close, 1.25 as before"><span>LINE SPACING</span>
+              <input type="number" step="0.05" min="0.5" max="3" value="${v.lh}" data-gtf="${f.id}|lh"/></label>
           </div>
           <p class="hint" style="margin:6px 0 0;">Drag the words on the sheet to move them, or the corner to resize the box.</p>
         </div>
@@ -42023,7 +42032,7 @@ const GT_TEXT_FIELDS=[
   ['gtTextFont','font',String],['gtTextSize','size',Number],
   ['gtTextColor','color',String],['gtTextAlign','align',String],
   ['gtTextCurve','curve',Number],['gtTextRot','rot',Number],
-  ['gtTextOc','oc',String],['gtTextOw','ow',Number],
+  ['gtTextOc','oc',String],['gtTextOw','ow',Number],['gtTextLh','lh',Number],
   ['gtTextName','name',String]];
 let gtTextWriting=false;                 // so filling the boxes does not read as typing
 function gtTextPanelSync(){
@@ -42200,6 +42209,8 @@ function gtRenderFields(){
             <label class="field"><span>OUTLINE THICKNESS</span>
               <input type="number" step="0.05" min="0" value="${round(f.ow)}" data-gtd="ow"
                      title="How far it stands outside the letter. Nothing at zero."/></label>
+            <label class="field" title="How far apart the lines sit: 1 is close, 1.25 as before"><span>LINE SPACING</span>
+              <input type="number" step="0.05" min="0.5" max="3" value="${f.lh||1.25}" data-gtd="lh"/></label>
           </div>
           <div class="grid2" style="margin-top:6px;">
             <label class="field"><span>X mm</span>
@@ -42273,6 +42284,7 @@ document.getElementById('gtFieldList').addEventListener('input',e=>{
   const k=e.target.dataset.gtd; if(!k) return;
   if(k==='name'||k==='def'||k==='color'||k==='font'||k==='oc'||k==='align') f[k]=e.target.value;
   else if(k==='ow') f.ow=Math.max(0,Number(e.target.value)||0);
+  else if(k==='lh') f.lh=Math.max(0.5,Math.min(3,Number(e.target.value)||1.25));
   else if(k==='size') f.size=Math.max(0.5,Number(e.target.value)||f.size);
   else if(k==='rot') f.rot=Number(e.target.value)||0;
   else if(k==='curve') f.curve=Math.max(-350,Math.min(350,Number(e.target.value)||0));
