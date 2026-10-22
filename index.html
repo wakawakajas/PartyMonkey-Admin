@@ -7398,7 +7398,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <label class="click-tog"><input type="checkbox" id="gtTraceOn"/>Cut round the artwork, not the placeholder</label>
           </div>
           <!-- a PDF that is a whole sheet: every red cut line on it is kept as it is -->
-          <div class="click-row" id="gtCutSheetRow" style="margin-top:6px;" hidden>
+          <div class="click-row" id="gtCutSheetRow" style="margin-top:6px;display:none;">
             <label class="click-tog" title="For a PDF that is a whole sheet — a sticker sheet with a red cut line round every sticker. Every closed red line on the page becomes the cut line, however many there are, and the page goes in as one design. The red is never printed."><input type="checkbox" id="gtCutSheet"/>Sticker sheet: cut on every red line in the PDF</label>
           </div>
           <!-- the same sheet, nested a sticker at a time: off, it is one block -->
@@ -31688,6 +31688,10 @@ function gtSetPiecesOf(d){
 // the stickers of every nest-each sheet on the order, made and drawn: what
 // printing waits on, so a sheet is never printed as one block for want of them
 async function gtSetsReady(lines){
+  // and the pictures of designs cut round their words, which are read to cut them:
+  // printed before one was in, the tag went out cut round its artwork alone
+  await Promise.all((lines||gtOrder).map(l=>{ const d=l&&gtDesign(l.designId);
+    return d&&d.wordsCut&&!gtImgs.has(d.id)?gtImgLoad(d.id):null; }));
   const ids=new Set((lines||gtOrder).filter(l=>l&&gtLineSplits(l,gtDesign(l.designId))).map(l=>l.designId));
   await Promise.all([...ids].map(async id=>{ const d=gtDesign(id);
     if(!d) return;
@@ -31700,11 +31704,15 @@ async function gtSetsReady(lines){
 // on the sheet's own design, by the sticker's number
 function gtPieceEditOf(d){
   const rec=d&&gtSetPieces.get(d.id);
-  if(!rec||!rec.list) return d&&d.pieceEdit;
+  // stickers that could not be made this time say nothing about what was set
+  if(!rec||!rec.list||!rec.list.length) return d&&d.pieceEdit;
   const out={};
   rec.list.forEach(x=>{
     const k=Number(String(x.id).split('~')[1]);
-    if(k&&((x.fields||[]).length||x.wordsCut)) out[k]={fields:x.fields||[],...(x.wordsCut?{wordsCut:true}:{})};
+    // and a cut line traced or drawn on it by hand; the one from the PDF is read again anyway
+    const own=x.trace&&!x.trace.auto?gtTraceKept(x):null;
+    if(k&&((x.fields||[]).length||x.wordsCut||own))
+      out[k]={fields:x.fields||[],...(x.wordsCut?{wordsCut:true}:{}),...(own?{trace:own}:{})};
   });
   d.pieceEdit=out;
   return out;
@@ -31728,12 +31736,15 @@ function gtSetBuild(d){
       // what was set on this sticker before: its words, and cutting round them
       const pe=d.pieceEdit&&d.pieceEdit[k+1];
       if(pe){ x.fields=gtNormalizeDesign({fields:pe.fields||[]}).fields; if(pe.wordsCut) x.wordsCut=true; }
+      const peTrace=pe&&pe.trace?gtNormalizeDesign({trace:pe.trace}).trace:null;
       // its own red line, the way a design's PDF gives one (a small circle in
       // it is a window, not a punch - see gtCutTake)
       const lift=await gtCutLift(files[k],false).catch(()=>null);
       if(!lift) continue;
       gtCutFound.set(path,lift.cut); gtCutPending.add(path);
       gtCutTake(x);
+      // a line made by hand on this sticker before wins over the PDF's, as on any design
+      if(peTrace){ x.trace=peTrace; x.cutSeen=lift.cut.sig; }
       if(!x.trace) continue;
       gtSetPieceById.set(x.id,x); list.push(x);
     }
@@ -32816,7 +32827,8 @@ function gtNormalizeDesign(d){
     // by the sticker's number on the sheet (see gtSetBuild)
     ...(d.pieceEdit&&typeof d.pieceEdit==='object'&&Object.keys(d.pieceEdit).length
       ?{pieceEdit:Object.fromEntries(Object.entries(d.pieceEdit).map(([k,v])=>[k,
-        {fields:gtNormalizeDesign({fields:(v&&v.fields)||[]}).fields,...(v&&v.wordsCut?{wordsCut:true}:{})}]))}:{}),
+        {fields:gtNormalizeDesign({fields:(v&&v.fields)||[]}).fields,...(v&&v.wordsCut?{wordsCut:true}:{}),
+         ...(v&&v.trace&&gtNormalizeDesign({trace:v.trace}).trace?{trace:gtNormalizeDesign({trace:v.trace}).trace}:{})}]))}:{}),
     // its artwork turned a quarter, or more (see gtTurnDesign)
     ...(gtTurnOf(d)?{turn:gtTurnOf(d)}:{}),
     art:d.artV===2
@@ -35053,18 +35065,21 @@ function gtWordsGap(d,P,img){
   return gap;
 }
 function gtWordsCut(d,line){
-  if(!d||!d.wordsCut||d.cutSheet||!d.trace||!d.trace.on||d.trace.shape||!Array.isArray(d.trace.loop)) return d;
+  // one already cut round its words is not cut round them again - its line has them
+  if(!d||d.wordsOf||!d.wordsCut||d.cutSheet||!d.trace||!d.trace.on||d.trace.shape||!Array.isArray(d.trace.loop)) return d;
   const fields=gtFieldsOf(d,line).filter(f=>gtSideOf(f)!=='back');
   const said=fields.map(f=>{ const v=gtVal(line,f);
     return String(v.text||'').trim()?[f.id,v.text,v.font,v.size,v.rot,v.curve,v.dx,v.dy,v.bw,v.bh,v.ow,v.align,f.x,f.y,f.w,f.h]:null; })
     .filter(Boolean);
   if(!said.length) return d;
-  const key=d.id+'#'+JSON.stringify([said,d.trace.loop.length,d.trace.out,d.art]);
+  // its words, and everything about the design they are cut round with: the
+  // artwork (replaced, it is another picture), its cut, its turn and its size
+  const ref=gtFitRef(), lp=d.trace.loop;
+  const key=d.id+'#'+JSON.stringify([said,d.file,lp.length,lp[0],lp[lp.length>>1],d.trace.out,d.art,d.turn||0,ref.w,ref.h]);
   const had=gtWordsCuts.get(key);
   if(had) return had;
-  const img=gtImgGet(d.id);
+  const img=gtImgGet(d.id);          // turned, as its cut line is held
   if(!img||!img.naturalWidth) return d;
-  const ref=gtFitRef();
   const f=gtFitD(d,img.naturalWidth,img.naturalHeight,ref.w||60,ref.h||40);
   const A={x:0,y:0,w:f.w,h:f.h};
   const P=gtArtDraw(d,{x:0,y:0,w:f.w,h:f.h},0,0);
@@ -35107,7 +35122,9 @@ function gtWordsCut(d,line){
   delete t.cx; delete t.cy; delete t.rd;
   const v={...d,id:d.id+'#'+(gtWordsCuts.size+1),trace:t,wordsOf:d.id};
   gtWordsCuts.set(key,v); gtWordsCutById.set(v.id,v);
-  gtImgs.set(v.id,img);
+  // the picture as it was read, not turned: gtImgGet turns it by the turn the
+  // copy carries, and a turned one was turned twice
+  if(gtImgs.has(d.id)) gtImgs.set(v.id,gtImgs.get(d.id));
   return v;
 }
 var gtWordsCutById=new Map();      // gtWordsCut's designs by their own id
@@ -41990,6 +42007,12 @@ document.getElementById('gtReplaceArtBtn').addEventListener('click',async()=>{
   const d=gtCurrentDesign; if(!d) return;
   // with the back on show, the picture being replaced is the back's
   if(gtEditSide==='back'){ document.getElementById('gtDBackBtn').click(); return; }
+  // a sticker is cut out of its sheet's PDF every visit: a picture put in its
+  // place would be gone on the next one, so it is the sheet that is replaced
+  if(d.setOf){
+    showMsg(document.getElementById('gtTraceMsg'),'This sticker comes from its sheet - go back to the whole sheet and replace the artwork there.',false);
+    return;
+  }
   await gtEnsureDir(true);
   const file=await gtPickFile('image/png,image/jpeg,image/webp,application/pdf,'
     +'.png,.jpg,.jpeg,.webp,.pdf,.ai');
@@ -42142,7 +42165,9 @@ function gtArtWriteInputs(){
   const t=d.trace||null;
   document.getElementById('gtTraceOn').checked=!!(t&&t.on);
   document.getElementById('gtTraceOn').disabled=!t;
-  document.getElementById('gtCutSheetRow').hidden=!gtIsPdfFile(d.file);
+  // by style: a click-row's own display:flex wins over hidden - and never on a
+  // sticker, which is one sticker of a sheet already
+  document.getElementById('gtCutSheetRow').style.display=!gtIsPdfFile(d.file)||d.setOf?'none':'';
   document.getElementById('gtCutSheet').checked=!!d.cutSheet;
   // by style: a click-row's own display:flex wins over hidden
   document.getElementById('gtNestEachRow').style.display=!d.cutSheet||!gtIsPdfFile(d.file)||d.setOf?'none':'';
