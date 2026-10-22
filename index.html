@@ -6859,6 +6859,13 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <div class="sect-label">Live from the page folders</div>
             <div class="calc" id="gtComboLiveState">—</div>
             <button class="btn-outline" id="gtComboReloadBtn" style="width:100%;margin-top:6px;">↻ Read the folders again</button>
+            <div class="sect-label" style="margin-top:10px;">Copy sheet setup from</div>
+            <div class="grid2" style="grid-template-columns:1fr 1fr 1fr;">
+              <button class="btn-outline" data-gt-combo-sheet="festive">Festive</button>
+              <button class="btn-outline" data-gt-combo-sheet="custom">Custom</button>
+              <button class="btn-outline" data-gt-combo-sheet="sticker">Sticker</button>
+            </div>
+            <p class="hint" style="margin:6px 0 0;">That page’s sheet as it is set up — nesting, cutting files, margins, bleed and each paper’s own — put on this one. Its cutting files come from this folder’s Shape where the same file is there, and are copied in where it is not. Run numbers are not copied.</p>
             <p class="hint" style="margin:6px 0 0;">This page’s folder is the main folder (e.g. Pigu New). Designs come straight from the Festive Gift Tag, Custom Gift Tag and Sticker folders inside it — those are only read. Fonts and shapes are the main folder’s fonts and Shape. A design changed here is saved in the main folder and stops following its own.</p>
           </div>
           <details class="gt-why"><summary>What it does</summary>
@@ -41625,12 +41632,20 @@ function gtComboAdoptEdited(){
 // are found in the folder after the designs are read, so its words are put in
 // the font of that name again once they are (gtComboFonts)
 const gtLiveFontName=new Map();
+// a font's name and its file's name, either of which may be how it is known
+const gtFontKeys=f=>[String(f.name||'').toLowerCase(),
+  String(f.file||'').split('/').pop().replace(/\.[^.]+$/,'').toLowerCase()].filter(Boolean);
+function gtFontIndex(){
+  const m=new Map();
+  gtLib.fonts.forEach(f=>gtFontKeys(f).forEach(k=>{ if(!m.has(k)) m.set(k,f.id); }));
+  return m;
+}
 function gtComboFonts(){
-  const byName=new Map(gtLib.fonts.map(f=>[String(f.name||'').toLowerCase(),f.id]));
+  const byName=gtFontIndex();
   const have=new Set(gtLib.fonts.map(f=>f.id));
   const fix=list=>(list||[]).forEach(f=>{
     if(!f||!f.font||have.has(f.font)) return;
-    const id=byName.get(gtLiveFontName.get(f.font)||''); if(id) f.font=id; });
+    for(const n of gtLiveFontName.get(f.font)||[]){ const id=byName.get(n); if(id){ f.font=id; return; } } });
   gtLib.designs.forEach(d=>{
     if(!d.live) return;
     const same=gtLiveSnap.get(d.id)===gtLiveLook(d);
@@ -41661,7 +41676,7 @@ async function gtComboLive(ask){
     gtComboLivePaint(); return;
   }
   // fonts by name: the page's own fonts folder is the only one
-  const fontByName=new Map(gtLib.fonts.map(f=>[String(f.name||'').toLowerCase(),f.id]));
+  const fontByName=gtFontIndex();
   const ownIds=new Set(gtLib.designs.map(d=>d.id));
   const liveIds=new Set();
   const notes=[];
@@ -41672,8 +41687,8 @@ async function gtComboLive(ask){
     let man=null;
     try{ man=(await gtReadAll(dir)).man; }catch(e){}
     if(!man){ notes.push(GT_MODE_TITLE[kind]+': no library'); continue; }
-    (man.fonts||[]).forEach(f=>{ if(f&&f.id) gtLiveFontName.set(f.id,String(f.name||'').toLowerCase()); });
-    const fontOf=id=>{ if(!id) return id; const n=gtLiveFontName.get(id); return (n&&fontByName.get(n))||id; };
+    (man.fonts||[]).forEach(f=>{ if(f&&f.id) gtLiveFontName.set(f.id,gtFontKeys(f)); });
+    const fontOf=id=>{ if(!id) return id; for(const n of gtLiveFontName.get(id)||[]){ const m=fontByName.get(n); if(m) return m; } return id; };
     const fixFields=list=>(list||[]).map(f=>({...f,font:fontOf(f.font)}));
     const files=[], made=[];
     for(const x of man.designs||[]){
@@ -41709,6 +41724,82 @@ function gtComboLivePaint(){
   const el=document.getElementById('gtComboLiveState');
   if(el) el.innerHTML=gtComboLiveNote||'—';
 }
+// Another page's sheet put on this one: nesting, cutting files, margins,
+// bleed, each paper's own - everything but the run numbers, which are each
+// page's own. A file the sheet names is this folder's where the very same file
+// is here (the main folder's Shape), copied in where it is not, and put beside
+// it under the page's name - "Sticker 4cm Round.svg" - where a different file
+// already has its name. That page's folder is only read.
+async function gtComboSheetFrom(kind){
+  const msg=document.getElementById('gtLibMsg');
+  if(gtMode!=='combo'||!gtDir) return;
+  const name=GT_MODE_TITLE[kind];
+  showMsg(msg,'Reading the '+name+' sheet…',true);
+  let src=null;
+  try{ src=await gtDir.getDirectoryHandle(GT_LIVE_DIRS[kind]); }catch(e){}
+  if(!src){ showMsg(msg,'No '+GT_LIVE_DIRS[kind]+' folder in '+escapeHtml(gtDir.name)+'.',false); return; }
+  let man=null; try{ man=(await gtReadAll(src)).man; }catch(e){}
+  if(!man||!man.sheet||!Object.keys(man.sheet).length){ showMsg(msg,name+' has no sheet set up.',false); return; }
+  const sh=JSON.parse(JSON.stringify(man.sheet));
+  ['runNo','runSet','qrNext'].forEach(k=>{ delete sh[k]; });
+  // every file the sheet names, as a value or as a key (shapeSlots)
+  const isFile=v=>typeof v==='string'&&/\.(svg|png|jpe?g|webp|pdf|ai)$/i.test(v)&&v.length<300;
+  const paths=new Set();
+  const walk=o=>{ if(!o||typeof o!=='object') return;
+    Object.entries(o).forEach(([k,v])=>{ if(isFile(k)) paths.add(k); if(isFile(v)) paths.add(v); else walk(v); }); };
+  walk(sh);
+  const same=async(x,y)=>{
+    if(!x||!y||x.size!==y.size) return false;
+    const [u,w]=(await Promise.all([x.arrayBuffer(),y.arrayBuffer()])).map(v=>new Uint8Array(v));
+    for(let i=0;i<u.length;i++) if(u[i]!==w[i]) return false;
+    return true;
+  };
+  const moved={}; let copied=0, missing=0;
+  for(const f of paths){
+    let blob; try{ blob=await gtDirRead(src,f); }catch(e){ missing++; continue; }
+    const cut=f.lastIndexOf('/'), dir=cut<0?'':f.slice(0,cut+1), nm=f.slice(cut+1);
+    // the very same file here already, under its own name or the page's
+    // ("Sticker 4cm Round.svg"); else written in, a Sticker one always under
+    // the page's name, as the Shape folder keeps them
+    const cands=[f,dir+name+' '+nm,dir+name+' '+nm.replace(/(\.[^.]+)$/,'~2$1')];
+    const free=[];
+    for(const c of cands){
+      let here=null; try{ here=await gtDirRead(gtDir,c); }catch(e){}
+      if(!here){ free.push(c); continue; }
+      if(await same(here,blob)){ moved[f]=c; gtAssets.set(c,here); break; }
+    }
+    if(!moved[f]){
+      const c=free.find(c=>kind!=='sticker'||c!==f);
+      if(c){ await gtDirWrite(gtDir,c,blob); gtAssets.set(c,blob); moved[f]=c; copied++; }
+    }
+  }
+  const fix=o=>{ if(!o||typeof o!=='object') return o;
+    if(Array.isArray(o)) return o.map(v=>isFile(v)&&moved[v]?moved[v]:fix(v));
+    const out={};
+    Object.entries(o).forEach(([k,v])=>{ out[isFile(k)&&moved[k]?moved[k]:k]=isFile(v)&&moved[v]?moved[v]:fix(v); });
+    return out; };
+  const next=fix(sh);
+  Object.keys(gtSheet).forEach(k=>{ if(!['runNo','runSet','qrNext'].includes(k)) delete gtSheet[k]; });
+  Object.assign(gtSheet,next);
+  if(gtSheet.bleedMode==='aware') gtSheet.bleedMode='mirror';
+  gtShapeSlots.clear(); gtPickOnly(null);
+  gtLayoutFrom=null; gtBaseFrom=null;
+  gtDefaultShape=gtSheet.layoutFile||'';
+  await gtHydrate();
+  // the sheet is the paper it was saved for: on another paper, that paper's
+  // own sheet out of the ones just copied comes up
+  if(gtFinishFollow()) await gtFinishShow();
+  if(!gtSheet.slots||!gtSheet.slots.length) gtRebuildSlots();
+  gtNestCache=null;
+  await gtSaveLib();
+  gtRefreshLibraryUi(); gtWriteSheetInputs(); gtRenderOrder(); gtDraw();
+  showMsg(msg,'✓ '+name+'’s sheet setup is on this page'
+    +(copied?` · ${copied} file(s) copied into ${escapeHtml(gtDir.name)}`:'')
+    +(missing?` · ${missing} older file name(s) it remembers are no longer in its folder`:'')+'.',true);
+}
+document.querySelectorAll('[data-gt-combo-sheet]').forEach(b=>
+  b.addEventListener('click',()=>gtComboSheetFrom(b.dataset.gtComboSheet).catch(e=>
+    showMsg(document.getElementById('gtLibMsg'),'Could not copy the sheet: '+((e&&e.message)||e),false))));
 document.getElementById('gtComboReloadBtn').addEventListener('click',async()=>{
   if(gtMode!=='combo') return;
   const msg=document.getElementById('gtLibMsg');
