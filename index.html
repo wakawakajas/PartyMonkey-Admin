@@ -51630,6 +51630,43 @@ async function mcGtIndex(){
   mcGtNames=out;
   return out;
 }
+// A design file is taken into its page's library only when that page is
+// opened (gtPickUpNew), so artwork dropped into a gift tag designs folder
+// since then answered "nothing called" here for a file sitting right there.
+// A SKU no library knows is looked for by file name in each page's folder;
+// a page that has one is opened, its new files taken on, and the libraries
+// read again. Only folders that open without a tap are looked in.
+async function mcGtAdoptNew(skus){
+  const wants=new Set(skus.flatMap(mcGtNamesFor)
+    .map(n=>String(n).trim().toLowerCase()).filter(Boolean)
+    .filter(n=>!mcGiftHit(n)));
+  if(!wants.size) return false;
+  const stem=n=>n.replace(/\.[^.]+$/,'').trim().toLowerCase();
+  const found=[];
+  for(const p of mcGtPages()){
+    const dir=await gtIdbGet(p.dir).catch(()=>null);
+    if(!dir||!await gtDirOk(dir)) continue;
+    let hit=false;
+    for(const sub of ['designs','']){
+      let dh=dir;
+      if(sub){ try{ dh=await dir.getDirectoryHandle(sub); }catch(e){ continue; } }
+      try{ for await (const en of dh.values())
+        if(en.kind==='file'&&GT_ART.test(en.name)&&wants.has(stem(en.name))){ hit=true; break; } }catch(e){}
+      if(hit) break;
+    }
+    if(hit) found.push(p.mode);
+  }
+  if(!found.length) return false;
+  if(typeof gtOpen==='function'&&!gtLoaded) await gtOpen();
+  const back=gtMode;
+  for(const m of found){
+    if(m!==gtMode) await gtSetMode(m);
+    await gtPickUpNew(true);
+  }
+  if(gtMode!==back) await gtSetMode(back);
+  await mcGtIndex();
+  return true;
+}
 // A one-off proper: the customer's own picture, on no page. A design read off a
 // Pigu folder is marked adhoc as well but belongs to the page it was read on.
 const mcGtTrueOneOff=d=>!!(d&&d.adhoc&&!gtIsPiguFile(d.file));
@@ -53180,6 +53217,11 @@ async function mcRouteRowsRun(rows){
     try{ await mcGtIndex(); } finally{ st.done=true; clearTimeout(st.t); }
     if(mcGtStalled.length) showMsg(out,'Could not finish '+mcGtStalled.join(' and ')
       +' — matching with what was read last time.',false);
+    const unknown=rows.filter(r=>!designFileForSku(r.sku)&&!mcGiftHit(r.sku)).map(r=>r.sku);
+    if(unknown.length){
+      const st2=mcStage(out,'Looking for new files in the gift tag folders…');
+      try{ await mcGtAdoptNew(unknown); } finally{ st2.done=true; clearTimeout(st2.t); }
+    }
   }
   // The designs folder is read once and kept, so a file put in it after that
   // read — or a scan that was cut short — answers "nothing called" for a card
