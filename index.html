@@ -30277,10 +30277,12 @@ function pdfCutScan(content,box,sheetOn){
     // time (pdfSheetPieces): a red line inside another one is a window of that
     // sticker, not a sticker of its own. Biggest first, so a sticker is there
     // before its windows are looked at.
-    const big1=c=>c.loops.map(l=>bb(l.pts)).sort((x,y)=>y.w*y.h-x.w*x.h)[0];
-    sheet.map(c=>({c,b:big1(c)})).sort((x,y)=>y.b.w*y.b.h-x.b.w*x.b.h).forEach(({c,b})=>{
-      const home=pieces.find(p=>b.x0>=p.b.x0&&b.x1<=p.b.x1&&b.y0>=p.b.y0&&b.y1<=p.b.y1);
-      if(home) home.ranges.push([c.start,c.end]); else pieces.push({b,ranges:[[c.start,c.end]]});
+    const big1=c=>c.loops.map(l=>({b:bb(l.pts),pts:l.pts})).sort((x,y)=>y.b.w*y.b.h-x.b.w*x.b.h)[0];
+    sheet.map(c=>({c,...big1(c)})).sort((x,y)=>y.b.w*y.b.h-x.b.w*x.b.h).forEach(({c,b,pts})=>{
+      // inside its line, not only its box: a small sticker in the hollow of a
+      // bigger one's outline is a sticker of its own
+      const home=pieces.find(p=>b.x0>=p.b.x0&&b.x1<=p.b.x1&&b.y0>=p.b.y0&&b.y1<=p.b.y1&&gtLoopInLoop(pts,p.pts));
+      if(home) home.ranges.push([c.start,c.end]); else pieces.push({b,pts,ranges:[[c.start,c.end]]});
     });
   }
   const take=new Set(sheet||[outline.c]);
@@ -31777,6 +31779,9 @@ function gtPieceEditOf(d){
   const rec=d&&gtSetPieces.get(d.id);
   // stickers that could not be made this time say nothing about what was set
   if(!rec||!rec.list||!rec.list.length) return d&&d.pieceEdit;
+  // stickers of artwork since replaced (saved before they are made again)
+  // are not this artwork's: what was set stays as it was
+  if(rec.blob!==gtAssets.get(d.file)) return d.pieceEdit;
   // said with the sheet they were set on: other artwork, or another number of
   // stickers, does not take them by number (see gtSetBuild)
   const out={file:d.file,n:rec.n||rec.list.length};
@@ -31800,7 +31805,7 @@ function gtPieceEditOf(d){
 // made from, rather than being written over by the copies here
 function gtSetForget(id){
   const rec=gtSetPieces.get(id);
-  if(rec&&rec.list) rec.list.forEach(x=>{ gtSetPieceById.delete(x.id); gtAssets.delete(x.file); gtImgs.delete(x.id); });
+  if(rec&&rec.list) rec.list.forEach(x=>{ gtSetPieceById.delete(x.id); gtAssets.delete(x.file); gtImgs.delete(x.id); gtImgFailed.delete(x.id); });
   gtSetPieces.delete(id);
   gtNestCache=null;
 }
@@ -31809,7 +31814,7 @@ function gtSetBuild(d){
   const blob=gtAssets.get(d.file);
   const had=gtSetPieces.get(d.id);
   if(had&&had.blob===blob&&had.p) return had.p;
-  if(had) had.list&&had.list.forEach(x=>{ gtSetPieceById.delete(x.id); gtAssets.delete(x.file); gtImgs.delete(x.id); });
+  if(had) had.list&&had.list.forEach(x=>{ gtSetPieceById.delete(x.id); gtAssets.delete(x.file); gtImgs.delete(x.id); gtImgFailed.delete(x.id); });
   const rec={blob,list:null,p:null,gen:++gtSetGen};
   gtSetPieces.set(d.id,rec);
   // a making overtaken by another (the artwork replaced, a merge, forgotten)
@@ -35172,6 +35177,14 @@ const gtGrowMask=(m,W,H,r)=>{ const D=gtDistTo(m,W,H), o=new Uint8Array(W*H); fo
 const gtShrinkMask=(m,W,H,r)=>{ const n=new Uint8Array(W*H); for(let i=0;i<W*H;i++) n[i]=m[i]?0:1;
   for(let x=0;x<W;x++){ n[x]=1; n[(H-1)*W+x]=1; } for(let y=0;y<H;y++){ n[y*W]=1; n[y*W+W-1]=1; }
   const D=gtDistTo(n,W,H), o=new Uint8Array(W*H); for(let i=0;i<W*H;i++) o[i]=D[i]>r?1:0; return o; };
+// whether a point is inside a closed loop (even-odd), and a loop inside
+// another - a few of its points, not its box, so a small shape sitting in the
+// hollow of a bigger one is not taken for its window
+const gtPtInLoop=([x,y],L)=>{ let o=false;
+  for(let i=0,j=L.length-1;i<L.length;j=i++){ const [xi,yi]=L[i],[xj,yj]=L[j];
+    if((yi>y)!==(yj>y)&&x<(xj-xi)*(y-yi)/(yj-yi)+xi) o=!o; }
+  return o; };
+const gtLoopInLoop=(a,b)=>a.length>0&&[0,a.length>>2,a.length>>1,(3*a.length)>>2].every(i=>gtPtInLoop(a[i],b));
 const gtLoopLen=l=>{ let s=0; for(let i=0;i<l.length;i++){ const p=l[i], q=l[(i+1)%l.length]; s+=Math.hypot(q[0]-p[0],q[1]-p[1]); } return s; };
 // How far the design's cut sits outside the coloured part of its artwork, in
 // mm, on average: a white border round the artwork is part of that gap, and so
@@ -35221,7 +35234,9 @@ function gtWordsCut(d,line){
   const lk=line&&line.id?line.id+'|'+d.id:null;
   if(lk&&gtWordsHold===line.id&&gtWordsLast.has(lk)){
     const was=gtWordsLast.get(lk);
-    if(gtWordsCutById.get(was.id)===was){ gtWordsUsed.add(was.id); return was; }
+    if(gtWordsCutById.get(was.id)===was){
+      for(const [kk,o] of gtWordsCuts) if(o===was){ gtWordsCuts.delete(kk); gtWordsCuts.set(kk,o); break; }
+      gtWordsUsed.add(was.id); return was; }
   }
   // its words, and everything about the design they are cut round with: the
   // artwork (replaced, it is another picture), its cut, its turn and its size
@@ -35247,15 +35262,12 @@ function gtWordsCut(d,line){
   // everything that is drawn, and room round it to grow into
   let x0=P.x, y0=P.y, x1=P.x+P.w, y1=P.y+P.h;
   cutMm.forEach(([X,Y])=>{ x0=Math.min(x0,X); y0=Math.min(y0,Y); x1=Math.max(x1,X); y1=Math.max(y1,Y); });
-  const cx0=x0, cy0=y0, cx1=x1, cy1=y1;   // the cut's own box
-  let far=0;                              // how far the words stand off it
   fields.forEach(fl=>{ const r=gtFieldRect(line,fl,A), c=[r.x+r.w/2,r.y+r.h/2];
     const h=r.rot?Math.hypot(r.w,r.h)/2:0, hw=h||r.w/2, hh=h||r.h/2;
-    far=Math.max(far,cx0-(c[0]+hw),(c[0]-hw)-cx1,cy0-(c[1]+hh),(c[1]-hh)-cy1);
     x0=Math.min(x0,c[0]-hw); y0=Math.min(y0,c[1]-hh); x1=Math.max(x1,c[0]+hw); y1=Math.max(y1,c[1]+hh); });
-  // room for the join to be rounded in, as wide as it may have to be
-  const reach=Math.min(30,Math.max(2,gap)+Math.max(0,far)/2+6);
-  const pad=gap+2+reach; x0-=pad; y0-=pad; x1+=pad; y1+=pad;
+  // room for the words to grow into and the join to be rounded in
+  const R0=Math.max(2,gap);
+  const pad=gap+R0+3; x0-=pad; y0-=pad; x1+=pad; y1+=pad;
   const sc=Math.min(20,GT_TRACE_PX/Math.max(x1-x0,y1-y0));
   const W=Math.max(8,Math.round((x1-x0)*sc)), H=Math.max(8,Math.round((y1-y0)*sc));
   // the words alone, grown by the gap
@@ -35276,25 +35288,61 @@ function gtWordsCut(d,line){
   // itself (2 mm at least), so the line swings round the number in one curve
   const both=new Uint8Array(W*H);
   for(let i=0;i<W*H;i++) both[i]=words[i]||cut[i]?1:0;
+  // its separate pieces, numbered from 1
+  const label=m=>{ const lab=new Int32Array(W*H); let n=0;
+    for(let i=0;i<W*H;i++){ if(!m[i]||lab[i]) continue; n++; const st=[i]; lab[i]=n;
+      while(st.length){ const j=st.pop(), x=j%W;
+        const go=k=>{ if(m[k]&&!lab[k]){ lab[k]=n; st.push(k); } };
+        if(x>0) go(j-1); if(x<W-1) go(j+1); if(j>=W) go(j-W); if(j<W*(H-1)) go(j+W); } }
+    return {lab,n}; };
+  // Rounded off where the words meet the rest: what closing fills in is kept
+  // only where it touches the words (or a join to them), so the rest of the
+  // design's cut stays exactly as drawn and no edge is clipped short of it.
+  const round=(m,seed)=>{ const r=Math.max(1,sc*R0);
+    const closed=gtShrinkMask(gtGrowMask(m,W,H,r),W,H,r), ex=new Uint8Array(W*H);
+    for(let i=0;i<W*H;i++) ex[i]=closed[i]&&!m[i]?1:0;
+    const L=label(ex), keep=new Uint8Array(L.n+1);
+    for(let i=0;i<W*H;i++){ if(!seed[i]) continue; const x=i%W;
+      if(x>0) keep[L.lab[i-1]]=1; if(x<W-1) keep[L.lab[i+1]]=1;
+      if(i>=W) keep[L.lab[i-W]]=1; if(i<W*(H-1)) keep[L.lab[i+W]]=1; }
+    keep[0]=0;
+    const out=new Uint8Array(W*H);
+    for(let i=0;i<W*H;i++) out[i]=m[i]||keep[L.lab[i]]?1:0;
+    return out; };
+  let inside=round(both,words);
   // Words moved off the artwork are still part of the tag: a number standing
   // clear of the topper would be cut out as a piece of its own and fall off.
-  // The rounding is widened, a couple of millimetres at a time, until the
-  // words and the artwork are one piece the blade goes round.
-  const pieces=m=>{ const seen=new Uint8Array(W*H); let n=0;
-    for(let i=0;i<W*H;i++){ if(!m[i]||seen[i]) continue; n++; const st=[i]; seen[i]=1;
-      while(st.length){ const j=st.pop(), x=j%W;
-        const go=k=>{ if(m[k]&&!seen[k]){ seen[k]=1; st.push(k); } };
-        if(x>0) go(j-1); if(x<W-1) go(j+1); if(j>=W) go(j-W); if(j<W*(H-1)) go(j+W); } }
-    return n; };
-  // Only round the words does the line change: the rest of the design's own
-  // cut stays exactly as drawn, however wide the join has to be.
-  let inside=null;
-  for(let mmR=Math.max(2,gap);mmR<=reach+0.01;mmR+=2){
-    const r=Math.max(1,sc*mmR);
-    const closed=gtShrinkMask(gtGrowMask(both,W,H,r),W,H,r), near=gtGrowMask(words,W,H,r*3);
-    inside=new Uint8Array(W*H);
-    for(let i=0;i<W*H;i++) inside[i]=both[i]||(closed[i]&&near[i])?1:0;
-    if(pieces(inside)<=1) break;
+  // Each piece left over is joined to the artwork by a rounded band from its
+  // nearest point to the artwork's nearest point, however far off it stands.
+  let L=label(inside);
+  if(L.n>1){
+    const seed=words.slice(), br=Math.max(1,sc*Math.max(2.5,gap+1));
+    for(let guard=0;L.n>1&&guard<12;guard++){
+      // the artwork is the piece with most of the design's own cut in it
+      const cnt=new Float64Array(L.n+1);
+      for(let i=0;i<W*H;i++) if(cut[i]) cnt[L.lab[i]]++;
+      let main=1; for(let k=2;k<=L.n;k++) if(cnt[k]>cnt[main]) main=k;
+      const mm=new Uint8Array(W*H); for(let i=0;i<W*H;i++) mm[i]=L.lab[i]===main?1:0;
+      const Dm=gtDistTo(mm,W,H);
+      let q=-1,qd=Infinity;
+      for(let i=0;i<W*H;i++) if(L.lab[i]&&L.lab[i]!==main&&Dm[i]<qd){ qd=Dm[i]; q=i; }
+      if(q<0) break;
+      const kq=L.lab[q], km=new Uint8Array(W*H); for(let i=0;i<W*H;i++) km[i]=L.lab[i]===kq?1:0;
+      const Dk=gtDistTo(km,W,H);
+      let p0=-1,pd=Infinity;
+      for(let i=0;i<W*H;i++) if(mm[i]&&Dk[i]<pd){ pd=Dk[i]; p0=i; }
+      if(p0<0) break;
+      // the band, round-ended, from one to the other
+      const ax=q%W, ay=(q/W)|0, bx=p0%W, by=(p0/W)|0, vx=bx-ax, vy=by-ay, ll=vx*vx+vy*vy||1;
+      const X0=Math.max(0,Math.floor(Math.min(ax,bx)-br)), X1=Math.min(W-1,Math.ceil(Math.max(ax,bx)+br));
+      const Y0=Math.max(0,Math.floor(Math.min(ay,by)-br)), Y1=Math.min(H-1,Math.ceil(Math.max(ay,by)+br));
+      for(let y=Y0;y<=Y1;y++) for(let x=X0;x<=X1;x++){
+        const t=Math.max(0,Math.min(1,((x-ax)*vx+(y-ay)*vy)/ll));
+        if(Math.hypot(x-ax-t*vx,y-ay-t*vy)<=br){ inside[y*W+x]=1; seed[y*W+x]=1; } }
+      L=label(inside);
+    }
+    // and the band's ends rounded into what they meet
+    inside=round(inside,seed);
   }
   const loop=gtTraceLoopOf({inside,W,H});
   if(!loop) return d;
@@ -35332,6 +35380,8 @@ function gtWordsPrune(){
   if(gtWordsCuts.size<=cap) return;
   [...gtWordsCuts.keys()].slice(0,gtWordsCuts.size-cap+Math.ceil(cap/4)).forEach(kk=>{
     const o=gtWordsCuts.get(kk); gtWordsCuts.delete(kk); gtWordsCutById.delete(o.id); gtImgs.delete(o.id); });
+  // and what lines last had, for cuts let go
+  for(const [kk,o] of gtWordsLast) if(gtWordsCutById.get(o.id)!==o) gtWordsLast.delete(kk);
   gtNestCache=null;
 }
 // A closed polyline with points added along each side, every corner kept.
@@ -41406,7 +41456,11 @@ function gtEditZoomSet(z){
 // The editor shows a whole placeholder, not the artwork alone — a design has to
 // be judged at the size and shape the sheet will give it.
 // px per mm here, so everything below is in the sheet's own units.
+let gtEditGeomHeld=null;           // the view as it was when a drag began
 function gtEditGeom(){
+  // held still while a box is dragged: the view widening under the pointer
+  // to take the box in would move everything the pointer is measured against
+  if(gtEditDrag&&gtEditGeomHeld) return gtEditGeomHeld;
   const c=document.getElementById('gtDesignCanvas');
   let T=gtTagBox();
   // drawn to the width it is actually given, so it stays sharp in the narrow
@@ -41414,7 +41468,8 @@ function gtEditGeom(){
   // the card, not the scroll box the canvas sits in, whose own width moves
   // with its scroll bars
   const host=c.closest('.preview-card')||c.parentElement;
-  const availW=host&&host.clientWidth?host.clientWidth-24:GT_EDIT_MAX;
+  // less the canvas's own border, which tipped Fit over into a scroll bar
+  const availW=host&&host.clientWidth?host.clientWidth-24-((c.offsetWidth-c.clientWidth)||0):GT_EDIT_MAX;
   // the whole width the card gives it, held to most of the window's height so a
   // tall tag still fits on screen
   const availH=Math.max(360,(window.innerHeight||900)*0.8);
@@ -41469,17 +41524,30 @@ function gtEditGeom(){
     }catch(e){}
   }
   if(gtEditSide==='back'){ const a=T.w-ex1, b=T.w-ex0; ex0=a; ex1=b; }
+  // and every text box on the side shown, turned as it is drawn - a box moved
+  // past the tag is still in view, and can be taken hold of to bring back
+  if(d) gtSideFields(d).forEach(f=>{
+    const bw=f.w*art.w, bh=f.h*art.h, cx=art.x+f.x*art.w+bw/2, cy=art.y+f.y*art.h+bh/2;
+    const a=(Number(f.rot)||0)*Math.PI/180, cs=Math.abs(Math.cos(a)), sn=Math.abs(Math.sin(a));
+    const hw=(bw*cs+bh*sn)/2, hh=(bw*sn+bh*cs)/2;
+    ex0=Math.min(ex0,cx-hw); ex1=Math.max(ex1,cx+hw); ey0=Math.min(ey0,cy-hh); ey1=Math.max(ey1,cy+hh);
+  });
   const pad=1;                       // a millimetre round it, so a line on the edge shows
   // and the bleed past the cut all round, with a millimetre of paper past that,
   // so how far the artwork runs on can be seen - not just its edge at the cut
   const bl=d?Math.max(0,Number(gtBleedOf(d))||0):0, bp=bl>0?bl+pad:0;
   const vx0=Math.min(-bp,ex0-(ex0<0?pad:0)), vx1=Math.max(T.w+bp,ex1+(ex1>T.w?pad:0));
   const vy0=Math.min(-bp,ey0-(ey0<0?pad:0)), vy1=Math.max(T.h+bp,ey1+(ey1>T.h?pad:0));
-  const vw=vx1-vx0, vh=vy1-vy0;
+  // Room all round to drag a text into - a tenth of the tag, 4 mm at least -
+  // and zoomed out past Fit, more room rather than a smaller tag: the canvas
+  // keeps its size and takes in more of what is round the tag.
+  const room=Math.max(4,0.1*Math.max(T.w,T.h)), out=gtEditZoom<1?1/gtEditZoom:1;
+  let vX0=vx0-room, vY0=vy0-room, vw=vx1-vx0+2*room, vh=vy1-vy0+2*room;
+  if(out>1){ vX0-=vw*(out-1)/2; vY0-=vh*(out-1)/2; vw*=out; vh*=out; }
   const fit=Math.max(220/Math.max(vw,vh),Math.min(GT_EDIT_MAX/vw,GT_EDIT_MAX/vh,availW/vw,availH/vh));
-  const sc=fit*Math.min(gtEditZoom,GT_EDIT_PX_MAX/(Math.max(vw,vh)*fit));
+  const sc=fit*Math.min(Math.max(1,gtEditZoom),GT_EDIT_PX_MAX/(Math.max(vw,vh)*fit));
   const w=Math.max(1,Math.round(vw*sc)), h=Math.max(1,Math.round(vh*sc));
-  return {c,img,sc,w,h,art,draw,tag:T,vx0,vy0,vw,vh,bleed:bl,over:vw>T.w+1e-6||vh>T.h+1e-6};
+  return {c,img,sc,w,h,art,draw,tag:T,vx0:vX0,vy0:vY0,vw,vh,bleed:bl,over:true};
 }
 // the texts on the side of the tag being worked on — everything the editor
 // picks, drags, lines up and lists answers to these and leaves the other
@@ -41664,7 +41732,8 @@ function gtDrawBleedZone(ctx,d,draw,slot,sc,tw,th,b,vx0,vy0,vw,vh){
     // a window, or a shape added inside a sticker, bleeds into its hole - no edge outside it
     const box=L=>{ let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity; L.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); }); return {x0,y0,x1,y1}; };
     const closed=gtTraceExtras(d,draw).filter(L=>!L.open&&L.length>3), all=[loop,...closed].map(box);
-    const within=(b,i)=>all.some((o,j)=>j!==i&&b.x0>=o.x0&&b.y0>=o.y0&&b.x1<=o.x1&&b.y1<=o.y1&&(o.x1-o.x0)*(o.y1-o.y0)>(b.x1-b.x0)*(b.y1-b.y0));
+    const loops=[loop,...closed];
+    const within=(b,i)=>all.some((o,j)=>j!==i&&b.x0>=o.x0&&b.y0>=o.y0&&b.x1<=o.x1&&b.y1<=o.y1&&(o.x1-o.x0)*(o.y1-o.y0)>(b.x1-b.x0)*(b.y1-b.y0)&&gtLoopInLoop(loops[i],loops[j]));
     closed.filter((L,i)=>!within(all[i+1],i+1)).forEach(L=>{
       const bb=bleedAt(L); if(!(bb>0)) return;
       let o=null; try{ o=gtOffsetLoop(L,bb); }catch(e){ o=null; }
@@ -41718,8 +41787,8 @@ function gtNudgeFields(list,dx,dy){
   // the whole group across: now it only stops the group going further out.
   const room=(v,lo,hi)=>clamp(v,Math.min(0,lo),Math.max(0,hi));
   list.forEach(f=>{
-    mx=room(mx,-f.x,1-f.w-f.x);
-    my=room(my,-f.y,1-f.h-f.y);
+    mx=room(mx,-f.x-f.w/2,1-f.w/2-f.x);
+    my=room(my,-f.y-f.h/2,1-f.h/2-f.y);
   });
   list.forEach(f=>{ f.x+=mx; f.y+=my; });
 }
@@ -41853,6 +41922,7 @@ document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
       // next one begins by dropping the last
       if(!near&&!f.group&&!gtFieldPick.has(f.id)) gtFieldPick.clear();
       const moving=near?[f]:gtMoveSet(f);
+      gtEditGeomHeld=p.g;
       gtEditDrag={f,mode:near?'resize':'move',px:p.x,py:p.y,x:f.x,y:f.y,w:f.w,h:f.h,
         moving:moving.map(m=>({f:m,x:m.x,y:m.y}))};
       c.setPointerCapture(e.pointerId);
@@ -41894,18 +41964,20 @@ document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
       // held back at the edge by whichever of them reaches it first, so the
       // arrangement inside a group survives being pushed into a corner
       let mx=dx,my=dy;
+      // a box may hang past the artwork's edge as far as its own middle - a big
+      // box is not stopped short with its words still well inside
       g.moving.forEach(m=>{
-        mx=clamp(mx,-m.x,1-m.f.w-m.x);
-        my=clamp(my,-m.y,1-m.f.h-m.y);
+        mx=clamp(mx,Math.min(0,-m.x-m.f.w/2),Math.max(0,1-m.f.w/2-m.x));
+        my=clamp(my,Math.min(0,-m.y-m.f.h/2),Math.max(0,1-m.f.h/2-m.y));
       });
       g.moving.forEach(m=>{ m.f.x=m.x+mx; m.f.y=m.y+my; });
     }else{
-      g.f.w=clamp(g.w+dx,0.04,1-g.f.x);
-      g.f.h=clamp(g.h+dy,0.03,1-g.f.y);
+      g.f.w=clamp(g.w+dx,0.04,Math.max(0.04,g.w,1.5-g.f.x));
+      g.f.h=clamp(g.h+dy,0.03,Math.max(0.03,g.h,1.5-g.f.y));
     }
     gtDrawDesign();
   });
-  const stop=()=>{ if(!gtEditDrag) return; gtEditDrag=null; gtRenderFields(); };
+  const stop=()=>{ if(!gtEditDrag) return; gtEditDrag=null; gtEditGeomHeld=null; gtRenderFields(); gtDrawDesign(); };
   c.addEventListener('pointerup',stop);
   c.addEventListener('pointercancel',stop);
 })();
@@ -42874,8 +42946,8 @@ function gtPiecesRowWrite(d){
   // one that will not draw is left blank rather than asked for again and again
   const want=ps.filter(p=>!gtImgs.has(p.id)&&!gtImgFailed.has(p.id)&&!gtPiecesAsked.has(p.id));
   want.forEach(p=>gtPiecesAsked.add(p.id));
-  if(want.length) Promise.all(want.map(p=>gtImgLoad(p.id).catch(()=>{}))).then(()=>{
-    want.forEach(p=>{ if(!gtImgs.has(p.id)) gtImgFailed.add(p.id); gtPiecesAsked.delete(p.id); });
+  if(want.length) Promise.all(want.map(p=>gtImgLoad(p.id).catch(()=>{ gtImgFailed.add(p.id); }))).then(()=>{
+    want.forEach(p=>gtPiecesAsked.delete(p.id));
     if(want.some(p=>gtImgs.has(p.id))&&gtCurrentDesign===d&&currentScreen==='tool-gift-tag-design') gtPiecesRowWrite(d); });
 }
 const gtPiecesAsked=new Set();     // sticker pictures being drawn for their buttons
