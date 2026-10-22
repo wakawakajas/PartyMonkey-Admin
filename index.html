@@ -7403,7 +7403,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           </div>
           <!-- the same sheet, nested a sticker at a time: off, it is one block -->
           <div class="click-row" id="gtNestEachRow" style="margin-top:6px;" hidden>
-            <label class="click-tog" title="On: each sticker on the sheet is a tag of its own, cut on its own red line and nested on its own - the line on the order is the whole set. Off: the sheet prints and cuts as one block, laid out as it is drawn."><input type="checkbox" id="gtNestEach"/>Nest each sticker on its own (a set)</label>
+            <label class="click-tog" title="On: each sticker on the sheet is a tag of its own, cut on its own red line and nested on its own - the line on the order is the whole set. Off: the sheet prints and cuts as one block, laid out as it is drawn."><input type="checkbox" id="gtNestEach"/>Break up into separate stickers by default</label>
           </div>
           <div class="chips" id="gtCutShapeSeg" style="margin:9px 0 0;">
             <button type="button" class="chip chip-state" data-gtcs="none" title="No cut line of its own - the tag is cut to its placeholder">None</button>
@@ -31660,8 +31660,11 @@ var gtCutSheetFiles=new Set();     // design files read as a sticker sheet
 // folder: they are the sheet's, and are made again from it on every visit.
 var gtSetPieceById=new Map();      // sticker design id -> the design
 const gtSetPieces=new Map();       // sheet design id -> {blob, list, p}
+// Whether a line breaks its sticker sheet up: its own tick if it has one,
+// else what the design says
+const gtLineSplits=(l,d)=>!!(d&&d.cutSheet&&gtIsPdfFile(d.file)&&(l&&l.split!==undefined?l.split:d.nestEach));
 function gtSetPiecesOf(d){
-  if(!d||!d.nestEach||!d.cutSheet) return null;
+  if(!d||!d.cutSheet) return null;
   const blob=gtAssets.get(d.file);
   if(!blob) return null;
   const had=gtSetPieces.get(d.id);
@@ -31672,9 +31675,9 @@ function gtSetPiecesOf(d){
 // the stickers of every nest-each sheet on the order, made and drawn: what
 // printing waits on, so a sheet is never printed as one block for want of them
 async function gtSetsReady(lines){
-  const ids=new Set((lines||gtOrder).map(l=>l&&l.designId));
+  const ids=new Set((lines||gtOrder).filter(l=>l&&gtLineSplits(l,gtDesign(l.designId))).map(l=>l.designId));
   await Promise.all([...ids].map(async id=>{ const d=gtDesign(id);
-    if(!d||!d.nestEach||!d.cutSheet) return;
+    if(!d) return;
     const list=await gtSetBuild(d);
     await Promise.all((list||[]).map(x=>gtImgLoad(x.id)));
   }));
@@ -31711,7 +31714,7 @@ function gtSetBuild(d){
     }
     if(gtSetPieces.get(d.id)!==rec) return list;
     rec.list=list;
-    try{ gtDraw(); }catch(e){}
+    try{ gtNestCache=null; gtDraw(); }catch(e){}
     return list;
   })();
   return rec.p;
@@ -35656,7 +35659,7 @@ function gtQueue(lines){
     const n=Math.max(0,Math.floor(Number(l.qty)||0));
     // a sheet nested a sticker at a time: each of its stickers is a tag, as
     // many of each as the line asks for. Until they are made it is the one block.
-    const ps=d.nestEach?gtSetPiecesOf(d):null;
+    const ps=gtLineSplits(l,d)?gtSetPiecesOf(d):null;
     if(ps&&ps.length){
       for(let i=0;i<n;i++) ps.forEach(p=>out.push(gtSetLine(l,p)));
       return;
@@ -35674,6 +35677,14 @@ function gtSetLine(l,p){
   if(!x){ x={}; gtSetLines.set(k,x); }
   for(const key of Object.keys(x)) if(!(key in l)) delete x[key];
   return Object.assign(x,l,{designId:p.id,setLine:l.id});
+}
+// the tick on an order line, for a sticker sheet: break it up or keep it whole
+function gtSplitRow(l,d){
+  if(!d||!d.cutSheet||!gtIsPdfFile(d.file)) return '';
+  const ps=gtLineSplits(l,d)?gtSetPiecesOf(d):null;
+  return `<div class="click-row" style="margin:0 0 6px;align-items:center;gap:10px;">
+    <label class="click-tog" title="On: every sticker on the sheet is a tag of its own and nests on its own. Off: the sheet is one block, laid out as it is drawn.">
+    <input type="checkbox" data-gtl="split"${gtLineSplits(l,d)?' checked':''}/>Break up into separate stickers${ps&&ps.length?` (${ps.length})`:''}</label></div>`;
 }
 
 // ---------- one order, several shapes ----------
@@ -38886,6 +38897,7 @@ function gtRenderOrder(){
           <div class="combo-panel" role="listbox" data-gt-design-panel>${gtDesignPanel('',l.designId)}</div>
         </div>
       </div>
+      ${gtSplitRow(l,d)}
       ${gtBackRow(l,d)}
       ${gtEnhanceRow(d)}
       ${words}
@@ -39098,6 +39110,14 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
         mode:GT_BLEED_MODES.includes(gtSheet.bleedMode)?gtSheet.bleedMode:'offset'}; }
     else delete line.bleed;
     gtNestCache=null; gtRenderOrder(); gtDraw(); return;
+  }
+  if(lk==='split'){
+    const d=gtDesign(line.designId);
+    line.split=e.target.checked;
+    gtNestCache=null; gtDraw();
+    if(line.split&&d) gtSetBuild(d).then(()=>{ gtNestCache=null; gtRenderOrder(); gtDraw(); });
+    else gtRenderOrder();
+    return;
   }
   if(lk==='bleedMode'){
     if(line.bleed&&GT_BLEED_MODES.includes(e.target.value)){ line.bleed.mode=e.target.value; gtNestCache=null; gtDraw(); }
