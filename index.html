@@ -41576,33 +41576,66 @@ async function gtComboBringIn(mode){
     const src=await gtComboSource(mode);
     const man=src.man;
     let added=0, missing=0;
-    const copy=async(from,to)=>{
-      try{ gtAssets.set(to,await src.read(from)); return true; }catch(e){ missing++; return false; }
+    // Where a file from that page lands here. Its own path when that is free,
+    // or already holds the very same file; otherwise with the page's name on
+    // it (designs/tag~sticker.png). Free means free in this library AND in
+    // this page's folder, letter case aside: the NAS takes Shape/ and shape/
+    // as one folder, and a Sticker "Shape/4cm Round.svg" written on top of the
+    // Festive "shape/4cm Round.svg" already in the folder would replace it.
+    const sameBytes=async(x,y)=>{
+      if(!x||!y||x.size!==y.size) return false;
+      const [u,w]=(await Promise.all([x.arrayBuffer(),y.arrayBuffer()])).map(v=>new Uint8Array(v));
+      for(let i=0;i<u.length;i++) if(u[i]!==w[i]) return false;
+      return true;
     };
-    // a path free in this library: the same one, or with the page's name on it
-    const freePath=f=>{
-      if(!gtAssets.has(f)) return f;
-      const cut=f.lastIndexOf('/'), dir=cut<0?'':f.slice(0,cut+1), nm=f.slice(cut+1);
+    const heldAt=async c=>{
+      const lc=c.toLowerCase();
+      for(const [k,v] of gtAssets) if(k.toLowerCase()===lc) return {key:k,blob:v};
+      if(gtDir){ try{ return {key:c,blob:await gtDirRead(gtDir,c)}; }catch(e){} }
+      return null;
+    };
+    const place=async from=>{
+      let blob;
+      try{ blob=await src.read(from); }catch(e){ missing++; return null; }
+      const cut=from.lastIndexOf('/'), dir=cut<0?'':from.slice(0,cut+1), nm=from.slice(cut+1);
       const dot=nm.lastIndexOf('.'), stem=dot>0?nm.slice(0,dot):nm, ext=dot>0?nm.slice(dot):'';
-      for(let i=1;;i++){
-        const t=dir+stem+'~'+mode+(i>1?i:'')+ext;
-        if(!gtAssets.has(t)) return t;
+      for(let i=0;i<100;i++){
+        const c=i===0?from:dir+stem+'~'+mode+(i>1?i:'')+ext;
+        const held=await heldAt(c);
+        if(!held){ gtAssets.set(c,blob); return c; }
+        if(await sameBytes(held.blob,blob)){ gtAssets.set(held.key,held.blob); return held.key; }
       }
+      missing++; return null;
+    };
+    // a sheet's files put here, and its names for them changed to match
+    const placeSheet=async v=>{
+      const moved={};
+      for(const f of new Set([v.layoutFile,v.baseFile,v.backFile,v.base].filter(f=>f&&typeof f==='string'))){
+        const to=await place(f);
+        if(!to) return false;
+        moved[f]=to;
+      }
+      ['layoutFile','baseFile','backFile','base'].forEach(k=>{ if(moved[v[k]]) v[k]=moved[v[k]]; });
+      if(v.shapeSlots&&typeof v.shapeSlots==='object')
+        v.shapeSlots=Object.fromEntries(Object.entries(v.shapeSlots).map(([k,x])=>[moved[k]||k,x]));
+      return true;
     };
     // The cutting file is the sheet's, one per paper (gtFinishFollow). The
     // first page brought in gives the whole sheet, as Import does; each one
     // after gives the papers this page has no cutting file for yet - Sticker's
     // sheet onto the Sticker paper, Festive's onto Matte and Gloss.
     const sh=man.sheet;
-    const sheetFiles=v=>[v.layoutFile,v.baseFile,v.backFile].filter(f=>f&&typeof f==='string');
-    if(sh&&!gtSheet.layoutFile&&sh.layoutFile&&await copy(sh.layoutFile,sh.layoutFile)){
-      const files=[sh.baseFile,sh.backFile];
-      Object.values(sh.byFinish||{}).forEach(v=>{ if(v) files.push(...sheetFiles(v)); });
-      for(const f of new Set(files.filter(f=>f&&typeof f==='string'))) await copy(f,f);
-      Object.assign(gtSheet,JSON.parse(JSON.stringify(sh)));
-      if(gtSheet.bleedMode==='aware') gtSheet.bleedMode='mirror';
-      gtShapeSlots.clear(); gtPickOnly(null);
-      added++;
+    if(sh&&!gtSheet.layoutFile&&sh.layoutFile){
+      const v=JSON.parse(JSON.stringify(sh));
+      let ok=await placeSheet(v);
+      if(ok&&v.byFinish&&typeof v.byFinish==='object')
+        for(const [p,x] of Object.entries(v.byFinish)) if(x&&!await placeSheet(x)) delete v.byFinish[p];
+      if(ok){
+        Object.assign(gtSheet,v);
+        if(gtSheet.bleedMode==='aware') gtSheet.bleedMode='mirror';
+        gtShapeSlots.clear(); gtPickOnly(null);
+        added++;
+      }
     }else if(sh&&gtSheet.layoutFile){
       const theirs={};
       Object.entries(sh.byFinish||{}).forEach(([p,v])=>{ if(v&&v.layoutFile) theirs[p]=v; });
@@ -41615,17 +41648,8 @@ async function gtComboBringIn(mode){
       const all=(gtSheet.byFinish&&typeof gtSheet.byFinish==='object')?gtSheet.byFinish:(gtSheet.byFinish={});
       for(const [paper,v0] of Object.entries(theirs)){
         if(paper===mineOn||(all[paper]&&all[paper].layoutFile)) continue;
-        const v=JSON.parse(JSON.stringify(v0)), moved={};
-        let ok=true;
-        for(const f of new Set(sheetFiles(v))){
-          const to=gtAssets.has(f)?freePath(f):f;
-          if(!await copy(f,to)){ ok=false; break; }
-          moved[f]=to;
-        }
-        if(!ok) continue;
-        ['layoutFile','baseFile','backFile','base'].forEach(k=>{ if(moved[v[k]]) v[k]=moved[v[k]]; });
-        if(v.shapeSlots&&typeof v.shapeSlots==='object')
-          v.shapeSlots=Object.fromEntries(Object.entries(v.shapeSlots).map(([k,x])=>[moved[k]||k,x]));
+        const v=JSON.parse(JSON.stringify(v0));
+        if(!await placeSheet(v)) continue;
         all[paper]=v;
         added++;
       }
@@ -41633,8 +41657,8 @@ async function gtComboBringIn(mode){
     const fontPath={};
     for(const f of man.fonts||[]){
       if(!f||gtLib.fonts.some(x=>x.id===f.id)) continue;
-      const to=f.file?freePath(f.file):'';
-      if(f.file&&!await copy(f.file,to)) continue;
+      const to=f.file?await place(f.file):'';
+      if(f.file&&!to) continue;
       fontPath[f.id]=to;
       gtLib.fonts.push({id:f.id,name:f.name,file:to});
       added++;
@@ -41643,14 +41667,14 @@ async function gtComboBringIn(mode){
       if(!d0||gtLib.designs.some(x=>x.id===d0.id)) continue;
       const d=JSON.parse(JSON.stringify(d0));
       if(d.file){
-        const to=freePath(d.file);
-        if(!await copy(d.file,to)) continue;
+        const to=await place(d.file);
+        if(!to) continue;
         if(d.pieceEdit&&d.pieceEdit.file===d.file) d.pieceEdit.file=to;
         d.file=to;
       }
       if(d.back&&d.back.file){
-        const to=freePath(d.back.file);
-        if(await copy(d.back.file,to)) d.back.file=to; else delete d.back;
+        const to=await place(d.back.file);
+        if(to) d.back.file=to; else delete d.back;
       }
       d.kind=mode;
       gtLib.designs.push(gtNormalizeDesign(d));
