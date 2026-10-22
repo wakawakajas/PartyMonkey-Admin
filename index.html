@@ -6856,13 +6856,10 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         </div>
           <div id="gtLibMsg"></div>
           <div id="gtComboBringWrap" style="display:none;margin-top:8px;">
-            <div class="sect-label">Bring in designs from</div>
-            <div class="grid2" style="grid-template-columns:1fr 1fr 1fr;">
-              <button class="btn-outline" data-gt-combo-from="festive">Festive</button>
-              <button class="btn-outline" data-gt-combo-from="custom">Custom</button>
-              <button class="btn-outline" data-gt-combo-from="sticker">Sticker</button>
-            </div>
-            <p class="hint" style="margin:6px 0 0;">Copies that page’s designs, fonts and phrases into this one. That page’s folder is only read, never written. A design already here is left alone.</p>
+            <div class="sect-label">Live from the Pigu 2 folders</div>
+            <div class="calc" id="gtComboLiveState">—</div>
+            <button class="btn-outline" id="gtComboReloadBtn" style="width:100%;margin-top:6px;">↻ Read the folders again</button>
+            <p class="hint" style="margin:6px 0 0;">Designs come straight from Festive Gift Tag, Custom Gift Tag and Sticker in this page’s own root (Pigu 2) — those folders are only read. A design changed here is saved in this page’s folder and stops following its folder. Fonts and shapes are this page’s own.</p>
           </div>
           <details class="gt-why"><summary>What it does</summary>
             <p class="hint">One file holding every design, font and phrase. Send it on; whoever opens it imports once and has the lot. Importing adds what is new and leaves what is already there alone.</p>
@@ -32062,7 +32059,8 @@ const gtManDesign=d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.ho
   ...(d.wordsCut?{wordsCut:true}:{}),...(d.pieceEdit&&Object.keys(d.pieceEdit).length?{pieceEdit:d.pieceEdit}:{}),
   ...(d.back?{back:d.back}:{}),...(d.turn?{turn:d.turn}:{}),...(d.kind?{kind:d.kind}:{})});
 function gtManifest(){
-  const own=gtOwnDesigns||gtLib.designs;
+  if(gtMode==='combo') gtComboAdoptEdited();
+  const own=(gtOwnDesigns||gtLib.designs).filter(d=>!d.live);
   gtKeepShape();
   // the running number as it stands, not whatever the sheet object holds: an
   // Undo put an old one back on it, and every other computer then took it
@@ -32317,6 +32315,7 @@ async function gtSaveLibRun(){
       for(const [file,blob] of gtAssets){
         if(gtIsAdhoc(file)) continue;            // a one-off is nobody's file but this session's
         if(/^designs\//i.test(file)&&GT_ART.test(file)&&!listed.has(file)) continue;
+        if(GT_LIVE_PATH.test(file)&&!listed.has(file)) continue;   // still read live, see gtComboLive
         if(blob&&blob.size===0) continue;        // nothing to write; an empty file would only be left behind
         // already on disk is the normal case — only what is new gets written
         try{ await gtDirRead(gtDir,file); continue; }catch(e){}
@@ -32337,7 +32336,8 @@ async function gtSaveLibRun(){
     return;
   }
   await gtIdbPut(gtLibKey(),{manifest:man,
-    assets:Object.fromEntries([...gtAssets].filter(([k])=>!gtIsAdhoc(k)))});
+    assets:Object.fromEntries([...gtAssets].filter(([k])=>!gtIsAdhoc(k)
+      &&!(GT_LIVE_PATH.test(k)&&!(man.designs||[]).some(x=>x&&(x.file===k||(x.back&&x.back.file===k))))))});
 }
 // The sheet, the layout and the placeholders are changed a keystroke at a time,
 // and writing the library on every one of those would be a file write per digit.
@@ -32575,7 +32575,7 @@ async function gtMergeRun(){
   // designs — updated in place, so an order line or the design open on the
   // design screen still holds the same object
   const ds=gtMerge3(base.designs,mine.designs,disk.designs,x=>x.id);
-  const own=gtOwnDesigns||gtLib.designs.filter(d=>!d.adhoc);
+  const own=gtOwnDesigns||gtLib.designs.filter(d=>!d.adhoc&&!d.live);
   const byId=new Map(own.map(d=>[d.id,d]));
   const keepIds=new Set(ds.out.map(x=>x.id));
   const gone=new Set(own.filter(d=>!keepIds.has(d.id)).map(d=>d.id));
@@ -32599,7 +32599,8 @@ async function gtMergeRun(){
     gtOwnDesigns=next;
     gtLib.designs=gtLib.designs.filter(d=>!gone.has(d.id));
   }else{
-    gtLib.designs=[...next,...gtLib.designs.filter(d=>d.adhoc)];
+    // and Custom Gift Tag 2's live ones, but for one changed there since
+    gtLib.designs=[...next,...gtLib.designs.filter(d=>d.adhoc||(d.live&&!keepIds.has(d.id)))];
   }
   if(gone.size){
     gone.forEach(id=>gtImgs.delete(id));
@@ -32733,6 +32734,7 @@ async function gtOneOffRestore(lines){
 const gtLibKept={};
 function gtLibKeepPut(mode){
   delete gtLibKept[mode];
+  if(mode==='combo') return;       // its live designs are read fresh each visit
   if(!gtDir||!gtLibLoaded||gtFolderPending||!gtLibDiskText) return;
   try{
     gtLibKept[mode]={dir:gtDir,sig:gtLibDiskText,
@@ -32778,7 +32780,10 @@ async function gtLoadLib(){
   gtOneOffStash();
   // the order outlives the library read, and so does the back it came with
   const jb=gtJobBack;
-  try{ if(!await gtLibKeepTake()) await gtLoadLibRead(); }
+  try{
+    if(!await gtLibKeepTake()) await gtLoadLibRead();
+    if(gtMode==='combo') await gtComboLive().catch(e=>console.warn('Custom Gift Tag 2 - live read',e));
+  }
   finally{
     await gtOneOffRestore(gtOrder).catch(()=>{});
     gtJobBack=gtOrder.length?jb:null;
@@ -32967,8 +32972,10 @@ function gtNormalizeDesign(d){
   else if(d.file&&gtCutSheetFiles.has(d.file)
     &&!(gtLib.designs||[]).some(x=>x.id!==d.id&&x.file===d.file&&x.cutSheet)) gtCutSheetFiles.delete(d.file);
   return {id:d.id||gtId('d'),name:d.name||'Untitled',file:d.file||'',adhoc:!!d.adhoc,
-    // which page a Custom Gift Tag 2 design was copied from (gtComboBringIn)
+    // which page a Custom Gift Tag 2 design was read from (gtComboLive)
     ...(GT_COMBO_KINDS.includes(d.kind)?{kind:d.kind}:{}),
+    // read live out of that page's folder and not changed here (gtComboLive)
+    ...(GT_COMBO_KINDS.includes(d.live)?{live:d.live}:{}),
     fields:(d.fields||[]).map(f=>({id:f.id||gtId('f'),name:f.name||'Text',def:f.def||'',
       font:f.font||'',size:Number(f.size)||6,color:f.color||'#232323',align:f.align||'center',
       rot:Number(f.rot)||0,curve:Number(f.curve)||0,group:f.group||'',
@@ -33447,6 +33454,7 @@ function gtDropMissing(present){
   if(gtOwnDesigns) gtOwnDesigns=gtOwnDesigns.filter(d=>!gone.has(d.id));
   gtOrder=gtOrder.filter(l=>!gone.has(l.designId));
   Object.keys(gtOrders||{}).forEach(k=>{
+    if(!gtOrdersKin(k)) return;
     if(Array.isArray(gtOrders[k])) gtOrders[k]=gtOrders[k].filter(l=>!gone.has(l.designId)); });
   if(gtCurrentDesign&&gone.has(gtCurrentDesign.id)) gtCurrentDesign=null;
   return gone.size;
@@ -33476,7 +33484,7 @@ function gtDedupeLib(){
     if(win!==d){
       // every page's rows, not only the one on screen: a row parked on another
       // page kept the dropped id and was written back pointing at nothing
-      [gtOrder,...Object.values(gtOrders||{})].forEach(list=>(Array.isArray(list)?list:[])
+      [gtOrder,...Object.keys(gtOrders||{}).filter(gtOrdersKin).map(k=>gtOrders[k])].forEach(list=>(Array.isArray(list)?list:[])
         .forEach(l=>{ if(l&&l.designId===d.id) l.designId=win.id; }));
       if(gtCurrentDesign&&gtCurrentDesign.id===d.id) gtCurrentDesign=win;
       gtImgs.delete(d.id);
@@ -33675,12 +33683,17 @@ async function gtDirNameSet(name){ await gtIdbPut(gtDirNameKey(),name||null); }
 // The root itself, shared by every page that names a folder inside it rather
 // than choosing its own. Read-write, like gtDir — a page's own folder resolved
 // from it needs to write library.json and cut files just the same.
-let gtRootDir=null, gtRootRead=false;
+// Custom Gift Tag 2 has a root of its own (its Pigu 2), never the one the
+// other three pages share: it reads its designs out of the page folders in
+// that root (gtComboLive), and those must not be the real ones.
+const gtRootKey=()=>gtMode==='combo'?'giftTagRoot:combo':'giftTagRoot';
+const gtRootDirs={};
 async function gtRootDirGet(){
-  if(!gtRootRead){ gtRootDir=await gtIdbGet('giftTagRoot').catch(()=>null)||null; gtRootRead=true; }
-  return gtRootDir;
+  const k=gtRootKey();
+  if(!(k in gtRootDirs)) gtRootDirs[k]=await gtIdbGet(k).catch(()=>null)||null;
+  return gtRootDirs[k];
 }
-async function gtRootDirSet(dir){ gtRootDir=dir; gtRootRead=true; await gtIdbPut('giftTagRoot',dir); }
+async function gtRootDirSet(dir){ const k=gtRootKey(); gtRootDirs[k]=dir; await gtIdbPut(k,dir); }
 // This page's folder, off the root and the name, when one is set — null if
 // there is no name, no root, no permission (asked for only when ask is true,
 // off a tap), or no folder of that name inside it.
@@ -33692,10 +33705,13 @@ async function gtResolveFromRoot(ask){
   try{ return await root.getDirectoryHandle(name); }catch(e){ return null; }
 }
 // Custom Gift Tag 2 (combo) is a fourth page, a test of the three in one: a
-// folder and library of its own, filled by copying designs out of the other
-// three (gtComboBringIn). It is not in GT_PAGES, so Magic Create never sends
+// folder and library of its own, its designs read live out of
+// the three page folders in its own root (gtComboLive). It is not in GT_PAGES, so Magic Create never sends
 // a line to it and nothing on the other pages reads it.
 const gtOrders={festive:null,custom:null,sticker:null,combo:null};
+// whose parked order this page's housekeeping may change: Festive, Custom and
+// Sticker each other's as always, Custom Gift Tag 2 only its own
+const gtOrdersKin=k=>gtMode==='combo'?false:k!=='combo';
 const gtJobBacks={festive:null,custom:null,sticker:null,combo:null};   // each parked order's gtJobBack
 const GT_MODE_TITLE={festive:'Festive Gift Tag',custom:'Custom Gift Tag',sticker:'Sticker',combo:'Custom Gift Tag 2'};
 const gtModeOk=m=>Object.prototype.hasOwnProperty.call(GT_MODE_TITLE,m)?m:'festive';
@@ -33703,7 +33719,7 @@ const GT_MODE_HINT={
   festive:'Your festive library folder \u2014 its designs, fonts, shapes and saved words.',
   custom:'Your custom tag folder \u2014 a library of its own, nothing shared with Festive.',
   sticker:'Your sticker folder \u2014 a library of its own, nothing shared with Festive or Custom.',
-  combo:'Festive, Custom and Sticker designs together \u2014 copied in, the three pages are left as they are.'};
+  combo:'Festive, Custom and Sticker designs together \u2014 read live from Pigu 2, the three pages are left as they are.'};
 function gtPaintMode(){
   const t=document.getElementById('gtTitle');
   if(t) t.textContent=GT_MODE_TITLE[gtMode];
@@ -37947,7 +37963,7 @@ function gtBackBox(d,x,y,w,h){
   return {x:x+w-(R.x-x)-R.w,y:R.y,w:R.w,h:R.h};
 }
 function gtDrawBack(ctx,line,x,y,w,h,sc,forExport,vec){
-  const d=gtDesign(line.designId); if(!d) return;
+  const d=gtDesign(line.designId); if(!d||gtNoBackKind(d)) return;
   const bk=gtBackOf(d,line);
   if(bk&&bk.img&&bk.img.naturalWidth)
     gtPutArt(ctx,bk.img,bk.key,bk.art,x,y,w,h,gtBleedOf(d,line),sc,vec,false,gtBackBox(d,x,y,w,h));
@@ -38033,6 +38049,7 @@ const gtNoInSheet=sh=>sh?gtNoOf(sh.runNo):null;
 const gtNoPageSig={};
 async function gtNoReadPages(){
   if(typeof GT_PAGES==='undefined') return;
+  if(gtMode==='combo') return;     // linked to none of them
   const one=async p=>{
     let dir=await gtIdbGet(p.dir).catch(()=>null);
     if(dir&&!await gtDirOk(dir)) dir=null;
@@ -40837,8 +40854,8 @@ function gtRenderDesignList(){
   if(!mine.length){
     el.innerHTML='<p class="hint" style="margin:4px 0 0;">'
       +(gtMode==='combo'
-        ? (gtComboKind?'— none from '+escapeHtml(GT_MODE_TITLE[gtComboKind])+' yet · press it under Bring in designs —'
-          :'— none yet · press Festive, Custom or Sticker under Bring in designs —')
+        ? (gtComboKind?'— none from '+escapeHtml(GT_MODE_TITLE[gtComboKind])+' —'
+          :'— none yet · see Live from the Pigu 2 folders below —')
         : gtMode!=='festive'
         ? '— nothing in the Pigu folders yet · give a folder a shape under ⚙ —'
         : '— none yet —')+'</p>';
@@ -40868,7 +40885,7 @@ function gtRenderDesignList(){
         </div>
         <div style="flex:1;min-width:0;">
           <div class="ph-card-head" style="margin-bottom:4px;"><span style="flex:1;">${escapeHtml(d.name)}</span>${
-            gtMode==='combo'&&d.kind?`<span class="hint" style="margin:0;">${escapeHtml(GT_MODE_TITLE[d.kind]||d.kind)}</span>`:''}</div>
+            gtMode==='combo'&&d.kind?`<span class="hint" style="margin:0;">${escapeHtml(GT_MODE_TITLE[d.kind]||d.kind)}${d.live?'':' · changed here'}</span>`:''}</div>
           <p class="hint" style="margin:0;">${d.fields.length} text field${d.fields.length===1?'':'s'}${d.hole.on?' · punch hole':''}${
             d.adhoc?' · <strong>one-off, not in the folder</strong>':''}</p>
         </div>
@@ -41064,6 +41081,12 @@ document.getElementById('gtForgetFolderBtn').addEventListener('click',async()=>{
 document.getElementById('gtDirNameInput').addEventListener('change',async e=>{
   const name=e.target.value.trim();
   e.target.value=name;
+  if(gtMode==='combo'&&Object.values(GT_LIVE_DIRS).some(n=>n.toLowerCase()===name.toLowerCase())){
+    e.target.value=await gtDirNameGet();
+    showMsg(document.getElementById('gtLibMsg'),'“'+name+'” is one of the folders this page reads — '
+      +'give it a folder of its own, e.g. Custom Gift Tag 2.',false);
+    return;
+  }
   await gtDirNameSet(name);
   const msg=document.getElementById('gtLibMsg');
   if(!name){
@@ -41463,7 +41486,12 @@ document.getElementById('gtExportLibBtn').addEventListener('click',async()=>{
   try{
     showMsg(msg,'Packing the library…',true);
     const assets={};
-    for(const [k,v] of gtAssets) assets[k]=await gtB64(v);
+    const listed=new Set();
+    gtLib.designs.forEach(d=>{ if(!d.live){ if(d.file) listed.add(d.file); if(d.back&&d.back.file) listed.add(d.back.file); } });
+    for(const [k,v] of gtAssets){
+      if(GT_LIVE_PATH.test(k)&&!listed.has(k)) continue;   // read live, not this library's
+      assets[k]=await gtB64(v);
+    }
     const out={kind:'pigu-gift-tag-library',...gtManifest(),assets};
     downloadBlob(new Blob([JSON.stringify(out)],{type:'application/json'}),'gift-tag-library.json');
     showMsg(msg,'✓ Exported gift-tag-library.json',true);
@@ -41520,40 +41548,118 @@ document.getElementById('gtImportLibBtn').addEventListener('click',async()=>{
     showMsg(msg,added?`✓ Imported ${added} new item(s).`:'Nothing new — that library is already here.',true);
   }catch(err){ showMsg(msg,'Import failed: '+((err&&err.message)||'unknown error'),false); }
 });
-// ---------- Custom Gift Tag 2: the three pages' designs copied into one ----------
-// The other page's folder is opened for reading only, and nothing is written
-// to it: its library is read the way Magic Create reads one (gtReadAll), and
-// its files are copied into this page's library, which saves to this page's
-// own folder. A design whose id is here already is left as it is, so pressing
-// it twice brings in only what is new. A file name the library has already is
-// given the page's name on the end rather than written over.
-async function gtComboReadOnly(dir){
+// ---------- Custom Gift Tag 2: the three page folders, read live ----------
+// Its root (Pigu 2, gtRootKey) holds "Custom Gift Tag 2" - this page's own
+// folder, where everything it saves goes - beside "Festive Gift Tag",
+// "Custom Gift Tag" and "Sticker". Those three are read, never written: their
+// designs come into the library flagged live, with their files held under
+// live-<page>/ so no name meets one of this page's. The fonts and the shapes
+// are this page's own; a design's words are put in the font of the same name
+// here. Changed here, a design stops being live and is saved like any other
+// (gtComboAdoptEdited), and from then on its folder no longer changes it.
+async function gtComboReadOnly(dir,ask){
   try{
     if(await dir.queryPermission({mode:'read'})==='granted') return true;
-    return await dir.requestPermission({mode:'read'})==='granted';
+    return !!ask&&await dir.requestPermission({mode:'read'})==='granted';
   }catch(e){ return false; }
 }
-async function gtComboSource(mode){
-  const page=GT_PAGES.find(p=>p.mode===mode);
-  if(!page) throw new Error('no such page');
-  let dir=await gtIdbGet(page.dir).catch(()=>null);
-  if(!dir){
-    const name=await gtIdbGet(mode==='festive'?'dirName':'dirName:'+mode).catch(()=>null);
-    const root=name?await gtRootDirGet().catch(()=>null):null;
-    if(root&&await gtComboReadOnly(root)) try{ dir=await root.getDirectoryHandle(name); }catch(e){ dir=null; }
-  }
-  if(dir){
-    if(!await gtComboReadOnly(dir)) throw new Error('the '+page.name+' folder would not open — allow it when the browser asks');
-    const man=(await gtReadAll(dir)).man;
-    if(!man) throw new Error('the '+page.name+' folder has no library in it');
-    return {man,read:f=>gtDirRead(dir,f)};
-  }
-  const rec=await gtIdbGet(page.lib).catch(()=>null);
-  if(!rec||!rec.manifest) throw new Error('the '+page.name+' page has no library on this computer yet — open it once first');
-  const assets=rec.assets||{};
-  return {man:rec.manifest,read:async f=>{ if(!assets[f]) throw new Error('missing'); return assets[f]; }};
+const GT_LIVE_DIRS={festive:'Festive Gift Tag',custom:'Custom Gift Tag',sticker:'Sticker'};
+const GT_LIVE_PATH=/^live-(festive|custom|sticker)\//;
+const gtLivePath=(kind,f)=>'live-'+kind+'/'+String(f).replace(/\//g,'~');
+// what each live design looked like when read, to tell one changed here
+const gtLiveSnap=new Map();
+const gtLiveLook=d=>JSON.stringify([d.name,d.fields,d.hole,d.art,d.bleed,d.back||null,d.turn||0,
+  !!d.wordsCut,!!d.nestEach,d.trace&&!d.trace.auto?d.trace:null,d.pieceEdit||null]);
+function gtComboAdoptEdited(){
+  let n=0;
+  gtLib.designs.forEach(d=>{
+    if(d.live&&gtLiveSnap.has(d.id)&&gtLiveLook(d)!==gtLiveSnap.get(d.id)){
+      // the look it was read with is kept: an Undo puts the live one back,
+      // and changed again it has to be told apart again
+      delete d.live; n++;
+    }
+  });
+  // the list says "changed here" from now, not from the next time it is drawn
+  if(n) setTimeout(()=>{ try{ gtRenderDesignList(); }catch(e){} },0);
 }
-// which page's designs Custom Gift Tag 2 shows: '' for all of them
+let gtComboLiveNote='';
+async function gtComboLive(ask){
+  if(gtMode!=='combo') return;
+  gtComboAdoptEdited();
+  if(gtLib.designs.some(d=>!d.live&&d.kind)) gtSaveSoon();
+  gtLib.designs.forEach(d=>{ if(d.live){ gtImgs.delete(d.id); try{ gtImgFailed.delete(d.id); }catch(e){} } });
+  gtLib.designs=gtLib.designs.filter(d=>!d.live);
+  gtLiveSnap.clear();
+  [...gtAssets.keys()].forEach(k=>{ if(GT_LIVE_PATH.test(k)&&!gtLib.designs.some(d=>d.file===k||(d.back&&d.back.file===k))) gtAssets.delete(k); });
+  const root=await gtRootDirGet();
+  const name=await gtDirNameGet();
+  if(!root||!name){
+    gtComboLiveNote='Not linked yet — type Custom Gift Tag 2 as the folder name above, then Choose folder and pick your Pigu 2 folder.';
+    gtComboLivePaint(); return;
+  }
+  if(!await gtComboReadOnly(root,ask)){
+    gtComboLiveNote='⚠ '+escapeHtml(root.name)+' needs permission again — press ↻ Read the folders again.';
+    gtComboLivePaint(); return;
+  }
+  // fonts by name: the page's own fonts folder is the only one
+  const fontByName=new Map(gtLib.fonts.map(f=>[String(f.name||'').toLowerCase(),f.id]));
+  const ownIds=new Set(gtLib.designs.map(d=>d.id));
+  const liveIds=new Set();
+  const notes=[];
+  for(const kind of GT_COMBO_KINDS){
+    let dir=null;
+    try{ dir=await root.getDirectoryHandle(GT_LIVE_DIRS[kind]); }catch(e){}
+    if(!dir){ notes.push(GT_MODE_TITLE[kind]+': no folder'); continue; }
+    let man=null;
+    try{ man=(await gtReadAll(dir)).man; }catch(e){}
+    if(!man){ notes.push(GT_MODE_TITLE[kind]+': no library'); continue; }
+    const theirFont=new Map((man.fonts||[]).map(f=>[f.id,String(f.name||'').toLowerCase()]));
+    const fontOf=id=>{ if(!id) return id; const n=theirFont.get(id); return (n&&fontByName.get(n))||id; };
+    const fixFields=list=>(list||[]).map(f=>({...f,font:fontOf(f.font)}));
+    const files=[], made=[];
+    for(const x of man.designs||[]){
+      if(!x||!x.id) continue;
+      // an id an earlier page's folder had already (live or changed here)
+      const id=liveIds.has(x.id)?kind+'~'+x.id:x.id;
+      liveIds.add(x.id);
+      if(ownIds.has(id)) continue;                    // changed here: this page's copy wins
+      const d=JSON.parse(JSON.stringify(x)); d.id=id;
+      if(d.file){ files.push([d.file,gtLivePath(kind,d.file)]);
+        if(d.pieceEdit&&d.pieceEdit.file===d.file) d.pieceEdit.file=gtLivePath(kind,d.file);
+        d.file=gtLivePath(kind,d.file); }
+      if(d.back&&d.back.file){ files.push([d.back.file,gtLivePath(kind,d.back.file)]); d.back.file=gtLivePath(kind,d.back.file); }
+      d.fields=fixFields(d.fields);
+      if(d.pieceEdit&&typeof d.pieceEdit==='object') Object.values(d.pieceEdit).forEach(v=>{
+        if(v&&typeof v==='object'&&Array.isArray(v.fields)) v.fields=fixFields(v.fields); });
+      d.kind=kind; d.live=kind;
+      made.push(gtNormalizeDesign(d));
+    }
+    let at=0;
+    await gtPool(files,16,async([from,to])=>{
+      gtTrace(`reading ${GT_MODE_TITLE[kind]} (${++at} of ${files.length})`);
+      try{ gtAssets.set(to,await gtDirRead(dir,from)); }catch(e){}
+    });
+    made.forEach(d=>{ gtLiveSnap.set(d.id,gtLiveLook(d)); gtLib.designs.push(d); });
+    notes.push(GT_MODE_TITLE[kind]+': '+made.length);
+  }
+  gtComboLiveNote='Live from '+escapeHtml(root.name)+' — '+notes.map(escapeHtml).join(' · ');
+  await gtHydrateBacks().catch(()=>{});
+  gtComboLivePaint();
+}
+function gtComboLivePaint(){
+  const el=document.getElementById('gtComboLiveState');
+  if(el) el.innerHTML=gtComboLiveNote||'—';
+}
+document.getElementById('gtComboReloadBtn').addEventListener('click',async()=>{
+  if(gtMode!=='combo') return;
+  const msg=document.getElementById('gtLibMsg');
+  showMsg(msg,'Reading the folders…',true);
+  try{
+    await gtComboLive(true);
+    gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+    showMsg(msg,'✓ Read again.',true);
+  }catch(e){ showMsg(msg,'Could not read them: '+((e&&e.message)||e),false); }
+});
 let gtComboKind='';
 document.getElementById('gtComboKindSeg').addEventListener('click',e=>{
   const b=e.target.closest('[data-gt-combo-kind]'); if(!b) return;
@@ -41562,140 +41668,6 @@ document.getElementById('gtComboKindSeg').addEventListener('click',e=>{
     .forEach(x=>x.classList.toggle('on',x===b));
   gtRenderDesignList();
 });
-let gtComboBusy=false;
-async function gtComboBringIn(mode){
-  const msg=document.getElementById('gtLibMsg');
-  if(gtMode!=='combo'||gtComboBusy) return;
-  // a folder chosen for this page but not connected: saving now would put the
-  // lot in this browser only, and the folder would come back without it
-  if(gtFolderPending){ showMsg(msg,'Connect this page’s folder first (Choose folder), then bring the designs in.',false); return; }
-  gtComboBusy=true;
-  try{
-    const name=GT_MODE_TITLE[mode];
-    showMsg(msg,'Reading '+name+'…',true);
-    const src=await gtComboSource(mode);
-    const man=src.man;
-    let added=0, missing=0;
-    // Where a file from that page lands here. Its own path when that is free,
-    // or already holds the very same file; otherwise with the page's name on
-    // it (designs/tag~sticker.png). Free means free in this library AND in
-    // this page's folder, letter case aside: the NAS takes Shape/ and shape/
-    // as one folder, and a Sticker "Shape/4cm Round.svg" written on top of the
-    // Festive "shape/4cm Round.svg" already in the folder would replace it.
-    const sameBytes=async(x,y)=>{
-      if(!x||!y||x.size!==y.size) return false;
-      const [u,w]=(await Promise.all([x.arrayBuffer(),y.arrayBuffer()])).map(v=>new Uint8Array(v));
-      for(let i=0;i<u.length;i++) if(u[i]!==w[i]) return false;
-      return true;
-    };
-    const heldAt=async c=>{
-      const lc=c.toLowerCase();
-      for(const [k,v] of gtAssets) if(k.toLowerCase()===lc) return {key:k,blob:v};
-      if(gtDir){ try{ return {key:c,blob:await gtDirRead(gtDir,c)}; }catch(e){} }
-      return null;
-    };
-    const place=async from=>{
-      let blob;
-      try{ blob=await src.read(from); }catch(e){ missing++; return null; }
-      const cut=from.lastIndexOf('/'), dir=cut<0?'':from.slice(0,cut+1), nm=from.slice(cut+1);
-      const dot=nm.lastIndexOf('.'), stem=dot>0?nm.slice(0,dot):nm, ext=dot>0?nm.slice(dot):'';
-      for(let i=0;i<100;i++){
-        const c=i===0?from:dir+stem+'~'+mode+(i>1?i:'')+ext;
-        const held=await heldAt(c);
-        if(!held){ gtAssets.set(c,blob); return c; }
-        if(await sameBytes(held.blob,blob)){ gtAssets.set(held.key,held.blob); return held.key; }
-      }
-      missing++; return null;
-    };
-    // a sheet's files put here, and its names for them changed to match
-    const placeSheet=async v=>{
-      const moved={};
-      for(const f of new Set([v.layoutFile,v.baseFile,v.backFile,v.base].filter(f=>f&&typeof f==='string'))){
-        const to=await place(f);
-        if(!to) return false;
-        moved[f]=to;
-      }
-      ['layoutFile','baseFile','backFile','base'].forEach(k=>{ if(moved[v[k]]) v[k]=moved[v[k]]; });
-      if(v.shapeSlots&&typeof v.shapeSlots==='object')
-        v.shapeSlots=Object.fromEntries(Object.entries(v.shapeSlots).map(([k,x])=>[moved[k]||k,x]));
-      return true;
-    };
-    // The cutting file is the sheet's, one per paper (gtFinishFollow). The
-    // first page brought in gives the whole sheet, as Import does; each one
-    // after gives the papers this page has no cutting file for yet - Sticker's
-    // sheet onto the Sticker paper, Festive's onto Matte and Gloss.
-    const sh=man.sheet;
-    if(sh&&!gtSheet.layoutFile&&sh.layoutFile){
-      const v=JSON.parse(JSON.stringify(sh));
-      let ok=await placeSheet(v);
-      if(ok&&v.byFinish&&typeof v.byFinish==='object')
-        for(const [p,x] of Object.entries(v.byFinish)) if(x&&!await placeSheet(x)) delete v.byFinish[p];
-      if(ok){
-        Object.assign(gtSheet,v);
-        if(gtSheet.bleedMode==='aware') gtSheet.bleedMode='mirror';
-        gtShapeSlots.clear(); gtPickOnly(null);
-        added++;
-      }
-    }else if(sh&&gtSheet.layoutFile){
-      const theirs={};
-      Object.entries(sh.byFinish||{}).forEach(([p,v])=>{ if(v&&v.layoutFile) theirs[p]=v; });
-      const theirOwn=sh.finishOf||sh.backFinish;
-      if(theirOwn&&sh.layoutFile){
-        theirs[theirOwn]=Object.fromEntries(GT_FINISH_KEYS().filter(k=>k in sh).map(k=>[k,sh[k]]));
-        theirs[theirOwn].base=sh.layoutFile;
-      }
-      const mineOn=gtSheet.finishOf||gtFinish;
-      const all=(gtSheet.byFinish&&typeof gtSheet.byFinish==='object')?gtSheet.byFinish:(gtSheet.byFinish={});
-      for(const [paper,v0] of Object.entries(theirs)){
-        if(paper===mineOn||(all[paper]&&all[paper].layoutFile)) continue;
-        const v=JSON.parse(JSON.stringify(v0));
-        if(!await placeSheet(v)) continue;
-        all[paper]=v;
-        added++;
-      }
-    }
-    const fontPath={};
-    for(const f of man.fonts||[]){
-      if(!f||gtLib.fonts.some(x=>x.id===f.id)) continue;
-      const to=f.file?await place(f.file):'';
-      if(f.file&&!to) continue;
-      fontPath[f.id]=to;
-      gtLib.fonts.push({id:f.id,name:f.name,file:to});
-      added++;
-    }
-    for(const d0 of man.designs||[]){
-      if(!d0||gtLib.designs.some(x=>x.id===d0.id)) continue;
-      const d=JSON.parse(JSON.stringify(d0));
-      if(d.file){
-        const to=await place(d.file);
-        if(!to) continue;
-        if(d.pieceEdit&&d.pieceEdit.file===d.file) d.pieceEdit.file=to;
-        d.file=to;
-      }
-      if(d.back&&d.back.file){
-        const to=await place(d.back.file);
-        if(to) d.back.file=to; else delete d.back;
-      }
-      d.kind=mode;
-      gtLib.designs.push(gtNormalizeDesign(d));
-      added++;
-    }
-    for(const t of man.texts||[]){
-      if(!t||gtLib.texts.some(x=>x.id===t.id)) continue;
-      gtLib.texts.push(JSON.parse(JSON.stringify(gtPhraseKept(t))));
-      added++;
-    }
-    gtLibLoaded=true; gtSaveWarned=false;
-    await gtHydrate(); await gtSaveLib();
-    if(!gtSheet.slots.length) gtRebuildSlots();
-    gtRefreshLibraryUi(); gtWriteSheetInputs(); gtRenderOrder(); gtDraw();
-    showMsg(msg,(added?`✓ Brought in ${added} new item(s) from ${name}.`:`Nothing new — ${name} is already here.`)
-      +(missing?` ${missing} file(s) could not be read and were left out.`:''),true);
-  }catch(err){ showMsg(msg,'Could not bring them in: '+((err&&err.message)||'unknown error'),false); }
-  finally{ gtComboBusy=false; }
-}
-document.querySelectorAll('[data-gt-combo-from]').forEach(b=>
-  b.addEventListener('click',()=>gtComboBringIn(b.dataset.gtComboFrom)));
 
 // ---------- design editor ----------
 const GT_EDIT_MAX=1600;            // the editor canvas's longest side, in px
@@ -42665,7 +42637,7 @@ function gtDesignOpen(){
 // listed, picked, dragged, nudged, lined up and added. Nothing picked on one
 // side is carried over to the other.
 function gtSetEditSide(side){
-  gtEditSide=(side==='back'&&gtBackOn())?'back':'front';
+  gtEditSide=(side==='back'&&gtBackOn()&&!gtNoBackKind(gtCurrentDesign))?'back':'front';
   gtEditSel=null; gtEditLock=null; gtFieldPick.clear(); gtEditDrag=null;
   gtBackChrome();
   document.getElementById('gtReplaceArtBtn').textContent=
