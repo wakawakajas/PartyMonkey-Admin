@@ -35158,7 +35158,10 @@ function gtDistTo(m,W,H){
   return out;
 }
 const gtGrowMask=(m,W,H,r)=>{ const D=gtDistTo(m,W,H), o=new Uint8Array(W*H); for(let i=0;i<W*H;i++) o[i]=D[i]<=r?1:0; return o; };
+// shrunk as if the paper ran on past the edge of the drawing: a shape grown
+// out to its edge comes back in from it, rather than staying stuck to it
 const gtShrinkMask=(m,W,H,r)=>{ const n=new Uint8Array(W*H); for(let i=0;i<W*H;i++) n[i]=m[i]?0:1;
+  for(let x=0;x<W;x++){ n[x]=1; n[(H-1)*W+x]=1; } for(let y=0;y<H;y++){ n[y*W]=1; n[y*W+W-1]=1; }
   const D=gtDistTo(n,W,H), o=new Uint8Array(W*H); for(let i=0;i<W*H;i++) o[i]=D[i]>r?1:0; return o; };
 const gtLoopLen=l=>{ let s=0; for(let i=0;i<l.length;i++){ const p=l[i], q=l[(i+1)%l.length]; s+=Math.hypot(q[0]-p[0],q[1]-p[1]); } return s; };
 // How far the design's cut sits outside the coloured part of its artwork, in
@@ -35206,6 +35209,11 @@ function gtWordsCut(d,line){
     return String(v.text||'').trim()?[f.id,v.text,v.font,faceIn(v.font),v.size,v.rot,v.curve,v.dx,v.dy,v.bw,v.bh,v.ow,v.align,f.x,f.y,f.w,f.h]:null; })
     .filter(Boolean);
   if(!said.length) return d;
+  const lk=line&&line.id?line.id+'|'+d.id:null;
+  if(lk&&gtWordsHold===line.id&&gtWordsLast.has(lk)){
+    const was=gtWordsLast.get(lk);
+    if(gtWordsCutById.get(was.id)===was){ gtWordsUsed.add(was.id); return was; }
+  }
   // its words, and everything about the design they are cut round with: the
   // artwork (replaced, it is another picture), its cut, its turn and its size
   const ref=gtFitRef(), lp=d.trace.loop;
@@ -35213,7 +35221,7 @@ function gtWordsCut(d,line){
   const key=d.id+'#'+JSON.stringify([said,d.file,lp.length,lp[0],lp[lp.length>>1],t0.out,t0.rd,t0.cx,t0.cy,t0.sm,d.art,d.turn||0,ref.w,ref.h]);
   const had=gtWordsCuts.get(key);
   // used again: to the back of the line, so the ones let go are the unused
-  if(had){ gtWordsCuts.delete(key); gtWordsCuts.set(key,had); gtWordsUsed.add(had.id); return had; }
+  if(had){ gtWordsCuts.delete(key); gtWordsCuts.set(key,had); gtWordsUsed.add(had.id); if(lk) gtWordsLast.set(lk,had); return had; }
   const img=gtImgGet(d.id);          // turned, as its cut line is held
   if(!img||!img.naturalWidth) return d;
   // a picture that says nothing of its size is fitted to the placeholder by
@@ -35230,10 +35238,15 @@ function gtWordsCut(d,line){
   // everything that is drawn, and room round it to grow into
   let x0=P.x, y0=P.y, x1=P.x+P.w, y1=P.y+P.h;
   cutMm.forEach(([X,Y])=>{ x0=Math.min(x0,X); y0=Math.min(y0,Y); x1=Math.max(x1,X); y1=Math.max(y1,Y); });
+  const cx0=x0, cy0=y0, cx1=x1, cy1=y1;   // the cut's own box
+  let far=0;                              // how far the words stand off it
   fields.forEach(fl=>{ const r=gtFieldRect(line,fl,A), c=[r.x+r.w/2,r.y+r.h/2];
     const h=r.rot?Math.hypot(r.w,r.h)/2:0, hw=h||r.w/2, hh=h||r.h/2;
+    far=Math.max(far,cx0-(c[0]+hw),(c[0]-hw)-cx1,cy0-(c[1]+hh),(c[1]-hh)-cy1);
     x0=Math.min(x0,c[0]-hw); y0=Math.min(y0,c[1]-hh); x1=Math.max(x1,c[0]+hw); y1=Math.max(y1,c[1]+hh); });
-  const pad=gap+2; x0-=pad; y0-=pad; x1+=pad; y1+=pad;
+  // room for the join to be rounded in, as wide as it may have to be
+  const reach=Math.min(30,Math.max(2,gap)+Math.max(0,far)/2+6);
+  const pad=gap+2+reach; x0-=pad; y0-=pad; x1+=pad; y1+=pad;
   const sc=Math.min(20,GT_TRACE_PX/Math.max(x1-x0,y1-y0));
   const W=Math.max(8,Math.round((x1-x0)*sc)), H=Math.max(8,Math.round((y1-y0)*sc));
   // the words alone, grown by the gap
@@ -35254,8 +35267,26 @@ function gtWordsCut(d,line){
   // itself (2 mm at least), so the line swings round the number in one curve
   const both=new Uint8Array(W*H);
   for(let i=0;i<W*H;i++) both[i]=words[i]||cut[i]?1:0;
-  const r=Math.max(1,sc*Math.max(2,gap));
-  const inside=gtShrinkMask(gtGrowMask(both,W,H,r),W,H,r);
+  // Words moved off the artwork are still part of the tag: a number standing
+  // clear of the topper would be cut out as a piece of its own and fall off.
+  // The rounding is widened, a couple of millimetres at a time, until the
+  // words and the artwork are one piece the blade goes round.
+  const pieces=m=>{ const seen=new Uint8Array(W*H); let n=0;
+    for(let i=0;i<W*H;i++){ if(!m[i]||seen[i]) continue; n++; const st=[i]; seen[i]=1;
+      while(st.length){ const j=st.pop(), x=j%W;
+        const go=k=>{ if(m[k]&&!seen[k]){ seen[k]=1; st.push(k); } };
+        if(x>0) go(j-1); if(x<W-1) go(j+1); if(j>=W) go(j-W); if(j<W*(H-1)) go(j+W); } }
+    return n; };
+  // Only round the words does the line change: the rest of the design's own
+  // cut stays exactly as drawn, however wide the join has to be.
+  let inside=null;
+  for(let mmR=Math.max(2,gap);mmR<=reach+0.01;mmR+=2){
+    const r=Math.max(1,sc*mmR);
+    const closed=gtShrinkMask(gtGrowMask(both,W,H,r),W,H,r), near=gtGrowMask(words,W,H,r*3);
+    inside=new Uint8Array(W*H);
+    for(let i=0;i<W*H;i++) inside[i]=both[i]||(closed[i]&&near[i])?1:0;
+    if(pieces(inside)<=1) break;
+  }
   const loop=gtTraceLoopOf({inside,W,H});
   if(!loop) return d;
   const r4=n=>Math.round(n*1e4)/1e4;
@@ -35269,6 +35300,7 @@ function gtWordsCut(d,line){
   const v=Object.create(d);
   v.id=d.id+'#'+(++gtWordsCutSeq); v.trace=t; v.wordsOf=d.id;
   gtWordsCuts.set(key,v); gtWordsCutById.set(v.id,v); gtWordsUsed.add(v.id);
+  if(lk) gtWordsLast.set(lk,v);
   // the picture as it was read, not turned: gtImgGet turns it by the turn the
   // copy carries, and a turned one was turned twice
   if(gtImgs.has(d.id)) gtImgs.set(v.id,gtImgs.get(d.id));
@@ -35276,6 +35308,8 @@ function gtWordsCut(d,line){
 }
 var gtWordsCutById=new Map();      // gtWordsCut's designs by their own id
 let gtWordsCutSeq=0;
+var gtWordsHold=null;              // the line whose words are being dragged: its cut keeps still
+const gtWordsLast=new Map();       // line + design -> the cut it last had
 const gtWordsFaceWait=new Set();   // faces being waited on to cut round, each once
 const gtWordsUsed=new Set();       // the cuts the last look at the order used
 // A word typed a letter at a time leaves a cut behind for every letter. The
@@ -38723,6 +38757,7 @@ function gtSheetDrag(c,side){
     const at=gtPageAt(gtPage);
     const q=at?at.queue:gtQueue(), start=at?at.start:gtPage*per;
     const back=gtSheetSide==='back';
+    let boxHit=null;
     for(let i=0;i<per;i++){
       const s0=gtSheet.slots[i], line=q[start+i];
       if(!line) continue;
@@ -38730,7 +38765,11 @@ function gtSheetDrag(c,side){
       // and only the back's words are there to be taken hold of
       // moved by the back's margin shift, as gtRenderPage draws it
       const slot0=back?{...s0,x:gtSheet.paperW-s0.x-s0.w+(Number(gtSheet.backDx)||0),y:s0.y+(Number(gtSheet.backDy)||0)}:s0;
-      if(p.mx<slot0.x||p.my<slot0.y||p.mx>slot0.x+slot0.w||p.my>slot0.y+slot0.h) continue;
+      // words dragged off past their tag's box are still its words: they can be
+      // taken hold of where they are (and brought back), only the tag itself
+      // answers to its box alone
+      const inBox=!(p.mx<slot0.x||p.my<slot0.y||p.mx>slot0.x+slot0.w||p.my>slot0.y+slot0.h);
+      if(!inBox&&!(gtFieldsOf(gtDesign(line.designId),line)||[]).length) continue;
       // a turned tag is hit where it is before the turn: the pointer is turned back to meet it
       let P=p, slot=slot0;
       if(slot0.rot){
@@ -38739,9 +38778,9 @@ function gtSheetDrag(c,side){
         P={mx:cx+dx*c-dy*sn,my:cy+dx*sn+dy*c}; slot=gtUnrotSlot(slot0);
         // packed at an angle, boxes overlap at their corners: the point has to
         // be on this tag, not merely in the box round it
-        if(slot0.tw&&(P.mx<slot.x||P.my<slot.y||P.mx>slot.x+slot.w||P.my>slot.y+slot.h)) continue;
+        if(inBox&&slot0.tw&&(P.mx<slot.x||P.my<slot.y||P.mx>slot.x+slot.w||P.my>slot.y+slot.h)) continue;
       }
-      const d=gtDesign(line.designId); if(!d) return {line};
+      const d=gtDesign(line.designId); if(!d){ if(inBox&&!boxHit) boxHit={line}; continue; }
       const art=gtTagArt(line,slot);
       // topmost first, so a box drawn over another takes the tap
       const fs=gtFieldsOf(d,line).filter(f=>gtSideOf(f)===(back?'back':'front'));
@@ -38763,9 +38802,11 @@ function gtSheetDrag(c,side){
                    &&(b.h-v*b.h)<=Math.min(g,b.h*0.35);
         return {line,f,b,corner};
       }
-      return {line};                       // the tag, but not a box: still its line
+      // the tag, but not a box: still its line - unless words of another tag,
+      // dragged out over this one, are under the pointer further on
+      if(inBox&&!boxHit) boxHit={line};
     }
-    return null;
+    return boxHit;
   };
   // Which placeholder is under the pointer, and whether the grip is. Taken
   // last-first so a small contour sitting on top of a large one wins the tap.
@@ -38817,6 +38858,10 @@ function gtSheetDrag(c,side){
     const v=gtVal(h.line,h.f), p=at(e);
     drag={line:h.line,f:h.f,mode:h.corner?'resize':'move',
       px:p.mx,py:p.my,dx:v.dx,dy:v.dy,bw:h.b.w,bh:h.b.h};
+    // the cut round these words keeps still while they are dragged - traced
+    // at every step, the tag re-centred and the nest moved under the pointer -
+    // and is traced again where they are let go (see gtWordsCut)
+    gtWordsHold=h.line.id;
     gtHeld={lineId:h.line.id,fieldId:h.f.id,name:h.f.name||''};
     try{ c.setPointerCapture(e.pointerId); }catch(err){}
     gtDraw();
@@ -38824,6 +38869,7 @@ function gtSheetDrag(c,side){
   c.addEventListener('pointerdown',e=>{
     // a press starts fresh: nothing left over from a drag that never finished
     if(marq||sdrag||hdrag||pan||drag){ marq=null; gtMarquee=null; sdrag=null; hdrag=null; pan=null; drag=null; c.style.cursor=''; }
+    if(gtWordsHold){ gtWordsHold=null; gtNestCache=null; }
     // on Both, pressing the other sheet makes it the one being worked on;
     // the cut lines belong to the front, so Contours leaves the back alone
     if(side()!==gtSheetSide){
@@ -38998,7 +39044,9 @@ function gtSheetDrag(c,side){
       return;
     }
     if(!drag) return;
-    drag=null; gtRenderOrder(); gtDraw();
+    drag=null;
+    if(gtWordsHold){ gtWordsHold=null; gtNestCache=null; }
+    gtRenderOrder(); gtDraw();
   };
   c.addEventListener('pointerup',stop);
   c.addEventListener('pointercancel',stop);
