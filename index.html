@@ -7401,6 +7401,10 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
           <div class="click-row" id="gtCutSheetRow" style="margin-top:6px;" hidden>
             <label class="click-tog" title="For a PDF that is a whole sheet — a sticker sheet with a red cut line round every sticker. Every closed red line on the page becomes the cut line, however many there are, and the page goes in as one design. The red is never printed."><input type="checkbox" id="gtCutSheet"/>Sticker sheet: cut on every red line in the PDF</label>
           </div>
+          <!-- the same sheet, nested a sticker at a time: off, it is one block -->
+          <div class="click-row" id="gtNestEachRow" style="margin-top:6px;" hidden>
+            <label class="click-tog" title="On: each sticker on the sheet is a tag of its own, cut on its own red line and nested on its own - the line on the order is the whole set. Off: the sheet prints and cuts as one block, laid out as it is drawn."><input type="checkbox" id="gtNestEach"/>Nest each sticker on its own (a set)</label>
+          </div>
           <div class="chips" id="gtCutShapeSeg" style="margin:9px 0 0;">
             <button type="button" class="chip chip-state" data-gtcs="none" title="No cut line of its own - the tag is cut to its placeholder">None</button>
             <button type="button" class="chip chip-state on" data-gtcs="trace" title="Follow the edge of the artwork">Traced</button>
@@ -9972,6 +9976,56 @@ async function pdfAllPageFiles(file){
   for(let i=0;i<n;i++){
     const f=await pdfPageFile(bytes,i,file.name,'p'+(i+1));
     if(f) out.push(f);
+  }
+  return out.length?out:null;
+}
+// A sticker sheet drawn as one page - each sticker its own closed red line -
+// lifted out a sticker at a time, so each can be nested on its own: a page per
+// sticker, cut down to its red line and 1.5mm round it, still vector, with that
+// sticker's red line kept in it and every other one blanked. Read as a design,
+// each is a sticker with its own cut line like any other. In reading order, top
+// row first. null where the page has no sticker's red line to go by.
+async function pdfSheetPieces(file){
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  let em, n0=0;
+  try{ em=await pdfLift.embedPage(bytes,0,()=>++n0,{cut:true,sheet:true}); }catch(e){ return null; }
+  const ps=em&&em.cut&&em.cut.pieces;
+  if(!ps||!ps.length) return null;
+  const [px0,py0,px1,py1]=em.bbox;
+  // rows: top down (the page's y runs up), and along each row left to right
+  const left=ps.slice().sort((a,b)=>b.b.y1-a.b.y1), rows=[];
+  while(left.length){
+    const top=left.shift(), row=[top];
+    for(let i=0;i<left.length;){
+      const cy=(left[i].b.y0+left[i].b.y1)/2;
+      if(cy>=top.b.y0&&cy<=top.b.y1) row.push(...left.splice(i,1)); else i++;
+    }
+    rows.push(row.sort((a,b)=>a.b.x0-b.b.x0));
+  }
+  const order=rows.flat(), enc=new TextEncoder(), out=[];
+  for(let k=0;k<order.length;k++){
+    const p=order[k];
+    // 1.5mm of the sheet round the line, for bleed - less on a very small
+    // sticker, whose line must still be most of its page to be read as its own
+    const m=Math.min(1.5*72/25.4,0.12*Math.min(p.b.w,p.b.h));
+    const box=[Math.max(px0,p.b.x0-m),Math.max(py0,p.b.y0-m),Math.min(px1,p.b.x1+m),Math.min(py1,p.b.y1+m)];
+    const blank=order.filter(q=>q!==p).flatMap(q=>q.ranges);
+    let last=0; const alloc=()=>++last;
+    const catalog=alloc(), kids=alloc();
+    let pg;
+    try{ pg=await pdfLift.embedPage(bytes,0,alloc,{blank,flat:{box,parent:kids}}); }catch(e){ continue; }
+    const objs=[
+      {num:catalog,parts:[enc.encode(`${catalog} 0 obj\n<< /Type /Catalog /Pages ${kids} 0 R >>\nendobj\n`)]},
+      {num:kids,parts:[enc.encode(`${kids} 0 obj\n<< /Type /Pages /Kids [${pg.page} 0 R] /Count 1 >>\nendobj\n`)]},
+      ...pg.objs];
+    const parts=[enc.encode('%PDF-1.7\n')], off=new Map();
+    let pos=parts[0].length;
+    objs.forEach(o=>{ off.set(o.num,pos); o.parts.forEach(x=>{ parts.push(x); pos+=x.length; }); });
+    let xref=`xref\n0 ${last+1}\n0000000000 65535 f \n`;
+    for(let i=1;i<=last;i++) xref+=off.has(i)?String(off.get(i)).padStart(10,'0')+' 00000 n \n':'0000000000 65535 f \n';
+    parts.push(enc.encode(xref+`trailer\n<< /Size ${last+1} /Root ${catalog} 0 R >>\nstartxref\n${pos}\n%%EOF\n`));
+    const base=String(file.name||'sheet.pdf').replace(/\.(pdf|ai)$/i,'');
+    out.push(new File(parts,`${base} (${String(k+1).padStart(2,'0')}).pdf`,{type:'application/pdf'}));
   }
   return out.length?out:null;
 }
@@ -29875,6 +29929,10 @@ const pdfLift=(function(){
     let contentLen = chunks.reduce((a, c) => a + c.length, 0);
     let content = new Uint8Array(contentLen);
     { let o = 0; chunks.forEach(c => { content.set(c, o); o += c.length; }); }
+    // the other stickers' red lines on a sheet lifted a sticker at a time
+    // (pdfSheetPieces): blanked byte for byte, so every place pdfCutScan said
+    // they were is still where they are
+    if (opts && opts.blank) { content = content.slice(); opts.blank.forEach(([s0, s1]) => content.fill(32, s0, s1)); }
     // a cut line drawn on the page is read off and left out of what is kept
     let cutScan = null;
     if (opts && opts.cut) {
@@ -29933,6 +29991,33 @@ const pdfLift=(function(){
     walkRefs(group);
     drain();
 
+    // ---- or a page of its own, drawn straight from the content ----
+    // A sticker lifted off a sheet is a page cut down to that sticker, with its
+    // red line still in the page's own content: read again as a design, the
+    // line is found where a design's line always is. In a form it would be out
+    // of reach of pdfCutScan. flat.box is in the page's own space.
+    if (opts && opts.flat) {
+      const packedPg = await deflateBytes(content);
+      const contentNum = alloc(), pageNum = alloc();
+      objs.push({ num: contentNum, parts: [enc.encode(contentNum + ' 0 obj\n<< /Filter /FlateDecode /Length ' + packedPg.length + ' >>\nstream\n'),
+        packedPg, enc.encode('\nendstream\nendobj\n')] });
+      const rot = ((Number(src.resolve(get('Rotate'))) || 0) % 360 + 360) % 360;
+      const pd = new Map();
+      pd.set('Type', Name('Page'));
+      pd.set('Parent', { str: enc.encode(opts.flat.parent + ' 0 R') });
+      pd.set('MediaBox', opts.flat.box);
+      if (rot) pd.set('Rotate', rot);
+      if (resources !== undefined) pd.set('Resources', resources);
+      if (group !== undefined) pd.set('Group', group);
+      pd.set('Contents', { str: enc.encode(contentNum + ' 0 R') });
+      const pparts = [enc.encode(pageNum + ' 0 obj\n')];
+      serialize(pd, mapper, pparts);
+      pparts.push(enc.encode('\nendobj\n'));
+      objs.push({ num: pageNum, parts: pparts });
+      drain();
+      return { page: pageNum, objs };
+    }
+
     // ---- the form itself ----
     // A page that asks to be turned before it is looked at is turned here, in the
     // form's own matrix, so that everything outside this function can go on
@@ -29983,6 +30068,8 @@ const pdfLift=(function(){
         holes: cutScan.holes.map(h => { const cc = toUV([(h.b.x0 + h.b.x1) / 2, (h.b.y0 + h.b.y1) / 2]);
           return { u: cc[0], v: cc[1], mm: Math.max(h.b.w, h.b.h) * mm, pts: h.pts.map(toUV) }; }),
         extras: cutScan.extras.map(e => ({ pts: e.pts.map(toUV), closed: e.closed })),
+        // each sticker of a sheet, in the page's own space - see pdfSheetPieces
+        ...(cutScan.pieces ? { pieces: cutScan.pieces } : {}),
       };
     }
     return {
@@ -30090,7 +30177,7 @@ function pdfCutScan(content,box,sheetOn){
   let outline=null;
   cands.forEach(c=>c.loops.forEach(l=>{ const b=bb(l.pts);
     if(b.w*b.h>=0.4*pageA&&(!outline||b.w*b.h>outline.b.w*outline.b.h)) outline={c,l,b}; }));
-  const holes=[], extras=[];
+  const holes=[], extras=[], pieces=[];
   let sheet=null;
   if(!sheetOn&&!outline) return null;
   if(sheetOn){
@@ -30111,6 +30198,15 @@ function pdfCutScan(content,box,sheetOn){
     sheet.forEach(c=>c.loops.forEach(l=>{ const b=bb(l.pts);
       if(!outline||b.w*b.h>outline.b.w*outline.b.h) outline={c,l,b}; }));
     sheet.forEach(c=>c.loops.forEach(l=>{ if(l!==outline.l) extras.push({pts:l.pts,closed:true}); }));
+    // and the same lines as stickers, for a sheet that is nested a sticker at a
+    // time (pdfSheetPieces): a red line inside another one is a window of that
+    // sticker, not a sticker of its own. Biggest first, so a sticker is there
+    // before its windows are looked at.
+    const big1=c=>c.loops.map(l=>bb(l.pts)).sort((x,y)=>y.w*y.h-x.w*x.h)[0];
+    sheet.map(c=>({c,b:big1(c)})).sort((x,y)=>y.b.w*y.b.h-x.b.w*x.b.h).forEach(({c,b})=>{
+      const home=pieces.find(p=>b.x0>=p.b.x0&&b.x1<=p.b.x1&&b.y0>=p.b.y0&&b.y1<=p.b.y1);
+      if(home) home.ranges.push([c.start,c.end]); else pieces.push({b,ranges:[[c.start,c.end]]});
+    });
   }
   const take=new Set(sheet||[outline.c]);
   if(!sheet){
@@ -30137,7 +30233,8 @@ function pdfCutScan(content,box,sheetOn){
     if(p.length>3&&Math.hypot(a[0]-z[0],a[1]-z[1])<1e-3) p.pop(); return p; };
   return {content:stripped,outline:dedupe(outline.l.pts),
           holes:holes.map(h=>({pts:dedupe(h.pts),b:h.b})),
-          extras:extras.map(e=>({pts:e.closed?dedupe(e.pts):e.pts,closed:e.closed}))};
+          extras:extras.map(e=>({pts:e.closed?dedupe(e.pts):e.pts,closed:e.closed})),
+          ...(pieces.length?{pieces}:{})};
 }
 
 async function inflateBytes(bytes){
@@ -31456,7 +31553,7 @@ Object.defineProperty(gtSheet,'slots',{configurable:true,enumerable:true,
   get(){ const e=gtNestEntry(); return e?e.slots:gtSlotsBase; },
   set(v){ gtSlotsBase=v; }});
 let gtLayoutFrom='', gtBaseFrom=''; // which file each was built from, so neither is rebuilt for nothing
-const gtDesign=id=>gtLib.designs.find(d=>d.id===id)||null;
+const gtDesign=id=>gtLib.designs.find(d=>d.id===id)||(gtSetPieceById&&gtSetPieceById.get(id))||null;
 // The page's library is the whole of what it offers: the two do not share one.
 const gtDesignsInView=()=>gtLib.designs;
 const gtFont=id=>gtLib.fonts.find(f=>f.id===id)||null;
@@ -31556,6 +31653,69 @@ const gtCutFound=new Map();        // design file -> the cut line found on its p
 const gtCutPending=new Set();      // files whose line has not been given to their designs yet
 // sheet: the design is a sticker sheet, cut on every red line (see pdfCutScan)
 var gtCutSheetFiles=new Set();     // design files read as a sticker sheet
+// A sticker sheet that nests a sticker at a time (nestEach): one design in the
+// library and one line on the order, but every sticker on it is a tag of its
+// own on the sheet. The stickers are designs made from the sheet's PDF when
+// first wanted (pdfSheetPieces) and kept here, never in the library or the
+// folder: they are the sheet's, and are made again from it on every visit.
+var gtSetPieceById=new Map();      // sticker design id -> the design
+const gtSetPieces=new Map();       // sheet design id -> {blob, list, p}
+function gtSetPiecesOf(d){
+  if(!d||!d.nestEach||!d.cutSheet) return null;
+  const blob=gtAssets.get(d.file);
+  if(!blob) return null;
+  const had=gtSetPieces.get(d.id);
+  if(had&&had.blob===blob) return had.list;
+  gtSetBuild(d);
+  return null;
+}
+// the stickers of every nest-each sheet on the order, made and drawn: what
+// printing waits on, so a sheet is never printed as one block for want of them
+async function gtSetsReady(lines){
+  const ids=new Set((lines||gtOrder).map(l=>l&&l.designId));
+  await Promise.all([...ids].map(async id=>{ const d=gtDesign(id);
+    if(!d||!d.nestEach||!d.cutSheet) return;
+    const list=await gtSetBuild(d);
+    await Promise.all((list||[]).map(x=>gtImgLoad(x.id)));
+  }));
+}
+function gtSetBuild(d){
+  const blob=gtAssets.get(d.file);
+  const had=gtSetPieces.get(d.id);
+  if(had&&had.blob===blob&&had.p) return had.p;
+  if(had) had.list&&had.list.forEach(x=>{ gtSetPieceById.delete(x.id); gtAssets.delete(x.file); gtImgs.delete(x.id); });
+  const rec={blob,list:null,p:null};
+  gtSetPieces.set(d.id,rec);
+  rec.p=(async()=>{
+    const files=blob?await pdfSheetPieces(blob).catch(()=>null):null;
+    const list=[];
+    for(let k=0;k<(files||[]).length;k++){
+      const path=`adhoc/set-${d.id}-${k+1}.pdf`;
+      gtAssets.set(path,files[k]);
+      const x=gtNormalizeDesign({id:`${d.id}~${k+1}`,name:`${d.name} ${k+1}`,file:path,adhoc:true,
+        fields:[],bleed:d.bleed?{...d.bleed}:null});
+      x.setOf=d.id;
+      // its own red line, the way a design's PDF gives one; a small circle in
+      // a sticker is a window cut out of it, not a hole to punch
+      const lift=await gtCutLift(files[k],false).catch(()=>null);
+      if(!lift) continue;
+      gtCutFound.set(path,lift.cut); gtCutPending.add(path);
+      gtCutTake(x);
+      if(x.hole&&x.hole.on){
+        const h=lift.cut.holes&&lift.cut.holes[0];
+        if(h&&x.trace) x.trace.extra=[...(x.trace.extra||[]),{pts:h.pts,closed:true}];
+        x.hole={...x.hole,on:false};
+      }
+      if(!x.trace) continue;
+      gtSetPieceById.set(x.id,x); list.push(x);
+    }
+    if(gtSetPieces.get(d.id)!==rec) return list;
+    rec.list=list;
+    try{ gtDraw(); }catch(e){}
+    return list;
+  })();
+  return rec.p;
+}
 function gtCutLift(blob,sheet){
   if(!blob||typeof blob.arrayBuffer!=='function') return Promise.resolve(null);
   sheet=!!sheet;
@@ -31699,7 +31859,8 @@ window.addEventListener('beforeunload',e=>{
 // one-off means.
 const gtManDesign=d=>({id:d.id,name:d.name,file:d.file,fields:d.fields,hole:d.hole,
   artV:2,art:d.art,bleed:d.bleed,trace:d.trace,...(d.cutSeen?{cutSeen:d.cutSeen}:{}),
-  ...(d.cutSheet?{cutSheet:true}:{}),...(d.back?{back:d.back}:{}),...(d.turn?{turn:d.turn}:{})});
+  ...(d.cutSheet?{cutSheet:true}:{}),...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),
+  ...(d.back?{back:d.back}:{}),...(d.turn?{turn:d.turn}:{})});
 function gtManifest(){
   const own=gtOwnDesigns||gtLib.designs;
   gtKeepShape();
@@ -31801,7 +31962,7 @@ async function gtPiguFieldsSave(){
     // and a size set on it went back to the default each time
     const keep={fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
       artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,cutSeen:d.cutSeen||null,
-      ...(d.cutSheet?{cutSheet:true}:{}),...(d.turn?{turn:d.turn}:{})};
+      ...(d.cutSheet?{cutSheet:true}:{}),...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),...(d.turn?{turn:d.turn}:{})};
     const now=JSON.stringify(keep);
     if(JSON.stringify(map[d.file]||null)!==now){ map[d.file]=JSON.parse(now); changed=true; }
   });
@@ -32255,8 +32416,9 @@ async function gtMergeRun(){
   pf.fromDisk.forEach(k=>{
     const d=gtLib.designs.find(x=>x.adhoc&&x.file===k);
     // cutSheet is only written when on: off there, it must not survive from here
-    if(d&&map[k]){ const n=gtNormalizeDesign({...d,cutSheet:undefined,...map[k]}); d.fields=n.fields; d.hole=n.hole; d.back=n.back; d.art=n.art; d.bleed=n.bleed; d.trace=n.trace;
+    if(d&&map[k]){ const n=gtNormalizeDesign({...d,cutSheet:undefined,nestEach:undefined,...map[k]}); d.fields=n.fields; d.hole=n.hole; d.back=n.back; d.art=n.art; d.bleed=n.bleed; d.trace=n.trace;
       if(n.turn) d.turn=n.turn; else delete d.turn;
+      if(n.nestEach) d.nestEach=true; else delete d.nestEach;
       // a sticker sheet turned on or off there: the page is read again here
       if(!!n.cutSheet!==!!d.cutSheet){
         if(n.cutSheet){ d.cutSheet=true; gtCutSheetFiles.add(d.file); } else{ delete d.cutSheet; gtCutSheetFiles.delete(d.file); }
@@ -32616,6 +32778,8 @@ function gtNormalizeDesign(d){
     ...(d.cutSeen?{cutSeen:String(d.cutSeen)}:{}),
     // a sticker sheet: the PDF's every red line is its cut line (see pdfCutScan)
     ...(d.cutSheet?{cutSheet:true}:{}),
+    // and nested a sticker at a time rather than as one block (see gtSetPiecesOf)
+    ...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),
     // its artwork turned a quarter, or more (see gtTurnDesign)
     ...(gtTurnOf(d)?{turn:gtTurnOf(d)}:{}),
     art:d.artV===2
@@ -35487,11 +35651,29 @@ function gtQueue(lines){
   if(list.some(own)&&list.some(l=>!own(l)&&gtDesign(l.designId)&&gtShapeOfLine(l)))
     list=list.filter(l=>!own(l)).concat(list.filter(own));
   list.forEach(l=>{
-    if(!gtDesign(l.designId)) return;
+    const d=gtDesign(l.designId);
+    if(!d) return;
     const n=Math.max(0,Math.floor(Number(l.qty)||0));
+    // a sheet nested a sticker at a time: each of its stickers is a tag, as
+    // many of each as the line asks for. Until they are made it is the one block.
+    const ps=d.nestEach?gtSetPiecesOf(d):null;
+    if(ps&&ps.length){
+      for(let i=0;i<n;i++) ps.forEach(p=>out.push(gtSetLine(l,p)));
+      return;
+    }
     for(let i=0;i<n;i++) out.push(l);
   });
   return out;
+}
+// The order line, standing for one sticker of its sheet: the same line in
+// every way but its design, and the same object every time it is asked for.
+const gtSetLines=new Map();
+function gtSetLine(l,p){
+  const k=l.id+'|'+p.id;
+  let x=gtSetLines.get(k);
+  if(!x){ x={}; gtSetLines.set(k,x); }
+  for(const key of Object.keys(x)) if(!(key in l)) delete x[key];
+  return Object.assign(x,l,{designId:p.id,setLine:l.id});
 }
 
 // ---------- one order, several shapes ----------
@@ -41753,6 +41935,8 @@ function gtArtWriteInputs(){
   document.getElementById('gtTraceOn').disabled=!t;
   document.getElementById('gtCutSheetRow').hidden=!gtIsPdfFile(d.file);
   document.getElementById('gtCutSheet').checked=!!d.cutSheet;
+  document.getElementById('gtNestEachRow').hidden=!d.cutSheet||!gtIsPdfFile(d.file)||!!d.setOf;
+  document.getElementById('gtNestEach').checked=!!(d.cutSheet&&d.nestEach);
   const shape=!t||!t.on?'none':(t.shape||'trace');
   document.querySelectorAll('#gtCutShapeSeg [data-gtcs]').forEach(b=>b.classList.toggle('on',b.dataset.gtcs===shape));
   // threshold and Trace are for reading the artwork's edge — a drawn shape has none
@@ -42152,7 +42336,7 @@ document.getElementById('gtCutSheet').addEventListener('change',async e=>{
   // would bring back a line read the other way
   gtCutSettle();
   [d,...(gtLib.designs||[]),...(gtOwnDesigns||[])].forEach(x=>{ if(x.file!==d.file) return;
-    if(on) x.cutSheet=true; else delete x.cutSheet;
+    if(on) x.cutSheet=true; else{ delete x.cutSheet; delete x.nestEach; }
     gtImgs.delete(x.id); gtImgFailed.delete(x.id); });
   if(on) gtCutSheetFiles.add(d.file); else gtCutSheetFiles.delete(d.file);
   if(gtDesign(d.id)){ await gtImgLoad(d.id); gtImgGet(d); }
@@ -42167,6 +42351,21 @@ document.getElementById('gtCutSheet').addEventListener('change',async e=>{
   showMsg(document.getElementById('gtTraceMsg'),
     on?(f?`✓ ${1+((f.extras||[]).length)} cut lines taken from the PDF.`:'No closed red line found in this PDF.')
       :"Back to the PDF's single cut line.",!on||!!f);
+});
+// The same sticker sheet as a set: every sticker nested on its own, or the
+// whole sheet as one block
+document.getElementById('gtNestEach').addEventListener('change',async e=>{
+  const d=gtCurrentDesign; if(!d||!d.cutSheet) return;
+  const on=e.target.checked;
+  if(on) d.nestEach=true; else delete d.nestEach;
+  const lib=gtDesign(d.id); if(lib&&lib!==d){ if(on) lib.nestEach=true; else delete lib.nestEach; }
+  const msg=document.getElementById('gtTraceMsg');
+  if(on){
+    const list=await gtSetBuild(d);
+    showMsg(msg,list&&list.length?`✓ ${list.length} stickers - each nests on its own.`
+      :'No sticker with its own closed red line found - it stays one block.',!!(list&&list.length));
+  }else showMsg(msg,'The sheet prints and cuts as one block.',true);
+  gtArtChanged();
 });
 document.getElementById('gtTraceOn').addEventListener('change',e=>{
   const d=gtCurrentDesign; if(!d||!d.trace) return;
@@ -42888,7 +43087,7 @@ async function gtExport(print){
   let swapped=false;
   try{
     // counted and planned with every shape's own placeholders, as the cuts are
-    try{ await gtShapesInHand(); gtDraw(); }catch(e){}
+    try{ await gtShapesInHand(); await gtSetsReady(); gtDraw(); }catch(e){}
     const pages=gtPageCount();
     if(!pages||!gtQueue().length){ showMsg(out,'Nothing to print — add a design and a quantity first.',false); return; }
     const noAge=gtAgeLeft();
@@ -57152,7 +57351,7 @@ async function mcGtKeepOneOffOn(it,si){
   si.oneOff={id:d.id,name:d.name||'',file:d.file||path,path,
     fields:(d.fields||[]),hole:d.hole||null,...(d.back?{back:d.back}:{}),
     artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,
-    ...(d.cutSeen?{cutSeen:d.cutSeen}:{}),...(d.cutSheet?{cutSheet:true}:{}),...(d.turn?{turn:d.turn}:{})};
+    ...(d.cutSeen?{cutSeen:d.cutSeen}:{}),...(d.cutSheet?{cutSheet:true}:{}),...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),...(d.turn?{turn:d.turn}:{})};
 }
 // The copies these lines are carrying, back into the library — only the ones
 // the library cannot already answer for, so a page still holding its one-offs
@@ -59752,7 +59951,7 @@ const PJ_KINDS={
             fields:d.fields||[],hole:d.hole||null,...(d.back?{back:d.back}:{}),
             // how it sits, its own bleed and its traced cut line
             artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,
-            ...(d.cutSheet?{cutSheet:true}:{}),...(d.turn?{turn:d.turn}:{})}}:{})};
+            ...(d.cutSheet?{cutSheet:true}:{}),...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),...(d.turn?{turn:d.turn}:{})}}:{})};
       });
       const sheet={};
       GT_JOB_SHEET_KEYS.forEach(k=>{ if(gtSheet[k]!==undefined) sheet[k]=gtSheet[k]; });
