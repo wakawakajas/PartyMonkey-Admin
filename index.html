@@ -6855,7 +6855,10 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         </div>
           <div id="gtLibMsg"></div>
           <div id="gtComboBringWrap" style="display:none;margin-top:8px;">
-            <div class="sect-label">Copy sheet setup from</div>
+            <div class="sect-label">Live from the page folders</div>
+            <div class="calc" id="gtComboLiveState">—</div>
+            <button class="btn-outline" id="gtComboReloadBtn" style="width:100%;margin-top:6px;">↻ Read the folders again</button>
+            <div class="sect-label" style="margin-top:10px;">Copy sheet setup from</div>
             <div class="grid2">
               <button class="btn-outline" data-gt-combo-sheet="festive">Festive</button>
               <button class="btn-outline" data-gt-combo-sheet="custom">Custom</button>
@@ -32324,7 +32327,7 @@ async function gtSaveLibRun(){
       for(const [file,blob] of gtAssets){
         if(gtIsAdhoc(file)) continue;            // a one-off is nobody's file but this session's
         if(/^designs\//i.test(file)&&GT_ART.test(file)&&!listed.has(file)) continue;
-        if(GT_LIVE_PATH.test(file)&&!listed.has(file)) continue;   // still read live, see gtComboLive
+        if(GT_LIVE_PATH.test(file)) continue;   // a page folder's file, read live from there (gtComboLive) - never copied in
         if(blob&&blob.size===0) continue;        // nothing to write; an empty file would only be left behind
         // already on disk is the normal case — only what is new gets written
         try{ await gtDirRead(gtDir,file); continue; }catch(e){}
@@ -33750,7 +33753,7 @@ const GT_MODE_HINT={
   festive:'Your festive library folder \u2014 its designs, fonts, shapes and saved words.',
   custom:'Your custom tag folder \u2014 a library of its own, nothing shared with Festive.',
   sticker:'Your sticker folder \u2014 a library of its own, nothing shared with Festive or Custom.',
-  combo:'Your main folder (e.g. Pigu New) \u2014 Die Cut keeps a library of its own in it, nothing is read from Festive or Custom.'};
+  combo:'Festive and Custom designs together \u2014 read live from the main folder, the other pages are left as they are.'};
 function gtPaintMode(){
   const t=document.getElementById('gtTitle');
   if(t) t.textContent=GT_MODE_TITLE[gtMode];
@@ -41716,8 +41719,9 @@ document.getElementById('gtImportLibBtn').addEventListener('click',async()=>{
 // designs come into the library flagged live, with their files held under
 // Library (DO NOT TOUCH)/<page>~ so no name meets one of this page's. The fonts and the shapes
 // are this page's own; a design's words are put in the font of the same name
-// here. Changed here, a design stops being live and is saved like any other
-// (gtComboAdoptEdited), and from then on its folder no longer changes it.
+// here. Changed here, a design stops being live and its changes are saved in
+// this page's library (gtComboAdoptEdited) - but only the changes: its picture
+// is never copied in, it is still read from its page folder every time.
 async function gtComboReadOnly(dir,ask){
   try{
     if(await dir.queryPermission({mode:'read'})==='granted') return true;
@@ -41725,10 +41729,8 @@ async function gtComboReadOnly(dir,ask){
   }catch(e){ return false; }
 }
 const GT_LIVE_DIRS={festive:'Festive Gift Tag',custom:'Custom Gift Tag',sticker:'Sticker'};
-// the page folders it reads: none. Die Cut stands on its own - it shows its
-// own library only, and Magic Create finds only what is in it. Designs once
-// read live and changed here stayed as this page's own copies and are kept.
-const GT_LIVE_KINDS=[];
+// the page folders it reads: Sticker taken out - stickers stay on their own page
+const GT_LIVE_KINDS=['festive','custom'];
 // a file held for a live design: <GT_COMBO_HOME>/<page>~<its path there>
 const GT_LIVE_PATH={test:k=>{ k=String(k); const pre=GT_COMBO_HOME+'/';
   return k.startsWith(pre)&&/^(festive|custom|sticker)~/.test(k.slice(pre.length)); }};
@@ -41799,6 +41801,10 @@ async function gtComboLive(ask){
   // fonts by name: the page's own fonts folder is the only one
   const fontByName=gtFontIndex();
   const ownIds=new Set(gtLib.designs.map(d=>d.id));
+  // a design changed here keeps only its changes in this library: its picture
+  // is still the page folder's file, read from there every time like a live one
+  const ownLive=new Set();
+  gtLib.designs.forEach(d=>[d.file,d.back&&d.back.file].forEach(f=>{ if(f&&GT_LIVE_PATH.test(f)) ownLive.add(f); }));
   const liveIds=new Set();
   const notes=[];
   for(const kind of GT_LIVE_KINDS){
@@ -41817,6 +41823,7 @@ async function gtComboLive(ask){
       // an id an earlier page's folder had already (live or changed here)
       const id=liveIds.has(x.id)?kind+'~'+x.id:x.id;
       liveIds.add(x.id);
+      [x.file,x.back&&x.back.file].forEach(f=>{ if(f&&ownLive.has(gtLivePath(kind,f))) files.push([f,gtLivePath(kind,f)]); });
       if(ownIds.has(id)) continue;                    // changed here: this page's copy wins
       const d=JSON.parse(JSON.stringify(x)); d.id=id;
       if(d.file){ files.push([d.file,gtLivePath(kind,d.file)]);
@@ -41835,9 +41842,13 @@ async function gtComboLive(ask){
       try{ gtAssets.set(to,await gtDirRead(dir,from)); }catch(e){}
     });
     made.forEach(d=>{ gtLiveSnap.set(d.id,gtLiveLook(d)); gtLib.designs.push(d); });
+    // a design changed here drawn again from the file just read
+    gtLib.designs.forEach(d=>{ if(d.live) return;
+      if(ownLive.has(d.file)){ gtImgs.delete(d.id); try{ gtImgFailed.delete(d.id); }catch(e){} }
+      if(d.back&&ownLive.has(d.back.file)) gtBackImgs.delete(d.back.file); });
     notes.push(GT_MODE_TITLE[kind]+': '+made.length);
   }
-  gtComboLiveNote=notes.length?'Live from '+escapeHtml(root.name)+' — '+notes.map(escapeHtml).join(' · '):'Own library only.';
+  gtComboLiveNote='Live from '+escapeHtml(root.name)+' — '+notes.map(escapeHtml).join(' · ');
   await gtHydrateBacks().catch(()=>{});
   gtComboLivePaint();
 }
@@ -41921,6 +41932,16 @@ async function gtComboSheetFrom(kind){
 document.querySelectorAll('[data-gt-combo-sheet]').forEach(b=>
   b.addEventListener('click',()=>gtComboSheetFrom(b.dataset.gtComboSheet).catch(e=>
     showMsg(document.getElementById('gtLibMsg'),'Could not copy the sheet: '+((e&&e.message)||e),false))));
+document.getElementById('gtComboReloadBtn').addEventListener('click',async()=>{
+  if(gtMode!=='combo') return;
+  const msg=document.getElementById('gtLibMsg');
+  showMsg(msg,'Reading the folders…',true);
+  try{
+    await gtComboLive(true);
+    gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
+    showMsg(msg,'✓ Read again.',true);
+  }catch(e){ showMsg(msg,'Could not read them: '+((e&&e.message)||e),false); }
+});
 let gtComboKind='';
 document.getElementById('gtComboKindSeg').addEventListener('click',e=>{
   const b=e.target.closest('[data-gt-combo-kind]'); if(!b) return;
@@ -52961,9 +52982,9 @@ const GT_PAGES=[{mode:'festive',name:'Festive',dir:'dir',lib:'lib'},
                 {mode:'custom', name:'Custom', dir:'dir:custom',lib:'lib:custom'},
                 {mode:'sticker',name:'Sticker',dir:'dir:sticker',lib:'lib:sticker'},
                 // Die Cut: last, so a SKU no route names still finds
-                // its design on Festive or Custom first. Its library is its
-                // own. Only a route to it, or this page being the one open,
-                // sends a line here.
+                // its design on Festive or Custom first - this page's designs
+                // are theirs, read live. Only a route to it, or this page being
+                // the one open, sends a line here.
                 {mode:'combo',  name:'Die Cut',title:'Die Cut',dir:'dir:combo',lib:'lib:combo'}];
 const mcIsGtDest=d=>GT_PAGES.some(p=>p.mode===d);
 // the page on screen answers first, so a design of the same name on both goes
@@ -53000,8 +53021,10 @@ async function mcGtReadNames(page){
   }catch(e){ return []; }
 }
 // Die Cut's names as the page itself lists them (gtComboLive): its
-// own library in GT_COMBO_HOME, and nothing else now (GT_LIVE_KINDS is empty).
-// Its run numbers are its own, so none are taken from it.
+// own library in GT_COMBO_HOME first, then the Festive and Custom folders'
+// designs read live - an id one folder already used given its page's name in
+// front, and one changed on this page its own copy. Its run numbers are its own,
+// so none are taken from it.
 async function mcGtComboNames(root){
   let home=null; try{ home=await root.getDirectoryHandle(GT_COMBO_HOME); }catch(e){}
   const own=home?(((await gtReadAll(home)).man||{}).designs||[]):[];
