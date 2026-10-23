@@ -1985,6 +1985,9 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .crop-stage{display:flex;justify-content:center;align-items:center;min-height:200px;
   background:repeating-conic-gradient(#3a3a38 0 25%,#2c2c2a 0 50%) 0 0/16px 16px;border-radius:8px;padding:8px;}
 .crop-stage canvas{display:block;touch-action:none;cursor:crosshair;max-width:100%;}
+.crop-zoom{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+.crop-zoom .chip{width:auto;height:30px;min-width:34px;padding:0 10px;}
+.crop-zoom #cropZoomLbl{min-width:46px;text-align:center;font-variant-numeric:tabular-nums;}
 .fr-sheet{max-width:1100px;height:calc(100vh - 24px);}
 .fr-cols{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,1fr);gap:16px;}
 .fr-left{display:flex;flex-direction:column;min-height:0;gap:6px;}
@@ -8699,6 +8702,13 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         <button type="button" class="chip" id="cropEraseUndo" hidden>↶ Undo</button>
       </div>
     </div>
+    <div class="crop-zoom">
+      <button type="button" class="chip" id="cropZoomOut" title="Zoom out">−</button>
+      <span id="cropZoomLbl">100%</span>
+      <button type="button" class="chip" id="cropZoomIn" title="Zoom in">+</button>
+      <button type="button" class="chip" id="cropZoomFit" title="See the whole picture">Fit</button>
+      <span class="hint" style="margin:0;">Scroll to zoom on the pointer · hold Space and drag (or drag with the wheel button) to move round</span>
+    </div>
     <p class="hint" id="cropHint" style="margin:0;">Or drag a box on the picture. Drag its edges or corners to adjust it, or drag inside it to move it.</p>
     <p class="hint" id="cropSplitNote" style="margin:0;color:var(--amber);" hidden>Split is on: every page is cropped the same way.</p>
     <div class="crop-stage"><canvas id="cropCanvas"></canvas></div>
@@ -13676,76 +13686,186 @@ function cropBgCanvas(P,tol){
   return c;
 }
 // Magic eraser: what was painted over is filled in from the picture round it,
-// the way content-aware fill does it — from the edge of the hole inward, each
-// step finds the square of untouched picture nearby that best matches what is
-// already there round the gap, and copies in its missing part. Only the
-// painted spot and a margin round it are worked on, so a big picture is quick.
+// the way content-aware fill does it (PatchMatch, worked coarse to fine). The
+// hole is first filled roughly on a small copy of the picture; then, at each
+// size up, every little square over the hole finds the square of untouched
+// picture that looks most like it, and each hole pixel becomes the blend of
+// what those best matches say it should be - over and over, until it settles.
+// So lines, stripes and patterns run on through the spot, and the edges blend.
+// Only the spot and a margin round it are worked on, so a big picture is quick.
 // `mask` is 1 where painted, over the box `mb` of the picture `src`. A new
 // canvas of the whole picture, or null when nothing was painted.
 function cropInpaint(src,mask,mb){
   const W=src.width, H=src.height, big=Math.max(mb.w,mb.h);
-  const ph=Math.max(3,Math.min(7,Math.round(big/8)));   // patch half-width
-  const S=Math.max(30,Math.min(90,Math.round(big*1.5))); // how far to look
-  const st=S>50?2:1, m=S+ph*2;
+  const PR=3, PS=PR*2+1;   // the squares: 7 x 7
+  // the margin the fill learns from: three times the spot, within reason
+  const m=Math.max(48,Math.min(260,Math.round(big*3)));
   const rx=Math.max(0,mb.x-m), ry=Math.max(0,mb.y-m);
   const rw=Math.min(W,mb.x+mb.w+m)-rx, rh=Math.min(H,mb.y+mb.h+m)-ry;
   const im=src.getContext('2d',{willReadFrequently:true}).getImageData(rx,ry,rw,rh), d=im.data;
-  const hole=new Uint8Array(rw*rh); let left=0;
+  const A0=new Float32Array(rw*rh*4), M0=new Uint8Array(rw*rh); let left=0;
+  for(let i=0;i<A0.length;i++) A0[i]=d[i];
   for(let y=0;y<mb.h;y++) for(let x=0;x<mb.w;x++) if(mask[y*mb.w+x]){
     const X=mb.x+x-rx, Y=mb.y+y-ry;
-    if(X>=0&&Y>=0&&X<rw&&Y<rh&&!hole[Y*rw+X]){ hole[Y*rw+X]=1; left++; } }
+    if(X>=0&&Y>=0&&X<rw&&Y<rh&&!M0[Y*rw+X]){ M0[Y*rw+X]=1; left++; } }
   if(!left) return null;
-  // a source square must be all untouched picture: a summed table of the hole
-  const R=rw+1, I=new Int32Array(R*(rh+1));
-  for(let y=0;y<rh;y++){ let s=0; for(let x=0;x<rw;x++){ s+=hole[y*rw+x]; I[(y+1)*R+x+1]=I[y*R+x+1]+s; } }
-  const clean=(x,y)=>{ const x0=x-ph,y0=y-ph,x1=x+ph+1,y1=y+ph+1;
-    if(x0<0||y0<0||x1>rw||y1>rh) return false;
-    return I[y1*R+x1]-I[y0*R+x1]-I[y1*R+x0]+I[y0*R+x0]===0; };
-  // the hole lies inside mb, so only that part is looked over for its edge
-  const hx0=Math.max(0,mb.x-rx), hy0=Math.max(0,mb.y-ry);
-  const hx1=Math.min(rw,mb.x+mb.w-rx), hy1=Math.min(rh,mb.y+mb.h-ry);
-  while(left>0){
-    // the edge pixel whose square is the most already known goes first
-    let px=-1, py=-1, pk=-1;
-    for(let y=hy0;y<hy1;y++) for(let x=hx0;x<hx1;x++){
-      const p=y*rw+x; if(!hole[p]) continue;
-      if(!((x>0&&!hole[p-1])||(x<rw-1&&!hole[p+1])||(y>0&&!hole[p-rw])||(y<rh-1&&!hole[p+rw]))) continue;
-      let k=0;
-      for(let dy=-ph;dy<=ph;dy++){ const Y=y+dy; if(Y<0||Y>=rh) continue;
-        for(let dx=-ph;dx<=ph;dx++){ const X=x+dx; if(X>=0&&X<rw&&!hole[Y*rw+X]) k++; } }
-      if(k>pk){ pk=k; px=x; py=y; }
+  // a steady random, so the same stroke fills the same way
+  let seed=12345; const rnd=()=>((seed=(Math.imul(seed,1103515245)+12345)>>>0)/4294967296);
+  // the sizes: halved until the spot is a few squares across
+  const lv=[{w:rw,h:rh,A:A0,M:M0}];
+  for(let ext=big;ext>PS*2;ext/=2){
+    const f=lv[lv.length-1], w=f.w>>1, h=f.h>>1;
+    if(w<PS*4||h<PS*4) break;
+    const A=new Float32Array(w*h*4), M=new Uint8Array(w*h);
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+      const s=[0,0,0,0]; let n=0, hole=0;
+      for(let dy=0;dy<2;dy++) for(let dx=0;dx<2;dx++){
+        const p=(y*2+dy)*f.w+x*2+dx;
+        if(f.M[p]){ hole=1; continue; }
+        for(let c=0;c<4;c++) s[c]+=f.A[p*4+c]; n++; }
+      const q=y*w+x; M[q]=hole;
+      if(n) for(let c=0;c<4;c++) A[q*4+c]=s[c]/n;
     }
-    if(px<0) break;
-    // the best-matching untouched square within reach
-    let bx=-1, by=-1, bs=Infinity;
-    for(let qy=Math.max(ph,py-S);qy<=Math.min(rh-ph-1,py+S);qy+=st)
-      for(let qx=Math.max(ph,px-S);qx<=Math.min(rw-ph-1,px+S);qx+=st){
-        if(!clean(qx,qy)) continue;
-        let s=0;
-        for(let dy=-ph;dy<=ph&&s<bs;dy++){ const Y=py+dy; if(Y<0||Y>=rh) continue;
-          for(let dx=-ph;dx<=ph;dx++){ const X=px+dx; if(X<0||X>=rw) continue;
-            const p=Y*rw+X; if(hole[p]) continue;
-            const i=p*4, j=((qy+dy)*rw+qx+dx)*4;
-            const a=d[i]-d[j], b=d[i+1]-d[j+1], c=d[i+2]-d[j+2], e=d[i+3]-d[j+3];
-            s+=a*a+b*b+c*c+e*e; } }
-        if(s<bs){ bs=s; bx=qx; by=qy; }
-      }
-    if(bx<0){
-      // nothing whole within reach: the pixel takes the mean of what is known round it
-      const i=(py*rw+px)*4, sum=[0,0,0,0]; let n=0;
-      for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ const X=px+dx, Y=py+dy;
-        if(X<0||Y<0||X>=rw||Y>=rh||hole[Y*rw+X]) continue;
-        const j=(Y*rw+X)*4; for(let c=0;c<4;c++) sum[c]+=d[j+c]; n++; }
-      for(let c=0;c<4;c++) d[i+c]=Math.round(sum[c]/n);
-      hole[py*rw+px]=0; left--; continue;
-    }
-    for(let dy=-ph;dy<=ph;dy++){ const Y=py+dy; if(Y<0||Y>=rh) continue;
-      for(let dx=-ph;dx<=ph;dx++){ const X=px+dx; if(X<0||X>=rw) continue;
-        const p=Y*rw+X; if(!hole[p]) continue;
-        const i=p*4, j=((by+dy)*rw+bx+dx)*4;
-        d[i]=d[j]; d[i+1]=d[j+1]; d[i+2]=d[j+2]; d[i+3]=d[j+3];
-        hole[p]=0; left--; } }
+    lv.push({w,h,A,M});
   }
+  // the smallest size: the hole filled in from its edge inward, a pixel at a
+  // time - the one with the most known round it first - each taking the
+  // middle of the untouched square anywhere that best matches the known part
+  // round it. Searching everywhere, not guessing, is what carries a thin line
+  // or an edge on through the spot. A start for the matching at every size up.
+  {
+    const L=lv[lv.length-1], w=L.w, h=L.h, A=L.A, M=L.M.slice(), src=[];
+    for(let y=PR;y<h-PR;y++) for(let x=PR;x<w-PR;x++){
+      let k=0; for(let dy=-PR-1;dy<=PR+1&&!k;dy++) for(let dx=-PR-1;dx<=PR+1&&!k;dx++){
+        const X=x+dx, Y=y+dy; if(X>=0&&Y>=0&&X<w&&Y<h&&M[Y*w+X]) k=1; }
+      if(!k) src.push(y*w+x); }
+    const known=p=>{ const x=p%w, y=(p/w)|0; let n=0;
+      for(let dy=-PR;dy<=PR;dy++){ const Y=y+dy; if(Y<0||Y>=h) continue;
+        for(let dx=-PR;dx<=PR;dx++){ const X=x+dx; if(X>=0&&X<w&&!M[Y*w+X]) n++; } }
+      return n; };
+    let todo=0; for(let p=0;p<w*h;p++) if(M[p]) todo++;
+    while(todo>0){
+      let bp=-1, bk=0;
+      for(let p=0;p<w*h;p++){ if(!M[p]) continue;
+        const x=p%w;
+        if(!((x>0&&!M[p-1])||(x<w-1&&!M[p+1])||(p>=w&&!M[p-w])||(p<w*(h-1)&&!M[p+w]))) continue;
+        const k=known(p); if(k>bk){ bk=k; bp=p; } }
+      if(bp<0) break;
+      const x=bp%w, y=(bp/w)|0;
+      let best=-1, bs=Infinity;
+      for(const q of src){ const sx=q%w, sy=(q/w)|0; let s=0;
+        for(let dy=-PR;dy<=PR&&s<bs;dy++){ const Y=y+dy; if(Y<0||Y>=h) continue;
+          for(let dx=-PR;dx<=PR;dx++){ const X=x+dx; if(X<0||X>=w) continue;
+            const t=Y*w+X; if(M[t]) continue;
+            const i=t*4, j=((sy+dy)*w+sx+dx)*4;
+            const a=A[i]-A[j], b=A[i+1]-A[j+1], c=A[i+2]-A[j+2], e=A[i+3]-A[j+3];
+            s+=a*a+b*b+c*c+e*e; } }
+        if(s<bs){ bs=s; best=q; } }
+      if(best>=0) for(let c=0;c<4;c++) A[bp*4+c]=A[best*4+c];
+      else{ const s=[0,0,0,0]; let n=0;
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ const X=x+dx, Y=y+dy;
+          if(X<0||Y<0||X>=w||Y>=h||M[Y*w+X]) continue;
+          for(let c=0;c<4;c++) s[c]+=A[(Y*w+X)*4+c]; n++; }
+        for(let c=0;c<4;c++) A[bp*4+c]=n?s[c]/n:0; }
+      M[bp]=0; todo--;
+    }
+  }
+  let nnx=null, nny=null, pw=0, ph=0;
+  for(let li=lv.length-1;li>=0;li--){
+    const {w,h,A,M}=lv[li];
+    // a finer size: the hole starts as the coarser fill, scaled up
+    if(li<lv.length-1){
+      const C=lv[li+1];
+      for(let y=0;y<h;y++) for(let x=0;x<w;x++){ const p=y*w+x; if(!M[p]) continue;
+        const cx=Math.min(C.w-1,x>>1), cy=Math.min(C.h-1,y>>1), q=(cy*C.w+cx)*4;
+        for(let c=0;c<4;c++) A[p*4+c]=C.A[q+c]; }
+    }
+    // a square may be taken from where none of it is in the hole (grown by
+    // one, so the spot's soft rim is not copied back in)
+    const I=new Int32Array((w+1)*(h+1));
+    for(let y=0;y<h;y++){ let s=0; for(let x=0;x<w;x++){
+      let k=M[y*w+x]; if(!k) for(let dy=-1;dy<=1&&!k;dy++) for(let dx=-1;dx<=1&&!k;dx++){
+        const X=x+dx, Y=y+dy; if(X>=0&&Y>=0&&X<w&&Y<h&&M[Y*w+X]) k=1; }
+      s+=k; I[(y+1)*(w+1)+x+1]=I[y*(w+1)+x+1]+s; } }
+    const ok=new Uint8Array(w*h), okList=[];
+    for(let y=PR;y<h-PR;y++) for(let x=PR;x<w-PR;x++){
+      const x0=x-PR,y0=y-PR,x1=x+PR+1,y1=y+PR+1;
+      if(I[y1*(w+1)+x1]-I[y0*(w+1)+x1]-I[y1*(w+1)+x0]+I[y0*(w+1)+x0]===0){ ok[y*w+x]=1; okList.push(y*w+x); } }
+    if(!okList.length){ nnx=null; continue; }   // no whole square anywhere: keep the rough fill
+    // the squares to match: every one that takes in a hole pixel
+    const tg=[];
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+      let k=0; for(let dy=-PR;dy<=PR&&!k;dy++){ const Y=y+dy; if(Y<0||Y>=h) continue;
+        for(let dx=-PR;dx<=PR;dx++){ const X=x+dx; if(X>=0&&X<w&&M[Y*w+X]){ k=1; break; } } }
+      if(k) tg.push(y*w+x); }
+    const isT=new Uint8Array(w*h); tg.forEach(p=>isT[p]=1);
+    // how far into the hole each pixel is: a square centred near the known
+    // picture is surer of itself than one deep in the hole, and counts for more
+    const far=new Float32Array(w*h);
+    { let ring=[]; for(let p=0;p<w*h;p++) if(!M[p]) far[p]=0; else far[p]=-1;
+      for(let p=0;p<w*h;p++) if(far[p]===0) ring.push(p);
+      for(let k=1;ring.length;k++){ const nx=[];
+        for(const p of ring){ const x=p%w;
+          for(const q of [x>0?p-1:-1,x<w-1?p+1:-1,p-w,p+w]) if(q>=0&&q<w*h&&far[q]<0){ far[q]=k; nx.push(q); } }
+        ring=nx; } }
+    const NX=new Int32Array(w*h), NY=new Int32Array(w*h), ND=new Float64Array(w*h);
+    const dist=(tx,ty,sx,sy,cap)=>{
+      let s=0;
+      for(let dy=-PR;dy<=PR;dy++){ const Y=ty+dy; if(Y<0||Y>=h) continue;
+        const rowT=Y*w, rowS=(sy+dy)*w;
+        for(let dx=-PR;dx<=PR;dx++){ const X=tx+dx; if(X<0||X>=w) continue;
+          const i=(rowT+X)*4, j=(rowS+sx+dx)*4;
+          const a=A[i]-A[j], b=A[i+1]-A[j+1], c=A[i+2]-A[j+2], e=A[i+3]-A[j+3];
+          s+=a*a+b*b+c*c+e*e; }
+        if(s>=cap) return s; }
+      return s; };
+    const randOk=()=>okList[(rnd()*okList.length)|0];
+    // where each square's best match starts: the coarser size's, scaled up, or a guess
+    for(const p of tg){
+      const x=p%w, y=(p/w)|0; let s=-1;
+      if(nnx){ const cx=Math.min(pw-1,x>>1), cy=Math.min(ph-1,y>>1), q=cy*pw+cx;
+        if(nnx[q]>=0){ const sx=Math.min(w-PR-1,Math.max(PR,nnx[q]*2+(x&1))), sy=Math.min(h-PR-1,Math.max(PR,nny[q]*2+(y&1)));
+          if(ok[sy*w+sx]) s=sy*w+sx; } }
+      if(s<0) s=randOk();
+      NX[p]=s%w; NY[p]=(s/w)|0;
+    }
+    const em=li===lv.length-1?12:li===0?4:6;
+    for(let it=0;it<em;it++){
+      for(const p of tg) ND[p]=dist(p%w,(p/w)|0,NX[p],NY[p],Infinity);
+      // PatchMatch: good matches spread to neighbours, then a random look round
+      for(let pass=0;pass<(li===0?3:4);pass++){
+        const back=pass&1, n=tg.length, st=back?1:-1;
+        for(let k=0;k<n;k++){
+          const p=tg[back?n-1-k:k], x=p%w, y=(p/w)|0;
+          const tryS=(sx,sy)=>{
+            if(sx<PR||sy<PR||sx>=w-PR||sy>=h-PR||!ok[sy*w+sx]) return;
+            const dd=dist(x,y,sx,sy,ND[p]); if(dd<ND[p]){ ND[p]=dd; NX[p]=sx; NY[p]=sy; } };
+          const qx=x+st, qy=y+st;
+          if(qx>=0&&qx<w&&isT[y*w+qx]) tryS(NX[y*w+qx]-st,NY[y*w+qx]);
+          if(qy>=0&&qy<h&&isT[qy*w+x]) tryS(NX[qy*w+x],NY[qy*w+x]-st);
+          for(let R=Math.max(w,h);R>=1;R>>=1)
+            tryS(Math.round(NX[p]+(rnd()*2-1)*R),Math.round(NY[p]+(rnd()*2-1)*R));
+        }
+      }
+      // each hole pixel: the blend of what the matching squares over it say,
+      // the closer matches counting for more
+      const ds=tg.map(p=>ND[p]).sort((a,b)=>a-b), sig=Math.max(1,ds[Math.floor(ds.length*0.75)]||1);
+      const acc=new Float64Array(w*h*4), wt=new Float64Array(w*h);
+      for(const p of tg){
+        const x=p%w, y=(p/w)|0, ww=Math.exp(-ND[p]/(2*sig))*Math.pow(1.3,-Math.max(0,far[p]));
+        for(let dy=-PR;dy<=PR;dy++){ const Y=y+dy; if(Y<0||Y>=h) continue;
+          for(let dx=-PR;dx<=PR;dx++){ const X=x+dx; if(X<0||X>=w) continue;
+            const q=Y*w+X; if(!M[q]) continue;
+            const j=((NY[p]+dy)*w+NX[p]+dx)*4;
+            acc[q*4]+=ww*A[j]; acc[q*4+1]+=ww*A[j+1]; acc[q*4+2]+=ww*A[j+2]; acc[q*4+3]+=ww*A[j+3]; wt[q]+=ww; } }
+      }
+      for(let q=0;q<w*h;q++) if(M[q]&&wt[q]>0) for(let c=0;c<4;c++) A[q*4+c]=acc[q*4+c]/wt[q];
+    }
+    nnx=new Int32Array(w*h).fill(-1); nny=new Int32Array(w*h);
+    for(const p of tg){ nnx[p]=NX[p]; nny[p]=NY[p]; }
+    pw=w; ph=h;
+  }
+  for(let p=0;p<rw*rh;p++) if(M0[p]) for(let c=0;c<4;c++) d[p*4+c]=Math.max(0,Math.min(255,Math.round(A0[p*4+c])));
   const out=document.createElement('canvas'); out.width=W; out.height=H;
   const ox=out.getContext('2d'); ox.drawImage(src,0,0); ox.putImageData(im,rx,ry);
   return out;
@@ -13787,7 +13907,7 @@ async function cropMake(img,box,trim,name,bgTol,edit){
     +(whole?'':' · cropped')+(bgTol?' · no bg':'')+(edit?' · erased':'')+'.png'};
 }
 // ---- the Crop sheet ----
-let cropUI=null;
+let cropUI=null, cropSpace=false;
 function cropSides(){
   return ['front','back'].filter(s=>!(s==='front'&&usingPreset())&&state.final[s]&&state.final[s].img);
 }
@@ -14008,13 +14128,19 @@ function cropPaint(){
   const cv=document.getElementById('cropCanvas'), img=cropUI.img;
   const stage=cv.parentElement;
   const maxW=Math.max(200,(stage.clientWidth||620)-16), maxH=Math.max(200,window.innerHeight*0.55);
-  const k=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);
+  let k=Math.min(maxW/img.naturalWidth,maxH/img.naturalHeight);
   const dpr=window.devicePixelRatio||1;
   cv.style.width=Math.round(img.naturalWidth*k)+'px'; cv.style.height=Math.round(img.naturalHeight*k)+'px';
   cv.width=Math.round(img.naturalWidth*k*dpr); cv.height=Math.round(img.naturalHeight*k*dpr);
-  cropUI.k=k;
-  const x=cv.getContext('2d'); x.setTransform(k*dpr,0,0,k*dpr,0,0);
-  x.clearRect(0,0,img.naturalWidth,img.naturalHeight);
+  // zoomed in, the canvas keeps its size and shows part of the picture:
+  // cropUI.zoom times the fit, from cropUI.pan (the picture's top-left on show)
+  cropUI.fitK=k; cropViewClamp();
+  const z=cropUI.zoom, pan=cropUI.pan;
+  k*=z; cropUI.k=k;
+  const x=cv.getContext('2d'); x.setTransform(1,0,0,1,0,0); x.clearRect(0,0,cv.width,cv.height);
+  x.setTransform(k*dpr,0,0,k*dpr,-pan.x*k*dpr,-pan.y*k*dpr);
+  x.imageSmoothingEnabled=z<4;   // close up, the picture's own pixels, sharp
+  document.getElementById('cropZoomLbl').textContent=Math.round(z*100)+'%';
   const bgc=cropBgPreview();
   if(bgc){
     // a checkerboard under it, so what is see-through reads as such
@@ -14047,8 +14173,26 @@ function cropPoint(e){
   // read against the size the canvas is shown at, which CSS can make smaller
   // than the size it was drawn for
   const cv=document.getElementById('cropCanvas'), r=cv.getBoundingClientRect();
+  const W=cropUI.img.naturalWidth, H=cropUI.img.naturalHeight, z=cropUI.zoom||1, pan=cropUI.pan||{x:0,y:0};
+  return {x:pan.x+(e.clientX-r.left)/(r.width||1)*W/z, y:pan.y+(e.clientY-r.top)/(r.height||1)*H/z};
+}
+// ---- zoom: the wheel (or a pinch) zooms on the pointer, Space-drag or a
+// middle-button drag moves round, + / − / Fit on the bar ----
+function cropViewClamp(){
   const W=cropUI.img.naturalWidth, H=cropUI.img.naturalHeight;
-  return {x:(e.clientX-r.left)/(r.width||1)*W, y:(e.clientY-r.top)/(r.height||1)*H};
+  cropUI.zoom=Math.max(1,Math.min(40,cropUI.zoom||1));
+  const p=cropUI.pan||{x:0,y:0}, z=cropUI.zoom;
+  cropUI.pan={x:Math.max(0,Math.min(W-W/z,p.x)),y:Math.max(0,Math.min(H-H/z,p.y))};
+}
+// zoom to `z`, keeping the picture point at screen fraction (fx,fy) where it is
+function cropZoomTo(z,fx,fy){
+  if(!cropUI) return;
+  const W=cropUI.img.naturalWidth, H=cropUI.img.naturalHeight, z0=cropUI.zoom||1, p=cropUI.pan||{x:0,y:0};
+  if(fx==null){ fx=0.5; fy=0.5; }
+  const ix=p.x+fx*W/z0, iy=p.y+fy*H/z0;
+  cropUI.zoom=Math.max(1,Math.min(40,z));
+  cropUI.pan={x:ix-fx*W/cropUI.zoom, y:iy-fy*H/cropUI.zoom};
+  cropPaint(); cropBrushCursor();
 }
 function cropClampBox(b){
   const W=cropUI.img.naturalWidth, H=cropUI.img.naturalHeight;
@@ -14150,12 +14294,17 @@ async function cropApply(){
   cv.addEventListener('pointerdown',e=>{
     if(!cropUI) return;
     e.preventDefault(); cv.setPointerCapture(e.pointerId);
+    // moving round a zoomed picture: Space held, or the wheel button
+    if(e.button===1||cropSpace){
+      cropUI.panDrag={cx:e.clientX,cy:e.clientY,pan:{...(cropUI.pan||{x:0,y:0})}};
+      cv.style.cursor='grabbing'; return;
+    }
     if(cropUI.erase){
       // a stroke of the magic eraser, painted onto a sheet of its own the
       // picture's size; the brush is screen pixels, so the same on any picture
       if(cropUI.stroke) return;   // the last one is still being filled in
       const W=cropUI.img.naturalWidth, H=cropUI.img.naturalHeight, p=cropPoint(e);
-      const r=cropBrush()/2*W/(cv.getBoundingClientRect().width||1);
+      const r=cropBrush()/2*W/(cv.getBoundingClientRect().width||1)/(cropUI.zoom||1);
       const c=document.createElement('canvas'); c.width=W; c.height=H;
       const g=c.getContext('2d'); g.fillStyle=g.strokeStyle='#ff2020'; g.lineWidth=r*2; g.lineCap=g.lineJoin='round';
       g.beginPath(); g.arc(p.x,p.y,r,0,Math.PI*2); g.fill();
@@ -14169,6 +14318,13 @@ async function cropApply(){
   });
   cv.addEventListener('pointermove',e=>{
     if(!cropUI) return;
+    if(cropUI.panDrag){
+      const P=cropUI.panDrag, r=cv.getBoundingClientRect(), z=cropUI.zoom||1;
+      const W=cropUI.img.naturalWidth, H=cropUI.img.naturalHeight;
+      cropUI.pan={x:P.pan.x-(e.clientX-P.cx)/(r.width||1)*W/z, y:P.pan.y-(e.clientY-P.cy)/(r.height||1)*H/z};
+      cropPaint(); return;
+    }
+    if(cropSpace){ cv.style.cursor='grab'; return; }
     if(cropUI.erase){
       const S=cropUI.stroke; if(!S||!S.on) return;
       const p=cropPoint(e);
@@ -14199,6 +14355,7 @@ async function cropApply(){
     cropModeBtns(); cropPaint();
   });
   const up=()=>{
+    if(cropUI&&cropUI.panDrag){ cropUI.panDrag=null; cv.style.cursor=cropSpace?'grab':''; cropBrushCursor(); return; }
     if(cropUI&&cropUI.stroke&&cropUI.stroke.on){ cropUI.stroke.on=false; cropEraseStroke(cropUI.stroke); return; }
     if(!cropUI||!cropUI.drag) return;
     const D=cropUI.drag; cropUI.drag=null;
@@ -14219,6 +14376,26 @@ async function cropApply(){
     if(e.key==='Escape'){ e.preventDefault(); cropClose(); }
     else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&cropUI&&cropUI.edHist.length
       &&!/^(INPUT|TEXTAREA)$/.test(e.target.tagName)){ e.preventDefault(); cropEraseUndo(); } });
+  cv.addEventListener('wheel',e=>{
+    if(!cropUI) return;
+    e.preventDefault();
+    const r=cv.getBoundingClientRect();
+    // a pinch on a touchpad comes as a wheel with Ctrl, in smaller steps
+    const f=Math.exp(-e.deltaY*(e.ctrlKey?0.01:0.0015));
+    cropZoomTo((cropUI.zoom||1)*f,(e.clientX-r.left)/(r.width||1),(e.clientY-r.top)/(r.height||1));
+  },{passive:false});
+  // Space held moves round instead of painting or drawing a box
+  window.addEventListener('keydown',e=>{
+    if(e.code!=='Space'||!cropUI||/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    e.preventDefault(); if(!cropSpace){ cropSpace=true; cv.style.cursor='grab'; }
+  });
+  window.addEventListener('keyup',e=>{
+    if(e.code!=='Space'||!cropSpace) return;
+    cropSpace=false; cv.style.cursor=''; cropBrushCursor();
+  });
+  document.getElementById('cropZoomIn').addEventListener('click',()=>cropUI&&cropZoomTo((cropUI.zoom||1)*1.5));
+  document.getElementById('cropZoomOut').addEventListener('click',()=>cropUI&&cropZoomTo((cropUI.zoom||1)/1.5));
+  document.getElementById('cropZoomFit').addEventListener('click',()=>cropUI&&cropZoomTo(1));
   document.getElementById('cropEraseBtn').addEventListener('click',cropEraseToggle);
   document.getElementById('cropEraseUndo').addEventListener('click',cropEraseUndo);
   document.getElementById('cropBrush').addEventListener('input',cropBrushCursor);
