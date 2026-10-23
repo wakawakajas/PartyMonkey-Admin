@@ -7177,7 +7177,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <label class="click-tog" title="Packs each tag by its traced cut line instead of the box round it, so round and odd shapes sit in one another's gaps and fewer sheets are needed. Tags with no traced line stay boxes. Takes a few seconds on a big order."><input type="checkbox" id="gtNestRealOn"/>Fit the real cut lines (saves more paper)</label>
           </div>
             <div class="click-row">
-            <label class="click-tog" title="Each design in neat rows of its own, one band under another in the order's order; two lines of one design share a band. A line ticked &quot;Fill the gaps&quot; is nested into the room the rows leave instead. Packs by boxes, not real cut lines."><input type="checkbox" id="gtNestNeatOn"/>Neat rows - same design together</label>
+            <label class="click-tog" title="Each design in neat rows of its own, one band under another in the order's order; two lines of one design share a band. A line ticked &quot;Fill the gaps&quot; is nested into the room the rows leave instead. With Fit the real cut lines on, each design repeats in the pattern its outline packs closest in."><input type="checkbox" id="gtNestNeatOn"/>Neat rows - same design together</label>
           </div>
             <div style="margin-top:10px;">
             <p class="hint" style="margin:0 0 6px;">Picked tags (Contours on - click, Shift+click, or double-click for a whole design):</p>
@@ -37441,7 +37441,8 @@ function gtNeatCopies(l,n){
 // ticked "Fill the gaps" go after, into the room the bands leave (fill packs
 // what will not go there onto sheets of their own). W, H: the sheet less its
 // margins, plus one gutter; blocks: the dots' keep-clear boxes.
-function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill){
+function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
+  let usedReal=false;
   const E=1e-6, hit=(x,y,w,h)=>(blocks||[]).filter(b=>x<b.x+b.w-E&&b.x<x+w-E&&y<b.y+b.h-E&&b.y<y+h-E);
   const bands=new Map(), free=[], seen=new Map(), copies=new Map(), pageOf=new Map();
   all.forEach(it=>{ const id=it.line.id; seen.set(id,(seen.get(id)||0)+1); });
@@ -37465,6 +37466,56 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill){
     const want=pageOf.get(items[0])>0?pageOf.get(items[0])-1:null;
     goTo(want!=null?want:carry);
     const it0=items[0], e=2*(it0.bl||0), ex=e+Math.max(0,gx-e), ey=e+Math.max(0,gy-e);
+    // A band given its sheet (a SHEET, or tags sent there) that has no room for
+    // a row left on it goes into the room round what is there first, and only
+    // what will not go there runs on to the next sheet
+    let squeezed=false;
+    const squeeze=k=>{
+      squeezed=true;
+      const bin=gtNestBin(W,H,'tl',(blocks||[]).concat(pg.cells));
+      const cw=Math.max(0.1,it0.sz.w+ex), ch=Math.max(0.1,it0.sz.h+ey);
+      const alt=rotate&&Math.abs(it0.sz.w-it0.sz.h)>0.01?{w:Math.max(0.1,it0.sz.h+ex),h:Math.max(0.1,it0.sz.w+ey)}:null;
+      while(k<items.length){
+        const pos=bin.add(cw,ch,alt); if(!pos) break;
+        pg.items.push({it:items[k++],pos}); pg.cells.push({x:pos.x,y:pos.y,w:pos.w,h:pos.h});
+      }
+      return k;
+    };
+    // Fit the real cut lines: the band in the pattern its outline repeats in
+    const rl=realOf&&realOf(it0);
+    const P=rl&&gtNeatPattern(rl,it0.sz.w,it0.sz.h,items.length,W-gx,H-gy,it0.bl||0,rotate);
+    if(P){
+      const b=it0.bl||0, Wl=W-gx-b, Hl=H-gy-b, C=P.cell;
+      let r=0, k=0, top=null;
+      while(k<items.length){
+        if(y+b+P.bh>Hl+E&&want!=null&&at===want&&!squeezed){ k=squeeze(k); if(k>=items.length) break; }
+        if(y+b+P.bh>Hl+E){ newPage(); r=0; }
+        if(y+b+P.bh>Hl+E){ items.slice(k).forEach(it=>{ pg.items.push({it,pos:{x:0,y:0,rot:0}}); tooBig++; }); k=items.length; break; }
+        const row=P.rows[r%P.rows.length];
+        let put=0;
+        for(let m=-1;k<items.length;m++){
+          let past=false;
+          for(const u of row.units){
+            const x=b+(row.shift+m*P.period+u.x)*C;
+            if(x<b-E) continue;
+            if(x+P.bw>Wl+E){ past=true; break; }
+            if(k>=items.length) break;
+            if(hit(x-b,y,P.bw+ex,P.bh+ey).length) continue;
+            pg.items.push({it:items[k++],pos:{x,y:y+b,bw:P.bw,bh:P.bh,deg:u.deg}});
+            pg.cells.push({x:x-b,y,w:P.bw+ex,h:P.bh+ey}); put++;
+          }
+          if(past) break;
+        }
+        top=y;
+        y+=P.dys[r%P.dys.length]*C; r++;
+        if(!put&&y+b+P.bh>Hl+E&&!pg.items.length){ pg.items.push({it:items[k++],pos:{x:0,y:0,rot:0}}); tooBig++; }
+      }
+      // the next band starts a gutter under this one's last row
+      if(top!=null) y=top+P.bh+ey;
+      usedReal=true;
+      if(want==null) carry=at;
+      return;
+    }
     const ways=[{w:it0.sz.w+ex,h:it0.sz.h+ey,rot:0}];
     if(rotate&&Math.abs(it0.sz.w-it0.sz.h)>0.01) ways.push({w:it0.sz.h+ex,h:it0.sz.w+ey,rot:1});
     // the way that fits the band in the least height (a whole sheet's rows counted)
@@ -37479,6 +37530,7 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill){
     }
     let k=0;
     while(k<items.length){
+      if(y+c.h>H+E&&want!=null&&at===want&&!squeezed){ k=squeeze(k); if(k>=items.length) break; }
       while(y+c.h>H+E) newPage();
       // one row, left to right, stepping past any dot in the way
       let x=0, put=0;
@@ -37513,7 +37565,143 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill){
   if(rest.length){ const r=fill(rest); out=out.concat(r.pages); tooBig+=r.tooBig; }
   if(!out.length) out=[{items:[]}];
   let f=0; out[out.length-1].items.forEach(({it})=>{ f+=it.sz.w*it.sz.h; });
-  return {pages:out,tooBig,fill:f};
+  return {pages:out,tooBig,fill:f,real:usedReal};
+}
+// Neat rows by the real cut lines: the pattern a design repeats in - side by
+// side, rows set over by half, every other row upside down, or every other tag
+// upside down - whichever puts n of them in the least height. Each outline is
+// drawn on a grid of 0.5 mm cells grown by r (half the gutter, or its bleed),
+// and a tag may sit wherever the grown outlines do not meet, found by sliding
+// each copy in until it touches. rl: {poly, r, key}; Wl, Hl: the room across and
+// down. Answers {rows:[{units:[{x,deg}],shift}], period, dys, bw, bh, cell} (x,
+// shift, period and dys in cells) or null where no outline is to be had.
+const gtNeatPatMemo=new Map();
+function gtNeatRaster(poly,w,h,deg,r,cell){
+  const T=deg===90?([x,y])=>[h-y,x]:deg===180?([x,y])=>[w-x,h-y]:deg===270?([x,y])=>[y,w-x]:p=>p;
+  const Pp=poly.map(T), bw=deg%180?h:w, bh=deg%180?w:h;
+  const Rc=r/cell+0.9, R=Math.ceil(Rc), o=R+1;
+  const mw=Math.ceil(bw/cell)+2*o+1, mh=Math.ceil(bh/cell)+2*o+1;
+  const S=[];
+  for(let j=0;j<mh;j++){
+    const row=new Uint8Array(mw), yy=(j-o+0.5)*cell, xs=[];
+    for(let a=0;a<Pp.length;a++){
+      const p=Pp[a], q=Pp[(a+1)%Pp.length];
+      if((p[1]<=yy&&q[1]>yy)||(q[1]<=yy&&p[1]>yy)) xs.push(p[0]+(yy-p[1])/(q[1]-p[1])*(q[0]-p[0]));
+    }
+    xs.sort((a,b)=>a-b);
+    for(let k=0;k+1<xs.length;k+=2){
+      const a=Math.max(0,Math.floor(xs[k]/cell)+o), b=Math.min(mw-1,Math.floor(xs[k+1]/cell)+o);
+      for(let c=a;c<=b;c++) row[c]=1;
+    }
+    S.push(row);
+  }
+  // grown: every edge cell spreads a disc of R cells
+  const D=S.map(s=>Uint8Array.from(s)), dxs=[];
+  for(let dy=-R;dy<=R;dy++) dxs.push(Math.floor(Math.sqrt(Math.max(0,Rc*Rc-dy*dy))));
+  for(let j=0;j<mh;j++){
+    const s=S[j];
+    for(let c=0;c<mw;c++){
+      if(!s[c]) continue;
+      if(c>0&&s[c-1]&&c<mw-1&&s[c+1]&&j>0&&S[j-1][c]&&j<mh-1&&S[j+1][c]) continue;
+      for(let dy=-R;dy<=R;dy++){
+        const jj=j+dy; if(jj<0||jj>=mh) continue;
+        const dx=dxs[dy+R], a=Math.max(0,c-dx), b=Math.min(mw-1,c+dx), d=D[jj];
+        for(let k=a;k<=b;k++) d[k]=1;
+      }
+    }
+  }
+  const span=D.map(d=>{ let a=-1,b=-1; for(let c=0;c<d.length;c++) if(d[c]){ if(a<0) a=c; b=c; } return [a,b]; });
+  return {D,span,mw,mh,bw,bh};
+}
+function gtNeatPattern(rl,w,h,n,Wl,Hl,bl,rotate){
+  const cell=0.5, r=rl.r;
+  const key=[rl.key,w,h,r,rotate].join('|');
+  let geo=gtNeatPatMemo.get(key);
+  if(geo===undefined){
+    geo=null;
+    try{
+      // B placed (ox, oy) cells from A, both by their boxes' top-left: do the grown outlines meet?
+      const meet=(A,B,ox,oy)=>{
+        const j0=Math.max(0,oy), j1=Math.min(A.mh,B.mh+oy);
+        for(let j=j0;j<j1;j++){
+          const sa=A.span[j], sb=B.span[j-oy]; if(sa[0]<0||sb[0]<0) continue;
+          const a=Math.max(sa[0],sb[0]+ox), b=Math.min(sa[1],sb[1]+ox); if(a>b) continue;
+          const ra=A.D[j], rb=B.D[j-oy];
+          for(let c=a;c<=b;c++) if(ra[c]&&rb[c-ox]) return true;
+        }
+        return false;
+      };
+      const M=new Map(), mask=d=>{ if(!M.has(d)) M.set(d,gtNeatRaster(rl.poly,w,h,d,r,cell)); return M.get(d); };
+      // slid in from far off until it touches: the step one short of that
+      const slide=(far,touch)=>{ for(let s=far;s>=1;s--) if(touch(s)) return s+1; return 1; };
+      // how far under a row of type a a row of type b can sit
+      const under=(ra,rb,period)=>{
+        const A0=mask(ra.units[0].deg), far=A0.mh+2, K=Math.ceil(A0.mw/Math.max(1,period))+2;
+        return slide(far,oy=>ra.units.some(ua=>rb.units.some(ub=>{
+          for(let m=-K;m<=K;m++) if(meet(mask(ua.deg),mask(ub.deg),rb.shift+ub.x-(ra.shift+ua.x)+m*period,oy)) return true;
+          return false; })));
+      };
+      const pats=[];
+      const bases=rotate&&Math.abs(w-h)>0.01?[0,90]:[0];
+      bases.forEach(a=>{
+        const A=mask(a), b=(a+180)%360, B=rotate?mask(b):null, far=2*A.mw+2;
+        const dAA=slide(far,s=>meet(A,A,s,0));
+        const add=(rows,period)=>{
+          const dys=rows.map((ra,i)=>under(ra,rows[(i+1)%rows.length],period));
+          // two kinds of row: the one two down must clear too
+          if(rows.length===2){ const two=under(rows[0],rows[0],period); if(dys[0]+dys[1]<two) dys[1]=two-dys[0]; }
+          pats.push({rows,period,dys,bw:A.bw*1,bh:A.bh*1});
+        };
+        const half=Math.round(dAA/2);
+        add([{units:[{x:0,deg:a}],shift:0}],dAA);
+        add([{units:[{x:0,deg:a}],shift:0},{units:[{x:0,deg:a}],shift:half}],dAA);
+        if(B){
+          const dBB=slide(far,s=>meet(B,B,s,0)), p=Math.max(dAA,dBB), hp=Math.round(p/2);
+          add([{units:[{x:0,deg:a}],shift:0},{units:[{x:0,deg:b}],shift:0}],p);
+          add([{units:[{x:0,deg:a}],shift:0},{units:[{x:0,deg:b}],shift:hp}],p);
+          // upside down every other tag along the row
+          const s=slide(far,x=>meet(A,B,x,0));
+          const pp=slide(2*far,x=>meet(A,A,x,0)||meet(B,A,x-s,0)||meet(B,B,x,0));
+          const per=Math.max(pp,s+1);
+          add([{units:[{x:0,deg:a},{x:s,deg:b}],shift:0}],per);
+          add([{units:[{x:0,deg:a},{x:s,deg:b}],shift:0},{units:[{x:0,deg:a},{x:s,deg:b}],shift:Math.round(per/2)}],per);
+        }
+      });
+      geo=pats.length?pats:null;
+    }catch(e){ geo=null; }
+    gtNeatPatMemo.set(key,geo);
+    while(gtNeatPatMemo.size>40) gtNeatPatMemo.delete(gtNeatPatMemo.keys().next().value);
+  }
+  if(!geo) return null;
+  // each tried with n tags from the top of an empty sheet: the least height wins
+  // (a whole sheet counted as its height), ties to the plainer pattern
+  const E=1e-6;
+  const cost=P=>{
+    const bw=P.bw, bh=P.bh;
+    let left=n, y=0, pages=0, rows=0, r=0, guard=0;
+    while(left>0&&guard++<10000){
+      if(y+bl+bh>Hl+E){ if(!rows) return Infinity; pages++; y=0; r=0; rows=0; continue; }
+      const row=P.rows[r%P.rows.length]; let put=0;
+      for(let m=-1;m<10000;m++){
+        let past=false;
+        for(const u of row.units){
+          const x=bl+(row.shift+m*P.period+u.x)*cell;
+          if(x<bl-E) continue;
+          if(x+bw>Wl-bl+E){ past=true; break; }
+          put++;
+        }
+        if(past) break;
+      }
+      if(!put) return Infinity;
+      left-=put; rows++;
+      if(left<=0) return pages*Hl+y+bh;
+      y+=P.dys[r%P.dys.length]*cell; r++;
+    }
+    return Infinity;
+  };
+  let best=null, bc=Infinity;
+  geo.forEach(P=>{ const c=cost(P); if(c<bc-0.01){ best=P; bc=c; } });
+  return best&&isFinite(bc)?{...best,cell}:null;
 }
 function gtNestPlan(){
   const S=gtSheet, q=gtQueue();
@@ -37660,7 +37848,16 @@ function gtNestPlan(){
         if(!best||r.pages.length<best.pages.length
           ||(r.pages.length===best.pages.length&&r.fill<best.fill-1e-6)) best=r;
       }));
-      return best; });
+      return best; },
+    // with Fit the real cut lines, each design's outline
+    S.nestReal?(()=>{
+      const poly=new Map(), r=Math.max(0,gx,gy)/2;
+      return it=>{
+        const id=it.line.designId;
+        if(!poly.has(id)){ let p=null; try{ p=flags.get(id)?flags.get(id).poly:gtNestPolyOf(gtDesign(id),size.get(id)); }catch(e){} poly.set(id,p&&p.length>2?p:null); }
+        const p=poly.get(id); return p?{poly:p,r:Math.max(r,it.bl||0),key:id+'|'+(it.bl||0)}:null;
+      };
+    })():null);
   else if(memo) packed={tooBig:memo.tooBig,fill:memo.fill,
     pages:memo.pages.map(pg=>({...pg,items:pg.items.map(({it,pos})=>({it:all[it.i],pos})).filter(x=>x.it)}))};
   else orders.forEach(cmp=>{
@@ -37698,7 +37895,7 @@ function gtNestPlan(){
   // Real cut lines: the same order packed with each tag's traced outline in
   // place of its box, several ways within a few seconds. The boxes' answer is
   // kept if it is no worse, so turning this on can only save paper.
-  let realUsed=false;
+  let realUsed=!!(neat&&packed.real);
   if(!neat&&S.nestReal&&all.length>1){
     const poly=new Map(ids.map(id=>[id,flags.get(id)?flags.get(id).poly:gtNestPolyOf(gtDesign(id),size.get(id))]));
     if([...poly.values()].some(Boolean)){
@@ -37797,7 +37994,7 @@ function gtNestPlan(){
         if(!best||r.pages.length<best.pages.length
           ||(r.pages.length===best.pages.length&&r.fill<best.fill-1e-6)) best=r;
       }));
-      after=best.pages;
+      after=after.concat(best.pages);
     }
     pages=handPages.concat(after);
   }
@@ -37810,7 +38007,9 @@ function gtNestPlan(){
     const turnOf=pos=>pos.bw>0?(Number(pos.deg)||0):(pos.rot?90:0);
     pg.items.forEach(a=>{ const b=box(a), e=a.pos.bw>0?0:2*(a.it.bl||0); uw=Math.max(uw,a.pos.x+b.w+e); uh=Math.max(uh,a.pos.y+b.h+e); });
     // centred, unless a dot is in the way: the sheet is then kept as packed
-    let ox=(manual||dotBlocks.length)?x0:(S.paperW-uw)/2, oy=(manual||dotBlocks.length)?y0:(S.paperH-uh)/2;
+    // Neat rows keep to the top, so the room left is one piece at the foot -
+    // centred, it was split above and below, and a tag sent there fitted neither
+    let ox=(manual||dotBlocks.length)?x0:(S.paperW-uw)/2, oy=(manual||dotBlocks.length||neat)?y0:(S.paperH-uh)/2;
     // a sheet with tags turned off the quarter is centred on what is cut
     if(!(manual||dotBlocks.length)&&pg.items.some(a=>a.pos.ext)){
       let ux0=Infinity,uy0=Infinity,ux1=-Infinity,uy1=-Infinity;
@@ -41216,7 +41415,7 @@ function gtNestSync(){
   on.checked=!!gtSheet.nestOn;
   on.disabled=!!gtLayout;
   const real=document.getElementById('gtNestRealOn');
-  if(real){ real.checked=!!gtSheet.nestReal; real.disabled=!!gtLayout||!gtSheet.nestOn||!!gtSheet.nestNeat; }
+  if(real){ real.checked=!!gtSheet.nestReal; real.disabled=!!gtLayout||!gtSheet.nestOn; }
   const neat=document.getElementById('gtNestNeatOn');
   if(neat){ neat.checked=!!gtSheet.nestNeat; neat.disabled=!!gtLayout||!gtSheet.nestOn; }
   gtNestMirrorSync();
@@ -41227,7 +41426,7 @@ function gtNestSync(){
   const plan=gtNestPlan(), tags=gtQueue().length;
   if(!plan.length){ msg.textContent='On — nothing on the order yet.'; return; }
   msg.innerHTML=`${tags} tag${tags===1?'':'s'} nested on ${plan.length} sheet${plan.length===1?'':'s'}, `
-    +(gtSheet.nestNeat?'each design in neat rows of its own. '
+    +(gtSheet.nestNeat?'each design in neat rows of its own'+(gtSheet.nestReal?(plan.real?', fitted by their real cut lines':', boxes - no design has a traced line')+'. ':'. ')
       :gtSheet.nestReal?(plan.real?'packed by their real cut lines'
         :'real cut lines tried — boxes were as good, or no design has a traced line')+'. ':'each design cut to its own size. ')
     +'Moving a placeholder keeps until the order, a design or the sheet changes; Reset placeholders nests again.'
