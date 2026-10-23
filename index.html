@@ -33727,8 +33727,9 @@ async function gtResolveFromRoot(ask){
 }
 // Custom Gift Tag 2 (combo) is a fourth page, a test of the three in one: a
 // folder and library of its own, its designs read live out of
-// the three page folders in its own root (gtComboLive). It is not in GT_PAGES, so Magic Create never sends
-// a line to it and nothing on the other pages reads it.
+// the three page folders in its own root (gtComboLive). It is last in GT_PAGES: Magic Create
+// sends a line to it when a route says so or when it is the page open, and
+// nothing on the other pages reads it.
 const gtOrders={festive:null,custom:null,sticker:null,combo:null};
 // whose parked order this page's housekeeping may change: Festive, Custom and
 // Sticker each other's as always, Custom Gift Tag 2 only its own
@@ -38139,6 +38140,7 @@ async function gtNoReadPages(){
     gtNoTake(gtNoInSheet(rec&&rec.manifest&&rec.manifest.sheet));
   };
   for(const p of GT_PAGES){
+    if(p.mode==='combo') continue;     // its run numbers are its own
     await Promise.race([one(p).catch(()=>{}),new Promise(r=>setTimeout(r,8000))]);
   }
   gtNoFold();
@@ -48355,7 +48357,7 @@ const MC_TILES={
     // day somebody adds one. A tile that is more than one page says so here
     // rather than the picker knowing the names of any of them.
     choices:()=>GT_PAGES.map(p=>({value:'giftTag:'+p.mode,
-      label:p.name+' Gift Tag',page:p.mode})),
+      label:p.title||p.name+' Gift Tag',page:p.mode})),
     bundles:mcGiftBundles,
     // a sheet with a back on any of its tags is two files, front then back
     // each on its own paper's sheet (meta.finish), as Edit opens it
@@ -52870,7 +52872,12 @@ function mcLineForSku(sku){
 // added next to these two is a name on the list below.
 const GT_PAGES=[{mode:'festive',name:'Festive',dir:'dir',lib:'lib'},
                 {mode:'custom', name:'Custom', dir:'dir:custom',lib:'lib:custom'},
-                {mode:'sticker',name:'Sticker',dir:'dir:sticker',lib:'lib:sticker'}];
+                {mode:'sticker',name:'Sticker',dir:'dir:sticker',lib:'lib:sticker'},
+                // Custom Gift Tag 2: last, so a SKU no route names still finds
+                // its design on Festive or Custom first - this page's designs
+                // are theirs, read live. Only a route to it, or this page being
+                // the one open, sends a line here.
+                {mode:'combo',  name:'Custom 2',title:'Custom Gift Tag 2',dir:'dir:combo',lib:'lib:combo'}];
 const mcIsGtDest=d=>GT_PAGES.some(p=>p.mode===d);
 // the page on screen answers first, so a design of the same name on both goes
 // where the operator is already standing
@@ -52891,6 +52898,7 @@ async function mcGtReadNames(page){
   try{
     const dir=await gtIdbGet(page.dir).catch(()=>null);
     if(dir){
+      if(page.mode==='combo'&&await gtDirOk(dir)) return await mcGtComboNames(dir);
       if(await gtDirOk(dir)){
         const man=(await gtReadAll(dir)).man||{};
         // and how far that page has counted (see gtNo)
@@ -52903,6 +52911,28 @@ async function mcGtReadNames(page){
     const rec=await gtIdbGet(page.lib).catch(()=>null);
     return ((rec&&rec.manifest&&rec.manifest.designs)||[]).map(d=>({id:d.id,name:d.name}));
   }catch(e){ return []; }
+}
+// Custom Gift Tag 2's names as the page itself lists them (gtComboLive): its
+// own library in GT_COMBO_HOME first, then the Festive and Custom folders'
+// designs read live - an id one folder already used given its page's name in
+// front, and one changed on this page its own copy. Its run numbers are its own,
+// so none are taken from it.
+async function mcGtComboNames(root){
+  let home=null; try{ home=await root.getDirectoryHandle(GT_COMBO_HOME); }catch(e){}
+  const own=home?(((await gtReadAll(home)).man||{}).designs||[]):[];
+  const out=own.map(d=>({id:d.id,name:d.name}));
+  const ownIds=new Set(out.map(d=>d.id)), liveIds=new Set();
+  for(const kind of GT_LIVE_KINDS){
+    let dir=null; try{ dir=await root.getDirectoryHandle(GT_LIVE_DIRS[kind]); }catch(e){ continue; }
+    let man=null; try{ man=(await gtReadAll(dir)).man; }catch(e){}
+    for(const x of (man&&man.designs)||[]){
+      if(!x||!x.id) continue;
+      const id=liveIds.has(x.id)?kind+'~'+x.id:x.id;
+      liveIds.add(x.id);
+      if(!ownIds.has(id)) out.push({id,name:x.name});
+    }
+  }
+  return out;
 }
 // Read on the way into the summary and again after anything is added, so the
 // rows say what is true of both pages rather than of the last one visited.
@@ -52952,6 +52982,7 @@ async function mcGtAdoptNew(skus){
   const stem=n=>n.replace(/\.[^.]+$/,'').trim().toLowerCase();
   const found=[];
   for(const p of mcGtPages()){
+    if(p.mode==='combo') continue;     // its designs are Festive's and Custom's
     const dir=await gtIdbGet(p.dir).catch(()=>null);
     if(!dir||!await gtDirOk(dir)) continue;
     let hit=false;
@@ -53567,6 +53598,7 @@ document.getElementById('mcMadeOpen').addEventListener('click',()=>{
 // the route, so it is mapped once for everybody rather than once per person.
 const MC_DESTS=[{v:'print',label:'Print sheet'},{v:'festive',label:'Festive gift tag'},
   {v:'custom',label:'Custom gift tag'},{v:'sticker',label:'Sticker gift tag'},
+  {v:'combo',label:'Custom gift tag 2'},
   {v:'placeCard',label:'Place Card'},
   {v:'copy',label:'Copy file'},
   {v:'skip',label:'Not added here'}];
@@ -54020,6 +54052,7 @@ const mcCellDest=v=>{
   if(/place\s*-?\s*card/.test(s)) return 'placeCard';
   // "Print – no template" is a print row; only a bare "no template" is a copy
   if(/copy|file only/.test(s)||(/no template/.test(s)&&!/print|sheet/.test(s))) return 'copy';
+  if(/custom.*\b2\b|tag\s*2\b/.test(s)) return 'combo';
   if(/festive/.test(s)) return 'festive';
   if(/sticker/.test(s)) return 'sticker';
   if(/custom/.test(s)&&/gift|tag/.test(s)) return 'custom';
@@ -58605,8 +58638,11 @@ function mcGiftWire(it){
     const q=String(term||'').trim().toLowerCase();
     const here=mcLinePage(it)||gtMode;
     const out=[];
+    // Custom Gift Tag 2's designs are Festive's and Custom's read live: the
+    // same names over again, so neither side lists the other's
+    const twin=(a,b)=>a==='combo'&&GT_LIVE_KINDS.includes(b);
     GT_PAGES.forEach(pg=>{
-      if(pg.mode===here) return;
+      if(pg.mode===here||twin(pg.mode,here)||twin(here,pg.mode)) return;
       (mcGtNames[pg.mode]||[]).forEach(d=>{
         if(q&&!String(d.name||'').toLowerCase().includes(q)) return;
         out.push({pg,d});
