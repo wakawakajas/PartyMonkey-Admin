@@ -37404,13 +37404,19 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill){
   const bands=new Map(), free=[];
   all.forEach(it=>{
     if(it.line.nestFree){ free.push(it); return; }
-    const k=it.line.designId+'|'+(it.bl||0);
+    const k=it.line.designId+'|'+(it.bl||0)+'|'+(it.line.nestPage>0?it.line.nestPage:'');
     if(!bands.has(k)) bands.set(k,[]);
     bands.get(k).push(it);
   });
-  const pages=[]; let pg=null, y=0, tooBig=0;
-  const newPage=()=>{ pg={items:[],cells:[]}; pages.push(pg); y=0; };
+  // each sheet keeps how far down its rows have got (y); a band with a SHEET of
+  // its own starts on that sheet, the rest go on from where the last one ended
+  const pages=[]; let pg=null, y=0, tooBig=0, at=0;
+  const goTo=n=>{ if(pg) pg.y=y; while(pages.length<=n) pages.push({items:[],cells:[],y:0}); at=n; pg=pages[n]; y=pg.y; };
+  const newPage=()=>goTo(pg?at+1:0);
+  let carry=0;
   bands.forEach(items=>{
+    const want=items[0].line.nestPage>0?items[0].line.nestPage-1:null;
+    goTo(want!=null?want:carry);
     const it0=items[0], e=2*(it0.bl||0), ex=e+Math.max(0,gx-e), ey=e+Math.max(0,gy-e);
     const ways=[{w:it0.sz.w+ex,h:it0.sz.h+ey,rot:0}];
     if(rotate&&Math.abs(it0.sz.w-it0.sz.h)>0.01) ways.push({w:it0.sz.h+ex,h:it0.sz.w+ey,rot:1});
@@ -37421,11 +37427,12 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill){
     const c=ways.reduce((a,b)=>tall(b)<tall(a)-E?b:a);
     if(!isFinite(tall(c))){
       items.forEach(it=>{ newPage(); pg.items.push({it,pos:{x:0,y:0,rot:0}}); tooBig++; y=H; });
+      if(want==null) carry=at;
       return;
     }
     let k=0;
     while(k<items.length){
-      if(!pg||y+c.h>H+E) newPage();
+      while(y+c.h>H+E) newPage();
       // one row, left to right, stepping past any dot in the way
       let x=0, put=0;
       while(k<items.length&&x+c.w<=W+E){
@@ -37439,7 +37446,9 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill){
       // a row the dots left no room in: the next row down is tried
       if(!put&&y+c.h>H+E&&!pg.items.length){ pg.items.push({it:items[k++],pos:{x:0,y:0,rot:c.rot}}); tooBig++; }
     }
+    if(want==null) carry=at;
   });
+  if(pg) pg.y=y;
   // the gap-fillers: into the room round the bands, sheet by sheet, then sheets of their own
   let rest=free;
   pages.forEach(p=>{
@@ -37478,7 +37487,7 @@ function gtNestPlan(){
               t.more?JSON.stringify(t.more):0,(t.extra||[]).length]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
-  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId+'|'+(gtLineBleed(l)??'')+'|'+(l.shape||'')+(l.nestFree?'|f':'')),dsig,!!S.nestNeat,Object.keys(gtFolderShapes||{}).length,S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId+'|'+(gtLineBleed(l)??'')+'|'+(l.shape||'')+(l.nestFree?'|f':'')+(l.nestPage>0?'|p'+l.nestPage:'')),dsig,!!S.nestNeat,Object.keys(gtFolderShapes||{}).length,S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
     S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,S.nestHole||0,marks,gtDotClear(),S.qrOn?(Number(S.qrDist)||10):0]);
   // tags moved by hand (gtNestHandKeep) hold for this very packing only: a new
   // line, a size or a gap changed, and the sheets are packed afresh
@@ -39776,6 +39785,18 @@ function gtSheetDrag(c,side){
     try{ c.setPointerCapture(e.pointerId); }catch(err){}
     gtDraw();
   };
+  // Contours on a nested sheet: a double-click picks every placeholder of that
+  // design on the sheet, so a design of many tags is moved as one
+  c.addEventListener('dblclick',e=>{
+    if(!gtSlotEdit) return;
+    const s=hitSlot(at(e)), en=gtNestEntry(); if(!s||!en) return;
+    const lineOf=x=>{ const k=en.slots.indexOf(x); return k>=0?en.queue[k]:null; };
+    const l=lineOf(s.slot); if(!l) return;
+    if(!e.shiftKey) gtSelSet.clear();
+    gtSheet.slots.forEach(x=>{ const m=lineOf(x); if(m&&m.designId===l.designId) gtSelSet.add(x.id); });
+    gtSelSlot=s.slot.id;
+    gtSlotCardSync(); gtSlotScopeSync(); gtDraw();
+  });
   c.addEventListener('pointerdown',e=>{
     // a press starts fresh: nothing left over from a drag that never finished
     if(marq||sdrag||hdrag||pan||drag){ marq=null; gtMarquee=null; sdrag=null; hdrag=null; pan=null; drag=null; c.style.cursor=''; }
@@ -40230,7 +40251,9 @@ function gtRenderOrder(){
         ${`<label class="click-tog" title="This line bleeds its own figure; every other line follows the sheet's bleed (or its design's own)">
           <input type="checkbox" data-gtl="bleedOn"${l.bleed&&l.bleed.on?' checked':''}/>Own bleed for this line</label>`}
         ${gtSheet.nestOn&&gtSheet.nestNeat?`<label class="click-tog" title="Neat rows: this line's tags are nested into the room the other designs' rows leave, instead of rows of their own">
-          <input type="checkbox" data-gtl="nestFree"${l.nestFree?' checked':''}/>Fill the gaps</label>`:''}
+          <input type="checkbox" data-gtl="nestFree"${l.nestFree?' checked':''}/>Fill the gaps</label>
+          ${l.nestFree?'':`<label class="field" style="max-width:90px;margin:0;" title="The sheet this design's rows start on; blank goes on from the line before"><span>SHEET</span>
+          <input type="number" min="1" step="1" placeholder="auto" value="${l.nestPage>0?l.nestPage:''}" data-gtl="nestPage"/></label>`}`:''}
         ${l.bleed&&l.bleed.on?`<label class="field" style="max-width:110px;margin:0;"><span>BLEED (mm)</span>
           <input type="number" step="0.1" min="0" value="${round(Number(l.bleed.mm)||0)}" data-gtl="bleedMm"/></label>
           <label class="field" style="max-width:150px;margin:0;" title="How this line's bleed is made - the other lines keep the sheet's style"><span>BLEED STYLE</span>
@@ -40465,6 +40488,11 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
   }
   if(lk==='nestFree'){
     if(e.target.checked) line.nestFree=true; else delete line.nestFree;
+    gtNestCache=null; gtRenderOrder(); gtNestSync(); gtDraw(); return;
+  }
+  if(lk==='nestPage'){
+    const v=Math.floor(Number(e.target.value)||0);
+    if(v>0) line.nestPage=v; else delete line.nestPage;
     gtNestCache=null; gtNestSync(); gtDraw(); return;
   }
   if(lk==='split'){
