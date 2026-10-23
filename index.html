@@ -37657,12 +37657,19 @@ function gtLineBleedMode(line){
   const b=line&&line.bleed;
   return b&&b.on&&GT_BLEED_MODES.includes(b.mode)?b.mode:null;
 }
+// and its Trim edge first (px) the same way
+function gtLineTrimPx(line){
+  const b=line&&line.bleed;
+  const v=b&&b.on?Number(b.trimPx):NaN;
+  return isFinite(v)&&v>=0?Math.min(50,Math.round(v)):null;
+}
 function gtWithLineMode(line,fn){
-  const m=gtLineBleedMode(line);
-  if(!m||m===gtSheet.bleedMode) return fn();
-  const was=gtSheet.bleedMode;
-  gtSheet.bleedMode=m;
-  try{ return fn(); } finally{ gtSheet.bleedMode=was; }
+  const m=gtLineBleedMode(line), t=gtLineTrimPx(line);
+  if((!m||m===gtSheet.bleedMode)&&(t==null||t===(Number(gtSheet.bleedTrimPx)||0))) return fn();
+  const was=gtSheet.bleedMode, wasT=gtSheet.bleedTrimPx;
+  if(m) gtSheet.bleedMode=m;
+  if(t!=null) gtSheet.bleedTrimPx=t;
+  try{ return fn(); } finally{ gtSheet.bleedMode=was; gtSheet.bleedTrimPx=wasT; }
 }
 function gtLineBleed(line){
   const b=line&&line.bleed;
@@ -37670,7 +37677,8 @@ function gtLineBleed(line){
 }
 // what a line's own bleed is kept as, wherever the line is copied to
 const gtLineBleedKept=l=>({...(l&&l.bleed&&l.bleed.on?{bleed:{on:true,mm:Math.max(0,Number(l.bleed.mm)||0),
-    ...(GT_BLEED_MODES.includes(l.bleed.mode)?{mode:l.bleed.mode}:{})}}:{}),
+    ...(GT_BLEED_MODES.includes(l.bleed.mode)?{mode:l.bleed.mode}:{}),
+    ...(gtLineTrimPx(l)!=null?{trimPx:gtLineTrimPx(l)}:{})}}:{}),
   // and its own back (see gtBackOf), which travels with it the same way
   ...(l&&typeof l.back==='string'?{back:l.back}:{}),
   // and its Break up tick on a sticker sheet (gtLineSplits): a Magic Create
@@ -37799,9 +37807,11 @@ function gtDrawArt(ctx,img,x,y,w,h,b,sc,mode,id,gap){
   const gx=(gap&&mode!=='offset'&&gap.x>0.05)?gap.x:0;
   const gy=(gap&&mode!=='offset'&&gap.y>0.05)?gap.y:0;
   // Extend, Content-aware and AI fill — and Mirror or Stretch once there is an
-  // edge to trim or a gap to cross — are made the Custom Print Template's way
+  // edge to trim or a gap to cross, and Offset with an edge to trim — are made
+  // the Custom Print Template's way
   if(b>0&&w>0&&h>0&&(mode==='extend'||mode==='content'||mode==='ai'
-     ||((mode==='mirror'||mode==='scale')&&(trim>0||gx>0||gy>0)))){
+     ||((mode==='mirror'||mode==='scale')&&(trim>0||gx>0||gy>0))
+     ||(mode==='offset'&&trim>0))){
     const bx=b+gx, by=b+gy;
     if(mode==='scale'&&!gx&&!gy){
       const t=Math.min(trim,Math.floor((Math.min(img.naturalWidth,img.naturalHeight)-2)/2));
@@ -39629,7 +39639,9 @@ function gtRenderOrder(){
         ${l.bleed&&l.bleed.on?`<label class="field" style="max-width:110px;margin:0;"><span>BLEED (mm)</span>
           <input type="number" step="0.1" min="0" value="${round(Number(l.bleed.mm)||0)}" data-gtl="bleedMm"/></label>
           <label class="field" style="max-width:150px;margin:0;" title="How this line's bleed is made - the other lines keep the sheet's style"><span>BLEED STYLE</span>
-          <select data-gtl="bleedMode">${GT_BLEED_MODES.map(m=>`<option value="${m}"${(gtLineBleedMode(l)||gtSheet.bleedMode)===m?' selected':''}>${GT_BLEED_MODE_NAMES[m]}</option>`).join('')}</select></label>`:''}
+          <select data-gtl="bleedMode">${GT_BLEED_MODES.map(m=>`<option value="${m}"${(gtLineBleedMode(l)||gtSheet.bleedMode)===m?' selected':''}>${GT_BLEED_MODE_NAMES[m]}</option>`).join('')}</select></label>
+          <label class="field" style="max-width:120px;margin:0;" title="Pixels shaved off this line's artwork edge before its bleed is made - for a thin white or dirty rim. The other lines keep the sheet's figure"><span>TRIM EDGE (px)</span>
+          <input type="number" step="1" min="0" max="50" value="${gtLineTrimPx(l)??(Number(gtSheet.bleedTrimPx)||0)}" data-gtl="bleedTrim"/></label>`:''}
       </div>
       <div class="gt-pick">
         ${gtArt(l.designId)}
@@ -39851,7 +39863,8 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
   if(lk==='bleedOn'){
     if(e.target.checked){ const d=gtDesign(line.designId);
       line.bleed={on:true,mm:Math.round((d?gtBleedOf(d):(gtSheet.bleedOn?Number(gtSheet.bleed)||0:0))*10)/10,
-        mode:GT_BLEED_MODES.includes(gtSheet.bleedMode)?gtSheet.bleedMode:'offset'}; }
+        mode:GT_BLEED_MODES.includes(gtSheet.bleedMode)?gtSheet.bleedMode:'offset',
+        trimPx:Math.max(0,Math.min(50,Math.round(Number(gtSheet.bleedTrimPx)||0)))}; }
     else delete line.bleed;
     gtNestCache=null; gtRenderOrder(); gtDraw(); return;
   }
@@ -39865,6 +39878,11 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
   }
   if(lk==='bleedMode'){
     if(line.bleed&&GT_BLEED_MODES.includes(e.target.value)){ line.bleed.mode=e.target.value; gtNestCache=null; gtDraw(); }
+    return;
+  }
+  if(lk==='bleedTrim'){
+    const v=parseFloat(e.target.value);
+    if(line.bleed&&isFinite(v)&&v>=0){ line.bleed.trimPx=Math.min(50,Math.round(v)); gtDraw(); }
     return;
   }
   if(lk==='bleedMm'){
