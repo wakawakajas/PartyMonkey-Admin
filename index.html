@@ -37483,7 +37483,14 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
     };
     // Fit the real cut lines: the band in the pattern its outline repeats in
     const rl=realOf&&realOf(it0);
-    const P=rl&&gtNeatPattern(rl,it0.sz.w,it0.sz.h,items.length,W-gx,H-gy,it0.bl||0,rotate);
+    const P0=rl&&gtNeatPattern(rl,it0.sz.w,it0.sz.h,items.length,W-gx,H-gy,it0.bl||0,rotate);
+    // kept only where it beats the boxes: a box's gutter is exact, and a shape
+    // that does not nest (a rectangle) packs no closer by its outline
+    const boxCost=(()=>{ const ws=[[it0.sz.w,it0.sz.h]]; if(rotate&&Math.abs(it0.sz.w-it0.sz.h)>0.01) ws.push([it0.sz.h,it0.sz.w]);
+      return Math.min(...ws.map(([w,h])=>{ const cw=w+ex, ch=h+ey, cols=Math.floor((W+E)/cw), per=Math.floor((H+E)/ch);
+        if(cols<1||per<1) return Infinity; const rows=Math.ceil(items.length/cols);
+        return Math.floor((rows-1)/per)*(H-gy)+((rows-1)%per)*ch+h+e; })); })();
+    const P=P0&&P0.cost<boxCost-0.5?P0:null;
     if(P){
       const b=it0.bl||0, Wl=W-gx-b, Hl=H-gy-b, C=P.cell;
       let r=0, k=0, top=null;
@@ -37576,10 +37583,11 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
 // down. Answers {rows:[{units:[{x,deg}],shift}], period, dys, bw, bh, cell} (x,
 // shift, period and dys in cells) or null where no outline is to be had.
 const gtNeatPatMemo=new Map();
-function gtNeatRaster(poly,w,h,deg,r,cell){
+function gtNeatRaster(poly,w,h,deg,rx,ry,cell){
   const T=deg===90?([x,y])=>[h-y,x]:deg===180?([x,y])=>[w-x,h-y]:deg===270?([x,y])=>[y,w-x]:p=>p;
   const Pp=poly.map(T), bw=deg%180?h:w, bh=deg%180?w:h;
-  const Rc=r/cell+0.9, R=Math.ceil(Rc), o=R+1;
+  // grown by rx across and ry down (half of each gap, or the bleed), and half a cell more for the sampling
+  const Ax=rx/cell+0.5, Ay=Math.max(0.5,ry/cell+0.5), R=Math.ceil(Math.max(Ax,Ay)), o=R+1;
   const mw=Math.ceil(bw/cell)+2*o+1, mh=Math.ceil(bh/cell)+2*o+1;
   const S=[];
   for(let j=0;j<mh;j++){
@@ -37595,9 +37603,9 @@ function gtNeatRaster(poly,w,h,deg,r,cell){
     }
     S.push(row);
   }
-  // grown: every edge cell spreads a disc of R cells
+  // grown: every edge cell spreads an ellipse, Ax cells across and Ay down
   const D=S.map(s=>Uint8Array.from(s)), dxs=[];
-  for(let dy=-R;dy<=R;dy++) dxs.push(Math.floor(Math.sqrt(Math.max(0,Rc*Rc-dy*dy))));
+  for(let dy=-R;dy<=R;dy++) dxs.push(Math.abs(dy)>Ay?-1:Math.floor(Ax*Math.sqrt(Math.max(0,1-(dy/Ay)*(dy/Ay)))));
   for(let j=0;j<mh;j++){
     const s=S[j];
     for(let c=0;c<mw;c++){
@@ -37605,7 +37613,8 @@ function gtNeatRaster(poly,w,h,deg,r,cell){
       if(c>0&&s[c-1]&&c<mw-1&&s[c+1]&&j>0&&S[j-1][c]&&j<mh-1&&S[j+1][c]) continue;
       for(let dy=-R;dy<=R;dy++){
         const jj=j+dy; if(jj<0||jj>=mh) continue;
-        const dx=dxs[dy+R], a=Math.max(0,c-dx), b=Math.min(mw-1,c+dx), d=D[jj];
+        const dx=dxs[dy+R]; if(dx<0) continue;
+        const a=Math.max(0,c-dx), b=Math.min(mw-1,c+dx), d=D[jj];
         for(let k=a;k<=b;k++) d[k]=1;
       }
     }
@@ -37614,8 +37623,8 @@ function gtNeatRaster(poly,w,h,deg,r,cell){
   return {D,span,mw,mh,bw,bh};
 }
 function gtNeatPattern(rl,w,h,n,Wl,Hl,bl,rotate){
-  const cell=0.5, r=rl.r;
-  const key=[rl.key,w,h,r,rotate].join('|');
+  const cell=0.25;
+  const key=[rl.key,w,h,rl.rx,rl.ry,rotate].join('|');
   let geo=gtNeatPatMemo.get(key);
   if(geo===undefined){
     geo=null;
@@ -37631,7 +37640,7 @@ function gtNeatPattern(rl,w,h,n,Wl,Hl,bl,rotate){
         }
         return false;
       };
-      const M=new Map(), mask=d=>{ if(!M.has(d)) M.set(d,gtNeatRaster(rl.poly,w,h,d,r,cell)); return M.get(d); };
+      const M=new Map(), mask=d=>{ if(!M.has(d)) M.set(d,gtNeatRaster(rl.poly,w,h,d,rl.rx,rl.ry,cell)); return M.get(d); };
       // slid in from far off until it touches: the step one short of that
       const slide=(far,touch)=>{ for(let s=far;s>=1;s--) if(touch(s)) return s+1; return 1; };
       // how far under a row of type a a row of type b can sit
@@ -37701,7 +37710,7 @@ function gtNeatPattern(rl,w,h,n,Wl,Hl,bl,rotate){
   };
   let best=null, bc=Infinity;
   geo.forEach(P=>{ const c=cost(P); if(c<bc-0.01){ best=P; bc=c; } });
-  return best&&isFinite(bc)?{...best,cell}:null;
+  return best&&isFinite(bc)?{...best,cell,cost:bc}:null;
 }
 function gtNestPlan(){
   const S=gtSheet, q=gtQueue();
@@ -37851,11 +37860,11 @@ function gtNestPlan(){
       return best; },
     // with Fit the real cut lines, each design's outline
     S.nestReal?(()=>{
-      const poly=new Map(), r=Math.max(0,gx,gy)/2;
+      const poly=new Map(), hx=Math.max(0,gx)/2, hy=Math.max(0,gy)/2;
       return it=>{
         const id=it.line.designId;
         if(!poly.has(id)){ let p=null; try{ p=flags.get(id)?flags.get(id).poly:gtNestPolyOf(gtDesign(id),size.get(id)); }catch(e){} poly.set(id,p&&p.length>2?p:null); }
-        const p=poly.get(id); return p?{poly:p,r:Math.max(r,it.bl||0),key:id+'|'+(it.bl||0)}:null;
+        const p=poly.get(id); return p?{poly:p,rx:Math.max(hx,it.bl||0),ry:Math.max(hy,it.bl||0),key:id+'|'+(it.bl||0)}:null;
       };
     })():null);
   else if(memo) packed={tooBig:memo.tooBig,fill:memo.fill,
