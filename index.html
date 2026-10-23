@@ -7167,8 +7167,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <label class="click-tog" title="Packs each tag by its traced cut line instead of the box round it, so round and odd shapes sit in one another's gaps and fewer sheets are needed. Tags with no traced line stay boxes. Takes a few seconds on a big order."><input type="checkbox" id="gtNestRealOn"/>Fit the real cut lines (saves more paper)</label>
           </div>
             <div class="click-row">
-            <label class="field gt-inline" style="display:inline-flex;align-items:center;gap:6px;" title="Clear paper kept between each registration dot (and the QR code) and the nearest tag's print, bleed included. The cutter's camera has to see the dots; smaller fits more tags in the corners."><span>SPACE ROUND DOTS (MM)</span>
-              <input type="number" id="gtNestDotClear" min="0" step="0.5" value="1" style="width:70px;"/></label>
+            <label class="field gt-inline" style="display:inline-flex;align-items:center;gap:6px;" title="Clear paper kept between each registration dot (and the QR code) and the nearest tag's print, bleed included. The cutter's camera has to see the dots; smaller fits more tags in the corners. Below 0 a tag may print that far over a dot's edge."><span>SPACE ROUND DOTS (MM)</span>
+              <input type="number" id="gtNestDotClear" min="-10" step="0.5" value="1" style="width:70px;"/></label>
           </div>
             <div class="calc" id="gtNestMsg" style="margin-top:8px;"></div>
           </div>
@@ -31678,6 +31678,7 @@ let gtBaseImg=null;                // the sheet's base layer, printed over the t
 // what is saved.
 let gtSlotsBase=gtSheet.slots;
 let gtNestCache=null;              // {sig,plan}
+let gtNestHand=null;               // nested sheets arranged by hand: {sig,pages:[[{i,slot}]]} (gtNestHandKeep)
 Object.defineProperty(gtSheet,'slots',{configurable:true,enumerable:true,
   get(){ const e=gtNestEntry(); return e?e.slots:gtSlotsBase; },
   set(v){ gtSlotsBase=v; }});
@@ -36421,7 +36422,8 @@ function gtCutFree(free,P){
 // bottom (its gutter), taken off the dot's left and top so the space round a
 // dot is the same on every side rather than that gutter more on two of them.
 // The QR code keeps qrPad (pad where not given) round it.
-const gtDotClear=()=>{ const v=Number(gtSheet.nestDotClear); return isFinite(v)&&v>=0?v:1; };
+// below 0 a tag may print over the edge of a dot, as far in as asked
+const gtDotClear=()=>{ const v=Number(gtSheet.nestDotClear); return isFinite(v)&&v>=-10?v:1; };
 function gtDotBlocks(x0,y0,W,H,pad,flipY,lead,qrPad){
   const out=[];
   let dots=[]; try{ dots=gtMarks()||[]; }catch(e){}
@@ -36894,7 +36896,10 @@ function gtNestPlan(){
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
   const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId+'|'+(gtLineBleed(l)??'')+'|'+(l.shape||'')),dsig,Object.keys(gtFolderShapes||{}).length,S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
     S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,S.nestHole||0,marks,gtDotClear(),S.qrOn?(Number(S.qrDist)||10):0]);
-  if(gtNestCache&&gtNestCache.sig===sig) return gtNestCache.plan;
+  // tags moved by hand (gtNestHandKeep) hold for this very packing only: a new
+  // line, a size or a gap changed, and the sheets are packed afresh
+  if(gtNestHand&&gtNestHand.sig!==sig) gtNestHand=null;
+  if(gtNestCache&&gtNestCache.sig===sig&&gtNestCache.hand===gtNestHand) return gtNestCache.plan;
   // A figure being typed (a gap, a size, a scale) changes the sheet on every
   // keystroke, and packing a sheet by its cut lines takes seconds: the page
   // froze for each digit. Until the typing stops the sheet keeps the packing it
@@ -37079,7 +37084,46 @@ function gtNestPlan(){
       }catch(e){ if(e!=='late') throw e; }
     }
   }
-  const pages=packed.pages, tooBig=packed.tooBig;
+  let pages=packed.pages; const tooBig=packed.tooBig;
+  // Sheets arranged by hand keep each tag where it was put, and the room left
+  // round them is filled with the tags of the sheets after, in their order;
+  // what is still over is packed onto sheets of its own after them.
+  const H=gtNestHand;
+  if(H){
+    const byI=new Map(all.map(it=>[it.i,it])), held=new Set();
+    H.pages.forEach(pg=>pg.forEach(h=>held.add(h.i)));
+    let rest=pages.flatMap(pg=>pg.items.map(a=>byI.get(a.it.i)||a.it)).filter(it=>!held.has(it.i));
+    const foot=it=>{ const e=2*(it.bl||0); return {ex:e+Math.max(0,gx-e),ey:e+Math.max(0,gy-e)}; };
+    const handPages=H.pages.map(pg=>{
+      const fixed=pg.map(h=>({it:byI.get(h.i),slot:h.slot})).filter(f=>f.it);
+      // a tag held where it was put is a block in the bin, its bleed and gutter round it
+      const blocks=dotBlocks.concat(fixed.map(({it,slot})=>{
+        const b=it.bl||0, {ex,ey}=foot(it);
+        return {x:slot.x-b-x0,y:slot.y-b-y0,w:slot.w+ex,h:slot.h+ey};
+      }));
+      const bin=gtNestBin(availW+gx,availH+gy,'tl',blocks), items=[];
+      rest=rest.filter(it=>{
+        const {ex,ey}=foot(it);
+        const alt=(S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)
+          ?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
+        const pos=bin.add(Math.max(0.1,it.sz.w+ex),Math.max(0.1,it.sz.h+ey),alt);
+        if(!pos) return true;
+        items.push({it,pos}); return false;
+      });
+      return {fixed,items,hand:true};
+    });
+    let after=[];
+    if(rest.length){
+      let best=null;
+      orders.forEach(cmp=>Object.keys(GT_NEST_SCORE).forEach(mode=>{
+        const r=packWith(rest.slice().sort(cmp),mode);
+        if(!best||r.pages.length<best.pages.length
+          ||(r.pages.length===best.pages.length&&r.fill<best.fill-1e-6)) best=r;
+      }));
+      after=best.pages;
+    }
+    pages=handPages.concat(after);
+  }
   const plan=pages.map((pg,at)=>{
     let uw=0,uh=0;
     // what each tag fills on the sheet: its width and height, swapped where it went in turned
@@ -37100,7 +37144,11 @@ function gtNestPlan(){
       });
       ox=(S.paperW-(ux1-ux0))/2-ux0; oy=(S.paperH-(uy1-uy0))/2-uy0;
     }
-    const slots=[], queue=[];
+    // a sheet arranged by hand is not centred: what was put there stays put
+    if(pg.hand){ ox=x0; oy=y0; }
+    // idx: which of the order's tags each placeholder holds (gtNestHandKeep)
+    const slots=[], queue=[], idx=[];
+    (pg.fixed||[]).forEach(({it,slot},k)=>{ slots.push({...slot,id:'n'+at+'_h'+k}); queue.push(it.line); idx.push(it.i); });
     pg.items.forEach((a,k)=>{
       const {it,pos}=a, b=box(a);
       const fl=flags.get(it.line.designId);
@@ -37111,9 +37159,9 @@ function gtNestPlan(){
         ...(S.nestHole?{hole:{...S.nestHole}}:{}),
         // turned off the quarter, the tag's own size goes with it - see gtUnrotSlot
         ...(turnOf(pos)%90?{tw:it.sz.w,th:it.sz.h}:{})});
-      queue.push(it.line);
+      queue.push(it.line); idx.push(it.i);
     });
-    return {shape:S.layoutFile,slots,per:slots.length,queue,start:0,of:pages.length,at,
+    return {shape:S.layoutFile,slots,per:slots.length,queue,idx,start:0,of:pages.length,at,
       lines:[...new Set(queue)],nest:true};
   });
   plan.tooBig=tooBig; plan.real=realUsed;
@@ -37126,8 +37174,24 @@ function gtNestPlan(){
       :'a box - no cut line and no cutting file named';
     return {name:(d&&d.name)||id,how};
   });
-  gtNestCache={sig,plan,qkey:q.map(l=>l.id+'|'+l.designId).join(',')};
+  gtNestCache={sig,plan,hand:gtNestHand,qkey:q.map(l=>l.id+'|'+l.designId).join(',')};
   return plan;
+}
+// A tag moved on a nested sheet stays where it was put: the sheet on screen and
+// every one before it are held as they now are, and gtNestPlan fills the room
+// the move left with tags from the sheets after - fewer sheets, where it can.
+function gtNestHandKeep(){
+  const e=gtNestEntry(); if(!e||!gtNestCache) return;
+  const plan=gtNestCache.plan, upto=Math.max(gtPage,gtNestHand?gtNestHand.pages.length-1:-1);
+  const pages=[];
+  for(let p=0;p<=upto&&p<plan.length;p++){
+    const pg=plan[p];
+    // a placeholder holding no tag (one left out) holds nothing back
+    pages.push(pg.slots.map((s,k)=>({i:pg.idx?pg.idx[k]:null,line:pg.queue[k],slot:{...s}}))
+      .filter(h=>h.i!=null&&h.line).map(({i,slot})=>({i,slot})));
+  }
+  gtNestHand={sig:gtNestCache.sig,pages};
+  gtNestCache=null;
 }
 // the nested sheet on screen, if the sheets are nested
 function gtNestEntry(){
@@ -37141,8 +37205,9 @@ function gtNestEntry(){
 function gtSetSlotsList(v){
   const e=gtNestEntry();
   if(!e){ gtSheet.slots=v; return; }
-  const old=e.slots, q=e.queue;
+  const old=e.slots, q=e.queue, ix=e.idx;
   e.queue=v.map(s=>{ const i=old.indexOf(s); return i>=0?q[i]:undefined; });
+  if(ix) e.idx=v.map(s=>{ const i=old.indexOf(s); return i>=0?ix[i]:undefined; });
   e.slots=v; e.per=v.length;
 }
 // what is on each sheet of the whole order: its shape, its placeholders, and
@@ -39278,6 +39343,9 @@ function gtSheetDrag(c,side){
     }
     if(sdrag){
       sdrag=null;
+      // on a nested sheet the tags stay where they were put, and the room
+      // left is filled from the sheets after
+      gtNestHandKeep();
       // the numbers on the form catch up with what the sheet was just told,
       // and the placeholder as moved is what gets written to the library
       gtRenderSlots(); gtSlotCardSync(); gtDraw(); gtSaveSoon();
@@ -40478,7 +40546,7 @@ document.querySelectorAll('[data-gt-mirror]').forEach(m=>{
 });
 document.getElementById('gtNestDotClear').addEventListener('input',e=>{
   const v=parseFloat(e.target.value);
-  if(!isFinite(v)||v<0) return;
+  if(!isFinite(v)||v<-10) return;
   gtSheet.nestDotClear=v; gtNestCache=null; gtPickOnly(null);
   gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
 });
@@ -40525,6 +40593,7 @@ document.getElementById('gtPackBtn').addEventListener('click',()=>{
       c.s.y=round(y0+best.uh-q.y-c.s.h);               // measured up from the bottom of the block
     }
   });
+  gtNestHandKeep();
   gtSlotsChanged();
   const dots=gtMarks(), pad=1;
   const onDot=list.some(s=>dots.some(d=>d.cx+d.r+pad>s.x&&d.cx-d.r-pad<s.x+s.w
