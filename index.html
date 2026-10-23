@@ -37572,7 +37572,9 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
   if(rest.length){ const r=fill(rest); out=out.concat(r.pages); tooBig+=r.tooBig; }
   if(!out.length) out=[{items:[]}];
   let f=0; out[out.length-1].items.forEach(({it})=>{ f+=it.sz.w*it.sz.h; });
-  return {pages:out,tooBig,fill:f,real:usedReal};
+  // the sheet each tag was given (a SHEET, or sent there), 0 on: kept to by a sheet held by hand
+  const want=new Map(); pageOf.forEach((p,it)=>{ if(p>0) want.set(it.i,p-1); });
+  return {pages:out,tooBig,fill:f,real:usedReal,want};
 }
 // Neat rows by the real cut lines: the pattern a design repeats in - side by
 // side, rows set over by half, every other row upside down, or every other tag
@@ -37978,7 +37980,9 @@ function gtNestPlan(){
       }));
       const bin=gtNestBin(availW+gx,availH+gy,'tl',blocks), items=[];
       rest=rest.filter(it=>{
-        if(neat&&onPage.get(it.i)!==hp) return true;
+        // a tag given a sheet tries that sheet as it is held, whatever the
+        // packing without the hand moves made of it
+        if(neat){ const w=packed.want&&packed.want.get(it.i); if((w!=null?w:onPage.get(it.i))!==hp) return true; }
         const {ex,ey}=foot(it);
         const alt=(S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)
           ?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
@@ -41497,7 +41501,9 @@ function gtNeatToolMsg(t,ok){
 function gtSendPicked(dir){
   if(!gtSheet.nestOn||!gtSheet.nestNeat) return gtNeatToolMsg('Turn on Nest and Neat rows first.',false);
   const en=gtNestEntry(); if(!en) return gtNeatToolMsg('Nothing is nested yet.',false);
-  const to=gtPage+dir;
+  const cur=Math.min(gtPage,Math.max(0,(gtNestCache&&gtNestCache.plan?gtNestCache.plan.length:1)-1));
+  if(cur!==gtPage) gtPage=cur;
+  const to=cur+dir;
   if(to<0) return gtNeatToolMsg('This is the first sheet.',false);
   const count=new Map();
   en.slots.forEach((s,k)=>{
@@ -41515,11 +41521,12 @@ function gtSendPicked(dir){
     // the line itself is never touched (a batch's line would be made again
     // from its row and lose it): the sheet keeps how many go where. Ones that
     // were sent to this sheet come off that first.
+    const oldAt=gtNeatCopies(l,qty);
     const s={...gtNeatOf(l).sent}, here=gtPage+1;
     s[here]=Math.max(0,(s[here]||0)-n);
     s[to+1]=(s[to+1]||0)+n;
     gtNeatSet(l.id,{sent:s});
-    sent+=n; done.push({l,qty});
+    sent+=n; done.push({l,qty,oldAt});
   });
   if(!sent) return gtNeatToolMsg(kept?'Sticker sheets broken into pieces cannot be sent - set the line’s SHEET instead.':'Nothing was sent.',false);
   // Tags moved by hand stay put. The ones sent are let go; the rest of each
@@ -41530,13 +41537,16 @@ function gtSendPicked(dir){
     en.slots.forEach((s,k)=>{ if(gtSelSet.has(s.id)&&en.idx&&en.idx[k]!=null) gone.add(gtNestCache.keys[en.idx[k]]); });
     const occ=key=>Number(key.slice(key.lastIndexOf('#')+1))||0, base=key=>key.slice(0,key.lastIndexOf('#'));
     const pages=gtNestHand.pages.map(pg=>pg.filter(h=>!h.key||!gone.has(h.key)).map(h=>({...h})));
-    done.forEach(({l,qty})=>{
+    done.forEach(({l,qty,oldAt})=>{
       const at=gtNeatCopies(l,qty), mine=h=>h.key&&base(h.key).split('|')[0]===l.id;
       const pool=new Map(); at.forEach((p,o)=>{ if(!pool.has(p)) pool.set(p,[]); pool.get(p).push(o+1); });
       pages.forEach((pg,hp)=>{
         const hs=pg.filter(mine).sort((x,y)=>occ(x.key)-occ(y.key));
         hs.forEach(h=>{
-          const o=(pool.get(hp+1)||[]).shift()||(pool.get(0)||[]).shift();
+          // a held tag stays what it was - one of the line's own, or one sent to
+          // this sheet before - so the tags sent now are the ones that come in
+          const was=oldAt[occ(h.key)-1]||0;
+          const o=(pool.get(was)||[]).shift()||(pool.get(0)||[]).shift()||(pool.get(hp+1)||[]).shift();
           h.key=o?base(h.key)+'#'+o:null;
         });
       });
