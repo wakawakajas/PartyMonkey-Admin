@@ -37408,6 +37408,32 @@ function gtNestRealBetter(r,packed){
   if(r.fill<packed.fill-1e-6) return true;
   return Math.abs(r.fill-packed.fill)<=1e-6&&gtNestUsed(r)<gtNestUsed(packed)*0.98;
 }
+// Neat rows' choices for a line, kept with the sheet rather than on the line: a
+// line lent from a Magic Create batch is made afresh from its row each time and
+// lost anything put on it. page: the SHEET its rows start on (0 = goes on from
+// the line before); free: Fill the gaps; sent: copies sent to other sheets,
+// {sheet: how many}. A line's own nestPage / nestFree (set before) still count.
+function gtNeatOf(l){
+  const m=((gtSheet.nestLines||{})[l&&l.id])||{};
+  return {page:m.page>0?m.page:(l&&l.nestPage>0?l.nestPage:0),
+    free:m.free!=null?!!m.free:!!(l&&l.nestFree),sent:m.sent||{}};
+}
+function gtNeatSet(id,patch){
+  const all=gtSheet.nestLines||(gtSheet.nestLines={});
+  const m={...(all[id]||{}),...patch};
+  if(m.sent){ m.sent={...m.sent}; Object.keys(m.sent).forEach(p=>{ if(!(m.sent[p]>0)) delete m.sent[p]; });
+    if(!Object.keys(m.sent).length) delete m.sent; }
+  if(!(m.page>0)) delete m.page;
+  if(m.free==null) delete m.free;
+  if(Object.keys(m).length) all[id]=m; else delete all[id];
+}
+// The sheet (1 on) each of a line's n copies is sent to, 0 for none: the copies
+// sent are taken from the end of the line
+function gtNeatCopies(l,n){
+  const s=gtNeatOf(l).sent, out=new Array(n).fill(0); let k=n-1;
+  Object.keys(s).map(Number).sort((a,b)=>b-a).forEach(p=>{ for(let c=0;c<s[p]&&k>=0;c++) out[k--]=p; });
+  return out;
+}
 // Neat rows (Nest settings): every design is laid in straight rows of its own,
 // a band, the bands one under another in the order's order, a sheet going on to
 // the next when full. Two lines of one design (and one bleed) are one band. A
@@ -37417,10 +37443,15 @@ function gtNestRealBetter(r,packed){
 // margins, plus one gutter; blocks: the dots' keep-clear boxes.
 function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill){
   const E=1e-6, hit=(x,y,w,h)=>(blocks||[]).filter(b=>x<b.x+b.w-E&&b.x<x+w-E&&y<b.y+b.h-E&&b.y<y+h-E);
-  const bands=new Map(), free=[];
+  const bands=new Map(), free=[], seen=new Map(), copies=new Map(), pageOf=new Map();
+  all.forEach(it=>{ const id=it.line.id; seen.set(id,(seen.get(id)||0)+1); });
   all.forEach(it=>{
-    if(it.line.nestFree){ free.push(it); return; }
-    const k=it.line.designId+'|'+(it.bl||0)+'|'+(it.line.nestPage>0?it.line.nestPage:'');
+    const id=it.line.id, nf=gtNeatOf(it.line);
+    if(!copies.has(id)) copies.set(id,{k:0,at:gtNeatCopies(it.line,seen.get(id))});
+    const c=copies.get(id), sent=c.at[c.k++]||0;
+    if(nf.free&&!sent){ free.push(it); return; }
+    const pg=sent||nf.page; pageOf.set(it,pg);
+    const k=it.line.designId+'|'+(it.bl||0)+'|'+(pg||'');
     if(!bands.has(k)) bands.set(k,[]);
     bands.get(k).push(it);
   });
@@ -37431,7 +37462,7 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill){
   const newPage=()=>goTo(pg?at+1:0);
   let carry=0;
   bands.forEach(items=>{
-    const want=items[0].line.nestPage>0?items[0].line.nestPage-1:null;
+    const want=pageOf.get(items[0])>0?pageOf.get(items[0])-1:null;
     goTo(want!=null?want:carry);
     const it0=items[0], e=2*(it0.bl||0), ex=e+Math.max(0,gx-e), ey=e+Math.max(0,gy-e);
     const ways=[{w:it0.sz.w+ex,h:it0.sz.h+ey,rot:0}];
@@ -37503,7 +37534,7 @@ function gtNestPlan(){
               t.more?JSON.stringify(t.more):0,(t.extra||[]).length]:0];
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
-  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId+'|'+(gtLineBleed(l)??'')+'|'+(l.shape||'')+(l.nestFree?'|f':'')+(l.nestPage>0?'|p'+l.nestPage:'')),dsig,!!S.nestNeat,Object.keys(gtFolderShapes||{}).length,S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
+  const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId+'|'+(gtLineBleed(l)??'')+'|'+(l.shape||'')+(l.nestFree?'|f':'')+(l.nestPage>0?'|p'+l.nestPage:'')),dsig,!!S.nestNeat,S.nestNeat?JSON.stringify(S.nestLines||{}):0,Object.keys(gtFolderShapes||{}).length,S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
     S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,S.nestHole||0,marks,gtDotClear(),S.qrOn?(Number(S.qrDist)||10):0]);
   // tags moved by hand (gtNestHandKeep) hold while the sheet itself stands: the
   // paper, margins, gaps, dots or Neat rows changed, and the sheets are packed
@@ -40287,7 +40318,7 @@ function gtRenderOrder(){
     return `<div class="ph-card${l.id===gtSelLine?' is-sel':''}" data-gt-line="${l.id}" data-id="${l.id}">
       <div class="ph-card-head"><span style="flex:1;">Line ${i+1}</span>
         ${gtSheet.nestOn&&gtSheet.nestNeat?`<label class="field qty gt-sheet-no" title="Neat rows: the sheet this design's rows start on. Blank goes on from the line before; a Fill the gaps line goes wherever there is room"><span>SHEET</span>
-          <input type="number" min="1" step="1" placeholder="auto" value="${l.nestPage>0&&!l.nestFree?l.nestPage:''}" data-gtl="nestPage"${l.nestFree?' disabled':''}/></label>`:''}
+          <input type="number" min="1" step="1" placeholder="auto" value="${gtNeatOf(l).page>0&&!gtNeatOf(l).free?gtNeatOf(l).page:''}" data-gtl="nestPage"${gtNeatOf(l).free?' disabled':''}/></label>`:''}
         <label class="field qty" title="How many of this design">
           <input type="number" min="0" step="1" value="${l.qty}" data-gtl="qty"/></label>
         <button class="del-btn" data-gt-del-line title="Remove">×</button></div>
@@ -40295,7 +40326,7 @@ function gtRenderOrder(){
         ${`<label class="click-tog" title="This line bleeds its own figure; every other line follows the sheet's bleed (or its design's own)">
           <input type="checkbox" data-gtl="bleedOn"${l.bleed&&l.bleed.on?' checked':''}/>Own bleed for this line</label>`}
         ${gtSheet.nestOn&&gtSheet.nestNeat?`<label class="click-tog" title="Neat rows: this line's tags are nested into the room the other designs' rows leave, instead of rows of their own">
-          <input type="checkbox" data-gtl="nestFree"${l.nestFree?' checked':''}/>Fill the gaps</label>`:''}
+          <input type="checkbox" data-gtl="nestFree"${gtNeatOf(l).free?' checked':''}/>Fill the gaps</label>`:''}
         ${l.bleed&&l.bleed.on?`<label class="field" style="max-width:110px;margin:0;"><span>BLEED (mm)</span>
           <input type="number" step="0.1" min="0" value="${round(Number(l.bleed.mm)||0)}" data-gtl="bleedMm"/></label>
           <label class="field" style="max-width:150px;margin:0;" title="How this line's bleed is made - the other lines keep the sheet's style"><span>BLEED STYLE</span>
@@ -40529,12 +40560,12 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
     gtNestCache=null; gtRenderOrder(); gtDraw(); return;
   }
   if(lk==='nestFree'){
-    if(e.target.checked) line.nestFree=true; else delete line.nestFree;
+    delete line.nestFree; gtNeatSet(line.id,{free:e.target.checked?true:null}); gtSaveSoon();
     gtNestCache=null; gtRenderOrder(); gtNestSync(); gtDraw(); return;
   }
   if(lk==='nestPage'){
     const v=Math.floor(Number(e.target.value)||0);
-    if(v>0) line.nestPage=v; else delete line.nestPage;
+    delete line.nestPage; gtNeatSet(line.id,{page:v>0?v:0}); gtSaveSoon();
     gtNestCache=null; gtNestSync(); gtDraw(); return;
   }
   if(lk==='split'){
@@ -41248,10 +41279,6 @@ document.getElementById('gtNestRealOn').addEventListener('change',e=>{
   gtSheet.nestReal=e.target.checked; gtNestCache=null; gtPage=0; gtPickOnly(null);
   gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
 });
-// Neat rows: the picked tags of the sheet on screen sent to the sheet before or
-// after. Their line is split - the tags sent become a line of their own with
-// that SHEET (or join the one sent there from it before) - so it keeps like any
-// other line. A line sent whole just takes the new SHEET.
 // these tools sit in Nest settings: what they say is shown there as well as
 // on the Placeholders card
 function gtNeatToolMsg(t,ok){
@@ -41271,33 +41298,42 @@ function gtSendPicked(dir){
   });
   if(!count.size) return gtNeatToolMsg('Pick the tags to send first - a double-click picks a whole design.',false);
   let sent=0, kept=0;
+  const done=[];
   count.forEach((n,id)=>{
     const l=gtOrder.find(x=>x.id===id); if(!l) return;
     // a sheet broken into stickers counts stickers, not copies: left alone
     if(gtLineSplits(l,gtDesign(l.designId))){ kept+=n; return; }
-    n=Math.min(n,Math.floor(Number(l.qty)||0)); if(n<=0) return;
-    const src=l.sentFrom||l.id;
-    let dest=gtOrder.find(x=>x!==l&&(x.sentFrom||x.id)===src&&x.designId===l.designId&&x.nestPage===to+1);
-    if(n>=l.qty&&!dest){ l.nestPage=to+1; delete l.nestFree; sent+=n; return; }
-    if(!dest){
-      dest=JSON.parse(JSON.stringify(l)); dest.id=gtId('l'); dest.sentFrom=src; dest.qty=0; dest.nestPage=to+1;
-      delete dest.nestFree;
-      gtOrder.splice(gtOrder.indexOf(l)+1,0,dest);
-    }
-    dest.qty+=n; l.qty-=n; sent+=n;
-    if(l.qty<=0) gtOrder.splice(gtOrder.indexOf(l),1);
+    const qty=Math.floor(Number(l.qty)||0); n=Math.min(n,qty); if(n<=0) return;
+    // the line itself is never touched (a batch's line would be made again
+    // from its row and lose it): the sheet keeps how many go where. Ones that
+    // were sent to this sheet come off that first.
+    const s={...gtNeatOf(l).sent}, here=gtPage+1;
+    s[here]=Math.max(0,(s[here]||0)-n);
+    s[to+1]=(s[to+1]||0)+n;
+    gtNeatSet(l.id,{sent:s});
+    sent+=n; done.push({l,qty});
   });
   if(!sent) return gtNeatToolMsg(kept?'Sticker sheets broken into pieces cannot be sent - set the line’s SHEET instead.':'Nothing was sent.',false);
-  // tags moved by hand stay put: the ones sent are let go, and the rest of each
-  // line held are numbered again as the copies it has left (see gtNestPlan's keys)
+  // Tags moved by hand stay put. The ones sent are let go; the rest of each
+  // line held are given copies again (gtNestPlan's keys) - on each held sheet
+  // the copies sent to it first, then the line's unsent ones, never one sent elsewhere.
   if(gtNestHand&&gtNestCache&&gtNestCache.keys){
     const gone=new Set();
     en.slots.forEach((s,k)=>{ if(gtSelSet.has(s.id)&&en.idx&&en.idx[k]!=null) gone.add(gtNestCache.keys[en.idx[k]]); });
-    const all=gtNestHand.pages.flat().filter(h=>h.key&&!gone.has(h.key));
-    const occ=h=>Number(h.key.slice(h.key.lastIndexOf('#')+1))||0, base=h=>h.key.slice(0,h.key.lastIndexOf('#'));
-    const by=new Map(); all.forEach(h=>{ const b=base(h); if(count.has(b.split('|')[0])){ if(!by.has(b)) by.set(b,[]); by.get(b).push(h); } });
-    by.forEach((hs,b)=>hs.sort((x,y)=>occ(x)-occ(y)).forEach((h,n)=>{ h.key=b+'#'+(n+1); }));
-    gtNestHand={...gtNestHand,sig:'',pages:gtNestHand.pages.map(pg=>pg.filter(h=>!h.key||!gone.has(h.key)||all.includes(h)))};
+    const occ=key=>Number(key.slice(key.lastIndexOf('#')+1))||0, base=key=>key.slice(0,key.lastIndexOf('#'));
+    const pages=gtNestHand.pages.map(pg=>pg.filter(h=>!h.key||!gone.has(h.key)).map(h=>({...h})));
+    done.forEach(({l,qty})=>{
+      const at=gtNeatCopies(l,qty), mine=h=>h.key&&base(h.key).split('|')[0]===l.id;
+      const pool=new Map(); at.forEach((p,o)=>{ if(!pool.has(p)) pool.set(p,[]); pool.get(p).push(o+1); });
+      pages.forEach((pg,hp)=>{
+        const hs=pg.filter(mine).sort((x,y)=>occ(x.key)-occ(y.key));
+        hs.forEach(h=>{
+          const o=(pool.get(hp+1)||[]).shift()||(pool.get(0)||[]).shift();
+          h.key=o?base(h.key)+'#'+o:null;
+        });
+      });
+    });
+    gtNestHand={...gtNestHand,sig:'',pages:pages.map(pg=>pg.filter(h=>h.key))};
   }
   gtNestCache=null; gtPickOnly(null);
   gtPage=to;
@@ -62000,7 +62036,7 @@ async function mcGiftBundleRun(lines,mode,side,guest){
 // the library happens to be on.
 const GT_JOB_SHEET_KEYS=['paperW','paperH','tagW','tagH','margin','marginX','marginY','gap','gapY','gridMode',
   'leadTrim','sideTrim','gridCols','gridRows','slotRadius','bleedOn','bleed','bleedMode',
-  'nestOn','nestReal','nestNeat','nestRotate','nestRotStep','nestCut','nestHole','nestDotClear','layoutFile','cutRemoved'];
+  'nestOn','nestReal','nestNeat','nestLines','nestRotate','nestRotStep','nestCut','nestHole','nestDotClear','layoutFile','cutRemoved'];
 const PJ_KINDS={
   giftTag:{
     label:'Gift tag sheet',
