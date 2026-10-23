@@ -37495,9 +37495,14 @@ function gtNestPlan(){
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
   const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId+'|'+(gtLineBleed(l)??'')+'|'+(l.shape||'')+(l.nestFree?'|f':'')+(l.nestPage>0?'|p'+l.nestPage:'')),dsig,!!S.nestNeat,Object.keys(gtFolderShapes||{}).length,S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
     S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,S.nestHole||0,marks,gtDotClear(),S.qrOn?(Number(S.qrDist)||10):0]);
-  // tags moved by hand (gtNestHandKeep) hold for this very packing only: a new
-  // line, a size or a gap changed, and the sheets are packed afresh
-  if(gtNestHand&&gtNestHand.sig!==sig) gtNestHand=null;
+  // tags moved by hand (gtNestHandKeep) hold while the sheet itself stands: the
+  // paper, margins, gaps, dots or Neat rows changed, and the sheets are packed
+  // afresh. A quantity, a bleed or a line changed keeps them - each held tag is
+  // found again by its line and which copy of it it is (keys), and one that is
+  // gone or has changed size is let go and packed with the rest.
+  const frame=JSON.stringify([S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.gridMode,!!S.nestNeat,marks,gtDotClear(),S.qrOn?(Number(S.qrDist)||10):0]);
+  const seen=new Map(), keys=q.map(l=>{ const k=l.id+'|'+l.designId; seen.set(k,(seen.get(k)||0)+1); return k+'#'+seen.get(k); });
+  if(gtNestHand&&gtNestHand.frame!==frame) gtNestHand=null;
   if(gtNestCache&&gtNestCache.sig===sig&&gtNestCache.hand===gtNestHand) return gtNestCache.plan;
   // A figure being typed (a gap, a size, a scale) changes the sheet on every
   // keystroke, and packing a sheet by its cut lines takes seconds: the page
@@ -37698,13 +37703,26 @@ function gtNestPlan(){
   // Sheets arranged by hand keep each tag where it was put, and the room left
   // round them is filled with the tags of the sheets after, in their order;
   // what is still over is packed onto sheets of its own after them.
-  const H=gtNestHand;
+  let H=gtNestHand;
+  if(H&&H.sig!==sig){
+    const byKey=new Map(keys.map((k,i)=>[k,i]));
+    const fits=(it,s)=>{ const E=0.01, a=it.sz;
+      return s.tw>0?Math.abs(s.tw-a.w)<E&&Math.abs(s.th-a.h)<E
+        :(Math.abs(s.w-a.w)<E&&Math.abs(s.h-a.h)<E)||(Math.abs(s.w-a.h)<E&&Math.abs(s.h-a.w)<E); };
+    H={...H,pages:H.pages.map(pg=>pg.map(h=>{ const i=h.key!=null?byKey.get(h.key):undefined;
+      return i!=null&&all[i]&&fits(all[i],h.slot)?{...h,i}:null; }).filter(Boolean))};
+    while(H.pages.length&&!H.pages[H.pages.length-1].length) H.pages.pop();
+    H=gtNestHand=H.pages.length?{...H,sig}:null;
+  }
   if(H){
     const byI=new Map(all.map(it=>[it.i,it])), held=new Set();
     H.pages.forEach(pg=>pg.forEach(h=>held.add(h.i)));
     let rest=pages.flatMap(pg=>pg.items.map(a=>byI.get(a.it.i)||a.it)).filter(it=>!held.has(it.i));
     const foot=it=>{ const e=2*(it.bl||0); return {ex:e+Math.max(0,gx-e),ey:e+Math.max(0,gy-e)}; };
-    const handPages=H.pages.map(pg=>{
+    // Neat rows: a tag keeps to the sheet its rows went on (a SHEET chosen, or
+    // sent there), only taking room on that same sheet when it is held by hand
+    const onPage=new Map(); pages.forEach((pg,p)=>pg.items.forEach(a=>onPage.set(a.it.i,p)));
+    const handPages=H.pages.map((pg,hp)=>{
       const fixed=pg.map(h=>({it:byI.get(h.i),slot:h.slot})).filter(f=>f.it);
       // a tag held where it was put is a block in the bin, its bleed and gutter round it
       const blocks=dotBlocks.concat(fixed.map(({it,slot})=>{
@@ -37713,6 +37731,7 @@ function gtNestPlan(){
       }));
       const bin=gtNestBin(availW+gx,availH+gy,'tl',blocks), items=[];
       rest=rest.filter(it=>{
+        if(neat&&onPage.get(it.i)!==hp) return true;
         const {ex,ey}=foot(it);
         const alt=(S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)
           ?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
@@ -37723,6 +37742,13 @@ function gtNestPlan(){
       return {fixed,items,hand:true};
     });
     let after=[];
+    // Neat rows: the sheets after the held ones keep their rows as packed
+    if(neat&&rest.length){
+      const left=new Set(rest.map(it=>it.i));
+      after=pages.slice(H.pages.length).map(pg=>({items:pg.items.filter(a=>left.has(a.it.i))})).filter(pg=>pg.items.length);
+      after.forEach(pg=>pg.items.forEach(a=>left.delete(a.it.i)));
+      rest=rest.filter(it=>left.has(it.i));
+    }
     if(rest.length){
       let best=null;
       orders.forEach(cmp=>Object.keys(GT_NEST_SCORE).forEach(mode=>{
@@ -37784,7 +37810,7 @@ function gtNestPlan(){
       :'a box - no cut line and no cutting file named';
     return {name:(d&&d.name)||id,how};
   });
-  gtNestCache={sig,plan,hand:gtNestHand,qkey:q.map(l=>l.id+'|'+l.designId).join(',')};
+  gtNestCache={sig,plan,hand:gtNestHand,qkey:q.map(l=>l.id+'|'+l.designId).join(','),frame,keys};
   return plan;
 }
 // A tag moved on a nested sheet stays where it was put: the sheet on screen and
@@ -37798,9 +37824,9 @@ function gtNestHandKeep(){
     const pg=plan[p];
     // a placeholder holding no tag (one left out) holds nothing back
     pages.push(pg.slots.map((s,k)=>({i:pg.idx?pg.idx[k]:null,line:pg.queue[k],slot:{...s}}))
-      .filter(h=>h.i!=null&&h.line).map(({i,slot})=>({i,slot})));
+      .filter(h=>h.i!=null&&h.line).map(({i,slot})=>({i,slot,key:gtNestCache.keys?gtNestCache.keys[i]:null})));
   }
-  gtNestHand={sig:gtNestCache.sig,pages};
+  gtNestHand={sig:gtNestCache.sig,frame:gtNestCache.frame,pages};
   gtNestCache=null;
 }
 // the nested sheet on screen, if the sheets are nested
@@ -41245,7 +41271,18 @@ function gtSendPicked(dir){
     if(l.qty<=0) gtOrder.splice(gtOrder.indexOf(l),1);
   });
   if(!sent) return gtSlotToolMsg(kept?'Sticker sheets broken into pieces cannot be sent - set the line’s SHEET instead.':'Nothing was sent.',false);
-  gtNestCache=null; gtNestHand=null; gtPickOnly(null);
+  // tags moved by hand stay put: the ones sent are let go, and the rest of each
+  // line held are numbered again as the copies it has left (see gtNestPlan's keys)
+  if(gtNestHand&&gtNestCache&&gtNestCache.keys){
+    const gone=new Set();
+    en.slots.forEach((s,k)=>{ if(gtSelSet.has(s.id)&&en.idx&&en.idx[k]!=null) gone.add(gtNestCache.keys[en.idx[k]]); });
+    const all=gtNestHand.pages.flat().filter(h=>h.key&&!gone.has(h.key));
+    const occ=h=>Number(h.key.slice(h.key.lastIndexOf('#')+1))||0, base=h=>h.key.slice(0,h.key.lastIndexOf('#'));
+    const by=new Map(); all.forEach(h=>{ const b=base(h); if(count.has(b.split('|')[0])){ if(!by.has(b)) by.set(b,[]); by.get(b).push(h); } });
+    by.forEach((hs,b)=>hs.sort((x,y)=>occ(x)-occ(y)).forEach((h,n)=>{ h.key=b+'#'+(n+1); }));
+    gtNestHand={...gtNestHand,sig:'',pages:gtNestHand.pages.map(pg=>pg.filter(h=>!h.key||!gone.has(h.key)||all.includes(h)))};
+  }
+  gtNestCache=null; gtPickOnly(null);
   gtPage=to;
   gtRenderOrder(); gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
   gtSlotToolMsg(sent+' tag'+(sent===1?'':'s')+' sent to sheet '+(to+1)+(kept?' ('+kept+' sticker pieces left)':'')+'.',true);
