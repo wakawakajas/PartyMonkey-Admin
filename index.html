@@ -6807,7 +6807,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         </div>
           <details class="gt-why"><summary>Library designs and one-offs</summary>
             <p class="hint">Artwork in the <strong>designs</strong> folder is the library: a new file there becomes a design the next time you come back to this window. It is taken on once, by the name it has, so nothing arrives twice — and one taken out with × stays out until you add it back from the list below.</p>
-            <p class="hint">A <strong>one-off design</strong> is for artwork a customer sent for this job alone: it is uploaded, printed and forgotten, never written into the folder and gone when the page is reloaded. A picture on the clipboard is the same thing — paste it anywhere on this screen and it lands on the line being worked on. Put the file in the designs folder instead if it should come back.</p>
+            <p class="hint">A <strong>one-off design</strong> is for artwork a customer sent for this job alone: it is uploaded and printed, never written into the folder. It stays on the order through a reload or hard refresh (kept in this browser) until its line is taken off. <strong>☆ Save for later</strong> keeps it in the cloud for the whole team, on this page's list, until it is deleted with × — which deletes its picture too. A picture on the clipboard is the same thing — paste it anywhere on this screen and it lands on the line being worked on. Put the file in the designs folder instead if it should come back.</p>
           </details>
         </div>
 
@@ -32265,6 +32265,7 @@ let gtWouldEmptyWhat='';
 // saves under way, however they were asked for (most call gtSaveLib straight)
 var gtSaveInFlight=0;
 async function gtSaveLib(){
+  try{ gtSavedSyncSoon(); }catch(e){}
   // Never with a batch's other paper swapped in (mcGtOnFinish): put off until
   // the swap is over, whichever of the many ways the save was asked for
   try{ if(mcGtSwapping>0){ gtSaveSoon(); return; } }catch(e){}
@@ -32748,6 +32749,154 @@ async function gtOneOffRestore(lines){
   if(n) await gtHydrateBacks().catch(()=>{});
   return n;
 }
+// What a one-off is, written down: its picture's name, words, hole and back,
+// how it sits, its bleed and its cut line - as a batch line keeps it
+// (mcGtKeepOneOffOn) - and the design made back out of it.
+function gtOneOffRec(d){
+  return {id:d.id,name:d.name||'',file:d.file||'',
+    fields:(d.fields||[]),hole:d.hole||null,...(d.back?{back:d.back}:{}),
+    artV:2,art:gtArtKept(d)||null,bleed:d.bleed||null,trace:gtTraceKept(d)||null,
+    ...(d.cutSeen?{cutSeen:d.cutSeen}:{}),...(d.cutSheet?{cutSheet:true}:{}),...(d.cutSheet&&d.nestEach?{nestEach:true}:{}),
+    ...(d.turn?{turn:d.turn}:{}),...(d.wordsCut?{wordsCut:true}:{}),...(d.cutSheet&&gtPieceEditOf(d)?{pieceEdit:gtPieceEditOf(d)}:{})};
+}
+const gtOneOffDesign=(rec,id)=>gtNormalizeDesign({id:id||rec.id,name:rec.name||'One-off',file:rec.file,adhoc:true,
+  fields:rec.fields||[],hole:rec.hole,back:rec.back,...(rec.artV?{artV:rec.artV}:{}),art:rec.art,bleed:rec.bleed,
+  trace:rec.trace,cutSeen:rec.cutSeen,cutSheet:rec.cutSheet,turn:rec.turn,nestEach:rec.nestEach,
+  wordsCut:rec.wordsCut,pieceEdit:rec.pieceEdit});
+// ---- the order through a hard refresh ----
+// Every page's own order (a batch's lent lines are the batch's) and the
+// pictures of the one-offs on it, in this browser. A line taken off takes its
+// picture out with it on the next write; nothing else is kept.
+let gtWorkT=null, gtWorkTaken=false;
+function gtWorkSaveSoon(){
+  if(!gtWorkTaken) return;          // not before the last one has been read back
+  clearTimeout(gtWorkT);
+  gtWorkT=setTimeout(()=>gtWorkSave().catch(e=>console.warn('order keep',e)),800);
+}
+async function gtWorkSave(){
+  const orders={}, used=new Set();
+  Object.keys(gtOrders).forEach(m=>{
+    const list=m===gtMode?gtOrder:gtOrders[m];
+    const own=(Array.isArray(list)?list:[]).filter(l=>l&&l.designId&&!String(l.id||'').startsWith('mc-'));
+    orders[m]=JSON.parse(JSON.stringify(own));
+    own.forEach(l=>used.add(l.designId));
+  });
+  const oneOffs={};
+  used.forEach(id=>{
+    if(gtSavedRows.has(id)) return;   // saved for later: read back from the cloud
+    const k=gtOneOffKeep.get(id), d0=gtDesign(id);
+    const d=d0&&d0.adhoc?d0:(k&&k.d), blob=d&&(gtAssets.get(d.file)||(k&&k.blob));
+    if(d&&d.adhoc&&blob) oneOffs[id]={rec:gtOneOffRec(d),blob};
+  });
+  await gtIdbPut('gtWork',{orders,oneOffs,at:Date.now()});
+}
+async function gtWorkTake(){
+  if(gtWorkTaken) return;
+  gtWorkTaken=true;
+  let v=null; try{ v=await gtIdbGet('gtWork'); }catch(e){}
+  if(!v) return;
+  Object.entries(v.oneOffs||{}).forEach(([id,o])=>{
+    if(o&&o.rec&&o.blob&&!gtOneOffKeep.has(id)) gtOneOffKeep.set(id,{d:gtOneOffDesign(o.rec,id),blob:o.blob});
+  });
+  Object.keys(gtOrders).forEach(m=>{
+    const o=v.orders&&v.orders[m];
+    if(Array.isArray(o)&&o.length&&!(gtOrders[m]&&gtOrders[m].length)) gtOrders[m]=o;
+  });
+  if(!gtOrder.length&&gtOrders[gtMode]&&gtOrders[gtMode].length) gtOrder=gtOrders[gtMode];
+}
+// ---- one-offs saved for later ----
+// Kept in the cloud for the whole team, a row each (gt_saved_oneoffs) with its
+// picture beside Magic Create's (<uid>/magic/), shown on the page it was saved
+// on until somebody deletes it - row and picture both.
+const gtSavedRows=new Map();   // design id -> {id,path,file,page,sent}
+const gtSavedKeep=new Map();   // picture path -> its bytes, fetched once a session
+const gtSavedPath=async d=>`${await mcWhoAmI()}/magic/gtsaved-${d.id}-${Date.now().toString(36)}${mcGtOneOffExt(d.file)}`;
+async function gtSavedLoad(){
+  if(typeof sb==='undefined'||!sb) return;
+  const mode=gtMode;
+  const {data,error}=await sb.from('gt_saved_oneoffs').select('id,page,path,design').eq('page',mode).order('created_at');
+  if(error) return;
+  const rows=data||[], here=new Set();
+  for(const r of rows){
+    const rec=r.design||{}, id=rec.id; if(!id||!r.path) continue;
+    here.add(id);
+    const had=gtSavedRows.get(id);
+    gtSavedRows.set(id,{id:r.id,path:r.path,file:rec.file,page:r.page,
+      sent:had&&had.path===r.path?had.sent:JSON.stringify(rec)});
+    if(gtDesign(id)) continue;
+    let blob=gtSavedKeep.get(r.path);
+    if(!blob){
+      try{
+        const dl=await sb.storage.from(PHOTO_BUCKET).download(r.path);
+        if(dl.error||!dl.data) continue;
+        blob=dl.data; gtSavedKeep.set(r.path,blob);
+      }catch(e){ continue; }
+    }
+    if(gtMode!==mode) return;          // the page was left while it came in
+    const d=gtOneOffDesign(rec,id);
+    gtAssets.set(d.file,blob);
+    try{ gtImgs.set(d.id,await loadImage(await gtArtURL(blob,d.file,true))); }catch(e){}
+    if(!gtDesign(id)) gtLib.designs.push(d);
+  }
+  // deleted on another PC: no longer saved here either
+  for(const [id,row] of [...gtSavedRows]) if(row.page===mode&&!here.has(id)) gtSavedRows.delete(id);
+  if(rows.some(r=>r.design&&r.design.back)) await gtHydrateBacks().catch(()=>{});
+}
+async function gtSaveForLater(d){
+  if(typeof sb==='undefined'||!sb) throw new Error('sign in first');
+  const blob=gtAssets.get(d.file); if(!blob) throw new Error('its picture is not on this PC');
+  const path=await gtSavedPath(d);
+  const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:blob.type||'application/octet-stream',upsert:true});
+  if(up.error) throw up.error;
+  const rec=gtOneOffRec(d);
+  const {data,error}=await sb.from('gt_saved_oneoffs').insert({page:gtMode,name:d.name||'',path,design:rec}).select('id').single();
+  // no row, no picture left behind
+  if(error){ try{ await sb.storage.from(PHOTO_BUCKET).remove([path]); }catch(e){} throw error; }
+  gtSavedRows.set(d.id,{id:data.id,path,file:d.file,page:gtMode,sent:JSON.stringify(rec)});
+  gtSavedKeep.set(path,blob);
+  gtWorkSaveSoon();
+}
+// the row goes first and the picture second: the other way round, a refused
+// delete left a saved one-off naming a picture that was gone
+async function gtSavedDelete(d){
+  const row=gtSavedRows.get(d.id); if(!row) return;
+  const {error}=await sb.from('gt_saved_oneoffs').delete().eq('id',row.id);
+  if(error) throw error;
+  try{ await sb.storage.from(PHOTO_BUCKET).remove([row.path]); }catch(e){}
+  gtSavedRows.delete(d.id); gtSavedKeep.delete(row.path);
+}
+// A saved one-off worked on afterwards - its words, its cut line, a crop -
+// is saved as it now is, a moment after the library is.
+let gtSavedSyncT=null;
+function gtSavedSyncSoon(){
+  if(!gtSavedRows.size) return;
+  clearTimeout(gtSavedSyncT);
+  gtSavedSyncT=setTimeout(()=>gtSavedSync().catch(e=>console.warn('saved one-off',e)),1500);
+}
+async function gtSavedSync(){
+  if(typeof sb==='undefined'||!sb) return;
+  for(const [id,row] of [...gtSavedRows]){
+    const d=gtDesign(id); if(!d||!d.adhoc) continue;
+    const rec=gtOneOffRec(d), sent=JSON.stringify(rec);
+    if(sent===row.sent) continue;
+    const patch={design:rec,name:d.name||''};
+    if(d.file!==row.file){               // a new picture (cropped, enhanced)
+      const blob=gtAssets.get(d.file); if(!blob) continue;
+      const path=await gtSavedPath(d);
+      const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:blob.type||'application/octet-stream',upsert:true});
+      if(up.error) continue;
+      patch.path=path;
+    }
+    const {error}=await sb.from('gt_saved_oneoffs').update(patch).eq('id',row.id);
+    if(error){ if(patch.path) try{ await sb.storage.from(PHOTO_BUCKET).remove([patch.path]); }catch(e){} continue; }
+    if(patch.path){
+      const old=row.path;
+      row.path=patch.path; gtSavedKeep.delete(old); gtSavedKeep.set(patch.path,gtAssets.get(d.file));
+      try{ await sb.storage.from(PHOTO_BUCKET).remove([old]); }catch(e){}
+    }
+    row.sent=sent; row.file=d.file;
+  }
+}
 // Each page's library as it was left, so coming back to it does not read every
 // design file off the folder again and decode its pictures (two thousand files,
 // seconds a time - and Magic Create goes between Festive and Custom for every
@@ -32800,6 +32949,8 @@ async function gtLibKeepTake(){
   return true;
 }
 async function gtLoadLib(){
+  // the order and its one-offs as the last refresh left them (gtWorkSave)
+  await gtWorkTake().catch(()=>{});
   gtOneOffStash();
   // the order outlives the library read, and so does the back it came with
   const jb=gtJobBack;
@@ -32808,6 +32959,8 @@ async function gtLoadLib(){
     if(gtMode==='combo') await gtComboLive().catch(e=>console.warn('Die Cut - live read',e));
   }
   finally{
+    // one-offs saved for later, this page's, before the lines are matched up
+    await gtSavedLoad().catch(e=>console.warn('saved one-offs',e));
     await gtOneOffRestore(gtOrder).catch(()=>{});
     gtJobBack=gtOrder.length?jb:null;
     if(gtJobBack&&!gtBackImgs.has(gtJobBack)) await gtHydrateBacks().catch(()=>{});
@@ -39551,6 +39704,7 @@ function gtAskAge(line){
 }
 function gtRenderOrder(){
   if(!gtOrder.length) gtJobBack=null;        // the job's back went with its order
+  gtWorkSaveSoon();                          // kept through a refresh
   // the preset backs, read off the folder in the background: the list is
   // drawn again once they are in, if any came in that were not there
   if(gtBackOn()&&!gtBackListing&&Date.now()-gtBackListedAt>20000){
@@ -41059,7 +41213,7 @@ function gtRenderDesignList(){
   el.innerHTML=shown.slice(0,150).map((d,i)=>{
     const img=i<60?gtImgGet(d.id,true):gtTurnImg(gtImgs.get(d.id),gtTurnOf(d));
     return `<div class="ph-card row-link" data-gt-design="${d.id}" data-id="${d.id}">
-      <button class="del-btn" data-gt-del-design title="Take out of the library"
+      <button class="del-btn" data-gt-del-design title="${gtSavedRows.has(d.id)?'Delete this saved one-off and its picture':'Take out of the library'}"
               style="float:right;">×</button>
       <div class="item-main" style="margin-bottom:0;align-items:center;">
         <div class="item-photo-wrap">
@@ -41069,7 +41223,10 @@ function gtRenderDesignList(){
           <div class="ph-card-head" style="margin-bottom:4px;"><span style="flex:1;">${escapeHtml(d.name)}</span>${
             gtMode==='combo'&&d.kind?`<span class="hint" style="margin:0;">${escapeHtml(GT_MODE_TITLE[d.kind]||d.kind)}${d.live?'':' · changed here'}</span>`:''}</div>
           <p class="hint" style="margin:0;">${d.fields.length} text field${d.fields.length===1?'':'s'}${d.hole.on?' · punch hole':''}${
-            d.adhoc?' · <strong>one-off, not in the folder</strong>':''}</p>
+            d.adhoc?(gtSavedRows.has(d.id)?' · <strong>★ one-off, saved for later</strong>'
+              :' · <strong>one-off, not in the folder</strong>'):''}</p>${
+            d.adhoc&&!gtSavedRows.has(d.id)?`<button type="button" class="btn-outline btn-sm" data-gt-save-later style="margin-top:6px;"
+              title="Keep it on this page's list for the whole team, until it is deleted with ×">☆ Save for later</button>`:''}
         </div>
       </div>
     </div>`;
@@ -41095,6 +41252,24 @@ document.getElementById('gtDesignList').addEventListener('click',async e=>{
   // Taking one out leaves the file in the folder — it is the library this is
   // about, not the artwork — and the file is remembered as offered, so the
   // next look at the folder does not hand it back.
+  if(e.target.closest('[data-gt-save-later]')){
+    const b=e.target.closest('[data-gt-save-later]');
+    b.disabled=true; b.textContent='Saving…';
+    try{ await gtSaveForLater(d); }
+    catch(err){ alert('Could not save "'+d.name+'" for later: '+((err&&err.message)||err)); }
+    gtRenderDesignList();
+    return;
+  }
+  if(e.target.closest('[data-gt-del-design]')&&gtSavedRows.has(d.id)){
+    const n=gtOrder.filter(l=>l.designId===d.id).length;
+    if(!confirm('Delete the saved one-off "'+d.name+'"?\n\nIts picture is deleted from the cloud too, for the whole team'
+      +(n?', and the '+n+' line'+(n===1?'':'s')+' using it come'+(n===1?'s':'')+' off the order':'')+'.\n\nThis cannot be undone.')) return;
+    try{ await gtSavedDelete(d); }
+    catch(err){ alert('Could not delete it: '+((err&&err.message)||err)); return; }
+    const f=d.file;
+    if(await gtDropDesigns([d])) gtAssets.delete(f);
+    return;
+  }
   if(e.target.closest('[data-gt-del-design]')){
     if(!confirm('Take "'+d.name+'" out of the library?\n\nThe file stays in the designs folder; it is only dropped from the library and from any order line using it.')) return;
     await gtDropDesigns([d]);
@@ -50154,6 +50329,10 @@ async function mcDeleteOrder(orderId){
       return;
     }
   }
+  // the copies of one-off gift tag designs the lines carried are nobody's now
+  // (the artwork chosen for a line is kept, as said)
+  const oneOffPaths=lines.map(l=>l.sheet_item&&l.sheet_item.oneOff&&l.sheet_item.oneOff.path).filter(Boolean);
+  if(oneOffPaths.length){ try{ await sb.storage.from(PHOTO_BUCKET).remove(oneOffPaths); }catch(e){} }
   // off the sheets, so a card nobody else is asking for stops being printed —
   // exactly as Clear does it
   const {print,gift}=mcOffSheets(lines.filter(mcLaid),orderId);
