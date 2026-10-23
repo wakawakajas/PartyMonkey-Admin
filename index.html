@@ -8691,8 +8691,15 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
         <button type="button" class="chip" id="cropBgBtn" title="Make the plain background round the design see-through — only the part joined to the edge, so white inside the design stays">Remove background</button>
         <label class="field" id="cropBgTolWrap" style="margin:0;width:110px;" hidden><span>TOLERANCE</span><input type="number" min="1" max="120" step="1" id="cropBgTol" value="30"/></label>
       </div>
+      <!-- magic eraser: paint over a stray dot and it is filled in from the
+           picture round it -->
+      <div class="chips" style="margin:0;align-items:center;">
+        <button type="button" class="chip" id="cropEraseBtn" title="Paint over a spot (a stray dot, a smudge) and it is filled in from the picture round it">🪄 Magic eraser</button>
+        <label class="field" id="cropBrushWrap" style="margin:0;width:90px;" hidden><span>BRUSH</span><input type="number" min="4" max="120" step="2" id="cropBrush" value="24"/></label>
+        <button type="button" class="chip" id="cropEraseUndo" hidden>↶ Undo</button>
+      </div>
     </div>
-    <p class="hint" style="margin:0;">Or drag a box on the picture. Drag its edges or corners to adjust it, or drag inside it to move it.</p>
+    <p class="hint" id="cropHint" style="margin:0;">Or drag a box on the picture. Drag its edges or corners to adjust it, or drag inside it to move it.</p>
     <p class="hint" id="cropSplitNote" style="margin:0;color:var(--amber);" hidden>Split is on: every page is cropped the same way.</p>
     <div class="crop-stage"><canvas id="cropCanvas"></canvas></div>
     <div class="hint" id="cropSize" style="margin:0;"></div>
@@ -13668,6 +13675,81 @@ function cropBgCanvas(P,tol){
   cx.putImageData(im,0,0);
   return c;
 }
+// Magic eraser: what was painted over is filled in from the picture round it,
+// the way content-aware fill does it — from the edge of the hole inward, each
+// step finds the square of untouched picture nearby that best matches what is
+// already there round the gap, and copies in its missing part. Only the
+// painted spot and a margin round it are worked on, so a big picture is quick.
+// `mask` is 1 where painted, over the box `mb` of the picture `src`. A new
+// canvas of the whole picture, or null when nothing was painted.
+function cropInpaint(src,mask,mb){
+  const W=src.width, H=src.height, big=Math.max(mb.w,mb.h);
+  const ph=Math.max(3,Math.min(7,Math.round(big/8)));   // patch half-width
+  const S=Math.max(30,Math.min(90,Math.round(big*1.5))); // how far to look
+  const st=S>50?2:1, m=S+ph*2;
+  const rx=Math.max(0,mb.x-m), ry=Math.max(0,mb.y-m);
+  const rw=Math.min(W,mb.x+mb.w+m)-rx, rh=Math.min(H,mb.y+mb.h+m)-ry;
+  const im=src.getContext('2d',{willReadFrequently:true}).getImageData(rx,ry,rw,rh), d=im.data;
+  const hole=new Uint8Array(rw*rh); let left=0;
+  for(let y=0;y<mb.h;y++) for(let x=0;x<mb.w;x++) if(mask[y*mb.w+x]){
+    const X=mb.x+x-rx, Y=mb.y+y-ry;
+    if(X>=0&&Y>=0&&X<rw&&Y<rh&&!hole[Y*rw+X]){ hole[Y*rw+X]=1; left++; } }
+  if(!left) return null;
+  // a source square must be all untouched picture: a summed table of the hole
+  const R=rw+1, I=new Int32Array(R*(rh+1));
+  for(let y=0;y<rh;y++){ let s=0; for(let x=0;x<rw;x++){ s+=hole[y*rw+x]; I[(y+1)*R+x+1]=I[y*R+x+1]+s; } }
+  const clean=(x,y)=>{ const x0=x-ph,y0=y-ph,x1=x+ph+1,y1=y+ph+1;
+    if(x0<0||y0<0||x1>rw||y1>rh) return false;
+    return I[y1*R+x1]-I[y0*R+x1]-I[y1*R+x0]+I[y0*R+x0]===0; };
+  // the hole lies inside mb, so only that part is looked over for its edge
+  const hx0=Math.max(0,mb.x-rx), hy0=Math.max(0,mb.y-ry);
+  const hx1=Math.min(rw,mb.x+mb.w-rx), hy1=Math.min(rh,mb.y+mb.h-ry);
+  while(left>0){
+    // the edge pixel whose square is the most already known goes first
+    let px=-1, py=-1, pk=-1;
+    for(let y=hy0;y<hy1;y++) for(let x=hx0;x<hx1;x++){
+      const p=y*rw+x; if(!hole[p]) continue;
+      if(!((x>0&&!hole[p-1])||(x<rw-1&&!hole[p+1])||(y>0&&!hole[p-rw])||(y<rh-1&&!hole[p+rw]))) continue;
+      let k=0;
+      for(let dy=-ph;dy<=ph;dy++){ const Y=y+dy; if(Y<0||Y>=rh) continue;
+        for(let dx=-ph;dx<=ph;dx++){ const X=x+dx; if(X>=0&&X<rw&&!hole[Y*rw+X]) k++; } }
+      if(k>pk){ pk=k; px=x; py=y; }
+    }
+    if(px<0) break;
+    // the best-matching untouched square within reach
+    let bx=-1, by=-1, bs=Infinity;
+    for(let qy=Math.max(ph,py-S);qy<=Math.min(rh-ph-1,py+S);qy+=st)
+      for(let qx=Math.max(ph,px-S);qx<=Math.min(rw-ph-1,px+S);qx+=st){
+        if(!clean(qx,qy)) continue;
+        let s=0;
+        for(let dy=-ph;dy<=ph&&s<bs;dy++){ const Y=py+dy; if(Y<0||Y>=rh) continue;
+          for(let dx=-ph;dx<=ph;dx++){ const X=px+dx; if(X<0||X>=rw) continue;
+            const p=Y*rw+X; if(hole[p]) continue;
+            const i=p*4, j=((qy+dy)*rw+qx+dx)*4;
+            const a=d[i]-d[j], b=d[i+1]-d[j+1], c=d[i+2]-d[j+2], e=d[i+3]-d[j+3];
+            s+=a*a+b*b+c*c+e*e; } }
+        if(s<bs){ bs=s; bx=qx; by=qy; }
+      }
+    if(bx<0){
+      // nothing whole within reach: the pixel takes the mean of what is known round it
+      const i=(py*rw+px)*4, sum=[0,0,0,0]; let n=0;
+      for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ const X=px+dx, Y=py+dy;
+        if(X<0||Y<0||X>=rw||Y>=rh||hole[Y*rw+X]) continue;
+        const j=(Y*rw+X)*4; for(let c=0;c<4;c++) sum[c]+=d[j+c]; n++; }
+      for(let c=0;c<4;c++) d[i+c]=Math.round(sum[c]/n);
+      hole[py*rw+px]=0; left--; continue;
+    }
+    for(let dy=-ph;dy<=ph;dy++){ const Y=py+dy; if(Y<0||Y>=rh) continue;
+      for(let dx=-ph;dx<=ph;dx++){ const X=px+dx; if(X<0||X>=rw) continue;
+        const p=Y*rw+X; if(!hole[p]) continue;
+        const i=p*4, j=((by+dy)*rw+bx+dx)*4;
+        d[i]=d[j]; d[i+1]=d[j+1]; d[i+2]=d[j+2]; d[i+3]=d[j+3];
+        hole[p]=0; left--; } }
+  }
+  const out=document.createElement('canvas'); out.width=W; out.height=H;
+  const ox=out.getContext('2d'); ox.drawImage(src,0,0); ox.putImageData(im,rx,ry);
+  return out;
+}
 function cropPxPerMm(img){
   const real=artRealMm(img);
   return real&&real.w>0?(img.naturalWidth/real.w):300/25.4;
@@ -13675,8 +13757,9 @@ function cropPxPerMm(img){
 // The cropped copy of one picture. `trim` is the card inside `box`, when the
 // crop kept a bleed round it — stamped into the picture the way a PDF's own
 // TrimBox is, so the sheet fits it by its trim and prints that bleed.
-async function cropMake(img,box,trim,name,bgTol){
-  const P=cropPixels(img);
+// `edit` is the picture touched up with the magic eraser, when it was.
+async function cropMake(img,box,trim,name,bgTol,edit){
+  const P=cropPixels(edit||img);
   const src=bgTol?(cropBgCanvas(P,bgTol)||P.c):P.c;
   const out=document.createElement('canvas'); out.width=box.w; out.height=box.h;
   out.getContext('2d').drawImage(src,box.x,box.y,box.w,box.h,0,0,box.w,box.h);
@@ -13701,7 +13784,7 @@ async function cropMake(img,box,trim,name,bgTol){
   const cut=await loadImage(data);
   const whole=box.x===0&&box.y===0&&box.w===P.W&&box.h===P.H;
   return {data,img:cut,name:(name||'artwork').replace(/(\.[^.]+)?$/,'')
-    +(whole?'':' · cropped')+(bgTol?' · no bg':'')+'.png'};
+    +(whole?'':' · cropped')+(bgTol?' · no bg':'')+(edit?' · erased':'')+'.png'};
 }
 // ---- the Crop sheet ----
 let cropUI=null;
@@ -13715,7 +13798,7 @@ function cropOpenGt(d){
   const img=d&&gtImgGet(d.id)&&gtImgs.get(d.id);
   if(!img||!img.naturalWidth){ showMsg(document.getElementById('gtCropMsg'),'This design\'s picture is not loaded.',false); return; }
   cropUI={side:null,gt:d,img,P:null,box:{x:0,y:0,w:img.naturalWidth,h:img.naturalHeight},trim:null,mode:'none',drag:null,
-    bg:false,bgC:null};
+    bg:false,bgC:null,erase:false,ed:null,edHist:[]};
   document.getElementById('cropSideSeg').hidden=true;
   document.getElementById('cropSplitNote').hidden=true;
   document.getElementById('cropMsg').innerHTML='';
@@ -13726,12 +13809,12 @@ async function cropApplyGt(){
   const {gt:d,img,box,trim}=cropUI, msg=document.getElementById('cropMsg');
   const go=document.getElementById('cropGo'); go.disabled=true;
   try{
-    const bg=cropUI.bg, cropped=!(box.x===0&&box.y===0&&box.w===img.naturalWidth&&box.h===img.naturalHeight);
-    const cut=await cropMake(img,box,trim,d.name,bg?cropBgTol():0);
+    const bg=cropUI.bg, ed=cropUI.ed, cropped=!(box.x===0&&box.y===0&&box.w===img.naturalWidth&&box.h===img.naturalHeight);
+    const cut=await cropMake(img,box,trim,d.name,bg?cropBgTol():0,ed);
     let blob=null, ext='.png';
-    // a PDF cropped (not cleared of its background) stays a PDF, its page cut
-    // to the box, so it still prints sharp; the cropped picture is its preview
-    if(!bg&&gtIsPdfFile(d.file)&&gtAssets.get(d.file)){
+    // a PDF cropped (not cleared of its background, nor erased) stays a PDF,
+    // its page cut to the box, so it still prints sharp; the cropped picture is its preview
+    if(!bg&&!ed&&gtIsPdfFile(d.file)&&gtAssets.get(d.file)){
       try{
         const src=gtAssets.get(d.file), lift=await gtCutLift(src,!!d.cutSheet);
         const bytes=new Uint8Array(await (lift?lift.clean:src).arrayBuffer());
@@ -13772,7 +13855,8 @@ async function cropApplyGt(){
     gtArtWriteInputs(); gtArtChanged();
     if(typeof gtRenderOrder==='function') gtRenderOrder();
     cropClose();
-    const done=cropped&&bg?'Cropped and removed the background.':bg?'Removed the background.':'Cropped.';
+    const done=[cropped&&'Cropped',bg&&'removed the background',ed&&'erased the spots'].filter(Boolean).join(', ')
+      .replace(/^./,c=>c.toUpperCase())+'.';
     showMsg(document.getElementById('gtCropMsg'),
       done+(retraced?' The cut line was traced again.':old?' The cut line could not be traced again — press Trace the artwork.':''),true);
   }catch(err){
@@ -13791,7 +13875,7 @@ function cropOpen(side){
   side=sides.includes(side)?side:sides[0];
   const img=state.final[side].img;
   cropUI={side,gt:null,img,P:null,box:{x:0,y:0,w:img.naturalWidth,h:img.naturalHeight},trim:null,mode:'none',drag:null,
-    bg:false,bgC:null};
+    bg:false,bgC:null,erase:false,ed:null,edHist:[]};
   document.querySelectorAll('#cropSideSeg [data-crop-side]').forEach(b=>{
     b.classList.toggle('on',b.dataset.cropSide===side);
     b.disabled=!sides.includes(b.dataset.cropSide);
@@ -13807,6 +13891,74 @@ function cropModeBtns(){
   const on=!!cropUI&&cropUI.bg;
   document.getElementById('cropBgBtn').classList.toggle('on',on);
   document.getElementById('cropBgTolWrap').hidden=!on;
+  const er=!!cropUI&&cropUI.erase;
+  document.getElementById('cropEraseBtn').classList.toggle('on',er);
+  document.getElementById('cropBrushWrap').hidden=!er;
+  document.getElementById('cropEraseUndo').hidden=!(cropUI&&cropUI.edHist.length);
+  document.getElementById('cropHint').textContent=er
+    ?'Paint over the spot to remove — it is filled in from the picture round it. Paint a little past its edge.'
+    :'Or drag a box on the picture. Drag its edges or corners to adjust it, or drag inside it to move it.';
+  cropBrushCursor();
+}
+// ---- magic eraser ----
+function cropBrush(){
+  const v=Number(document.getElementById('cropBrush').value);
+  return Math.max(4,Math.min(120,isFinite(v)&&v>0?v:24));
+}
+// the brush's size and shape as the pointer, a ring the width it paints
+function cropBrushCursor(){
+  const cv=document.getElementById('cropCanvas');
+  if(!cropUI||!cropUI.erase){ cv.style.cursor=''; return; }
+  const s=Math.round(cropBrush()), r=s/2, z=s+2;
+  const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${z}" height="${z}"><circle cx="${r+1}" cy="${r+1}" r="${r}" fill="none" stroke="black" stroke-width="2"/><circle cx="${r+1}" cy="${r+1}" r="${r}" fill="none" stroke="white" stroke-width="1"/></svg>`;
+  cv.style.cursor=`url("data:image/svg+xml,${encodeURIComponent(svg)}") ${r+1} ${r+1}, crosshair`;
+}
+function cropEraseToggle(){
+  if(!cropUI) return;
+  cropUI.erase=!cropUI.erase;
+  document.getElementById('cropMsg').innerHTML='';
+  cropModeBtns(); cropPaint();
+}
+// the touched-up picture now in use: everything read off the old one goes
+function cropSetEdit(c){
+  cropUI.ed=c; cropUI.P=null; cropUI.bgC=null;
+  cropModeBtns(); cropPaint();
+}
+function cropEraseUndo(){
+  if(!cropUI||!cropUI.edHist.length) return;
+  cropSetEdit(cropUI.edHist.pop());
+}
+// one stroke painted: the spot under it filled in
+function cropEraseStroke(S){
+  // the mask reaches 2 px past the paint, so the soft dark rim round a dot,
+  // just outside the brush, goes with it
+  const W=cropUI.img.naturalWidth, H=cropUI.img.naturalHeight, G=2, r=Math.ceil(S.r)+1+G;
+  const mb={x:Math.max(0,Math.floor(S.x0-r)),y:Math.max(0,Math.floor(S.y0-r))};
+  mb.w=Math.min(W,Math.ceil(S.x1+r))-mb.x; mb.h=Math.min(H,Math.ceil(S.y1+r))-mb.y;
+  if(mb.w<1||mb.h<1){ cropUI.stroke=null; cropPaint(); return; }
+  const a=S.c.getContext('2d').getImageData(mb.x,mb.y,mb.w,mb.h).data, w=mb.w, h=mb.h;
+  const row=new Uint8Array(w*h), mask=new Uint8Array(w*h);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){ let k=0;
+    for(let dx=-G;dx<=G&&!k;dx++){ const X=x+dx; if(X>=0&&X<w&&a[(y*w+X)*4+3]>0) k=1; } row[y*w+x]=k; }
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){ let k=0;
+    for(let dy=-G;dy<=G&&!k;dy++){ const Y=y+dy; if(Y>=0&&Y<h&&row[Y*w+x]) k=1; } mask[y*w+x]=k; }
+  const msg=document.getElementById('cropMsg');
+  showMsg(msg,'Erasing…',true);
+  // a frame for the message to show before the work starts
+  setTimeout(()=>{
+    if(!cropUI) return;
+    try{
+      const src=cropUI.ed||cropPixels(cropUI.img).c;
+      const out=cropInpaint(src,mask,mb);
+      if(out){ cropUI.edHist.push(cropUI.ed); if(cropUI.edHist.length>20) cropUI.edHist.shift(); }
+      cropUI.stroke=null;
+      msg.innerHTML='';
+      if(out) cropSetEdit(out); else cropPaint();
+    }catch(err){
+      cropUI.stroke=null; cropPaint();
+      showMsg(msg,'Erase failed: '+escapeHtml((err&&err.message)||'unknown error'),false);
+    }
+  },30);
 }
 function cropBgTol(){
   const v=Number(document.getElementById('cropBgTol').value);
@@ -13829,7 +13981,7 @@ function cropBgToggle(){
   }else msg.innerHTML='';
   cropModeBtns(); cropPaint();
 }
-function cropPixelsOf(){ if(!cropUI.P) cropUI.P=cropPixels(cropUI.img); return cropUI.P; }
+function cropPixelsOf(){ if(!cropUI.P) cropUI.P=cropPixels(cropUI.ed||cropUI.img); return cropUI.P; }
 function cropAuto(mode){
   if(!cropUI) return;
   const msg=document.getElementById('cropMsg'), img=cropUI.img;
@@ -13870,7 +14022,9 @@ function cropPaint(){
     for(let yy=0,r=0;yy<img.naturalHeight;yy+=q,r++) for(let xx=0,c2=0;xx<img.naturalWidth;xx+=q,c2++){
       x.fillStyle=(r+c2)%2?'#d9d9d9':'#ffffff'; x.fillRect(xx,yy,q,q); }
     x.drawImage(bgc,0,0);
-  }else x.drawImage(img,0,0);
+  }else x.drawImage(cropUI.ed||img,0,0);
+  // the eraser stroke being painted, see-through red
+  if(cropUI.stroke){ x.globalAlpha=0.5; x.drawImage(cropUI.stroke.c,0,0); x.globalAlpha=1; }
   const b=cropUI.box, lw=1.5/k;
   x.fillStyle='rgba(0,0,0,.55)';
   x.fillRect(0,0,img.naturalWidth,b.y);
@@ -13917,7 +14071,8 @@ async function cropOne(o,own){
     else{ b={x:Math.round(box.x/W*w),y:Math.round(box.y/H*h),w:Math.round(box.w/W*w),h:Math.round(box.h/H*h)}; t=null; }
     if(!b||b.w<2||b.h<2) return null;
   }
-  const cut=await cropMake(o.img,b,t,o.name,cropUI.bg?cropBgTol():0);
+  // the erasing was done on the page on screen only
+  const cut=await cropMake(o.img,b,t,o.name,cropUI.bg?cropBgTol():0,own?cropUI.ed:null);
   if(cut) cut.box=b;
   return cut;
 }
@@ -13940,8 +14095,8 @@ async function cropFresh(o,cut,bg){
 async function cropApply(){
   if(!cropUI) return;
   const {side,img,box}=cropUI, msg=document.getElementById('cropMsg');
-  if(!cropUI.bg&&box.x===0&&box.y===0&&box.w===img.naturalWidth&&box.h===img.naturalHeight){
-    showMsg(msg,'Nothing to do — pick a way to crop, drag a box, or Remove background.',false); return; }
+  if(!cropUI.bg&&!cropUI.ed&&box.x===0&&box.y===0&&box.w===img.naturalWidth&&box.h===img.naturalHeight){
+    showMsg(msg,'Nothing to do — pick a way to crop, drag a box, Remove background or use the Magic eraser.',false); return; }
   if(box.w<4||box.h<4){ showMsg(msg,'That box is too small to crop to.',false); return; }
   if(cropUI.gt) return cropApplyGt();
   const go=document.getElementById('cropGo'); go.disabled=true;
@@ -13953,14 +14108,14 @@ async function cropApply(){
       for(const d of list){
         if(!d.img) continue;
         const was=d.img, cut=await cropOne(d,was===img); if(!cut) continue;
-        const nf=await cropFresh(d,cut,bgDone);
+        const nf=await cropFresh(d,cut,bgDone||(was===img&&!!cropUI.ed));
         Object.assign(d,nf);
         if(state.final[side].img===was) state.final[side]={...state.final[side],...nf};
         n++;
       }
     }else{
       const cut=await cropOne(state.final[side],true);
-      state.final[side]={...state.final[side],...await cropFresh(state.final[side],cut,bgDone)};
+      state.final[side]={...state.final[side],...await cropFresh(state.final[side],cut,bgDone||!!cropUI.ed)};
       n=1;
     }
     // the turn upload chose fitted the picture's old shape; a crop that flips
@@ -13971,7 +14126,8 @@ async function cropApply(){
     fitArtToCard(side);
     refreshSlots(); refreshArtInputs(); drawAll();
     cropClose();
-    const did=cropped&&bgDone?'Cropped and removed the background of':bgDone?'Removed the background of':'Cropped';
+    const did=[cropped&&'Cropped',bgDone&&'removed the background of',cropUI.ed&&'erased spots on']
+      .filter(Boolean).join(', ').replace(/^./,c=>c.toUpperCase());
     showMsg(document.getElementById('cropArtMsg'),
       `${did} the ${side}${list?` — ${n} page${n===1?'':'s'}`:''}.`,true);
   }catch(err){
@@ -13994,6 +14150,18 @@ async function cropApply(){
   cv.addEventListener('pointerdown',e=>{
     if(!cropUI) return;
     e.preventDefault(); cv.setPointerCapture(e.pointerId);
+    if(cropUI.erase){
+      // a stroke of the magic eraser, painted onto a sheet of its own the
+      // picture's size; the brush is screen pixels, so the same on any picture
+      if(cropUI.stroke) return;   // the last one is still being filled in
+      const W=cropUI.img.naturalWidth, H=cropUI.img.naturalHeight, p=cropPoint(e);
+      const r=cropBrush()/2*W/(cv.getBoundingClientRect().width||1);
+      const c=document.createElement('canvas'); c.width=W; c.height=H;
+      const g=c.getContext('2d'); g.fillStyle=g.strokeStyle='#ff2020'; g.lineWidth=r*2; g.lineCap=g.lineJoin='round';
+      g.beginPath(); g.arc(p.x,p.y,r,0,Math.PI*2); g.fill();
+      cropUI.stroke={c,g,r,last:p,x0:p.x,y0:p.y,x1:p.x,y1:p.y,on:true};
+      cropPaint(); return;
+    }
     const p=cropPoint(e), h=hitOf(p);
     if(h.any) cropUI.drag={kind:'edge',edges:h.edges,p,b:{...cropUI.box}};
     else if(h.inside) cropUI.drag={kind:'move',p,b:{...cropUI.box}};
@@ -14001,6 +14169,13 @@ async function cropApply(){
   });
   cv.addEventListener('pointermove',e=>{
     if(!cropUI) return;
+    if(cropUI.erase){
+      const S=cropUI.stroke; if(!S||!S.on) return;
+      const p=cropPoint(e);
+      S.g.beginPath(); S.g.moveTo(S.last.x,S.last.y); S.g.lineTo(p.x,p.y); S.g.stroke();
+      S.last=p; S.x0=Math.min(S.x0,p.x); S.y0=Math.min(S.y0,p.y); S.x1=Math.max(S.x1,p.x); S.y1=Math.max(S.y1,p.y);
+      cropPaint(); return;
+    }
     const p=cropPoint(e), D=cropUI.drag;
     if(!D){
       const h=hitOf(p), E=h.edges;
@@ -14024,6 +14199,7 @@ async function cropApply(){
     cropModeBtns(); cropPaint();
   });
   const up=()=>{
+    if(cropUI&&cropUI.stroke&&cropUI.stroke.on){ cropUI.stroke.on=false; cropEraseStroke(cropUI.stroke); return; }
     if(!cropUI||!cropUI.drag) return;
     const D=cropUI.drag; cropUI.drag=null;
     // a tap or a wobble rather than a drag keeps the box there was
@@ -14040,7 +14216,12 @@ async function cropApply(){
   document.getElementById('cropClose').addEventListener('click',cropClose);
   document.getElementById('cropCancel').addEventListener('click',cropClose);
   document.getElementById('cropSheet').addEventListener('keydown',e=>{
-    if(e.key==='Escape'){ e.preventDefault(); cropClose(); } });
+    if(e.key==='Escape'){ e.preventDefault(); cropClose(); }
+    else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&cropUI&&cropUI.edHist.length
+      &&!/^(INPUT|TEXTAREA)$/.test(e.target.tagName)){ e.preventDefault(); cropEraseUndo(); } });
+  document.getElementById('cropEraseBtn').addEventListener('click',cropEraseToggle);
+  document.getElementById('cropEraseUndo').addEventListener('click',cropEraseUndo);
+  document.getElementById('cropBrush').addEventListener('input',cropBrushCursor);
   window.addEventListener('resize',()=>{ if(cropUI) cropPaint(); });
   document.getElementById('cropGo').addEventListener('click',cropApply);
   document.getElementById('cropBgBtn').addEventListener('click',cropBgToggle);
