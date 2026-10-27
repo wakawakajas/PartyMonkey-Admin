@@ -53875,10 +53875,12 @@ function mcSkuQtyToSheet(sku,qty){
     return true;
   }
   const on=mcWhereIsSku(sku);
-  if(!on||!on.line||on.line.qty===want) return false;
-  on.line.qty=want;
+  // the print line carries the other batches' share of it as well
+  const all=on&&on.on==='print'?want+mcSharedPrintQty(sku):want;
+  if(!on||!on.line||on.line.qty===all) return false;
+  on.line.qty=all;
   if(on.on==='print'){
-    ensureGridFor(want);
+    ensureGridFor(all);
     renderDesignLines(); drawAll();
   }else{
     if(typeof gtRenderOrder==='function') gtRenderOrder();
@@ -54241,9 +54243,21 @@ function mcGiftLineForSku(sku){
   }
   return null;
 }
+// How many of one SKU the other batches sharing this sheet have put on it. The
+// print sheet holds one line to a SKU at what every batch adds up to, so this
+// batch's own figure goes on top of theirs rather than over it.
+const mcSharedPrintQty=sku=>mcShared.filter(x=>x.tile==='sheetPrint'&&x.sheet_item
+  &&!mcMergedKey(x)&&mcRowKey(x)===String(sku||''))
+  .reduce((n,x)=>n+Math.max(1,Math.round(Number(x.sheet_item.qty)||mcQty(x)||1)),0);
 // where this SKU already is, if anywhere
 function mcWhereIsSku(sku){
-  const p=mcLineForSku(sku); if(p) return {on:'print',line:p,qty:p.qty};
+  // The print line is this batch's only where this batch put it there. Another
+  // order's Diwali Card 1 on the shared sheet said "already on a sheet" to this
+  // order's one, and the card could not be added at all.
+  const key0=String(sku||'');
+  const own=mcItems.filter(i=>mcRowKey(i)===key0&&!mcMergedKey(i));
+  const ownOn=!own.length||own.some(i=>i.tile==='sheetPrint'&&i.sheet_item);
+  const p=ownOn&&mcLineForSku(sku); if(p) return {on:'print',line:p,qty:p.qty};
   const g=mcGiftLineForSku(sku);
   if(g) return {on:'gift',mode:g.mode,line:g.line,qty:g.line.qty};
   // And failing both, what the batch's own lines say. A sheet lives in the
@@ -54360,7 +54374,14 @@ function mcRemoveSku(sku){
     }
   }
   const p=mcLineForSku(key);
-  if(p){
+  // another batch's share of the line stays on the sheet
+  const kept=p?mcSharedPrintQty(key):0;
+  if(p&&kept){
+    p.qty=kept;
+    if(hit==='gift'){ renderDesignLines(); drawAll(); }
+    hit=hit||'print';
+  }
+  else if(p){
     state.designs=state.designs.filter(d=>d.id!==p.id);
     // Off both sheets at once says 'gift', and the callers redraw only the one
     // they are told — so the print sheet goes on showing the card it just lost.
@@ -54535,8 +54556,10 @@ Cancel — stop.`)){
     const pick=designFileForSku(r.sku);
     // a merged line's design is that line's, whatever file it is off
     const existing=state.designs.find(d=>d.source&&d.source.path===pick.path&&!d.mcKey);
-    if(existing){ existing.qty=Math.max(1,Math.round(r.qty)||1); updated++; }
-    else { await addDesignLine(pick,r.qty,r.sku); added++; }
+    // what other batches sharing the sheet have of it stays on the line
+    const qty=Math.max(1,Math.round(r.qty)||1)+mcSharedPrintQty(r.sku);
+    if(existing){ existing.qty=qty; updated++; }
+    else { await addDesignLine(pick,qty,r.sku); added++; }
   }
   setArtMode('preset');
   mcNoteSheetPaths();
