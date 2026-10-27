@@ -42857,6 +42857,7 @@ async function gtComboLive(ask){
   gtLib.designs.forEach(d=>[d.file,d.back&&d.back.file].forEach(f=>{ if(f&&GT_LIVE_PATH.test(f)) ownLive.add(f); }));
   const liveIds=new Set();
   const notes=[];
+  let staleFixed=0;
   for(const kind of GT_LIVE_KINDS){
     let dir=null;
     try{ dir=await root.getDirectoryHandle(GT_LIVE_DIRS[kind]); }catch(e){}
@@ -42874,7 +42875,8 @@ async function gtComboLive(ask){
       const id=liveIds.has(x.id)?kind+'~'+x.id:x.id;
       liveIds.add(x.id);
       [x.file,x.back&&x.back.file].forEach(f=>{ if(f&&ownLive.has(gtLivePath(kind,f))) files.push([f,gtLivePath(kind,f)]); });
-      if(ownIds.has(id)) continue;                    // changed here: this page's copy wins
+      const own=ownIds.has(id)?gtLib.designs.find(o=>o.id===id):null;
+      if(own&&own.kind) continue;                     // changed here: this page's copy wins
       const d=JSON.parse(JSON.stringify(x)); d.id=id;
       if(d.file){ files.push([d.file,gtLivePath(kind,d.file)]);
         if(d.pieceEdit&&d.pieceEdit.file===d.file) d.pieceEdit.file=gtLivePath(kind,d.file);
@@ -42884,6 +42886,33 @@ async function gtComboLive(ask){
       if(d.pieceEdit&&typeof d.pieceEdit==='object') Object.values(d.pieceEdit).forEach(v=>{
         if(v&&typeof v==='object'&&Array.isArray(v.fields)) v.fields=fixFields(v.fields); });
       d.kind=kind; d.live=kind;
+      if(own){
+        // a copy of it from before designs said which page they came from: its
+        // picture's path is not the folder's and its fonts are the folder's
+        // ids, so it drew blank. The same as the folder's, it goes and the
+        // live one takes its place; changed, it keeps its changes and takes
+        // the folder's picture and fonts, as a design changed here does
+        const nd=gtNormalizeDesign(d);
+        const fixed=JSON.parse(JSON.stringify(own)); fixed.fields=fixFields(fixed.fields);
+        if(fixed.pieceEdit&&typeof fixed.pieceEdit==='object') Object.values(fixed.pieceEdit).forEach(v=>{
+          if(v&&typeof v==='object'&&Array.isArray(v.fields)) v.fields=fixFields(v.fields); });
+        gtImgs.delete(id); try{ gtImgFailed.delete(id); }catch(e){}
+        staleFixed++;
+        if(gtLiveLook(fixed)===gtLiveLook(nd)){
+          gtLib.designs.splice(gtLib.designs.indexOf(own),1);
+          made.push(nd);
+        }else{
+          Object.assign(own,{fields:fixed.fields,kind});
+          if(fixed.pieceEdit) own.pieceEdit=fixed.pieceEdit;
+          if(!gtAssets.has(own.file)){
+            if(own.pieceEdit&&own.pieceEdit.file===own.file) own.pieceEdit.file=nd.file;
+            own.file=nd.file;
+          }
+          if(own.back&&own.back.file&&!gtAssets.has(own.back.file)&&nd.back) own.back.file=nd.back.file;
+          [own.file,own.back&&own.back.file].forEach(f=>{ if(f&&GT_LIVE_PATH.test(f)) ownLive.add(f); });
+        }
+        continue;
+      }
       made.push(gtNormalizeDesign(d));
     }
     let at=0;
@@ -42898,6 +42927,7 @@ async function gtComboLive(ask){
       if(d.back&&ownLive.has(d.back.file)) gtBackImgs.delete(d.back.file); });
     notes.push(GT_MODE_TITLE[kind]+': '+made.length);
   }
+  if(staleFixed) gtSaveSoon();
   gtComboLiveNote='Live from '+escapeHtml(root.name)+' — '+notes.map(escapeHtml).join(' · ');
   await gtHydrateBacks().catch(()=>{});
   gtComboLivePaint();
