@@ -32070,6 +32070,16 @@ const gtDesign=id=>gtLib.designs.find(d=>d.id===id)||(gtSetPieceById&&gtSetPiece
 const gtDesignsInView=()=>gtMode==='combo'&&gtComboKind
   ?gtLib.designs.filter(d=>d.kind===gtComboKind):gtLib.designs;
 const gtFont=id=>gtLib.fonts.find(f=>f.id===id)||null;
+// The fonts to offer: one entry for each file. Two entries can share a file
+// (gtRepointFonts) and are one face - the second stays only so words set in it
+// keep their font. sel is the one picked, which is shown as its file's entry.
+function gtFontsListed(){
+  const seen=new Set();
+  return gtLib.fonts.filter(f=>{ const k=String(f.file||'').toLowerCase();
+    if(!k) return true; if(seen.has(k)) return false; seen.add(k); return true; });
+}
+const gtFontSameFile=(a,b)=>{ const x=gtFont(a), y=gtFont(b);
+  return !!(x&&y&&x.file&&String(x.file).toLowerCase()===String(y.file).toLowerCase()); };
 // a font that failed to load, or a field left on the default, falls back to the
 // app's own face rather than to whatever the browser feels like
 const gtFamily=id=>{
@@ -33964,6 +33974,7 @@ async function gtScanRun(){
     try{ for await (const entry of dh.values())
       if(entry.kind==='file'&&wanted.test(entry.name)) found.push(entry); }catch(e){ continue; }
     if(wanted===GT_ART) listed[folder?'designs':'root']=true;
+    else if(folder) listed.fonts=true;
     found.forEach(en=>present.add((folder?folder+'/':'')+en.name));
     // in the order the folder reads them, so a numbered set lands in its order
     found.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
@@ -33979,6 +33990,7 @@ async function gtScanRun(){
   await Promise.all([gtShapeList(),gtLibList()]);
   if(gtDedupeLib()) added=Math.max(added,1);
   if(listed.designs&&listed.root&&present.size) added+=gtDropMissing(present);
+  if(listed.fonts&&listed.root&&present.size) added+=gtRepointFonts(present);
   if(gtMode==='combo') gtComboFonts();     // fonts just found, for the live designs' words
   if(added){ await gtHydrate(); await gtSaveLib(); }
   return added;
@@ -34022,6 +34034,30 @@ function gtDropMissing(present){
   if(gtCurrentDesign&&gone.has(gtCurrentDesign.id)) gtCurrentDesign=null;
   return gone.size;
 }
+// A font whose file is not in the folder is pointed at the font of the same
+// name that is there. A library brought in from another page's folder (Die Cut
+// on 26 Oct) carried 625 fonts by their old file names, none of them there -
+// every font in the list twice, and those could not be drawn. It keeps its id,
+// so words set in it anywhere (a design, an order line, a Magic Create batch)
+// keep their font; the lists show each file once (gtFontsListed).
+function gtRepointFonts(present){
+  const have=new Set([...present].map(p=>p.toLowerCase()));
+  const there=f=>have.has(String(f.file||'').toLowerCase());
+  const lost=gtLib.fonts.filter(f=>!f.mcLent&&f.file&&(/^fonts\//i.test(f.file)||!f.file.includes('/'))&&!there(f));
+  if(!lost.length) return 0;
+  const real=gtLib.fonts.filter(f=>!f.mcLent&&there(f));
+  const ext=f=>(String(f.file||'').match(/\.[^.]+$/)||[''])[0].toLowerCase();
+  let n=0;
+  lost.forEach(f=>{
+    const keys=gtFontKeys(f);
+    const same=real.filter(o=>gtFontKeys(o).some(k=>keys.includes(k)));
+    // the same kind of file where there are two (BebasNeue .ttf and .otf)
+    const h=same.find(o=>ext(o)===ext(f))||same[0];
+    if(!h) return;
+    f.file=h.file; gtFontsDone.delete(f.id); n++;
+  });
+  return n;
+}
 // Two entries for one file are two of the same design, however they got there.
 // The first is kept, and anything an order line was pointing at is moved onto
 // it rather than left holding an id that no longer exists.
@@ -34058,10 +34094,12 @@ function gtDedupeLib(){
     keep.push(win);
   });
   if(dropped) gtLib.designs=keep;
+  // two fonts on one file are both kept, so words set in either keep their
+  // font; the lists show the file once (gtFontsListed). Only the same id twice goes
   const faces=new Set(), fonts=[];
   gtLib.fonts.forEach(f=>{
-    if(f.file&&faces.has(f.file)){ dropped=true; return; }
-    if(f.file) faces.add(f.file);
+    if(faces.has(f.id)){ dropped=true; return; }
+    faces.add(f.id);
     fonts.push(f);
   });
   gtLib.fonts=fonts;
@@ -40402,8 +40440,8 @@ function gtArtBox(id){
 }
 function gtFontOptions(sel){
   return `<option value=""${sel?'':' selected'}>Default</option>`
-    +gtLib.fonts.map(f=>
-      `<option value="${f.id}"${f.id===sel?' selected':''}>${escapeHtml(f.name)}</option>`).join('');
+    +gtFontsListed().map(f=>
+      `<option value="${f.id}"${f.id===sel||(sel&&gtFontSameFile(f.id,sel))?' selected':''}>${escapeHtml(f.name)}</option>`).join('');
 }
 // The age is the one thing on a tag that is wrong without looking wrong: last
 // week's 5 prints as happily as this week's 7, and nobody reads it again once
@@ -42091,7 +42129,7 @@ function gtRenderDesignList(){
 }
 function gtRenderFontList(){
   const q=(document.getElementById('gtFontSearch').value||'').trim().toLowerCase();
-  const hits=gtLib.fonts.filter(f=>!q||f.name.toLowerCase().includes(q));
+  const hits=gtFontsListed().filter(f=>!q||f.name.toLowerCase().includes(q));
   const el=document.getElementById('gtFontPanel');
   // each name in its own face, which is the quickest check that it loaded
   el.innerHTML=hits.length?hits.map(f=>`<div class="combo-opt" data-gt-font="${f.id}" data-id="${f.id}">
@@ -42172,7 +42210,8 @@ document.getElementById('gtFontPanel').addEventListener('click',async e=>{
     document.getElementById('gtFontSearch').value=f.name; gtRenderFontList(); return;
   }
   if(!confirm('Remove '+f.name+'?\n\nAny field set to it falls back to the default face.')) return;
-  gtLib.fonts=gtLib.fonts.filter(x=>x.id!==f.id);
+  // with any other entry on its file, which the list showed as this one
+  gtLib.fonts=gtLib.fonts.filter(x=>x.id!==f.id&&!gtFontSameFile(x.id,f.id));
   await gtSaveLib(); gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
   if(currentScreen==='tool-gift-tag-design') gtRenderFields();
 });
@@ -42806,8 +42845,15 @@ function gtComboAdoptEdited(){
 // the font of that name again once they are (gtComboFonts)
 const gtLiveFontName=new Map();
 // a font's name and its file's name, either of which may be how it is known
-const gtFontKeys=f=>[String(f.name||'').toLowerCase(),
-  String(f.file||'').split('/').pop().replace(/\.[^.]+$/,'').toLowerCase()].filter(Boolean);
+// and, after those, the two without the tag a copy was given on its way into
+// a folder (-t and 7 or 8 letters) or their spaces and dashes:
+// "BebasNeue-Regular" and "bebasneue-regular-tmoeisrl" are one face
+const gtFontLoose=s=>{ s=String(s||'').toLowerCase().replace(/\.(ttf|otf|woff2)$/,'')
+  .replace(/-t[a-z0-9]{7,8}$/,'').replace(/[^a-z0-9]/g,''); return s?'~'+s:''; };
+const gtFontKeys=f=>{
+  const name=String(f.name||''), file=String(f.file||'').split('/').pop().replace(/\.[^.]+$/,'');
+  return [...new Set([name.toLowerCase(),file.toLowerCase(),gtFontLoose(name),gtFontLoose(file)])].filter(Boolean);
+};
 function gtFontIndex(){
   const m=new Map();
   gtLib.fonts.forEach(f=>gtFontKeys(f).forEach(k=>{ if(!m.has(k)) m.set(k,f.id); }));
