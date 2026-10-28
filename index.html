@@ -30109,6 +30109,7 @@ function printCms(paper){
     // the colour as the screen shows it: a browser draws every RGB as sRGB
     const scrLab=T(srgb,L.TYPE_RGB_8,lab,L.TYPE_Lab_16,R,0);
     const lab16=v=>[v[0]/655.35,v[1]/257-128,v[2]/257-128];
+    const vividGrid={};
     const run=(t,a,n)=>lcms.cmsDoTransform(t,a,n);
     const Lk=run(kLab,run(toK.pdf,new Uint8Array([0,0,0]),1),1)[0];     // paper black, 16-bit L
     const lift=v=>Math.max(0,Math.min(65535,(v-Lk)*65535/(65535-Lk)));
@@ -30131,6 +30132,31 @@ function printCms(paper){
       screenLab:rgb=>lab16(run(scrLab,new Uint8Array(rgb),1)),
       printLab:(rgb,src)=>lab16(run(kLab,run(toK[src],new Uint8Array(rgb),1),1)),
       printRgb:(rgb,src)=>[...run(labRgb,run(kLab,run(toK[src],new Uint8Array(rgb),1),1),1)],
+      // The input that prints most colourful at this colour's printed hue
+      // (within 5 degrees) and lightness (within 3): Photographic squeezes a
+      // colour past the ink's reach harder than one at its edge, so neon green
+      // and hot pink print 13-16% more colourful sent as a duller colour.
+      // Every RGB in steps of 5, through the paper once per source, kept.
+      vivid:(rgb,src)=>{
+        let G=vividGrid[src];
+        if(!G){
+          const inp=[]; for(let r=0;r<=255;r+=5)for(let g=0;g<=255;g+=5)for(let b=0;b<=255;b+=5) inp.push(r,g,b);
+          const n=inp.length/3, a=new Uint8Array(inp);
+          G=vividGrid[src]={rgb:a,lab:run(kLab,run(toK[src],a,n),n),n};
+        }
+        const p0=lab16(run(kLab,run(toK[src],new Uint8Array(rgb),1),1));
+        const h0=Math.atan2(p0[2],p0[1]), c0=Math.hypot(p0[1],p0[2]);
+        let best=null, bc=c0;
+        for(let i=0;i<G.n;i++){
+          const L=G.lab[i*3]/655.35; if(Math.abs(L-p0[0])>3) continue;
+          const A=G.lab[i*3+1]/257-128, B=G.lab[i*3+2]/257-128, c=Math.hypot(A,B);
+          if(c<=bc) continue;
+          let dh=Math.abs(Math.atan2(B,A)-h0); if(dh>Math.PI) dh=2*Math.PI-dh;
+          if(dh>0.09) continue;
+          bc=c; best=[G.rgb[i*3],G.rgb[i*3+1],G.rgb[i*3+2]];
+        }
+        return best&&c0>0?{rgb:best,gain:Math.round((bc/c0-1)*100)}:null;
+      },
       // g: the screen match (printProofGamma) - above 1, the darks are taken
       // further down, and their colour with them, as paper shows them. Only
       // the darks: under L* 30 (from the paper's black) and fading out to it,
@@ -30181,6 +30207,9 @@ function artSrc(o){
 // green, which goes darker as much as flatter. Nothing can be swapped in that
 // prints brighter, so these are said, with the nearest the ink reaches.
 const PRINT_DULL_C=40, PRINT_DULL_DE=25;
+// a Most vivid swap is offered from this much more colour on paper, %: under
+// it (electric blue, 4-7%) the difference is not to be seen
+const PRINT_VIVID_GAIN=8;
 const _darkScan=new WeakMap();
 function artDarkColours(img,cms,src){ return artPrintScan(img,cms,src).dark; }
 function artDullColours(img,cms,src){ return artPrintScan(img,cms,src).dull; }
@@ -30194,7 +30223,10 @@ function artPrintScan(img,cms,src){
     const c=document.createElement('canvas');
     c.width=Math.max(1,Math.round(W*s)); c.height=Math.max(1,Math.round(H*s));
     let px=null;
-    try{ const x=c.getContext('2d',{willReadFrequently:true}); x.drawImage(img,0,0,c.width,c.height); px=x.getImageData(0,0,c.width,c.height).data; }
+    // shrunk without smoothing: smoothed, the pixels where two colours meet
+    // came out as a third (a pink block beside a blue one read as purple)
+    try{ const x=c.getContext('2d',{willReadFrequently:true}); x.imageSmoothingEnabled=false;
+      x.drawImage(img,0,0,c.width,c.height); px=x.getImageData(0,0,c.width,c.height).data; }
     catch(e){ px=null; }
     if(px){
       const sum=new Map(); let total=0;
@@ -30495,7 +30527,10 @@ function printColourPanel(side){
     artDullColours(o.img,cms,src).forEach(dc=>{
       const hx=hexOf(dc.rgb);
       if(seen.has(hx)) return; seen.add(hx);
+      const taken=swapsForIds(new Set([id])).find(s=>colDist(s.from,dc.rgb)<6);
+      if(taken){ rows.push({kind:'swap',dc,s:taken}); return; }
       if(colourIgnored.has(id+hx)) return;
+      if(dc.vivid===undefined) dc.vivid=cms.vivid(dc.rgb,src);
       rows.push({kind:'dull',dc});
     });
   });
@@ -30521,6 +30556,11 @@ function printColourPanel(side){
         +`<div style="font-size:13px;">⚠ ${sw(r.dc.rgb)} <b>${hx}</b> prints duller — too bright for the ink${r.dc.loss>=10?` (${r.dc.loss}% of its colour lost)`:''}</div>`
         +`<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px;font-size:12px;">`
         +`<span>Closest it prints:</span>${sw(r.dc.to,'The nearest the ink reaches, on this paper')} <span>${hexOf(r.dc.to)}</span>`
+        +(r.dc.vivid&&r.dc.vivid.gain>=PRINT_VIVID_GAIN
+          ?`<button type="button" class="btn-outline btn-sm" data-pc-swap="${hx}" data-pc-to="${hexOf(r.dc.vivid.rgb)}"`
+            +` title="Send it as ${hexOf(r.dc.vivid.rgb)}: duller on screen, ${r.dc.vivid.gain}% more colourful on paper than ${hx}, same lightness">`
+            +`Most vivid ${sw(r.dc.vivid.rgb)} ${hexOf(r.dc.vivid.rgb)} · +${r.dc.vivid.gain}% on paper</button>`
+          :`<span class="hint" style="margin:0;">no brighter option</span>`)
         +`<button type="button" class="btn-outline btn-sm" data-pc-ignore="${hx}">Ignore</button></div></div>`;
       return;
     }
