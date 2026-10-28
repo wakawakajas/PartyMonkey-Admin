@@ -30079,8 +30079,19 @@ function printCms(paper){
     const run=(t,a,n)=>lcms.cmsDoTransform(t,a,n);
     const Lk=run(kLab,run(toK.pdf,new Uint8Array([0,0,0]),1),1)[0];     // paper black, 16-bit L
     const lift=v=>Math.max(0,Math.min(65535,(v-Lk)*65535/(65535-Lk)));
+    // how dark black ink alone prints at each strength, 0-255: what "it looks
+    // like K 96%" is read against. The ink a colour takes (its K) says nothing
+    // of that - #420001 takes 74% black and prints darker than K 95%.
+    const kOnly=new Uint8Array(256*4); for(let k=0;k<256;k++) kOnly[k*4+3]=k;
+    const kL=run(kLab,kOnly,256).filter((_,i)=>i%3===0);
     const cms={paper,
       ink:(rgb,src)=>[...run(toK[src],new Uint8Array(rgb),1)],        // 0-255 each
+      // the black-ink-only strength, %, that prints as dark as this colour
+      looksK:(rgb,src)=>{
+        const v=run(kLab,run(toK[src],new Uint8Array(rgb),1),1)[0];
+        let k=0; while(k<255&&kL[k+1]>v) k++;
+        return Math.round(k/2.55);
+      },
       printL:(rgb,src)=>lift(run(kLab,run(toK[src],new Uint8Array(rgb),1),1)[0])/655.35,
       proof:(rgb,n,src)=>{
         const lb=run(kLab,run(toK[src],rgb,n),n);
@@ -30093,7 +30104,6 @@ function printCms(paper){
   return _printCms[paper];
 }
 const hexOf=c=>'#'+c.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('').toUpperCase();
-const inkK=(cms,rgb,src)=>Math.round(cms.ink(rgb,src)[3]/2.55);
 // every picture gets a number, so a swap knows which artwork it belongs to
 const _artIds=new WeakMap(); let _artIdN=0;
 function artImgId(img){
@@ -30139,7 +30149,7 @@ function artDarkColours(img,cms,src){
         const rgb=[b[0]/b[3],b[1]/b[3],b[2]/b[3]].map(Math.round);
         if(Math.max(...rgb)-Math.min(...rgb)<24) continue;        // grey or black: meant to be dark
         if(cms.printL(rgb,src)>PRINT_DARK_L) continue;
-        const k=inkK(cms,rgb,src);
+        const k=cms.looksK(rgb,src);
         const near=found.find(f=>colDist(f.rgb,rgb)<20);
         if(near){ if(b[3]>near.n){ near.rgb=rgb; near.k=k; } near.n+=b[3]; }
         else found.push({rgb,k,n:b[3]});
@@ -30170,7 +30180,7 @@ function darkFixes(cms,rgb,src){
     for(let l=l0;l<=0.7;l+=0.005){
       const c=hsl(l);
       if(cms.printL(c,src)>=target){
-        if(!out.some(o=>colDist(o.rgb,c)<6)) out.push({rgb:c,k:inkK(cms,c,src)});
+        if(!out.some(o=>colDist(o.rgb,c)<6)) out.push({rgb:c,k:cms.looksK(c,src)});
         break;
       }
     }
@@ -30330,10 +30340,10 @@ function printColourPanel(side){
       return;
     }
     h+=`<div style="margin:8px 0 0;padding:8px 10px;border:1px solid var(--border);border-radius:10px;">`
-      +`<div style="font-size:13px;">⚠ ${sw(r.dc.rgb)} <b>${hx}</b> prints near black (K ${r.dc.k}%)</div>`
+      +`<div style="font-size:13px;">⚠ ${sw(r.dc.rgb)} <b>${hx}</b> prints near black — as dark as K ${r.dc.k}% black</div>`
       +`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">`
       +r.fixes.map(f=>`<button type="button" class="btn-outline btn-sm" data-pc-swap="${hx}" data-pc-to="${hexOf(f.rgb)}"`
-        +` title="Print it as ${hexOf(f.rgb)} instead">${sw(f.rgb)} ${hexOf(f.rgb)} · K ${f.k}%</button>`).join('')
+        +` title="Print it as ${hexOf(f.rgb)} instead - as dark as K ${f.k}% black">${sw(f.rgb)} ${hexOf(f.rgb)} · like K ${f.k}%</button>`).join('')
       +`<button type="button" class="btn-outline btn-sm" data-pc-ignore="${hx}">Ignore</button></div></div>`;
   });
   box.innerHTML=h;
