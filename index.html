@@ -59971,6 +59971,17 @@ async function mcGtMoveToPage(it,mode,id){
 // only" in the full builder. They live on the order line beside vals, and
 // leaving them out here is what made a box added over there invisible on the
 // panel, undrawn in its preview, and gone by the time the line was saved.
+// The Magic Create panel's word list, said under a name list: each name and how
+// many, the total, and any row that will not print
+function mcGtNamesSay(line){
+  const NL=gtNamesOf(line); if(!NL) return '';
+  const bad=NL.rows.filter(r=>!r.ok).length;
+  return `<table class="gt-names-tbl" style="margin-top:6px;"><thead><tr><th>#</th><th>NAME ON TAG</th><th>QTY</th></tr></thead><tbody>${
+    NL.rows.map(r=>`<tr class="${r.ok?'':'bad'}"><td>${r.src}</td><td>${escapeHtml(r.name||'—')}</td><td>${r.ok?r.qty:'✕ check qty'}</td></tr>`).join('')
+    ||'<tr><td colspan="3" class="hint">Paste the names above - one to a row</td></tr>'}</tbody></table>
+    ${NL.warn.map(w=>`<div class="gt-names-warn">⚠ ${escapeHtml(w)}</div>`).join('')}
+    <div class="gt-names-tot">${NL.total} tag${NL.total===1?'':'s'}${bad?` · <span class="bad">${bad} row${bad>1?'s':''} not printed</span>`:''}</div>`;
+}
 const mcGtLine=it=>({id:'mc-'+it.id,
   // The SKU it was lent for. Everything that asks "where is this SKU" looks
   // for it here first, and a lent row carried none — so Remove on the summary
@@ -60194,7 +60205,10 @@ function mcGiftWire(it){
   // save both read this, so what is looked at and what is kept cannot differ
   function mcGtCollectLine(){
     const c=collect();
-    return {id:'mc-'+it.id,designId:c.designId,qty:c.qty,vals:c.vals,extra:c.extra||[],...gtLineBleedKept(it.sheet_item)};
+    const l={id:'mc-'+it.id,designId:c.designId,qty:c.qty,vals:c.vals,extra:c.extra||[],...gtLineBleedKept(it.sheet_item)};
+    // a name list is drawn with its first name, as its first tag prints
+    const NL=gtNamesOf(l), first=NL&&NL.rows.find(r=>r.ok);
+    return first?{...l,vals:{...l.vals,[NL.fid]:{...l.vals[NL.fid],text:first.name}}}:l;
   }
   function drawWords(){
     const d=mcGtDesign(mcGtPick);
@@ -60208,6 +60222,7 @@ function mcGiftWire(it){
     // a back text says so; the buyer's message goes to the front's one text
     const isBack=f=>!!f&&f.side==='back';
     const fronts=fields.filter(f=>!isBack(f)).length;
+    const NL=gtNamesOf(line);
     words.innerHTML='<div class="sect-label" style="margin-top:6px;">The words on it</div>'
       +fields.map(f=>{
       const v=(typeof gtVal==='function')?gtVal(line,f)
@@ -60217,9 +60232,27 @@ function mcGiftWire(it){
       const text=(line.vals&&line.vals[f.id]&&line.vals[f.id].text!==undefined)
         ? line.vals[f.id].text
         : (fronts===1&&!isBack(f)&&it.message?it.message:v.text);
+      // a word with a name list shows the list, the same one the sheet's line has
+      const listed=!!NL&&NL.fid===f.id, lv=listed?line.vals[f.id]:null;
+      const toggle=`<button type="button" class="icon-btn${listed?' on':''}" data-mc-gt-names="${f.id}"
+          title="${listed?'Back to one wording for every tag of this order':'Name list: paste many names, one tag (or Name // qty tags) each'}">☰</button>`;
+      if(listed) return `<div class="field" style="margin-bottom:4px;">
+          <span style="display:flex;align-items:center;gap:6px;">${escapeHtml(f.name||'TEXT')} · name list ${toggle}</span>
+          <textarea rows="5" data-mc-gtf="${f.id}|names" class="mc-gt-names" placeholder="ABC Pte Ltd // 5&#10;Sunrise Dental // 3"
+            style="width:100%;min-height:110px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13px;">${escapeHtml(lv.names)}</textarea>
+          <input type="hidden" data-mc-gtf="${f.id}|order" value="${escapeHtml(lv.order||'')}"/>
+          <div data-mc-gt-names-out>${mcGtNamesSay(line)}</div></div>`
+        +mcGtStyleRow(f,v);
       return `<label class="field" style="margin-bottom:4px;">
-          <span>${escapeHtml(f.name||'TEXT')}${isBack(f)?' (back)':''}</span>
-          <textarea class="gt-lines" rows="1" data-enter-next title="Ctrl+Enter for a second line" data-mc-gtf="${f.id}|text">${escapeHtml(text)}</textarea></label>
+          <span style="display:flex;align-items:center;gap:6px;">${escapeHtml(f.name||'TEXT')}${isBack(f)?' (back)':''} ${toggle}</span>
+          <textarea class="gt-lines" rows="1" data-enter-next title="Ctrl+Enter for a second line" data-mc-gtf="${f.id}|text">${escapeHtml(text)}</textarea></label>`
+        +mcGtStyleRow(f,v);
+    }).join('');
+    mcGtNamesQty(NL);
+  }
+  // the font, size and alignment of one word, under its words or its list
+  function mcGtStyleRow(f,v){
+    return `
         <div class="grid3e" style="margin-bottom:10px;">
           <label class="field"><span>FONT</span>
             <select data-mc-gtf="${f.id}|font">${
@@ -60234,8 +60267,55 @@ function mcGiftWire(it){
                   a==='left'?'Left':a==='center'?'Centre':'Right'}</option>`).join('')
             }</select></label>
         </div>`;
-    }).join('');
   }
+  // With a name list the list is the count: the box shows its total and is not
+  // typed in, and Add more is the list's job (a name's // qty)
+  function mcGtNamesQty(NL){
+    const q=document.getElementById('mcGtQty'), more=document.getElementById('mcGtMore');
+    if(q){ q.disabled=!!NL; if(NL) q.value=Math.max(1,NL.total);
+      q.title=NL?'Set by the name list':''; }
+    if(more) more.disabled=!!NL;
+  }
+  // a word made a name list here, or put back to one wording - the same as ☰
+  // on the sheet's line, onto the panel and onto the lent row beside it
+  words.addEventListener('click',e=>{
+    const b=e.target.closest('[data-mc-gt-names]'); if(!b) return;
+    const fid=b.dataset.mcGtNames;
+    const c=collect();
+    const vals=JSON.parse(JSON.stringify(c.vals||{}));
+    const v=vals[fid]||(vals[fid]={});
+    // a list put aside has no box on the panel, so the boxes alone lose it
+    const kept=(it.sheet_item&&it.sheet_item.vals&&it.sheet_item.vals[fid])||{};
+    if(typeof v.names!=='string'&&typeof v.namesOff!=='string'&&typeof kept.namesOff==='string'){
+      v.namesOff=kept.namesOff; if(kept.orderOff) v.orderOff=kept.orderOff; }
+    let qty=c.qty;
+    if(typeof v.names==='string'){
+      const NL=gtNamesOf({vals}), ok=NL?NL.rows.filter(r=>r.ok):[];
+      if(ok.length>1&&!confirm(`Take the name list off this order?\n\nIts ${ok.length} names go back to one wording - "${ok[0].name}" × ${ok[0].qty}. Tap ☰ again to bring the list back.`)) return;
+      if(ok[0]){ v.text=ok[0].name; qty=ok[0].qty; }
+      v.namesOff=v.names; v.orderOff=v.order; delete v.names; delete v.order;
+    }else{
+      Object.values(vals).forEach(o=>{ if(o&&typeof o.names==='string'){ o.namesOff=o.names; delete o.names; delete o.order; } });
+      if(typeof v.namesOff==='string'){ v.names=v.namesOff; if(v.orderOff) v.order=v.orderOff; delete v.namesOff; delete v.orderOff; }
+      else{ const t=String(v.text||'').trim(); v.names=t?t.replace(/\n/g,' ')+' // '+qty:''; }
+      const NL=gtNamesOf({vals}); qty=Math.max(1,NL.total||1);
+    }
+    it.sheet_item={...c,vals,qty};
+    const live=(typeof gtOrder!=='undefined'&&gtOrder||[]).find(l=>String(l.id||'')==='mc-'+it.id);
+    if(live){ live.vals=JSON.parse(JSON.stringify(vals)); live.qty=qty; gtNestCache=null;
+      try{ gtRenderOrder(); gtDraw(); }catch(err){} }
+    const q=document.getElementById('mcGtQty'); if(q) q.value=qty;
+    drawWords(); markShown(); drawPrev();
+    const ta=words.querySelector('.mc-gt-names'); if(ta) ta.focus();
+  });
+  // the list's count and what it says, as it is typed
+  words.addEventListener('input',e=>{
+    if(!e.target.matches('.mc-gt-names')) return;
+    const NL=gtNamesOf({vals:panelVals()});
+    mcGtNamesQty(NL);
+    const out=words.querySelector('[data-mc-gt-names-out]');
+    if(out) out.innerHTML=mcGtNamesSay({vals:panelVals(),designId:mcGtPick});
+  });
   // what the boxes held when last filled from the line — the measure of what
   // has been changed in the panel since, which is what wins over the sheet
   let shown=null;
@@ -60401,6 +60481,18 @@ function mcGiftWire(it){
         shown={qty:out.qty,vals};       // said on the sheet now, so no longer a change
         if(typeof gtDraw==='function') try{ gtDraw(); }catch(e){}
       }
+    }
+    // a list put aside (☰ off) has no box here; it stays on the line to come back
+    Object.entries((it.sheet_item&&it.sheet_item.vals)||{}).forEach(([id,o])=>{
+      const nv=out.vals[id];
+      if(o&&typeof o.namesOff==='string'&&nv&&typeof nv.names!=='string'&&nv.namesOff===undefined){
+        out.vals={...out.vals,[id]:{...nv,namesOff:o.namesOff,...(o.orderOff?{orderOff:o.orderOff}:{})}}; }
+    });
+    // a name list is the count, whatever the box or the sheet said
+    const NL=gtNamesOf(out);
+    if(NL){
+      out.qty=Math.max(1,NL.total);
+      if(live&&live.qty!==out.qty){ live.qty=out.qty; if(typeof gtDraw==='function') try{ gtDraw(); }catch(e){} }
     }
     // Add more here and Add Extra on the line are the same figure asked two
     // ways, so what is over the order is written down rather than left to be
@@ -60756,10 +60848,17 @@ function mcGtOwnForBatch(home){
     const lines=mcItems.filter(it=>mcRowKey(it).trim().toLowerCase()===key
       &&!lent.has(String(it.id))&&!mcMergedKey(it)&&!mcIsExtraDesign(it)
       &&(!it.tile||(it.tile==='giftTag'&&mcGtAdoptable(it,home))));
+    // A name list cannot be shared out: each order would take the whole list
+    // and print every name again. Only a row for one order is made its own;
+    // for several, each order's names go on that order's line (mcGtListShared).
+    if(lines.length>1&&gtNamesOf(row)){ mcGtListShared.add(row.id); continue; }
     if(lines.length) out.push({row,lines});
   }
   return out;
 }
+// rows with a name list left as the page's own, because they stood for several
+// orders - said once on the way off the sheet
+const mcGtListShared=new Set();
 // A gift tag line with a design already is only this loan's to fill when it is
 // on this page in this finish - a Gloss line (or one with no page yet) was
 // rewritten to the loan's Matte and design - and never a customer's one-off,
@@ -60796,7 +60895,12 @@ function mcGtAdoptOwnRows(home){
 async function mcGtReturnRun(){
   if(!mcGtHome) return;
   // not in the middle of an export borrowing the sheet - that is not a save
+  mcGtListShared.clear();
   if(!mcBusy) mcGtAdoptOwnRows(mcGtHome);
+  if(mcGtListShared.size){
+    const n=mcGtListShared.size; mcGtListShared.clear();
+    try{ alert(`${n} sheet row${n>1?'s':''} with a name list stood for several orders and ${n>1?'were':'was'} not saved to them - put each order's names on its own line.`); }catch(e){}
+  }
   const home=mcGtHome; mcGtHome=null;
   // Rows lent to a page that was then switched away from are parked in that
   // page's own order rather than sitting in gtOrder, and they are the batch's
