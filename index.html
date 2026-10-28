@@ -11913,8 +11913,8 @@ function drawAll(){
   // the back is the same on every sheet — one backing design, printed behind
   // whatever the front happens to be carrying
   renderSide('back',document.getElementById('canvasBack'),dim,bo);
-  printColourScreen(document.getElementById('canvasFront'),fo._art);
-  printColourScreen(document.getElementById('canvasBack'),bo._art);
+  printColourScreen(document.getElementById('canvasFront'),fo._art,'front');
+  printColourScreen(document.getElementById('canvasBack'),bo._art,'back');
   printColourCheckSoon();
   // Place Card's sheet shown 30% smaller on screen — drawn at the same pixels,
   // so it stays sharp, and clicks read the drawn size
@@ -16592,7 +16592,7 @@ function renderModal(){
   if(modalPage<0) modalPage=0;
   const mo={page:modalPage};
   renderSide(modalSide,document.getElementById('modalCanvas'),baseModalDim()*modalZoom,mo);
-  printColourScreen(document.getElementById('modalCanvas'),mo._art);
+  printColourScreen(document.getElementById('modalCanvas'),mo._art,modalSide);
   document.getElementById('zoomLbl').textContent=modalZoom.toFixed(1)+'×';
   document.getElementById('modalPages').style.display=n>1?'':'none';
   document.getElementById('modalPageLbl').textContent=`${modalPage+1} / ${n}`;
@@ -30009,45 +30009,91 @@ function iccObject(num){
   return b;
 }
 // ---------- what the Fiery will make of a colour ----------
-// The Fiery turns every RGB colour into ink through GRACoL2013 CRPC6
-// (relative colorimetric, black point compensation - its CMYK settings). A
-// colour that glows on a screen can come out mostly black ink: a customer's
-// burgundy #420001 is C9 M100 Y63 K84 and printed near black (28 Oct 2026).
-// LittleCMS with the same profile shows the sheet as it will print, finds the
-// colours that will go dark, and offers a lighter one of the same hue to swap
-// in. The swap is to the colour only: a PDF keeps its vectors (its rg/k
-// numbers are rewritten), a picture its pixels.
-const PRINT_CMYK_PROFILE='GRACoL2013_CRPC6.icc';
+// The Fiery prints RGB straight through the paper's own output profile -
+// "Separate RGB/Lab to CMYK source" is off - with Photographic (perceptual)
+// rendering. RGB with no profile (a Canva PDF's rg colours) is read as Adobe
+// RGB (1998), the RGB source; the pictures and sheet this tool writes carry
+// sRGB, which it uses ("Use RGB embedded profiles" is on). CMYK is read as
+// GRACoL2013. A colour that glows on a screen can come out near black: a
+// customer's burgundy #420001 printed so on matte (28 Oct 2026), 74% black.
+// LittleCMS with the Fiery's own profiles (exported from Device Center,
+// profiles/) shows the sheet as it will print, finds the colours that will go
+// dark, and offers a lighter one of the same hue to swap in. The swap is to
+// the colour only: a PDF keeps its vectors (its rg/k numbers are rewritten), a
+// picture its pixels.
+const PRINT_PROFILES={gloss:'profiles/fiery-coated-glossy.icc',matte:'profiles/fiery-coated-matte.icc',
+  plain:'profiles/fiery-plain.icc'};
+const PRINT_PAPER_NAMES={gloss:'Coated-Glossy',matte:'Coated-Matte',plain:'Plain'};
 const LCMS_URL='https://cdn.jsdelivr.net/npm/lcms-wasm@1.0.5/dist/lcms.js';
-const PRINT_DARK_K=75;          // black ink, %, at which a colour is flagged
-let _printCms=null, printCmsReady=null;
-function printCms(){
-  if(!_printCms) _printCms=(async()=>{
+// how light a colour prints, L* from the paper's black (0) to its white (100),
+// at or under which a colour is flagged, and the two its fixes are lifted to
+const PRINT_DARK_L=16, PRINT_FIX_L=[22,27];
+// the paper chosen beside the Order ID, as the Fiery's coatings: anything
+// matte prints on Coated-Matte, gloss (and nothing chosen, as the box opens on
+// gloss) on Coated-Glossy, the rest on Plain
+function printPaperKey(){
+  const p=String(state.paperType||'');
+  return /matt/i.test(p)?'matte':(!p||/gloss/i.test(p))?'gloss':'plain';
+}
+let _lcms=null;
+function lcmsLib(){
+  if(!_lcms) _lcms=(async()=>{
     const L=await import(LCMS_URL);
     const lcms=await L.instantiate();
-    const res=await fetch(PRINT_CMYK_PROFILE);
-    if(!res.ok) throw new Error('the GRACoL2013 profile did not load');
-    const buf=new Uint8Array(await res.arrayBuffer());
-    const cmyk=lcms.cmsOpenProfileFromMem(buf,buf.length);
-    if(!cmyk) throw new Error('the GRACoL2013 profile could not be read');
-    const srgb=lcms.cmsCreate_sRGBProfile();
-    const RI=L.INTENT_RELATIVE_COLORIMETRIC, BPC=L.cmsFLAGS_BLACKPOINTCOMPENSATION;
-    const toK=lcms.cmsCreateTransform(srgb,L.TYPE_RGB_8,cmyk,L.TYPE_CMYK_8,RI,BPC);
-    const fromK=lcms.cmsCreateTransform(cmyk,L.TYPE_CMYK_8,srgb,L.TYPE_RGB_8,RI,BPC);
-    const proof=lcms.cmsCreateProofingTransform(srgb,L.TYPE_RGB_8,srgb,L.TYPE_RGB_8,cmyk,RI,RI,
-      BPC|L.cmsFLAGS_SOFTPROOFING);
-    const cms={
-      cmyk:rgb=>[...lcms.cmsDoTransform(toK,new Uint8Array(rgb),1)],      // 0-255 each
-      rgbOf:c=>[...lcms.cmsDoTransform(fromK,new Uint8Array(c),1)],
-      proof:(rgb,n)=>lcms.cmsDoTransform(proof,rgb,n),
+    const prof=async url=>{
+      const res=await fetch(url);
+      if(!res.ok) throw new Error(url.split('/').pop()+' did not load');
+      const buf=new Uint8Array(await res.arrayBuffer());
+      const h=lcms.cmsOpenProfileFromMem(buf,buf.length);
+      if(!h) throw new Error(url.split('/').pop()+' could not be read');
+      return h;
     };
-    printCmsReady=cms;
+    const srgb=lcms.cmsCreate_sRGBProfile(), lab=lcms.cmsCreateLab4Profile(0);
+    const [adobe,gracol]=await Promise.all([prof('profiles/AdobeRGB1998.icc'),prof('profiles/GRACoL2013_CRPC6.icc')]);
+    const R=L.INTENT_RELATIVE_COLORIMETRIC, BPC=L.cmsFLAGS_BLACKPOINTCOMPENSATION;
+    // a PDF's k/K numbers, read and written as the Fiery's CMYK source
+    const gIn=lcms.cmsCreateTransform(srgb,L.TYPE_RGB_8,gracol,L.TYPE_CMYK_8,R,BPC);
+    const gOut=lcms.cmsCreateTransform(gracol,L.TYPE_CMYK_8,srgb,L.TYPE_RGB_8,R,BPC);
+    return {L,lcms,prof,srgb,lab,adobe,
+      cmykG:rgb=>[...lcms.cmsDoTransform(gIn,new Uint8Array(rgb),1)],
+      rgbOfG:c=>[...lcms.cmsDoTransform(gOut,new Uint8Array(c),1)]};
+  })().catch(e=>{ _lcms=null; throw e; });
+  return _lcms;
+}
+// One per paper: src 'pdf' is RGB with no profile (Adobe RGB at the Fiery),
+// 'img' is sRGB. proof() is the sheet as printed, shown with the paper's black
+// as the screen's black - a print's black is never as deep as a screen's, and
+// shown as the grey it measures, every dark colour looked lighter than it
+// printed.
+const _printCms={}, printCmsReady={};
+function printCms(paper){
+  paper=paper||printPaperKey();
+  if(!_printCms[paper]) _printCms[paper]=(async()=>{
+    const {L,lcms,prof,srgb,lab,adobe}=await lcmsLib();
+    const out=await prof(PRINT_PROFILES[paper]);
+    const P=L.INTENT_PERCEPTUAL, R=L.INTENT_RELATIVE_COLORIMETRIC, BPC=L.cmsFLAGS_BLACKPOINTCOMPENSATION;
+    const T=(a,af,b,bf,i,f)=>lcms.cmsCreateTransform(a,af,b,bf,i,f);
+    const toK={pdf:T(adobe,L.TYPE_RGB_8,out,L.TYPE_CMYK_8,P,BPC),img:T(srgb,L.TYPE_RGB_8,out,L.TYPE_CMYK_8,P,BPC)};
+    const kLab=T(out,L.TYPE_CMYK_8,lab,L.TYPE_Lab_16,R,0);
+    const labRgb=T(lab,L.TYPE_Lab_16,srgb,L.TYPE_RGB_8,R,0);
+    const run=(t,a,n)=>lcms.cmsDoTransform(t,a,n);
+    const Lk=run(kLab,run(toK.pdf,new Uint8Array([0,0,0]),1),1)[0];     // paper black, 16-bit L
+    const lift=v=>Math.max(0,Math.min(65535,(v-Lk)*65535/(65535-Lk)));
+    const cms={paper,
+      ink:(rgb,src)=>[...run(toK[src],new Uint8Array(rgb),1)],        // 0-255 each
+      printL:(rgb,src)=>lift(run(kLab,run(toK[src],new Uint8Array(rgb),1),1)[0])/655.35,
+      proof:(rgb,n,src)=>{
+        const lb=run(kLab,run(toK[src],rgb,n),n);
+        for(let i=0;i<lb.length;i+=3) lb[i]=lift(lb[i]);
+        return run(labRgb,lb,n);
+      }};
+    printCmsReady[paper]=cms;
     return cms;
-  })().catch(e=>{ _printCms=null; throw e; });
-  return _printCms;
+  })().catch(e=>{ delete _printCms[paper]; throw e; });
+  return _printCms[paper];
 }
 const hexOf=c=>'#'+c.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('').toUpperCase();
-const inkK=(cms,rgb)=>Math.round(cms.cmyk(rgb)[3]/2.55);
+const inkK=(cms,rgb,src)=>Math.round(cms.ink(rgb,src)[3]/2.55);
 // every picture gets a number, so a swap knows which artwork it belongs to
 const _artIds=new WeakMap(); let _artIdN=0;
 function artImgId(img){
@@ -30055,12 +30101,19 @@ function artImgId(img){
   if(!_artIds.has(img)) _artIds.set(img,++_artIdN);
   return _artIds.get(img);
 }
+// how the Fiery reads a design's RGB: a PDF's as Adobe RGB, a picture's as sRGB
+function artSrc(o){
+  if(!o) return 'img';
+  const f=o.file, nm=String((f&&f.name)||o.name||(o.source&&o.source.path)||'');
+  return (f&&f.type==='application/pdf')||/\.pdf$/i.test(nm)?'pdf':'img';
+}
 // The colours a picture is mostly made of, and those that will print dark:
 // enough of the art to matter (0.3% of it), clearly a colour rather than a
-// grey or black, and at PRINT_DARK_K black ink or more.
+// grey or black, and printing at PRINT_DARK_L or darker on this paper.
 const _darkScan=new WeakMap();
-function artDarkColours(img,cms){
-  if(_darkScan.has(img)) return _darkScan.get(img);
+function artDarkColours(img,cms,src){
+  const memo=_darkScan.get(img)||{}, key=cms.paper+src;
+  if(memo[key]) return memo[key];
   const W=img.naturalWidth||img.width, H=img.naturalHeight||img.height;
   let out=[];
   if(W>0&&H>0){
@@ -30085,8 +30138,8 @@ function artDarkColours(img,cms){
         if(b[3]<min) continue;
         const rgb=[b[0]/b[3],b[1]/b[3],b[2]/b[3]].map(Math.round);
         if(Math.max(...rgb)-Math.min(...rgb)<24) continue;        // grey or black: meant to be dark
-        const k=inkK(cms,rgb);
-        if(k<PRINT_DARK_K) continue;
+        if(cms.printL(rgb,src)>PRINT_DARK_L) continue;
+        const k=inkK(cms,rgb,src);
         const near=found.find(f=>colDist(f.rgb,rgb)<20);
         if(near){ if(b[3]>near.n){ near.rgb=rgb; near.k=k; } near.n+=b[3]; }
         else found.push({rgb,k,n:b[3]});
@@ -30095,13 +30148,13 @@ function artDarkColours(img,cms){
     }
     c.width=c.height=0;
   }
-  _darkScan.set(img,out);
+  memo[key]=out; _darkScan.set(img,memo);
   return out;
 }
 const colDist=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);
-// Lighter colours of the same hue and saturation, the first whose black ink
-// falls to 65% and to 55% - still that colour, printed as that colour.
-function darkFixes(cms,rgb){
+// Lighter colours of the same hue and saturation, the first that prints as
+// light as each of PRINT_FIX_L - still that colour, printed as that colour.
+function darkFixes(cms,rgb,src){
   const [r,g,b]=rgb.map(v=>v/255), mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn;
   let h=0;
   if(d) h=mx===r?((g-b)/d)%6:mx===g?(b-r)/d+2:(r-g)/d+4;
@@ -30113,10 +30166,13 @@ function darkFixes(cms,rgb){
     return [R+m,G+m,B+m].map(v=>Math.round(Math.min(1,Math.max(0,v))*255));
   };
   const out=[];
-  for(const target of [65,55]){
+  for(const target of PRINT_FIX_L){
     for(let l=l0;l<=0.7;l+=0.005){
-      const c=hsl(l), k=inkK(cms,c);
-      if(k<=target){ if(!out.some(o=>colDist(o.rgb,c)<6)) out.push({rgb:c,k}); break; }
+      const c=hsl(l);
+      if(cms.printL(c,src)>=target){
+        if(!out.some(o=>colDist(o.rgb,c)<6)) out.push({rgb:c,k:inkK(cms,c,src)});
+        break;
+      }
     }
   }
   return out;
@@ -30152,9 +30208,11 @@ function swapPixels(data,swaps,stride){
   }
 }
 // A drawn sheet on screen: its swaps, and as the Fiery would print it when
-// the preview is on. ids: the pictures renderSide drew (opts._art).
-function printColourScreen(canvas,ids){
-  const swaps=swapsForIds(ids), cms=printPreviewOn?printCmsReady:null;
+// the preview is on. ids: the pictures renderSide drew (opts._art). The sheet
+// is read as Adobe RGB where any of its artwork is a PDF, which is what it
+// mostly is then; sRGB otherwise.
+function printColourScreen(canvas,ids,side){
+  const swaps=swapsForIds(ids), cms=printPreviewOn?printCmsReady[printPaperKey()]:null;
   if(!swaps.length&&!cms) return;
   if(!(canvas.width>0&&canvas.height>0)) return;
   const ctx=canvas.getContext('2d');
@@ -30164,7 +30222,8 @@ function printColourScreen(canvas,ids){
   if(cms){
     const n=canvas.width*canvas.height, d=id.data, rgb=new Uint8Array(n*3);
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ rgb[j]=d[i]; rgb[j+1]=d[i+1]; rgb[j+2]=d[i+2]; }
-    const p=cms.proof(rgb,n);
+    const src=sideArtObjs(side).some(([,o])=>o&&o.img&&artSrc(o)==='pdf')?'pdf':'img';
+    const p=cms.proof(rgb,n,src);
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ d[i]=p[j]; d[i+1]=p[j+1]; d[i+2]=p[j+2]; }
   }
   ctx.putImageData(id,0,0);
@@ -30183,7 +30242,7 @@ function swappedArtCanvas(img,swaps){
 // given the new colour's ink. The page's content and every form it draws are
 // rewritten; pictures inside the PDF are left as they are.
 async function pdfSwapColours(bytes,swaps){
-  const cms=await printCms();
+  const cms=await lcmsLib();
   const N='(-?(?:\\d+\\.?\\d*|\\.\\d+))';
   const lead='(?<=^|[\\s\\[\\]()<>{}])(?<![\\d.]\\s+)';
   const re3=new RegExp(lead+N+'\\s+'+N+'\\s+'+N+'\\s+(rg|RG|scn|SCN|sc|SC)(?![A-Za-z])','g');
@@ -30196,8 +30255,8 @@ async function pdfSwapColours(bytes,swaps){
     let s=''; for(let i=0;i<data.length;i+=8192) s+=String.fromCharCode.apply(null,data.subarray(i,i+8192));
     let hit=false;
     s=s.replace(re4,(m,c,mg,y,k,op)=>{
-      const sw=near(cms.rgbOf([c,mg,y,k].map(u))); if(!sw) return m;
-      hit=true; return cms.cmyk(sw.to).map(fmt).join(' ')+' '+op;
+      const sw=near(cms.rgbOfG([c,mg,y,k].map(u))); if(!sw) return m;
+      hit=true; return cms.cmykG(sw.to).map(fmt).join(' ')+' '+op;
     });
     s=s.replace(re3,(m,r,g,b,op)=>{
       const sw=near([r,g,b].map(u)); if(!sw) return m;
@@ -30238,30 +30297,31 @@ function printColourPanel(side){
   if(!box) return;
   const arts=sideArtObjs(side).filter(([,o])=>o&&o.img);
   if(!arts.length){ box.innerHTML=''; return; }
-  const cms=printCmsReady;
+  const paper=printPaperKey(), cms=printCmsReady[paper];
   if(!cms){
     box.innerHTML='<p class="hint" style="margin:8px 0 0;">Checking colours for print…</p>';
-    printCms().then(()=>{ printColourPanel(side); if(printPreviewOn) drawAll(); })
+    printCms(paper).then(()=>{ printColourPanel(side); if(printPreviewOn) drawAll(); })
       .catch(e=>{ box.innerHTML=`<p class="hint" style="margin:8px 0 0;">Print colour check unavailable — ${e.message||e}.</p>`; });
     return;
   }
   const rows=[];
   const seen=new Set();
   arts.forEach(([,o])=>{
-    const id=artImgId(o.img);
-    artDarkColours(o.img,cms).forEach(dc=>{
+    const id=artImgId(o.img), src=artSrc(o);
+    artDarkColours(o.img,cms,src).forEach(dc=>{
       const hx=hexOf(dc.rgb);
       if(seen.has(hx)) return; seen.add(hx);
       const taken=colourSwaps.find(s=>s.imgs.has(id)&&colDist(s.from,dc.rgb)<6);
       if(taken){ rows.push({kind:'swap',dc,s:taken}); return; }
       if(colourIgnored.has(id+hx)) return;
-      rows.push({kind:'dark',dc,fixes:darkFixes(cms,dc.rgb)});
+      rows.push({kind:'dark',dc,fixes:darkFixes(cms,dc.rgb,src)});
     });
   });
   const sw=(c,t)=>`<span style="display:inline-block;width:16px;height:16px;border-radius:4px;vertical-align:-3px;`
     +`border:1px solid var(--border);background:${hexOf(c)}" title="${t||hexOf(c)}"></span>`;
-  let h=`<div class="click-row" style="margin-top:9px;"><label class="click-tog" title="Show the sheet as the Fiery prints it (GRACoL2013) - on screen only">`
-    +`<input type="checkbox" data-pc-preview ${printPreviewOn?'checked':''}/>Print preview (GRACoL2013)</label></div>`;
+  const pn=PRINT_PAPER_NAMES[paper];
+  let h=`<div class="click-row" style="margin-top:9px;"><label class="click-tog" title="Show the sheet as the Fiery prints it on ${pn} paper - on screen only. The paper is the Paper type beside the Order ID.">`
+    +`<input type="checkbox" data-pc-preview ${printPreviewOn?'checked':''}/>Print preview (Fiery ${pn})</label></div>`;
   rows.forEach((r,i)=>{
     const hx=hexOf(r.dc.rgb);
     if(r.kind==='swap'){
@@ -30285,7 +30345,8 @@ function printColourClick(e){
   const ids=()=>sideArtObjs(side).map(([,o])=>o).filter(o=>o&&o.img).filter(o=>{
     const id=artImgId(o.img), hx=e.target.closest('[data-pc-swap],[data-pc-ignore],[data-pc-undo]');
     const from=hx&&(hx.dataset.pcSwap||hx.dataset.pcIgnore||hx.dataset.pcUndo);
-    return from&&printCmsReady&&artDarkColours(o.img,printCmsReady).some(dc=>hexOf(dc.rgb)===from);
+    const cms=printCmsReady[printPaperKey()];
+    return from&&cms&&artDarkColours(o.img,cms,artSrc(o)).some(dc=>hexOf(dc.rgb)===from);
   }).map(o=>artImgId(o.img));
   const b=e.target.closest('button'); if(!b) return;
   if(b.dataset.pcSwap){
@@ -30306,8 +30367,13 @@ document.addEventListener('change',e=>{
   if(!e.target.matches||!e.target.matches('[data-pc-preview]')) return;
   printPreviewOn=e.target.checked;
   document.querySelectorAll('[data-pc-preview]').forEach(x=>{ x.checked=printPreviewOn; });
-  if(printPreviewOn&&!printCmsReady) printCms().then(()=>drawAll()).catch(()=>{});
+  if(printPreviewOn&&!printCmsReady[printPaperKey()]) printCms().then(()=>drawAll()).catch(()=>{});
   else drawAll();
+});
+// another paper is another profile: the check and the preview follow it
+document.addEventListener('change',e=>{
+  if(!e.target||e.target.id!=='artPaperType') return;
+  setTimeout(()=>{ printColourCheckSoon(); if(printPreviewOn) drawAll(); },0);
 });
 // ---------- lifting one page out of somebody else's PDF ----------
 // Kept to itself: every name in here is the format's, not the app's.
