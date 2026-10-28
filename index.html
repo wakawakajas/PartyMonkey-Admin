@@ -9264,7 +9264,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
     title="Screens glow and paper does not. Hold a print beside the screen and slide until the sheet looks like it - kept on this computer.">
     <span>Screen match</span><span class="hint" style="margin:0;">lighter</span>
     <input type="range" min="0" max="100" step="5" data-pc-dark id="pcPopDark" style="flex:1;min-width:70px;"/>
-    <span class="hint" style="margin:0;">darker</span></label>
+    <span class="hint" style="margin:0;">darker</span>
+    <b id="pcPopDarkVal" style="min-width:38px;text-align:right;">40%</b></label>
   <div id="pcPopBody"></div>
 </div>
 
@@ -30732,6 +30733,8 @@ const pcPopIsOpen=()=>{ const p=pcPopEl(); return !!p&&!p.hidden; };
 function pcPopRender(){
   const pop=pcPopEl(); if(!pop||pop.hidden) return;
   if(_pcDarkHeld) return;            // a slider is under the finger
+  const ae=document.activeElement;   // or a figure is being typed
+  if(ae&&ae.matches&&ae.matches('#pcPop input[type="number"]')) return;
   const paper=printPaperKey(), cms=printCmsReady[paper];
   const body=document.getElementById('pcPopBody');
   document.getElementById('pcPopTitle').textContent=`Print preview · Fiery ${PRINT_PAPER_NAMES[paper]}`;
@@ -30740,6 +30743,7 @@ function pcPopRender(){
   seg.style.display=has('front')&&has('back')?'':'none';
   seg.querySelectorAll('[data-pc-side]').forEach(b=>b.classList.toggle('btn-primary',b.dataset.pcSide===pcPopSide));
   document.getElementById('pcPopDark').value=printProofDark();
+  document.getElementById('pcPopDarkVal').textContent=printProofDark()+'%';
   if(!cms){
     body.innerHTML='<p class="hint">Loading the paper\'s colours…</p>';
     printCms(paper).then(()=>{ pcPopRender(); drawAll(); }).catch(e=>{
@@ -30780,9 +30784,10 @@ function pcPopRender(){
       +(cur?`<button type="button" class="btn-outline btn-sm" data-pc-undo="${hx}">Reset</button>`:'')
       +`</div>`;
     if(open){
-      const sl=(k,label,min,max,v,unit)=>`<label style="display:grid;grid-template-columns:78px 1fr 44px;gap:6px;align-items:center;font-size:12px;margin-top:4px;">`
+      const sl=(k,label,min,max,v,unit)=>`<label style="display:grid;grid-template-columns:78px 1fr 58px 14px;gap:6px;align-items:center;font-size:12px;margin-top:4px;">`
         +`<span>${label}</span><input type="range" min="${min}" max="${max}" step="1" value="${v}" data-adj-k="${k}"/>`
-        +`<span data-adj-v="${k}" style="text-align:right;">${v>0?'+':''}${v}${unit}</span></label>`;
+        +`<input type="number" min="${min}" max="${max}" step="1" value="${v}" data-adj-n="${k}" inputmode="numeric"`
+        +` style="width:58px;padding:3px 6px;font-size:12px;text-align:right;" aria-label="${label}"/><span>${unit}</span></label>`;
       h+=sl('h','Hue',-30,30,adj.h,'°')+sl('l','Brightness',-30,30,adj.l,'')+sl('s','Saturation',-50,50,adj.s,'%');
     }
     h+=`</div>`;
@@ -30882,13 +30887,18 @@ document.addEventListener('click',printColourClick);
 // a colour's own sliders: the change made as they move, the sheets drawn again
 let _pcAdjRaf=0;
 document.addEventListener('input',e=>{
-  const k=e.target.dataset&&e.target.dataset.adjK; if(!k) return;
+  const ds=e.target.dataset||{}, k=ds.adjK||ds.adjN; if(!k) return;
   const row=e.target.closest('[data-pc-adj]'); if(!row) return;
   const cms=printCmsReady[printPaperKey()]; if(!cms) return;
+  const range=row.querySelector(`[data-adj-k="${k}"]`), box=row.querySelector(`[data-adj-n="${k}"]`);
+  if(ds.adjN){
+    // typed: half a number ("-", "") waits; a figure past the ends is held to them
+    if(e.target.value===''||e.target.value==='-') return;
+    const n=Math.max(Number(range.min),Math.min(Number(range.max),Math.round(Number(e.target.value)||0)));
+    range.value=String(n);
+  }else if(box) box.value=range.value;
   const from=row.dataset.pcAdj, v=q=>Number(row.querySelector(`[data-adj-k="${q}"]`).value)||0;
   const adj={h:v('h'),l:v('l'),s:v('s')};
-  ['h','l','s'].forEach(q=>{ const el=row.querySelector(`[data-adj-v="${q}"]`);
-    if(el) el.textContent=(adj[q]>0?'+':'')+adj[q]+(q==='h'?'°':q==='s'?'%':''); });
   const to=adj.h||adj.l||adj.s?hexOf(cms.adjust(hexRgb(from),adj)):null;
   const now=row.querySelector('[data-pc-now]'), nh=row.querySelector('[data-pc-nowhex]');
   if(now) now.innerHTML=to?'→ '+pcSw(hexRgb(to),'What prints'):'';
@@ -30903,6 +30913,7 @@ document.addEventListener('input',e=>{
   if(!e.target.matches||!e.target.matches('[data-pc-dark]')) return;
   try{ localStorage.setItem(PROOF_DARK_KEY,String(Number(e.target.value)||0)); }catch(err){}
   document.querySelectorAll('[data-pc-dark]').forEach(x=>{ if(x!==e.target) x.value=e.target.value; });
+  const dv=document.getElementById('pcPopDarkVal'); if(dv) dv.textContent=(Number(e.target.value)||0)+'%';
   cancelAnimationFrame(_pcDarkRaf);
   _pcDarkRaf=requestAnimationFrame(()=>drawAll());
 });
@@ -30914,6 +30925,13 @@ document.addEventListener('pointerdown',e=>{
 });
 document.addEventListener('pointerup',()=>{ if(_pcDarkHeld){ _pcDarkHeld=false; printColourCheckSoon(); } });
 document.addEventListener('pointercancel',()=>{ _pcDarkHeld=false; });
+document.addEventListener('focusout',e=>{
+  if(!(e.target.matches&&e.target.matches('#pcPop input[type="number"]'))) return;
+  // a figure left past the ends, or empty, shows what was taken
+  const row=e.target.closest('[data-pc-adj]'), r=row&&row.querySelector(`[data-adj-k="${e.target.dataset.adjN}"]`);
+  if(r) e.target.value=r.value;
+  setTimeout(()=>pcPopRender(),0);
+});
 // another paper is another profile: the check and the preview follow it
 document.addEventListener('change',e=>{
   if(!e.target||e.target.id!=='artPaperType') return;
