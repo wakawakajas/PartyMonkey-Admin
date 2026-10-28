@@ -11050,14 +11050,28 @@ function renderSide(side,canvas,maxDim,opts){
   };
   const one=(img,ph,line,key)=>{
     // which pictures this sheet is made of - their colour swaps follow them
-    (opts._art||(opts._art=new Set())).add(artImgId(img));
+    const artId=artImgId(img);
+    (opts._art||(opts._art=new Set())).add(artId);
     artNote(line||(state.final[side]&&state.final[side].img===img?state.final[side]:null));
     const lk=line&&line.look;
-    if(!lk) return oneDraw(img,ph,line,key);
     // its own shift, as the difference from the sheet's the canvas already has
-    const sh=lk.shift&&side==='front'?lk.shift:null;
+    const sh=lk&&lk.shift&&side==='front'?lk.shift:null;
     const dx=sh?(Number(sh.xMm)||0)-shift.xMm:0, dy=sh?(Number(sh.yMm)||0)-shift.yMm:0;
     if(dx||dy){ ctx.save(); ctx.translate(dx*sc,dy*sc); artShift={xMm:shift.xMm+dx,yMm:shift.yMm+dy}; }
+    // and where on the canvas it lands - its card and its bleed - so a colour
+    // swapped on this picture is swapped there only, never on another
+    // order's picture beside it on a merged sheet
+    if(artPhase!=='ghost') try{        // once: the screen draws a faint pass first
+      const bl=(lk?withLook(side,line,()=>bleedMmFor(line)):bleedMmFor(line))+0.5;
+      const qt=phRotOf(ph)%180!==0, w=qt?ph.hMm:ph.wMm, h=qt?ph.wMm:ph.hMm;
+      const cx=ph.xMm+ph.wMm/2, cy=ph.yMm+ph.hMm/2, m=ctx.getTransform();
+      (opts._rects||(opts._rects=[])).push({id:artId,
+        x0:m.e+(cx-w/2-bl)*sc, y0:m.f+(cy-h/2-bl)*sc, x1:m.e+(cx+w/2+bl)*sc, y1:m.f+(cy+h/2+bl)*sc});
+    }catch(e){}
+    if(!lk){
+      try{ return oneDraw(img,ph,line,key); }
+      finally{ if(dx||dy){ ctx.restore(); artShift=shift; } }
+    }
     try{ return withLook(side,line,()=>oneDraw(img,ph,line,key)); }
     finally{
       if(dx||dy){ ctx.restore(); artShift=shift; }
@@ -11914,8 +11928,8 @@ function drawAll(){
   // the back is the same on every sheet — one backing design, printed behind
   // whatever the front happens to be carrying
   renderSide('back',document.getElementById('canvasBack'),dim,bo);
-  printColourScreen(document.getElementById('canvasFront'),fo._art,'front');
-  printColourScreen(document.getElementById('canvasBack'),bo._art,'back');
+  printColourScreen(document.getElementById('canvasFront'),fo,'front');
+  printColourScreen(document.getElementById('canvasBack'),bo,'back');
   printColourCheckSoon();
   // Place Card's sheet shown 30% smaller on screen — drawn at the same pixels,
   // so it stays sharp, and clicks read the drawn size
@@ -16593,7 +16607,7 @@ function renderModal(){
   if(modalPage<0) modalPage=0;
   const mo={page:modalPage};
   renderSide(modalSide,document.getElementById('modalCanvas'),baseModalDim()*modalZoom,mo);
-  printColourScreen(document.getElementById('modalCanvas'),mo._art,modalSide);
+  printColourScreen(document.getElementById('modalCanvas'),mo,modalSide);
   document.getElementById('zoomLbl').textContent=modalZoom.toFixed(1)+'×';
   document.getElementById('modalPages').style.display=n>1?'':'none';
   document.getElementById('modalPageLbl').textContent=`${modalPage+1} / ${n}`;
@@ -30273,18 +30287,36 @@ function swapPixels(data,swaps,stride){
     }
   }
 }
+// A drawn sheet's swaps, each in the boxes of the pictures it belongs to
+// (renderSide's opts._rects), so a colour taken on one design never moves
+// another design's pixels on the same sheet.
+function swapSheetPixels(imgData,rects){
+  if(!rects||!rects.length) return 0;
+  const W=imgData.width, H=imgData.height, d=imgData.data;
+  let n=0;
+  rects.forEach(r=>{
+    const sw=swapsForIds(new Set([r.id])); if(!sw.length) return;
+    const x0=Math.max(0,Math.floor(r.x0)), x1=Math.min(W,Math.ceil(r.x1));
+    const y0=Math.max(0,Math.floor(r.y0)), y1=Math.min(H,Math.ceil(r.y1));
+    if(x1<=x0||y1<=y0) return;
+    for(let y=y0;y<y1;y++) swapPixels(d.subarray((y*W+x0)*4,(y*W+x1)*4),sw);
+    n++;
+  });
+  return n;
+}
 // A drawn sheet on screen: its swaps, and as the Fiery would print it when
 // the preview is on. ids: the pictures renderSide drew (opts._art). The sheet
 // is read as Adobe RGB where any of its artwork is a PDF, which is what it
 // mostly is then; sRGB otherwise.
-function printColourScreen(canvas,ids,side){
+function printColourScreen(canvas,ro,side){
+  const ids=ro&&ro._art;
   const swaps=swapsForIds(ids), cms=printPreviewOn?printCmsReady[printPaperKey()]:null;
   if(!swaps.length&&!cms) return;
   if(!(canvas.width>0&&canvas.height>0)) return;
   const ctx=canvas.getContext('2d');
   let id;
   try{ id=ctx.getImageData(0,0,canvas.width,canvas.height); }catch(e){ return; }
-  swapPixels(id.data,swaps);
+  swapSheetPixels(id,ro._rects);
   if(cms){
     const n=canvas.width*canvas.height, d=id.data, rgb=new Uint8Array(n*3);
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ rgb[j]=d[i]; rgb[j+1]=d[i+1]; rgb[j+2]=d[i+2]; }
@@ -30308,7 +30340,9 @@ function swappedArtCanvas(img,swaps){
 // given the new colour's ink. The page's content and every form it draws are
 // rewritten; pictures inside the PDF are left as they are.
 async function pdfSwapColours(bytes,swaps){
-  const cms=await lcmsLib();
+  // the engine reads and writes k/K; rg needs none, and a swap is not dropped
+  // to pixels because the engine would not load
+  const cms=await lcmsLib().catch(()=>null);
   const N='(-?(?:\\d+\\.?\\d*|\\.\\d+))';
   const lead='(?<=^|[\\s\\[\\]()<>{}])(?<![\\d.]\\s+)';
   const re3=new RegExp(lead+N+'\\s+'+N+'\\s+'+N+'\\s+(rg|RG|scn|SCN|sc|SC)(?![A-Za-z])','g');
@@ -30320,7 +30354,7 @@ async function pdfSwapColours(bytes,swaps){
   const recolor=data=>{
     let s=''; for(let i=0;i<data.length;i+=8192) s+=String.fromCharCode.apply(null,data.subarray(i,i+8192));
     let hit=false;
-    s=s.replace(re4,(m,c,mg,y,k,op)=>{
+    if(cms) s=s.replace(re4,(m,c,mg,y,k,op)=>{
       const sw=near(cms.rgbOfG([c,mg,y,k].map(u))); if(!sw) return m;
       hit=true; return cms.cmykG(sw.to).map(fmt).join(' ')+' '+op;
     });
@@ -30368,7 +30402,7 @@ function printColourPanel(side){
   if(!cms){
     box.innerHTML='<p class="hint" style="margin:8px 0 0;">Checking colours for print…</p>';
     printCms(paper).then(()=>{ printColourPanel(side); if(printPreviewOn) drawAll(); })
-      .catch(e=>{ box.innerHTML=`<p class="hint" style="margin:8px 0 0;">Print colour check unavailable — ${e.message||e}.</p>`; });
+      .catch(e=>{ box.innerHTML=`<p class="hint" style="margin:8px 0 0;">Print colour check unavailable — ${escapeHtml(String((e&&e.message)||e))}.</p>`; });
     return;
   }
   const rows=[];
@@ -30965,7 +30999,8 @@ const pdfLift=(function(){
         // a form's drawing with its colours swapped (pdfSwapColours): decoded,
         // rewritten and packed again; one it does not touch goes as it was
         let re = null;
-        if (opts && opts.recolor && isStream(v) && isName(src.resolve(v.dict.get('Subtype')), 'Form')) {
+        if (opts && opts.recolor && isStream(v) && (isName(src.resolve(v.dict.get('Subtype')), 'Form')
+          || Number(src.resolve(v.dict.get('PatternType'))) === 1)) {
           try { re = opts.recolor(await src.streamData(v, inflateBytes)); } catch (e) { re = null; }
         }
         if (re) {
@@ -31734,7 +31769,7 @@ async function renderSidePdfAll(side,pages,onPage,from){
     renderSide(side,c,px,ro);
     const ctx=c.getContext('2d');
     const imgData=ctx.getImageData(0,0,c.width,c.height);
-    swapPixels(imgData.data,swapsForIds(ro._art));     // colours swapped for print
+    swapSheetPixels(imgData,ro._rects);                // colours swapped for print
     // a 300dpi A4 page is about 35 MB of pixels; a batch that keeps them all
     // is a batch that runs the tab out of memory before it finishes. Handed
     // straight on, the canvas is released as soon as the page is packed.
