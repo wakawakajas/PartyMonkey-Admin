@@ -2236,6 +2236,22 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   background:var(--card);}
 .gt-word.open{border-color:var(--blueprint);}
 .gt-word-row{display:flex;align-items:center;gap:6px;}
+/* a word made a name list: the names, the order they are for, and what prints */
+.gt-word-row:has(.gt-names){align-items:flex-start;}
+.gt-names{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px;}
+.gt-names-head{display:flex;align-items:end;gap:8px;justify-content:space-between;}
+.gt-names-head b{font-size:12.5px;padding-bottom:8px;}
+.gt-names-head .field{max-width:170px;margin:0;}
+.gt-names textarea{width:100%;min-height:110px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13px;padding:8px 10px;}
+.gt-names-tbl{width:100%;border-collapse:collapse;font-size:12.5px;}
+.gt-names-tbl th{text-align:left;font-weight:500;font-size:10.5px;letter-spacing:.08em;opacity:.7;padding:3px 6px;border-bottom:1px solid var(--border,#ddd);}
+.gt-names-tbl td{padding:3px 6px;border-bottom:1px solid rgba(127,127,127,.15);}
+.gt-names-tbl tr[data-gt-names-go]{cursor:pointer;}
+.gt-names-tbl tr[data-gt-names-go]:hover td{background:rgba(55,138,221,.12);}
+.gt-names-tbl tr.bad td,.gt-names-tot .bad{color:#d33;}
+.gt-names-warn{font-size:12.5px;color:#b26a00;}
+.gt-names-tot{font-size:12.5px;font-weight:600;}
+.icon-btn.on{background:var(--blue,#378add);color:#fff;}
 .gt-word-row input[type=text]{flex:1;min-width:0;height:40px;min-height:40px;}
 /* the words of a gift tag: one line, and a second with Ctrl+Enter (Enter still
    walks to the next box) - the box grows with the lines in it */
@@ -36840,26 +36856,111 @@ function gtQueue(lines){
   list.forEach(l=>{
     const d=gtDesign(l.designId);
     if(!d) return;
-    const n=Math.max(0,Math.floor(Number(l.qty)||0));
     // a sheet nested a sticker at a time: each of its stickers is a tag, as
     // many of each as the line asks for. Until they are made it is the one block.
     const ps=gtLineSplits(l,d)?gtSetPiecesOf(d):null;
-    // and a design cut round its words is cut round this line's (gtWordsCut)
-    if(ps&&ps.length){
-      const cut=ps.map(p=>gtWordsCut(p,l));
-      for(let i=0;i<n;i++) cut.forEach(p=>out.push(gtSetLine(l,p)));
-      return;
-    }
-    const w=gtWordsCut(d,l);
-    for(let i=0;i<n;i++) out.push(w===d?l:gtSetLine(l,w));
+    const put=(L,n)=>{
+      // and a design cut round its words is cut round this line's (gtWordsCut)
+      if(ps&&ps.length){
+        const cut=ps.map(p=>gtWordsCut(p,L));
+        for(let i=0;i<n;i++) cut.forEach(p=>out.push(gtSetLine(L,p)));
+        return;
+      }
+      const w=gtWordsCut(d,L);
+      for(let i=0;i<n;i++) out.push(w===d?L:gtSetLine(L,w));
+    };
+    // a name list: each name its own tags, as many as it asks for, all of
+    // this line and in the order pasted
+    const NL=gtNamesOf(l);
+    if(NL){ NL.rows.forEach((r,ri)=>{ if(r.ok) put(gtNameLine(l,NL.fid,ri,r.name),r.qty); }); return; }
+    put(l,Math.max(0,Math.floor(Number(l.qty)||0)));
   });
   return out;
+}
+// ---------- a name list on an order line ----------
+// One design, many customers' names: a word on the line takes a pasted list,
+// one name to a row, "Name // qty" (or a name and a qty pasted from Excel,
+// which come tab-apart). A row with no qty is one tag. The list lives in the
+// word's own values (vals[field].names), so wherever the line goes - kept
+// through a refresh, a saved sheet, Magic Create - the names go with it.
+function gtNamesParse(raw){
+  const rows=[], warn=[], seen=new Map();
+  String(raw||'').split(/\r?\n/).forEach((t0,i)=>{
+    const t=t0.trim(); if(!t) return;
+    const m=t.match(/^(.*?)\s*(?:\/\/|\t)\s*(\S*)\s*$/);
+    let name=t, qty=1, ok=true;
+    if(m){ name=m[1].trim(); if(/^\d+$/.test(m[2])) qty=parseInt(m[2],10); else ok=false; }
+    if(!name||qty<1) ok=false;
+    const k=name.toLowerCase();
+    if(name&&seen.has(k)) warn.push(`“${name}” is on the list twice (rows ${seen.get(k)} and ${i+1}).`);
+    else if(name) seen.set(k,i+1);
+    rows.push({name,qty,ok,src:i+1});
+  });
+  return {rows,warn};
+}
+// the line's list, if a word on it has one: {fid, rows, warn, total}
+function gtNamesOf(l){
+  const vals=l&&l.vals; if(!vals) return null;
+  for(const fid of Object.keys(vals)){
+    const v=vals[fid];
+    if(v&&typeof v.names==='string'){
+      const p=gtNamesParse(v.names);
+      return {fid,order:v.order||'',...p,total:p.rows.reduce((n,r)=>n+(r.ok?r.qty:0),0)};
+    }
+  }
+  return null;
+}
+// The order line, standing for one name of its list: the same line in every
+// way but that word's text, and the same object every time it is asked for.
+// It keeps the line's id - the sheet, Neat rows and its cuts all know the line
+// by it - and says which line and row it stands for.
+const gtNameLines=new Map();
+function gtNameLine(l,fid,ri,name){
+  const k=l.id+'|'+ri;
+  let x=gtNameLines.get(k);
+  if(!x){ x={}; gtNameLines.set(k,x); }
+  for(const key of Object.keys(x)) if(!(key in l)) delete x[key];
+  const vals={...l.vals,[fid]:{...l.vals[fid],text:name}};
+  return Object.assign(x,l,{vals,nameOf:l.id,nameRow:ri});
+}
+// the sheets each row of a line's list is printed on: row -> [sheet numbers]
+function gtNamesSheets(line){
+  const out=new Map();
+  try{
+    const plan=gtPagePlan(), pages=gtPageCount();
+    for(let p=0;p<pages;p++){
+      const at=plan[p]||null, SL=gtPageSlots(at), per=SL.length; if(!per) continue;
+      const q=at?at.queue:gtQueue(), start=at?at.start:p*per;
+      for(let i=0;i<per;i++){
+        const t=q[start+i];
+        if(!t||t.nameOf!==line.id) continue;
+        const s=out.get(t.nameRow)||[];
+        if(!s.includes(p+1)) s.push(p+1);
+        out.set(t.nameRow,s);
+      }
+    }
+  }catch(e){}
+  return out;
+}
+// what the list will print, drawn under it: changed as it is typed, without
+// rebuilding the box being typed in
+function gtNamesTable(line){
+  const NL=gtNamesOf(line); if(!NL) return '';
+  const sh=gtNamesSheets(line), d=gtDesign(line.designId);
+  const bad=NL.rows.filter(r=>!r.ok).length;
+  return `<table class="gt-names-tbl"><thead><tr><th>#</th><th>NAME ON TAG</th><th>QTY</th><th>SHEET</th></tr></thead><tbody>${
+    NL.rows.map((r,ri)=>`<tr class="${r.ok?'':'bad'}"${r.ok&&sh.get(ri)?` data-gt-names-go="${sh.get(ri)[0]}" title="Show sheet ${sh.get(ri)[0]}"`:''}>
+      <td>${r.src}</td><td>${escapeHtml(r.name||'—')}</td><td>${r.ok?r.qty:'✕ check qty'}</td><td>${r.ok?escapeHtml((sh.get(ri)||[]).join(', ')):''}</td></tr>`).join('')
+    ||'<tr><td colspan="4" class="hint">Paste the names above - one to a row</td></tr>'}</tbody></table>
+    ${NL.warn.map(w=>`<div class="gt-names-warn">⚠ ${escapeHtml(w)}</div>`).join('')}
+    <div class="gt-names-tot">${NL.total} tag${NL.total===1?'':'s'}${d?' · '+escapeHtml(d.name):''}${NL.order?' · order '+escapeHtml(NL.order):''}${
+      bad?` · <span class="bad">${bad} row${bad>1?'s':''} not printed</span>`:''}</div>`;
 }
 // The order line, standing for one sticker of its sheet: the same line in
 // every way but its design, and the same object every time it is asked for.
 const gtSetLines=new Map();
 function gtSetLine(l,p){
-  const k=l.id+'|'+p.id;
+  const k=l.id+(l.nameRow!=null?'~'+l.nameRow:'')+'|'+p.id;
   let x=gtSetLines.get(k);
   if(!x){ x={}; gtSetLines.set(k,x); }
   for(const key of Object.keys(x)) if(!(key in l)) delete x[key];
@@ -40115,7 +40216,10 @@ function gtSheetDrag(c,side){
   };
   const startDrag=(e,h)=>{
     const v=gtVal(h.line,h.f), p=at(e);
-    drag={line:h.line,f:h.f,mode:h.corner?'resize':'move',
+    // a name of a list moves the words of every name on its line: the line's
+    // own values are the ones written, not the stand-in's (gtNameLine)
+    const own=h.line.nameOf?(gtOrder.find(l=>l.id===h.line.nameOf)||h.line):h.line;
+    drag={line:own,f:h.f,mode:h.corner?'resize':'move',
       px:p.mx,py:p.my,dx:v.dx,dy:v.dy,bw:h.b.w,bh:h.b.h};
     // the cut round these words keeps still while they are dragged - traced
     // at every step, the tag re-centred and the nest moved under the pointer -
@@ -40534,13 +40638,24 @@ function gtRenderOrder(){
     // word can be set in is behind the word itself and opens by tapping it, one
     // word at a time — a line with four texts is four boxes, not forty. Nudge X
     // and Y are gone with it: the words are dragged where they go on the sheet.
+    const NL=gtNamesOf(l);
+    if(NL) l.qty=NL.total;                   // the list is the count
     const words=d?own.map(f=>{
       const v=gtVal(l,f);
       const open=gtOpenWord===l.id+'|'+f.id;
+      const listed=!!NL&&NL.fid===f.id;
+      const lv=listed?l.vals[f.id]:null;
       return `<div class="gt-word${open?' open':''}" data-gt-word="${f.id}">
         <div class="gt-word-row">
-          <textarea class="gt-lines" rows="1" data-enter-next title="Ctrl+Enter for a second line" placeholder="${escapeHtml(f.name)}${gtSideOf(f)==='back'?' · back':''}"
-                 aria-label="${escapeHtml(f.name)}${gtSideOf(f)==='back'?' (back)':''}" data-gtf="${f.id}|text" data-gt-word-text>${escapeHtml(v.text)}</textarea>
+          ${listed
+            ?`<div class="gt-names"><div class="gt-names-head"><b>${escapeHtml(f.name)} · name list</b>
+                <label class="field"><span>ORDER ID</span><input type="text" value="${escapeHtml(lv.order||'')}" data-gtf="${f.id}|order" placeholder="optional"/></label></div>
+              <textarea rows="5" data-gtf="${f.id}|names" data-gt-names-text placeholder="ABC Pte Ltd // 5&#10;Sunrise Dental // 3&#10;Koh Brothers" aria-label="${escapeHtml(f.name)}: names, one to a row">${escapeHtml(lv.names)}</textarea>
+              <div data-gt-names-out>${gtNamesTable(l)}</div></div>`
+            :`<textarea class="gt-lines" rows="1" data-enter-next title="Ctrl+Enter for a second line" placeholder="${escapeHtml(f.name)}${gtSideOf(f)==='back'?' · back':''}"
+                 aria-label="${escapeHtml(f.name)}${gtSideOf(f)==='back'?' (back)':''}" data-gtf="${f.id}|text" data-gt-word-text>${escapeHtml(v.text)}</textarea>`}
+          <button type="button" class="icon-btn${listed?' on':''}" data-gt-names-toggle
+            title="${listed?'Back to one wording for every tag on this line':'Name list: paste many names, one tag (or Name // qty tags) each'}">☰</button>
           <button type="button" class="icon-btn" data-gt-word-toggle
             aria-expanded="${open?'true':'false'}" title="How this text is set">▾</button>
           ${mine.has(f.id)?`<button type="button" class="del-btn" data-gt-del-lfield="${f.id}"
@@ -40586,8 +40701,8 @@ function gtRenderOrder(){
       <div class="ph-card-head"><span style="flex:1;">Line ${i+1}</span>
         ${gtSheet.nestOn&&gtSheet.nestNeat?`<label class="field qty gt-sheet-no" title="Neat rows: the sheet this design's rows start on. Blank goes on from the line before; a Fill the gaps line goes wherever there is room"><span>SHEET</span>
           <input type="number" min="1" step="1" placeholder="auto" value="${gtNeatOf(l).page>0&&!gtNeatOf(l).free?gtNeatOf(l).page:''}" data-gtl="nestPage"${gtNeatOf(l).free?' disabled':''}/></label>`:''}
-        <label class="field qty" title="How many of this design">
-          <input type="number" min="0" step="1" value="${l.qty}" data-gtl="qty"/></label>
+        <label class="field qty" title="${NL?'Set by the name list':'How many of this design'}">
+          <input type="number" min="0" step="1" value="${l.qty}" data-gtl="qty"${NL?' disabled':''}/></label>
         <button class="del-btn" data-gt-del-line title="Remove">×</button></div>
       <div class="click-row" style="margin:4px 0 6px;align-items:center;gap:10px;">
         ${`<label class="click-tog" title="This line bleeds its own figure; every other line follows the sheet's bleed (or its design's own)">
@@ -40875,8 +40990,17 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
   // colour belongs with the other words here, not with the numbers — left off
   // this list it would be read as a figure and stored as nought, which draws
   // as black and looks like the setting simply not working
-  v[key]=(key==='text'||key==='font'||key==='align'||key==='oc'||key==='color')
+  v[key]=(key==='text'||key==='font'||key==='align'||key==='oc'||key==='color'||key==='names'||key==='order')
     ?e.target.value:Number(e.target.value)||0;
+  if(key==='names'||key==='order'){
+    const NL=gtNamesOf(line);
+    if(NL) line.qty=NL.total;
+    const q=card.querySelector('[data-gtl="qty"]'); if(q) q.value=line.qty;
+    gtNestCache=null; gtDraw();
+    const out=card.querySelector('[data-gt-names-out]'); if(out) out.innerHTML=gtNamesTable(line);
+    gtWorkSaveSoon();
+    return;
+  }
   gtDraw();
 });
 document.getElementById('gtOrderList').addEventListener('click',async e=>{
@@ -40891,6 +41015,38 @@ document.getElementById('gtOrderList').addEventListener('click',async e=>{
     if(file){ gtAi.forBack=line.id; gtAiOpen(file); }
     return;
   }
+  // a word made a name list, or put back to one wording
+  const nt=e.target.closest('[data-gt-names-toggle]');
+  if(line&&nt){
+    const fid=nt.closest('[data-gt-word]').dataset.gtWord;
+    line.vals=line.vals||{};
+    const v=line.vals[fid]||(line.vals[fid]={});
+    if(typeof v.names==='string'){
+      const NL=gtNamesOf(line), ok=NL?NL.rows.filter(r=>r.ok):[];
+      if(ok.length>1&&!confirm(`Take the name list off this line?\n\nIts ${ok.length} names go back to one wording - "${ok[0].name}" × ${ok[0].qty}. Tap ☰ again to bring the list back.`)) return;
+      // the first name and its count stay, so the line is what it was for one
+      // customer, not every customer's count under one name; the list is kept
+      // aside and comes back with ☰
+      if(ok[0]){ v.text=ok[0].name; line.qty=ok[0].qty; }
+      v.namesOff=v.names; v.orderOff=v.order;
+      delete v.names; delete v.order;
+    }else{
+      // one list to a line: another word's list is put back first
+      Object.values(line.vals).forEach(o=>{ if(o&&typeof o.names==='string'){ o.namesOff=o.names; delete o.names; delete o.order; } });
+      if(typeof v.namesOff==='string'){ v.names=v.namesOff; if(v.orderOff) v.order=v.orderOff; delete v.namesOff; delete v.orderOff; }
+      else{
+        const t=String(gtVal(line,(gtLineFieldsOf(gtDesign(line.designId),line)||[]).find(f=>f.id===fid)||{}).text||'').trim();
+        v.names=t?t.replace(/\n/g,' ')+' // '+(line.qty||1):'';
+      }
+      gtOpenWord='';
+    }
+    const NL=gtNamesOf(line); if(NL) line.qty=NL.total;
+    gtNestCache=null; gtRenderOrder(); gtDraw();
+    if(NL){ const ta=document.querySelector(`#gtOrderList [data-gt-line="${line.id}"] [data-gt-names-text]`); if(ta) ta.focus(); }
+    return;
+  }
+  const go=e.target.closest('[data-gt-names-go]');
+  if(go){ gtGoPage(Number(go.dataset.gtNamesGo)-1); return; }
   if(line&&e.target.closest('[data-gt-add-lfield]')){
     (line.extra||(line.extra=[])).push(gtNewLineField(line));
     gtRenderOrder(); gtDraw();
