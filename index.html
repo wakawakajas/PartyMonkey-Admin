@@ -11051,6 +11051,7 @@ function renderSide(side,canvas,maxDim,opts){
   const one=(img,ph,line,key)=>{
     // which pictures this sheet is made of - their colour swaps follow them
     (opts._art||(opts._art=new Set())).add(artImgId(img));
+    artNote(line||(state.final[side]&&state.final[side].img===img?state.final[side]:null));
     const lk=line&&line.look;
     if(!lk) return oneDraw(img,ph,line,key);
     // its own shift, as the difference from the sheet's the canvas already has
@@ -30187,15 +30188,70 @@ function darkFixes(cms,rgb,src){
   }
   return out;
 }
-// Swaps taken (accept) and colours let be (ignore). Kept for this session:
-// a swap belongs to the pictures it was found in (imgs), so another order's
-// artwork in the same colour is never changed by it.
+// Swaps taken (accept) and colours let be (ignore). A swap belongs to the
+// pictures it was found in (imgs), so another order's artwork in the same
+// colour is never changed by it - for this session. Artwork filed on a Magic
+// Create line (its mcPath) keeps its swaps on that line instead, in
+// art.colours: written by Save, back after a refresh, used by every Magic
+// Create download, and gone with the line when its batch is completed or
+// deleted. Swapped or undone there before Save, the change waits in
+// mcColourEdits.
 const colourSwaps=[];               // {from,to,imgs:Set}
 const colourIgnored=new Set();      // imgId+hex
 let printPreviewOn=false;
+const hexRgb=hx=>[1,3,5].map(i=>parseInt(String(hx).slice(i,i+2),16));
+const _artMcPaths=new Map();        // picture id -> the line artwork file it is
+function artNote(o){
+  if(o&&o.img&&o.mcPath) _artMcPaths.set(artImgId(o.img),o.mcPath);
+}
+const mcColourEdits=new Map();      // mcPath -> [{from,to}], not saved yet
+function mcSavedColours(path){
+  if(typeof mcItems==='undefined') return [];
+  for(const it of [...mcItems,...(mcShared||[])]){
+    const c=it&&it.art&&it.art.colours&&it.art.colours[path];
+    if(Array.isArray(c)) return c.filter(x=>x&&/^#[0-9a-f]{6}$/i.test(x.from)&&/^#[0-9a-f]{6}$/i.test(x.to))
+      .map(x=>({from:hexRgb(x.from),to:hexRgb(x.to)}));
+  }
+  return [];
+}
+const mcColoursOf=path=>mcColourEdits.has(path)?mcColourEdits.get(path):mcSavedColours(path);
 function swapsForIds(ids){
   if(!ids||!ids.size) return [];
-  return colourSwaps.filter(s=>[...s.imgs].some(id=>ids.has(id)));
+  const out=colourSwaps.filter(s=>[...s.imgs].some(id=>ids.has(id)));
+  const seen=new Set();
+  ids.forEach(id=>{
+    const path=_artMcPaths.get(id); if(!path||seen.has(path)) return; seen.add(path);
+    out.push(...mcColoursOf(path));
+  });
+  return out;
+}
+// What Save writes onto a line: art.colours for each of its artwork files on
+// the builder - the edits made here, and swaps taken on a picture before it
+// was filed (it has its mcPath now). Files no longer on the line are dropped.
+function mcLineColours(art){
+  const out={}, was=(art&&art.colours)||{};
+  const paths=new Set();
+  ['front','back'].forEach(side=>{
+    if(art[side]) paths.add(art[side]);
+    (Array.isArray(art[side+'Split'])?art[side+'Split']:[]).forEach(pg=>pg&&pg.path&&paths.add(pg.path));
+  });
+  const objs=[];
+  ['front','back'].forEach(side=>{
+    if(state.final[side]) objs.push(state.final[side]);
+    (finalSplitList(side)||[]).forEach(d=>objs.push(d));
+  });
+  paths.forEach(path=>{
+    let list=mcColourEdits.has(path)?mcColourEdits.get(path).map(x=>({from:hexOf(x.from),to:hexOf(x.to)}))
+      :(Array.isArray(was[path])?was[path]:[]);
+    objs.filter(o=>o&&o.img&&o.mcPath===path).forEach(o=>{
+      colourSwaps.filter(x=>x.imgs.has(artImgId(o.img))).forEach(x=>{
+        const f=hexOf(x.from);
+        if(!list.some(y=>y.from===f)) list=[...list,{from:f,to:hexOf(x.to)}];
+      });
+    });
+    if(list.length) out[path]=list;
+  });
+  return out;
 }
 // Each pixel near the colour taken moves by the same step as the colour does;
 // close to it fully, fading out by 48 away, so soft edges move with it.
@@ -30295,6 +30351,7 @@ function sideArtObjs(side){
     if(list) [...new Set(list)].forEach(d=>{ if(d.img) want.push(['fl:'+d.id,d]); });
     else want.push(['final:'+side,state.final[side]]);
   }
+  want.forEach(([,o])=>artNote(o));
   return want;
 }
 let _pcCheckT=0;
@@ -30321,7 +30378,7 @@ function printColourPanel(side){
     artDarkColours(o.img,cms,src).forEach(dc=>{
       const hx=hexOf(dc.rgb);
       if(seen.has(hx)) return; seen.add(hx);
-      const taken=colourSwaps.find(s=>s.imgs.has(id)&&colDist(s.from,dc.rgb)<6);
+      const taken=swapsForIds(new Set([id])).find(s=>colDist(s.from,dc.rgb)<6);
       if(taken){ rows.push({kind:'swap',dc,s:taken}); return; }
       if(colourIgnored.has(id+hx)) return;
       rows.push({kind:'dark',dc,fixes:darkFixes(cms,dc.rgb,src)});
@@ -30351,26 +30408,34 @@ function printColourPanel(side){
 }
 function printColourClick(e){
   const box=e.target.closest('[id^="printColour"]'); if(!box) return;
-  const side=box.dataset.side, hexRgb=hx=>[1,3,5].map(i=>parseInt(hx.slice(i,i+2),16));
-  const ids=()=>sideArtObjs(side).map(([,o])=>o).filter(o=>o&&o.img).filter(o=>{
-    const id=artImgId(o.img), hx=e.target.closest('[data-pc-swap],[data-pc-ignore],[data-pc-undo]');
-    const from=hx&&(hx.dataset.pcSwap||hx.dataset.pcIgnore||hx.dataset.pcUndo);
-    const cms=printCmsReady[printPaperKey()];
-    return from&&cms&&artDarkColours(o.img,cms,artSrc(o)).some(dc=>hexOf(dc.rgb)===from);
-  }).map(o=>artImgId(o.img));
+  const side=box.dataset.side;
   const b=e.target.closest('button'); if(!b) return;
+  const from=b.dataset.pcSwap||b.dataset.pcIgnore||b.dataset.pcUndo; if(!from) return;
+  // the designs on this sheet the colour was found in
+  const cms=printCmsReady[printPaperKey()];
+  const objs=sideArtObjs(side).map(([,o])=>o).filter(o=>o&&o.img&&cms
+    &&artDarkColours(o.img,cms,artSrc(o)).some(dc=>hexOf(dc.rgb)===from));
+  const fromRgb=hexRgb(from), ids=objs.map(o=>artImgId(o.img));
+  if(b.dataset.pcIgnore){ ids.forEach(id=>colourIgnored.add(id+from)); drawAll(); printColourCheckSoon(); return; }
+  // a line's own artwork: the change waits for Save, on the line
+  objs.forEach(o=>{
+    if(!o.mcPath) return;
+    const list=mcColoursOf(o.mcPath).filter(x=>colDist(x.from,fromRgb)>=6);
+    if(b.dataset.pcSwap) list.push({from:fromRgb,to:hexRgb(b.dataset.pcTo)});
+    mcColourEdits.set(o.mcPath,list);
+  });
+  const loose=objs.filter(o=>!o.mcPath).map(o=>artImgId(o.img));
   if(b.dataset.pcSwap){
-    colourSwaps.push({from:hexRgb(b.dataset.pcSwap),to:hexRgb(b.dataset.pcTo),imgs:new Set(ids())});
-  }else if(b.dataset.pcIgnore){
-    ids().forEach(id=>colourIgnored.add(id+b.dataset.pcIgnore));
-  }else if(b.dataset.pcUndo){
-    const from=hexRgb(b.dataset.pcUndo), mine=new Set(ids());
+    if(loose.length) colourSwaps.push({from:fromRgb,to:hexRgb(b.dataset.pcTo),imgs:new Set(loose)});
+  }else{
+    const mine=new Set(ids);
     for(let i=colourSwaps.length-1;i>=0;i--){
       const s=colourSwaps[i];
-      if(colDist(s.from,from)<6&&[...s.imgs].some(id=>mine.has(id))) colourSwaps.splice(i,1);
+      if(colDist(s.from,fromRgb)<6&&[...s.imgs].some(id=>mine.has(id))) colourSwaps.splice(i,1);
     }
-  }else return;
+  }
   drawAll(); printColourCheckSoon();
+  if(typeof mcBuilderSaveSync==='function') try{ mcBuilderSaveSync(); }catch(err){}
 }
 document.addEventListener('click',printColourClick);
 document.addEventListener('change',e=>{
@@ -59906,6 +59971,12 @@ async function mcKeepBuilderArt(it){
       changed=true;
     }catch(e){ failed.push(side+' ('+((e&&e.message)||'upload failed')+')'); }
   }
+  // the print colour swaps on this line's artwork (mcLineColours)
+  const colours=mcLineColours(art);
+  if(JSON.stringify(colours)!==JSON.stringify(art.colours||{})){
+    if(Object.keys(colours).length) art.colours=colours; else delete art.colours;
+    changed=true;
+  }
   if(!changed) return {patch:null,failed};
   it.art=art;
   return {patch:{art},failed};
@@ -59996,6 +60067,7 @@ async function mcArtDataURL(path){
   const made={file};
   made.data=await fileToImageData(file);
   made.img=await loadImage(made.data);
+  _artMcPaths.set(artImgId(made.img),path);      // its colour swaps follow it
   mcArtCache.set(path,made);
   while(mcArtCache.size>MC_ART_KEEP)
     mcArtCache.delete(mcArtCache.keys().next().value);
