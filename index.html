@@ -451,6 +451,13 @@ html{touch-action:manipulation;}
 .icon-btn{background:var(--card);border:1px solid var(--border);color:var(--ink);font-size:12px;min-height:30px;padding:0 9px;border-radius:999px;}
 /* the sheet itself stays white — it is paper */
 canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;max-width:100%;height:auto;}
+/* The sheets being built fit the window's height as well as the card's width:
+   a portrait sheet came out taller than the screen, and seeing its top and
+   bottom took scrolling up and down. Width and height both auto, so the cap
+   shrinks it in proportion; clicks read the drawn size, so they still land.
+   What is left of the window is for the bar above and the dock below. */
+#canvasFront,#canvasBack,#gtCanvas,#gtCanvasBack{width:auto;
+  max-height:calc(100vh - 190px);max-height:calc(100dvh - 190px);}
 /* above .sheet-bg (64): a photo tapped from inside an open sheet — the
    request alert, most often — has to land on top of it, not behind it,
    or it looks like the tap did nothing. */
@@ -11935,7 +11942,10 @@ function drawAll(){
   // so it stays sharp, and clicks read the drawn size
   ['canvasFront','canvasBack'].forEach(id=>{
     const c=document.getElementById(id);
-    c.style.width=pcMode==='placecard'?Math.round(c.width*0.7)+'px':'';
+    // a cap on the width rather than a width: with the window-height cap a set
+    // width squashed the sheet, the height giving way and the width not
+    c.style.width='';
+    c.style.maxWidth=pcMode==='placecard'?`min(100%, ${Math.round(c.width*0.7)}px)`:'';
   });
   refreshSheetNav();
   phZoomSync();
@@ -30108,9 +30118,19 @@ function printCms(paper){
         return Math.round(k/2.55);
       },
       printL:(rgb,src)=>lift(run(kLab,run(toK[src],new Uint8Array(rgb),1),1)[0])/655.35,
-      proof:(rgb,n,src)=>{
+      // g: the screen match (printProofGamma) - above 1, the darks are taken
+      // further down, and their colour with them, as paper shows them
+      proof:(rgb,n,src,g)=>{
         const lb=run(kLab,run(toK[src],rgb,n),n);
-        for(let i=0;i<lb.length;i+=3) lb[i]=lift(lb[i]);
+        g=g>0?g:1;
+        for(let i=0;i<lb.length;i+=3){
+          const L1=lift(lb[i]);
+          if(g===1||!(L1>0)){ lb[i]=L1; continue; }
+          const L2=65535*Math.pow(L1/65535,g), k=Math.sqrt(L2/L1);
+          lb[i]=L2;
+          lb[i+1]=Math.max(0,Math.min(65535,32896+(lb[i+1]-32896)*k));
+          lb[i+2]=Math.max(0,Math.min(65535,32896+(lb[i+2]-32896)*k));
+        }
         return run(labRgb,lb,n);
       }};
     printCmsReady[paper]=cms;
@@ -30213,6 +30233,17 @@ function darkFixes(cms,rgb,src){
 const colourSwaps=[];               // {from,to,imgs:Set}
 const colourIgnored=new Set();      // imgId+hex
 let printPreviewOn=false;
+// How much darker than the measured print the preview is shown, 0-100, for
+// this computer's screen. A screen glows and paper does not: shown as
+// measured, a colour that printed near black still read as dark red. Set by
+// holding a print beside the screen; kept on this computer only, as screens
+// differ. 40 is the start, a third darker in the darks than measured.
+const PROOF_DARK_KEY='pigu.proofDark';
+function printProofDark(){
+  try{ const v=Number(localStorage.getItem(PROOF_DARK_KEY)); if(isFinite(v)&&v>=0&&v<=100&&localStorage.getItem(PROOF_DARK_KEY)!==null) return v; }catch(e){}
+  return 40;
+}
+const printProofGamma=()=>1+printProofDark()/100*0.8;
 const hexRgb=hx=>[1,3,5].map(i=>parseInt(String(hx).slice(i,i+2),16));
 const _artMcPaths=new Map();        // picture id -> the line artwork file it is
 function artNote(o){
@@ -30321,7 +30352,7 @@ function printColourScreen(canvas,ro,side){
     const n=canvas.width*canvas.height, d=id.data, rgb=new Uint8Array(n*3);
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ rgb[j]=d[i]; rgb[j+1]=d[i+1]; rgb[j+2]=d[i+2]; }
     const src=sideArtObjs(side).some(([,o])=>o&&o.img&&artSrc(o)==='pdf')?'pdf':'img';
-    const p=cms.proof(rgb,n,src);
+    const p=cms.proof(rgb,n,src,printProofGamma());
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ d[i]=p[j]; d[i+1]=p[j+1]; d[i+2]=p[j+2]; }
   }
   ctx.putImageData(id,0,0);
@@ -30396,6 +30427,7 @@ function printColourCheckSoon(){
 function printColourPanel(side){
   const box=document.getElementById(side==='front'?'printColourFront':'printColourBack');
   if(!box) return;
+  if(_pcDarkHeld&&box.querySelector('[data-pc-dark]')) return;
   const arts=sideArtObjs(side).filter(([,o])=>o&&o.img);
   if(!arts.length){ box.innerHTML=''; return; }
   const paper=printPaperKey(), cms=printCmsReady[paper];
@@ -30423,6 +30455,11 @@ function printColourPanel(side){
   const pn=PRINT_PAPER_NAMES[paper];
   let h=`<div class="click-row" style="margin-top:9px;"><label class="click-tog" title="Show the sheet as the Fiery prints it on ${pn} paper - on screen only. The paper is the Paper type beside the Order ID.">`
     +`<input type="checkbox" data-pc-preview ${printPreviewOn?'checked':''}/>Print preview (Fiery ${pn})</label></div>`;
+  if(printPreviewOn) h+=`<div style="display:flex;gap:8px;align-items:center;margin:6px 0 0;font-size:12px;"`
+    +` title="Screens glow and paper does not. Hold a print beside the screen and slide until the preview looks like it - kept on this computer.">`
+    +`<span>Screen match</span><span class="hint" style="margin:0;">lighter</span>`
+    +`<input type="range" min="0" max="100" step="5" value="${printProofDark()}" data-pc-dark style="flex:1;min-width:80px;"/>`
+    +`<span class="hint" style="margin:0;">darker</span></div>`;
   rows.forEach((r,i)=>{
     const hx=hexOf(r.dc.rgb);
     if(r.kind==='swap'){
@@ -30479,6 +30516,21 @@ document.addEventListener('change',e=>{
   if(printPreviewOn&&!printCmsReady[printPaperKey()]) printCms().then(()=>drawAll()).catch(()=>{});
   else drawAll();
 });
+// the screen match: every sheet on screen again, kept for this computer
+let _pcDarkRaf=0;
+document.addEventListener('input',e=>{
+  if(!e.target.matches||!e.target.matches('[data-pc-dark]')) return;
+  try{ localStorage.setItem(PROOF_DARK_KEY,String(Number(e.target.value)||0)); }catch(err){}
+  document.querySelectorAll('[data-pc-dark]').forEach(x=>{ if(x!==e.target) x.value=e.target.value; });
+  cancelAnimationFrame(_pcDarkRaf);
+  _pcDarkRaf=requestAnimationFrame(()=>drawAll());
+});
+// the panel is drawn again after every redraw; not while the slider is held,
+// or it is taken from under the finger mid-slide
+let _pcDarkHeld=false;
+document.addEventListener('pointerdown',e=>{ if(e.target.matches&&e.target.matches('[data-pc-dark]')) _pcDarkHeld=true; });
+document.addEventListener('pointerup',()=>{ if(_pcDarkHeld){ _pcDarkHeld=false; printColourCheckSoon(); } });
+document.addEventListener('pointercancel',()=>{ _pcDarkHeld=false; });
 // another paper is another profile: the check and the preview follow it
 document.addEventListener('change',e=>{
   if(!e.target||e.target.id!=='artPaperType') return;
