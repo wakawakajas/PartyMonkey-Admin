@@ -7694,6 +7694,8 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
   <div class="gt-shown" id="pcShownBar" title="Drawn over the sheet to cut by — neither is printed">
     <label class="click-tog"><input type="checkbox" id="cutToggle" checked/>Show cut lines</label>
     <label class="click-tog"><input type="checkbox" id="refMarkToggle" checked/>Show reference line</label>
+    <button type="button" class="click-tog" id="ppOpenBtn" style="cursor:pointer;font:inherit;"
+      title="The sheet as the Fiery prints it, on the Paper type chosen - and before and after any colour you changed">🖨 Print preview</button>
   </div>
   <p class="sub">Tap a stop below to jump to a section, or a section header to open and close it.</p>
   <!-- The sections, as a line of stops rather than a scroll: each opens its own
@@ -9229,6 +9231,35 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
     <button class="pe-tool pe-wide" id="photoEditRetake">📷 Retake</button>
     <button class="btn-primary pe-wide" id="photoEditSave">Save</button>
   </div>
+</div>
+
+<!-- Print preview: the sheet as the Fiery prints it on the paper chosen, with
+     the colours changed (After), as the file had them (Before), or the two
+     side by side. Screen only; nothing here reaches the PDF. -->
+<div class="modal-bg" id="ppModal">
+  <div class="modal-top" style="flex-wrap:wrap;row-gap:6px;">
+    <h4 id="ppTitle">Print preview</h4>
+    <span class="seg" id="ppSideSeg" style="display:inline-flex;gap:4px;">
+      <button type="button" class="btn-outline btn-sm" data-pp-side="front">Front</button>
+      <button type="button" class="btn-outline btn-sm" data-pp-side="back">Back</button>
+    </span>
+    <span class="modal-pages" id="ppPages" style="display:none;">
+      <button class="zoom-btn" id="ppPrev" aria-label="Previous sheet">‹</button>
+      <span class="zoomlbl" id="ppPageLbl">1 / 1</span>
+      <button class="zoom-btn" id="ppNext" aria-label="Next sheet">›</button>
+    </span>
+    <span class="seg" id="ppViewSeg" style="display:inline-flex;gap:4px;">
+      <button type="button" class="btn-outline btn-sm" data-pp-view="after" title="As it prints, with the colours you changed">After</button>
+      <button type="button" class="btn-outline btn-sm" data-pp-view="before" title="As it prints, with the file's own colours">Before</button>
+      <button type="button" class="btn-outline btn-sm" data-pp-view="both" title="Before and after side by side">Side by side</button>
+    </span>
+    <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#bdbdbd;"
+      title="Screens glow and paper does not. Hold a print beside the screen and slide until the preview looks like it - kept on this computer.">
+      Screen match <input type="range" min="0" max="100" step="5" data-pc-dark id="ppDark" style="width:110px;"/></label>
+    <button class="close-btn" id="ppClose" aria-label="Close">×</button>
+  </div>
+  <div id="ppNote" style="color:#bdbdbd;font-size:12px;padding:6px 14px 0;"></div>
+  <div class="modal-scroll" id="ppBody" style="gap:14px;align-items:flex-start;"></div>
 </div>
 
 <div class="modal-bg" id="modalBg">
@@ -30603,6 +30634,7 @@ function printColourClick(e){
     }
   }
   drawAll(); printColourCheckSoon();
+  if(document.getElementById('ppModal').classList.contains('open')) prvRender();
   if(typeof mcBuilderSaveSync==='function') try{ mcBuilderSaveSync(); }catch(err){}
 }
 document.addEventListener('click',printColourClick);
@@ -30620,7 +30652,8 @@ document.addEventListener('input',e=>{
   try{ localStorage.setItem(PROOF_DARK_KEY,String(Number(e.target.value)||0)); }catch(err){}
   document.querySelectorAll('[data-pc-dark]').forEach(x=>{ if(x!==e.target) x.value=e.target.value; });
   cancelAnimationFrame(_pcDarkRaf);
-  _pcDarkRaf=requestAnimationFrame(()=>drawAll());
+  _pcDarkRaf=requestAnimationFrame(()=>{ drawAll();
+    if(document.getElementById('ppModal').classList.contains('open')) prvRender(); });
 });
 // the panel is drawn again after every redraw; not while the slider is held,
 // or it is taken from under the finger mid-slide
@@ -30628,6 +30661,83 @@ let _pcDarkHeld=false;
 document.addEventListener('pointerdown',e=>{ if(e.target.matches&&e.target.matches('[data-pc-dark]')) _pcDarkHeld=true; });
 document.addEventListener('pointerup',()=>{ if(_pcDarkHeld){ _pcDarkHeld=false; printColourCheckSoon(); } });
 document.addEventListener('pointercancel',()=>{ _pcDarkHeld=false; });
+// ---- the Print preview pop-up ----
+let prvSide='front', prvView='after', prvPage=0, prvSeq=0;
+// one sheet as printed: drawn as on screen, its swaps made or not, then put
+// through the paper (and the screen match)
+function prvDraw(side,page,dim,withSwaps,cms){
+  const c=document.createElement('canvas'), ro={page};
+  renderSide(side,c,dim,ro);
+  const ctx=c.getContext('2d'), id=ctx.getImageData(0,0,c.width,c.height);
+  if(withSwaps) swapSheetPixels(id,ro._rects);
+  const n=c.width*c.height, d=id.data, rgb=new Uint8Array(n*3);
+  for(let i=0,j=0;i<d.length;i+=4,j+=3){ rgb[j]=d[i]; rgb[j+1]=d[i+1]; rgb[j+2]=d[i+2]; }
+  const src=sideArtObjs(side).some(([,o])=>o&&o.img&&artSrc(o)==='pdf')?'pdf':'img';
+  const pr=cms.proof(rgb,n,src,printProofGamma());
+  for(let i=0,j=0;i<d.length;i+=4,j+=3){ d[i]=pr[j]; d[i+1]=pr[j+1]; d[i+2]=pr[j+2]; }
+  ctx.putImageData(id,0,0);
+  c.style.cssText='max-width:none;border:1px solid #555;';
+  return {c,ro};
+}
+async function prvRender(){
+  const seq=++prvSeq, paper=printPaperKey();
+  const body=document.getElementById('ppBody'), note=document.getElementById('ppNote');
+  document.getElementById('ppTitle').textContent=`Print preview — Fiery ${PRINT_PAPER_NAMES[paper]}`;
+  document.querySelectorAll('#ppSideSeg [data-pp-side]').forEach(b=>b.classList.toggle('btn-primary',b.dataset.ppSide===prvSide));
+  document.querySelectorAll('#ppViewSeg [data-pp-view]').forEach(b=>b.classList.toggle('btn-primary',b.dataset.ppView===prvView));
+  document.getElementById('ppDark').value=printProofDark();
+  const pages=Math.max(1,sheetCount());
+  if(prvPage>=pages) prvPage=pages-1;
+  document.getElementById('ppPages').style.display=pages>1?'':'none';
+  document.getElementById('ppPageLbl').textContent=`${prvPage+1} / ${pages}`;
+  let cms=printCmsReady[paper];
+  if(!cms){
+    body.innerHTML='<p style="color:#bdbdbd;">Loading the paper\'s colours…</p>';
+    try{ cms=await printCms(paper); }catch(e){ body.innerHTML=`<p style="color:#bdbdbd;">Print preview unavailable — ${escapeHtml(String((e&&e.message)||e))}.</p>`; return; }
+    if(seq!==prvSeq) return;
+  }
+  // as big as the window allows, one sheet or two across
+  const both=prvView==='both', p=paperMm();
+  const aw=Math.max(160,(body.clientWidth||window.innerWidth)-40), ah=Math.max(160,(body.clientHeight||window.innerHeight-140)-40);
+  const k=Math.min((both?(aw-14)/2:aw)/p.w,ah/p.h);
+  const dim=Math.max(140,Math.round(k*Math.max(p.w,p.h)));
+  const views=both?[['Before',false],['After',true]]:[[prvView==='before'?'Before':'After',prvView!=='before']];
+  body.innerHTML='';
+  let changed=false;
+  views.forEach(([label,sw])=>{
+    const {c,ro}=prvDraw(prvSide,prvPage,dim,sw,cms);
+    if(sw&&swapsForIds(ro._art).length) changed=true;
+    if(!sw&&swapsForIds(ro._art).length) changed=true;
+    const fig=document.createElement('div');
+    fig.style.cssText='display:flex;flex-direction:column;align-items:center;gap:6px;';
+    const cap=document.createElement('div');
+    cap.style.cssText='color:#e8e8e8;font-size:13px;font-weight:600;';
+    cap.textContent=label+(label==='Before'?' — the file\'s own colours':' — with your colour changes');
+    fig.appendChild(cap); fig.appendChild(c); body.appendChild(fig);
+  });
+  note.textContent=changed?'':'No colours have been changed on this side — Before and After are the same.';
+}
+function prvOpen(){
+  prvPage=clampPage();
+  // the side being worked on: the back when only the back has artwork
+  if(!sideArtObjs('front').some(([,o])=>o&&o.img)&&sideArtObjs('back').some(([,o])=>o&&o.img)) prvSide='back';
+  document.getElementById('ppModal').classList.add('open');
+  prvRender();
+}
+function prvClose(){ document.getElementById('ppModal').classList.remove('open'); }
+document.getElementById('ppOpenBtn').addEventListener('click',prvOpen);
+document.getElementById('ppClose').addEventListener('click',prvClose);
+document.getElementById('ppModal').addEventListener('click',e=>{
+  const s=e.target.closest('[data-pp-side]'), v=e.target.closest('[data-pp-view]');
+  if(s){ prvSide=s.dataset.ppSide; prvRender(); }
+  else if(v){ prvView=v.dataset.ppView; prvRender(); }
+  else if(e.target.id==='ppPrev'){ prvPage=Math.max(0,prvPage-1); prvRender(); }
+  else if(e.target.id==='ppNext'){ prvPage++; prvRender(); }
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&document.getElementById('ppModal').classList.contains('open')) prvClose();
+});
+window.addEventListener('resize',()=>{ if(document.getElementById('ppModal').classList.contains('open')) prvRender(); });
 // another paper is another profile: the check and the preview follow it
 document.addEventListener('change',e=>{
   if(!e.target||e.target.id!=='artPaperType') return;
