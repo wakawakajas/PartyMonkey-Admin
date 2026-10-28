@@ -30084,6 +30084,33 @@ const LCMS_URL='https://cdn.jsdelivr.net/npm/lcms-wasm@1.0.5/dist/lcms.js';
 // how light a colour prints, L* from the paper's black (0) to its white (100),
 // at or under which a colour is flagged, and the two its fixes are lifted to
 const PRINT_DARK_L=16;
+// What this Fiery does that its own profiles do not say: reds print more
+// orange. Measured 28 Oct 2026 on Glossy 300gsm: #AC1500, which the profile
+// puts at hue 37, printed like #AC2A00 on screen, hue 45 - 8 degrees towards
+// yellow. Taken as the printer's, on every paper, across the reds (printed
+// hue 25-55, fading out by 10 and 70); the preview, the closest-it-prints
+// colours and the Truer colour fix all go through it.
+const PRINT_RED_SHIFT=8;
+function printHueShift(hDeg){
+  const h=((hDeg%360)+360)%360;
+  const w=h>=25&&h<=55?1:h>10&&h<25?(h-10)/15:h>55&&h<70?(70-h)/15:0;
+  return PRINT_RED_SHIFT*w;
+}
+// a printed L*a*b* (16-bit, from index i) turned by the shift, in place
+function printHueFix16(lb,i){
+  const a=lb[i+1]/257-128, b=lb[i+2]/257-128;
+  if(!a&&!b) return;
+  const t=printHueShift(Math.atan2(b,a)*180/Math.PI)*Math.PI/180;
+  if(!t) return;
+  const co=Math.cos(t), si=Math.sin(t);
+  lb[i+1]=Math.max(0,Math.min(65535,Math.round((a*co-b*si+128)*257)));
+  lb[i+2]=Math.max(0,Math.min(65535,Math.round((a*si+b*co+128)*257)));
+}
+// a printed colour that comes out a different shade than the screen shows -
+// by this much, in degrees, with the screen showing it at least this colourful.
+// Only the reds, where the printer was measured: #AC1500 printed 3 degrees off
+// the screen's hue, and that was plainly orange on paper.
+const PRINT_SHIFT_DEG=2.5, PRINT_SHIFT_C=30;
 // The fixes, by how light they measure on the paper: three, from a deep
 // burgundy to a clear red (22 and 27 were the two first offered, and both
 // still looked too dark on the shop's screen). Not off the screen match: that
@@ -30141,6 +30168,16 @@ function printCms(paper){
     const scrLab=T(srgb,L.TYPE_RGB_8,lab,L.TYPE_Lab_16,R,0);
     const lab16=v=>[v[0]/655.35,v[1]/257-128,v[2]/257-128];
     const vividGrid={};
+    // every RGB in steps of 5 through the paper, once per source, kept
+    const vividOf=src=>{
+      let G=vividGrid[src];
+      if(!G){
+        const inp=[]; for(let r=0;r<=255;r+=5)for(let g=0;g<=255;g+=5)for(let b=0;b<=255;b+=5) inp.push(r,g,b);
+        const n=inp.length/3, a=new Uint8Array(inp);
+        G=vividGrid[src]={rgb:a,lab:run(kLab,run(toK[src],a,n),n),n};
+      }
+      return G;
+    };
     const run=(t,a,n)=>lcms.cmsDoTransform(t,a,n);
     const Lk=run(kLab,run(toK.pdf,new Uint8Array([0,0,0]),1),1)[0];     // paper black, 16-bit L
     const lift=v=>Math.max(0,Math.min(65535,(v-Lk)*65535/(65535-Lk)));
@@ -30162,19 +30199,38 @@ function printCms(paper){
       // the nearest screen colour (no screen match: the paper as measured)
       screenLab:rgb=>lab16(run(scrLab,new Uint8Array(rgb),1)),
       printLab:(rgb,src)=>lab16(run(kLab,run(toK[src],new Uint8Array(rgb),1),1)),
-      printRgb:(rgb,src)=>[...run(labRgb,run(kLab,run(toK[src],new Uint8Array(rgb),1),1),1)],
+      // as this printer prints it (printHueShift), and as a screen colour
+      printLabC:(rgb,src)=>{ const v=run(kLab,run(toK[src],new Uint8Array(rgb),1),1); printHueFix16(v,0); return lab16(v); },
+      printRgb:(rgb,src)=>{ const v=run(kLab,run(toK[src],new Uint8Array(rgb),1),1); printHueFix16(v,0); return [...run(labRgb,v,1)]; },
+      // The input that prints at the shade the screen shows this colour, on
+      // this printer: hue nearest the screen's, lightness within 3 of its
+      // print, and at least 90% as colourful - of those within 1.5 degrees,
+      // the most colourful.
+      truer:(rgb,src)=>{
+        const G=vividOf(src), s0=lab16(run(scrLab,new Uint8Array(rgb),1));
+        const p0=lab16(run(kLab,run(toK[src],new Uint8Array(rgb),1),1)), c0=Math.hypot(p0[1],p0[2]);
+        const hs=Math.atan2(s0[2],s0[1]);
+        let best=null;
+        const one=new Uint16Array(3);
+        for(let i=0;i<G.n;i++){
+          const L=G.lab[i*3]/655.35; if(Math.abs(L-p0[0])>3) continue;
+          one[0]=G.lab[i*3]; one[1]=G.lab[i*3+1]; one[2]=G.lab[i*3+2]; printHueFix16(one,0);
+          const A=one[1]/257-128, B=one[2]/257-128, c=Math.hypot(A,B);
+          if(c<c0*0.9) continue;
+          let dh=Math.abs(Math.atan2(B,A)-hs); if(dh>Math.PI) dh=2*Math.PI-dh;
+          const near=dh<=0.026;
+          if(!best||(near&&!best.near)||(near===best.near&&(near?c>best.c:dh<best.dh)))
+            best={dh,c,near,rgb:[G.rgb[i*3],G.rgb[i*3+1],G.rgb[i*3+2]]};
+        }
+        return best?{rgb:best.rgb,off:Math.round(best.dh*180/Math.PI)}:null;
+      },
       // The input that prints most colourful at this colour's printed hue
       // (within 5 degrees) and lightness (within 3): Photographic squeezes a
       // colour past the ink's reach harder than one at its edge, so neon green
       // and hot pink print 13-16% more colourful sent as a duller colour.
       // Every RGB in steps of 5, through the paper once per source, kept.
       vivid:(rgb,src)=>{
-        let G=vividGrid[src];
-        if(!G){
-          const inp=[]; for(let r=0;r<=255;r+=5)for(let g=0;g<=255;g+=5)for(let b=0;b<=255;b+=5) inp.push(r,g,b);
-          const n=inp.length/3, a=new Uint8Array(inp);
-          G=vividGrid[src]={rgb:a,lab:run(kLab,run(toK[src],a,n),n),n};
-        }
+        const G=vividOf(src);
         const p0=lab16(run(kLab,run(toK[src],new Uint8Array(rgb),1),1));
         const h0=Math.atan2(p0[2],p0[1]), c0=Math.hypot(p0[1],p0[2]);
         let best=null, bc=c0;
@@ -30200,6 +30256,7 @@ function printCms(paper){
         g=g>0?g:1;
         const T=19661;                               // L* 30, 16-bit
         for(let i=0;i<lb.length;i+=3){
+          printHueFix16(lb,i);                       // this printer's reds
           const L1=lift(lb[i]);
           if(g===1||!(L1>0)||L1>=T){ lb[i]=L1; continue; }
           const L2=T*Math.pow(L1/T,g), k=Math.pow(L2/L1,0.75);
@@ -30244,11 +30301,12 @@ const PRINT_VIVID_GAIN=8;
 const _darkScan=new WeakMap();
 function artDarkColours(img,cms,src){ return artPrintScan(img,cms,src).dark; }
 function artDullColours(img,cms,src){ return artPrintScan(img,cms,src).dull; }
+function artShiftColours(img,cms,src){ return artPrintScan(img,cms,src).shift; }
 function artPrintScan(img,cms,src){
   const memo=_darkScan.get(img)||{}, key=cms.paper+src;
   if(memo[key]) return memo[key];
   const W=img.naturalWidth||img.width, H=img.naturalHeight||img.height;
-  let out=[], dull=[];
+  let out=[], dull=[], shift=[];
   if(W>0&&H>0){
     const s=Math.min(1,256/Math.max(W,H));
     const c=document.createElement('canvas');
@@ -30269,7 +30327,7 @@ function artPrintScan(img,cms,src){
         b[0]+=px[i]; b[1]+=px[i+1]; b[2]+=px[i+2]; b[3]++;
         sum.set(key,b);
       }
-      const min=Math.max(20,total*0.003), found=[], dl=[];
+      const min=Math.max(20,total*0.003), found=[], dl=[], sh=[];
       for(const b of sum.values()){
         if(b[3]<min) continue;
         const rgb=[b[0]/b[3],b[1]/b[3],b[2]/b[3]].map(Math.round);
@@ -30282,6 +30340,22 @@ function artPrintScan(img,cms,src){
             const to=cms.printRgb(rgb,src), loss=Math.max(0,Math.round((ca-cp)/ca*100));
             if(near){ if(b[3]>near.n){ near.rgb=rgb; near.to=to; near.loss=loss; } near.n+=b[3]; }
             else dl.push({rgb,to,loss,n:b[3]});
+            continue;
+          }
+          // printed a different shade than shown: the screen's hue against
+          // this printer's
+          if(ca>=PRINT_SHIFT_C){
+            const q=cms.printLabC(rgb,src);
+            let d=(Math.atan2(q[2],q[1])-Math.atan2(a[2],a[1]))*180/Math.PI;
+            if(d>180) d-=360; if(d<-180) d+=360;
+            // reds only (screen hue under 50): an orange said to print more
+            // orange is no news
+            const hs=((Math.atan2(a[2],a[1])*180/Math.PI)+360)%360;
+            if(Math.abs(d)>=PRINT_SHIFT_DEG&&hs>10&&hs<50){
+              const near=sh.find(f=>colDist(f.rgb,rgb)<20);
+              if(near){ if(b[3]>near.n){ near.rgb=rgb; near.deg=d; } near.n+=b[3]; }
+              else sh.push({rgb,deg:d,n:b[3]});
+            }
           }
           continue;
         }
@@ -30292,10 +30366,11 @@ function artPrintScan(img,cms,src){
       }
       out=found.sort((a,b)=>b.n-a.n).slice(0,4);
       dull=dl.sort((a,b)=>b.n-a.n).slice(0,4);
+      shift=sh.sort((a,b)=>b.n-a.n).slice(0,4);
     }
     c.width=c.height=0;
   }
-  memo[key]={dark:out,dull}; _darkScan.set(img,memo);
+  memo[key]={dark:out,dull,shift}; _darkScan.set(img,memo);
   return memo[key];
 }
 const colDist=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);
@@ -30555,6 +30630,15 @@ function printColourPanel(side){
       if(colourIgnored.has(id+hx)) return;
       rows.push({kind:'dark',dc,fixes:darkFixes(cms,dc.rgb,src)});
     });
+    artShiftColours(o.img,cms,src).forEach(dc=>{
+      const hx=hexOf(dc.rgb);
+      if(seen.has(hx)) return; seen.add(hx);
+      const taken=swapsForIds(new Set([id])).find(s=>colDist(s.from,dc.rgb)<6);
+      if(taken){ rows.push({kind:'swap',dc,s:taken}); return; }
+      if(colourIgnored.has(id+hx)) return;
+      if(dc.truer===undefined) dc.truer=cms.truer(dc.rgb,src);
+      rows.push({kind:'shift',dc});
+    });
     artDullColours(o.img,cms,src).forEach(dc=>{
       const hx=hexOf(dc.rgb);
       if(seen.has(hx)) return; seen.add(hx);
@@ -30580,6 +30664,19 @@ function printColourPanel(side){
     if(r.kind==='swap'){
       h+=`<div class="hint" style="margin:6px 0 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">✓ ${sw(r.dc.rgb)} ${hx} → ${sw(r.s.to)} ${hexOf(r.s.to)}`
         +` <button type="button" class="btn-outline btn-sm" data-pc-undo="${hx}">Undo</button></div>`;
+      return;
+    }
+    if(r.kind==='shift'){
+      const warm=r.dc.deg>0, deg=Math.round(Math.abs(r.dc.deg));
+      const t=r.dc.truer;
+      h+=`<div style="margin:8px 0 0;padding:8px 10px;border:1px solid var(--border);border-radius:10px;">`
+        +`<div style="font-size:13px;">⚠ ${sw(r.dc.rgb)} <b>${hx}</b> prints ${warm?'more orange / yellow':'more pink / blue'} on this printer (${deg}°)</div>`
+        +`<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px;font-size:12px;">`
+        +(t&&hexOf(t.rgb)!==hx
+          ?`<button type="button" class="btn-outline btn-sm" data-pc-swap="${hx}" data-pc-to="${hexOf(t.rgb)}"`
+            +` title="Send it as ${hexOf(t.rgb)}: it prints at the shade the screen shows ${hx}">Truer colour ${sw(t.rgb)} ${hexOf(t.rgb)}</button>`
+          :`<span class="hint" style="margin:0;">no truer option</span>`)
+        +`<button type="button" class="btn-outline btn-sm" data-pc-ignore="${hx}">Ignore</button></div></div>`;
       return;
     }
     if(r.kind==='dull'){
@@ -30613,7 +30710,8 @@ function printColourClick(e){
   // the designs on this sheet the colour was found in
   const cms=printCmsReady[printPaperKey()];
   const objs=sideArtObjs(side).map(([,o])=>o).filter(o=>o&&o.img&&cms
-    &&[...artDarkColours(o.img,cms,artSrc(o)),...artDullColours(o.img,cms,artSrc(o))].some(dc=>hexOf(dc.rgb)===from));
+    &&[...artDarkColours(o.img,cms,artSrc(o)),...artDullColours(o.img,cms,artSrc(o)),...artShiftColours(o.img,cms,artSrc(o))]
+      .some(dc=>hexOf(dc.rgb)===from));
   const fromRgb=hexRgb(from), ids=objs.map(o=>artImgId(o.img));
   if(b.dataset.pcIgnore){ ids.forEach(id=>colourIgnored.add(id+from)); drawAll(); printColourCheckSoon(); return; }
   // a line's own artwork: the change waits for Save, on the line
