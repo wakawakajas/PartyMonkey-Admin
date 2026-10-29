@@ -30618,10 +30618,24 @@ function swapSheetPixels(imgData,rects){
     if(r.inv) sw=sw.map(t=>({...t,from:t.from.map(v=>255-v),to:t.to.map(v=>255-v)}));
     live.push({r,sw,paper:!r.placed&&!r.inv&&sw.some(t=>t.from.every(v=>v>235))});
   });
-  const run=(L,b,trim)=>{
+  // a shape (a die-cut sticker's line) as the pixels inside it, over its box
+  const inside=(poly,x0,y0,x1,y1)=>{
+    const w=x1-x0, h=y1-y0; if(!(w>0&&h>0)) return null;
+    const c=document.createElement('canvas'); c.width=w; c.height=h;
+    const g=c.getContext('2d'); g.beginPath();
+    poly.forEach(([u,v],i)=>i?g.lineTo(u-x0,v-y0):g.moveTo(u-x0,v-y0));
+    g.closePath(); g.fill();
+    const a=g.getImageData(0,0,w,h).data, out=new Uint8Array(w*h);
+    for(let i=0;i<out.length;i++) out[i]=a[i*4+3]>127?1:0;
+    c.width=c.height=0;
+    return out;
+  };
+  const run=(L,b,trim,poly)=>{
     const x0=Math.max(0,Math.floor(b.x0)), x1=Math.min(W,Math.ceil(b.x1));
     const y0=Math.max(0,Math.floor(b.y0)), y1=Math.min(H,Math.ceil(b.y1));
+    const mask=poly?inside(poly,x0,y0,x1,y1):null;
     for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){
+      if(mask&&!mask[(y-y0)*(x1-x0)+(x-x0)]) continue;
       const k=y*W+x; if(done[k]) continue; done[k]=1;
       const i=k*4; let a=d[i+3];
       if(a<255&&trim&&L.paper){
@@ -30635,8 +30649,8 @@ function swapSheetPixels(imgData,rects){
       d[i]=q.rgb[0]; d[i+1]=q.rgb[1]; d[i+2]=q.rgb[2];
     }
   };
-  live.forEach(L=>{ if(L.r.t) run(L,L.r.t,true); });
-  live.forEach(L=>run(L,L.r,!L.r.t));
+  live.forEach(L=>{ if(L.r.t) run(L,L.r.t,true,L.r.polyT); });
+  live.forEach(L=>run(L,L.r,!L.r.t,L.r.polyB));
   return live.length;
 }
 // A drawn sheet on screen: its swaps, and as the Fiery would print it when
@@ -40318,6 +40332,20 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
       return {x0:Math.min(...P.map(q=>q[0])),y0:Math.min(...P.map(q=>q[1])),x1:Math.max(...P.map(q=>q[0])),y1:Math.max(...P.map(q=>q[1]))};
     };
     pcR={id,ph:ds&&ds.s?ds.s.id:null,inv:!!invert,...bb(clip.x,clip.y,clip.w,clip.h),t:bb(B.x,B.y,B.w,B.h)};
+    // Cut to its own line (Die Cut's stickers, nested close): its square box
+    // reached into the next sticker's shape, which took this one's change.
+    // Its shape at the cut (polyT) and with its bleed (polyB), on the canvas.
+    // A sticker sheet printed whole is clipped to its box, so keeps the box.
+    if(design&&gtCutsOwnLine(design)&&!cutOf.cutSheet){
+      const keep=gtTraceLast;
+      const toPx=P=>P&&P.length>3?P.map(([u,v])=>[m.a*u*sc+m.c*v*sc+m.e,m.b*u*sc+m.d*v*sc+m.f]):null;
+      pcR.polyT=toPx(gtTracePlace(cutOf,r,0));
+      pcR.polyB=b>0?toPx(gtTracePlace(cutOf,r,b)):pcR.polyT;
+      gtTraceLast=keep;
+      const pb=P=>({x0:Math.min(...P.map(q=>q[0])),y0:Math.min(...P.map(q=>q[1])),x1:Math.max(...P.map(q=>q[0])),y1:Math.max(...P.map(q=>q[1]))});
+      if(pcR.polyT) pcR.t=pb(pcR.polyT);
+      if(pcR.polyB) Object.assign(pcR,pb(pcR.polyB));
+    }
     gtPcRo._rects.push(pcR);
   }catch(e){}
   const took=vec?vec.take({id:key,turn},r,g,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
