@@ -30523,20 +30523,41 @@ const _artMcPaths=new Map();        // picture id -> the line artwork file it is
 // file can be on many lines. The line: the one open in the builder (not a
 // shared sheet), or the one a download is drawing (pcLineNow).
 let pcLineNow=null;
+function pcLineOpen(){
+  let line=pcLineNow;
+  if(!line) try{ if(mcWinItem&&!mcLaidShared&&currentScreen==='tool-custom') line=mcWinItem; }catch(e){}
+  return line||null;
+}
+// the line's own key for a picture, whether or not it has been filed
+function pcLineKeyOf(o,line){
+  line=line||pcLineOpen();
+  if(!o||!line) return null;
+  if(o===state.final.front) return 'line:'+line+':front';
+  if(o===state.final.back) return 'line:'+line+':back';
+  const ds=state.designs||[];
+  if(ds.includes(o)){
+    if(o.source&&o.source.path) return 'line:'+line+':d:'+o.source.path;
+    // no folder file: by name and its place among those of that name - two
+    // uploads both called image.png shared one key, and one's change was both's
+    const same=ds.filter(d=>!(d.source&&d.source.path)&&d.name===o.name);
+    return 'line:'+line+':n:'+String(o.name||'')+'#'+same.indexOf(o);
+  }
+  return null;
+}
 function pcKeyOf(o){
   if(!o) return null;
   if(o.mcPath) return o.mcPath;
-  let line=pcLineNow;
-  if(!line) try{ if(mcWinItem&&!mcLaidShared&&currentScreen==='tool-custom') line=mcWinItem; }catch(e){}
-  if(!line) return null;
-  if(o===state.final.front) return 'line:'+line+':front';
-  if(o===state.final.back) return 'line:'+line+':back';
-  if((state.designs||[]).includes(o)) return 'line:'+line+':d:'+String((o.source&&o.source.path)||o.name||o.id);
-  return null;
+  return pcLineKeyOf(o);
 }
+// What a picture's changes are found under, noted every time it is drawn. A
+// picture with no key here (a merged or shared sheet, the operator's own
+// layout) has any old one taken away: one folder file's picture is shared by
+// every line it is on, and the last line's changes showed on all of them -
+// and could not be reset there.
 function artNote(o){
-  const k=o&&o.img&&pcKeyOf(o);
-  if(k) _artMcPaths.set(artImgId(o.img),k);
+  if(!o||!o.img) return;
+  const k=pcKeyOf(o), id=artImgId(o.img);
+  if(k) _artMcPaths.set(id,k); else _artMcPaths.delete(id);
 }
 const mcColourEdits=new Map();      // mcPath -> [{from,to}], not saved yet
 function mcSavedColours(path){
@@ -30599,6 +30620,35 @@ function mcLineColours(art,it){
     });
     if(list.length) out[path]=list;
   });
+  if(it){
+    const pre='line:'+it.id+':';
+    const lineList=k=>mcColourEdits.has(k)
+      ?mcColourEdits.get(k).map(x=>({from:hexOf(x.from),to:hexOf(x.to),...(x.adj?{adj:x.adj}:{}),...(x.base?{base:x.base}:{})}))
+      :(Array.isArray(was[k])?was[k]:null);
+    // filed on this Save (a back, an enhanced or uploaded front): its changes
+    // were under the line's key and go to its path - left there, Save wrote
+    // nothing for it and the change was gone
+    const moved=new Set();
+    objs.forEach(o=>{
+      const k=keyOf.get(o), lk=o&&o.img?pcLineKeyOf(o,it.id):null;
+      if(!k||!lk||k===lk) return;
+      const L=lineList(lk); if(!L) return;
+      moved.add(lk);
+      const cur=out[k]||[];
+      L.forEach(x=>{ if(!cur.some(y=>y.from===x.from)) cur.push(x); });
+      if(cur.length) out[k]=cur;
+      mcColourEdits.delete(lk);
+    });
+    // and the line's own changes for artwork not on the builder now - the
+    // folder offline, a design that would not load - kept, not dropped
+    const here=new Set([...keyOf.values()]);
+    Object.keys(was).forEach(k=>{
+      if(!k.startsWith(pre)||k in out||moved.has(k)||here.has(k)) return;
+      if(k===pre+'front'&&state.final.front&&state.final.front.img) return;
+      if(k===pre+'back'&&state.final.back&&state.final.back.img) return;
+      out[k]=was[k];
+    });
+  }
   return out;
 }
 // Each pixel near the colour taken moves by the same step as the colour does;
