@@ -39285,8 +39285,28 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
   bands.forEach(items=>{
     const want=pageOf.get(items[0])>0?pageOf.get(items[0])-1:null;
     goTo(want!=null?want:carry);
-    if(mixed.has(items)){ const before=pages.map(p=>p.items.length);
-      gtNeatBand(items); gtNeatSentHome(items,before); return; }
+    if(mixed.has(items)){
+      // tried with them all in; tags sent to a sheet the band does not reach
+      // (Picked to next sheet, onto a sheet of their own) are taken back out,
+      // the band laid again without them, and they go to their sheet as before
+      const snap={n:pages.length,p:pages.map(q=>[q.items.length,q.cells.length,q.y]),at,y,carry,prev:gtNeatPrev,tooBig,pgOn:!!pg};
+      gtNeatBand(items);
+      const reach=new Set(); pages.forEach((q,n)=>{ if(q.items.length>(snap.p[n]?snap.p[n][0]:0)) reach.add(n); });
+      const stray=items.filter(it=>pageOf.get(it)>0&&!reach.has(pageOf.get(it)-1));
+      let home=items;
+      if(stray.length){
+        pages.length=snap.n;
+        pages.forEach((q,n)=>{ q.items.length=snap.p[n][0]; q.cells.length=snap.p[n][1]; q.y=snap.p[n][2]; });
+        at=snap.at; carry=snap.carry; gtNeatPrev=snap.prev; tooBig=snap.tooBig;
+        pg=snap.pgOn?pages[at]:null; y=snap.y;
+        home=items.filter(it=>!stray.includes(it));
+        if(home.length) gtNeatBand(home);
+      }
+      gtNeatSentHome(home,snap.p.map(q=>q[0]));
+      const bySheet=new Map(); stray.forEach(it=>{ const k=pageOf.get(it); if(!bySheet.has(k)) bySheet.set(k,[]); bySheet.get(k).push(it); });
+      bySheet.forEach(group=>{ goTo(pageOf.get(group[0])-1); gtNeatBand(group); });
+      return;
+    }
     gtNeatBand(items);
   });
   function gtNeatBand(items){
@@ -39393,8 +39413,7 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
     if(want==null) carry=at;
   }
   // Which tag goes in which place of a mixed band: on each sheet the ones sent
-  // there first, then the rest in the order's order. One sent to a sheet the
-  // band never reached takes the first place left.
+  // there first, then the rest in the order's order.
   function gtNeatSentHome(items,before){
     const spots=[];
     pages.forEach((p,n)=>p.items.slice(before[n]||0).forEach(e=>spots.push({e,n})));
@@ -39587,6 +39606,25 @@ function gtNeatPattern(rl,w,h,n,Wl,Hl,bl,rotate){
   // each tried with n tags from the top of an empty sheet: the least height wins
   // (a whole sheet counted as its height), ties to the plainer pattern
   const E=1e-6;
+  // how many tags one whole sheet takes in that pattern
+  const full=P=>{
+    const bw=P.bw, bh=P.bh; let y=0, r=0, k=0;
+    while(y+bl+bh<=Hl+E&&r<10000){
+      const row=P.rows[r%P.rows.length];
+      for(let m=-1;m<10000;m++){
+        let past=false;
+        for(const u of row.units){
+          const x=bl+(row.shift+m*P.period+u.x)*cell;
+          if(x<bl-E) continue;
+          if(x+bw>Wl-bl+E){ past=true; break; }
+          k++;
+        }
+        if(past) break;
+      }
+      y+=P.dys[r%P.dys.length]*cell; r++;
+    }
+    return k;
+  };
   const cost=P=>{
     const bw=P.bw, bh=P.bh;
     let left=n, y=0, pages=0, rows=0, r=0, guard=0;
@@ -39610,8 +39648,13 @@ function gtNeatPattern(rl,w,h,n,Wl,Hl,bl,rotate){
     }
     return Infinity;
   };
-  let best=null, bc=Infinity;
-  geo.forEach(P=>{ const c=cost(P); if(c<bc-0.01){ best=P; bc=c; } });
+  // Of patterns taking as many sheets, the one that fills a sheet fullest:
+  // judged by the last sheet's height alone, 47 tags went 24 + 23 in a looser
+  // pattern where the tight one makes the first sheet 26, like every other.
+  let best=null, bc=Infinity, bp=Infinity, bf=-1;
+  geo.forEach(P=>{ const c=cost(P); if(!isFinite(c)) return;
+    const pg=Math.floor((c+E)/Hl), f=pg?full(P):0;
+    if(pg<bp||(pg===bp&&(f>bf||(f===bf&&c<bc-0.01)))){ best=P; bc=c; bp=pg; bf=f; } });
   return best&&isFinite(bc)?{...best,cell,cost:bc}:null;
 }
 function gtNestPlan(){
@@ -39707,7 +39750,7 @@ function gtNestPlan(){
   const lead=k=>Math.min(...bls.map(b=>Math.max(0,k-2*b)));
   // and the guides dragged off the rulers (Die Cut), so no tag sits across one
   const dotBlocks=gtDotBlocks(x0,y0,availW+gx,availH+gy,clear,false,{x:lead(gx),y:lead(gy)},qrPad)
-    .concat(gtGuideBlocks(x0,y0,availW+gx,availH+gy,gx,gy,false));
+    .concat(gtGuideBlocks(x0,y0,availW+gx,availH+gy,gx,gy,false,Math.max(0,...bls)));
   const gapR=Math.max(0,gx,gy)/2;
   const realDots=gtDotBlocks(x0,y0,availW+gx,availH+gy,
     clear-Math.min(...bls.map(b=>Math.max(gapR,b)-b)),false,null,qrPad)
@@ -42290,6 +42333,12 @@ function gtGuidesPaint(){
       +'<div data-ruler="x" title="Drag across onto the sheet for a guide down"></div><div data-lines></div><div data-tip style="display:none"></div>';
     card.appendChild(lay);
     lay.addEventListener('pointerdown',gtGuideDown);
+    // a line lies over the sheet: the wheel over it still zooms the sheet
+    lay.addEventListener('wheel',e=>{
+      if(!e.target.closest('[data-guide]')) return;
+      e.preventDefault();
+      c.dispatchEvent(new WheelEvent('wheel',{deltaY:e.deltaY,deltaX:e.deltaX,deltaMode:e.deltaMode,clientX:e.clientX,clientY:e.clientY,bubbles:true,cancelable:true}));
+    },{passive:false});
     lay.addEventListener('dblclick',e=>{
       const ln=e.target.closest('[data-guide]'); if(!ln) return;
       const g=gtGuidesOf(), [ax,i]=ln.dataset.guide.split(':');
@@ -42367,11 +42416,15 @@ function gtGuideDown(e){
 // right and bottom, so its strip sits half a gutter past the line: a tag either
 // side stops half a gutter short of it. A real cut line is already grown by
 // half the gap, so its strip is the line itself.
-function gtGuideBlocks(x0,y0,W,H,gx,gy,real){
+// With a bleed the box is the print, and only the gutter left between two
+// prints (gx less both bleeds) is spare: the strip sits half of that past the
+// line, so no bleed prints across it. bl: the biggest bleed on the sheet.
+function gtGuideBlocks(x0,y0,W,H,gx,gy,real,bl){
   if(gtMode!=='combo') return [];
-  const g=gtGuidesOf(), out=[];
-  g.x.forEach(X=>{ const bx=X-x0+(real?0:gx/2); if(bx>0&&bx<W) out.push({x:bx,y:0,w:0.01,h:H}); });
-  g.y.forEach(Y=>{ const by=Y-y0+(real?0:gy/2); if(by>0&&by<H) out.push({x:0,y:by,w:W,h:0.01}); });
+  const g=gtGuidesOf(), out=[], b=Math.max(0,Number(bl)||0);
+  const sx=real?0:Math.max(0,gx-2*b)/2, sy=real?0:Math.max(0,gy-2*b)/2;
+  g.x.forEach(X=>{ const bx=X-x0+sx; if(bx>0&&bx<W) out.push({x:bx,y:0,w:0.01,h:H}); });
+  g.y.forEach(Y=>{ const by=Y-y0+sy; if(by>0&&by<H) out.push({x:0,y:by,w:W,h:0.01}); });
   return out;
 }
 window.addEventListener('resize',()=>{ try{ gtGuidesPaint(); }catch(e){} });
