@@ -39677,13 +39677,13 @@ function gtNestPlan(){
   });
   let marks=[]; try{ marks=(gtMarks()||[]).map(d=>[d.cx,d.cy,d.r]); }catch(e){}
   const sig=JSON.stringify([q.map(l=>l.id+'|'+l.designId+'|'+(gtLineBleed(l)??'')+'|'+(l.shape||'')+(l.nestFree?'|f':'')+(l.nestPage>0?'|p'+l.nestPage:'')),dsig,!!S.nestNeat,S.nestNeat?JSON.stringify(S.nestLines||{}):0,Object.keys(gtFolderShapes||{}).length,S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.tagW,S.tagH,S.gridMode,!!S.nestReal,S.nestRotate!==false,gtNestStep(),
-    S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,S.nestHole||0,marks,gtDotClear(),S.qrOn?(Number(S.qrDist)||10):0,gtMode==='combo'?gtGuidesOf():0]);
+    S.nestCut?[S.nestCut.file,S.nestCut.shape,S.nestCut.w,S.nestCut.h,!!gtNestCutLayout(S.nestCut.file)]:0,S.nestHole||0,marks,gtDotClear(),S.qrOn?(Number(S.qrDist)||10):0,gtGuidesSig()]);
   // tags moved by hand (gtNestHandKeep) hold while the sheet itself stands: the
   // paper, margins, gaps, dots or Neat rows changed, and the sheets are packed
   // afresh. A quantity, a bleed or a line changed keeps them - each held tag is
   // found again by its line and which copy of it it is (keys), and one that is
   // gone or has changed size is let go and packed with the rest.
-  const frame=JSON.stringify([S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.gridMode,!!S.nestNeat,marks,gtDotClear(),S.qrOn?(Number(S.qrDist)||10):0,gtMode==='combo'?gtGuidesOf():0]);
+  const frame=JSON.stringify([S.paperW,S.paperH,x0,y0,mx,my,gx,gy,S.gridMode,!!S.nestNeat,marks,gtDotClear(),S.qrOn?(Number(S.qrDist)||10):0,gtGuidesSig()]);
   const seen=new Map(), keys=q.map(l=>{ const k=l.id+'|'+l.designId; seen.set(k,(seen.get(k)||0)+1); return k+'#'+seen.get(k); });
   if(gtNestHand&&gtNestHand.frame!==frame) gtNestHand=null;
   if(gtNestCache&&gtNestCache.sig===sig&&gtNestCache.hand===gtNestHand) return gtNestCache.plan;
@@ -40000,7 +40000,7 @@ function gtNestPlan(){
   // its own sheet - a sheet arranged by hand is left as it was put
   plan.guideLeft=0;
   if(gtMode==='combo') plan.forEach((e,at)=>{ if(!(pages[at]&&pages[at].hand))
-    plan.guideLeft+=gtGuidePush(e.slots,e.queue.map(l=>gtBleedOf(gtDesign(l.designId),l)||0),gx,gy,mx,my); });
+    plan.guideLeft+=gtGuidePush(e.slots,e.queue.map(l=>gtBleedOf(gtDesign(l.designId),l)||0),gx,gy,mx,my,at); });
   plan.tooBig=tooBig; plan.real=realUsed;
   // what each design was nested by, for the Nest settings line
   plan.why=ids.map(id=>{
@@ -42289,20 +42289,40 @@ gtSheetDrag(document.getElementById('gtCanvas'),()=>gtMainSide());
 // As in Photoshop: drag down from the ruler above the sheet for a line across,
 // in from the ruler at its side for a line down. The lines cut the sheet into
 // sections: the tags are nested as always, then pushed off each line on their
-// own sheet (gtGuidePush) - never onto another sheet. A line is dragged to move it, and dragged back onto
-// its ruler (or double-clicked) to take it away. Kept on the sheet in mm from
-// the paper's top-left, front side: gtSheet.guides {x:[...], y:[...]}.
-const GT_RULER=16, GT_GUIDE_INK='#00b7ff';
+// own sheet (gtGuidePush) - never onto another sheet. A line is dragged to move
+// it, and dragged back onto its ruler (or double-clicked) to take it away.
+// A line is on every sheet, or on one sheet only: the button where the rulers
+// meet says which a new line goes on (gtGuideScope), and a line keeps where it
+// was put when it is moved. Kept on the sheet in mm from the paper's top-left,
+// front side: gtSheet.guides {x:[...], y:[...]} for every sheet, and
+// gtSheet.guidesBy {'<sheet number>': {x, y}} for one sheet each.
+const GT_RULER=16, GT_GUIDE_INK='#00b7ff', GT_GUIDE_ONE='#ff8a00';
 const gtGuidesOn=()=>gtMode==='combo'&&!!gtSheet.nestOn;
-function gtGuidesOf(){
-  const g=gtSheet.guides||{};
-  const ok=v=>(Array.isArray(v)?v:[]).map(Number).filter(n=>isFinite(n));
-  return {x:ok(g.x),y:ok(g.y)};
+let gtGuideScope='all';                     // where a new line goes: 'all' or 'sheet'
+const gtGuideNums=v=>(Array.isArray(v)?v:[]).map(Number).filter(n=>isFinite(n));
+// the lines of one scope: 'all', or a sheet's number (1 on) as a string
+function gtGuideSet(scope){
+  const g=scope==='all'?gtSheet.guides:((gtSheet.guidesBy||{})[scope]);
+  return {x:gtGuideNums(g&&g.x),y:gtGuideNums(g&&g.y)};
 }
-function gtGuidesPut(g){
+// what a sheet is pushed by (page from 0): every sheet's lines and its own
+function gtGuidesOf(page){
+  const a=gtGuideSet('all');
+  if(page==null) return a;
+  const b=gtGuideSet(String(page+1));
+  return {x:[...new Set(a.x.concat(b.x))],y:[...new Set(a.y.concat(b.y))]};
+}
+// what the sheets are packed with, for knowing when to pack them again
+function gtGuidesSig(){ return gtMode==='combo'?[gtSheet.guides||0,gtSheet.guidesBy||0]:0; }
+function gtGuidesPut(scope,g){
   const keep=(v,max)=>[...new Set(v.filter(n=>isFinite(n)).map(n=>Math.round(n*10)/10))].filter(n=>n>0&&n<max).sort((a,b)=>a-b);
-  const x=keep(g.x,gtSheet.paperW), y=keep(g.y,gtSheet.paperH);
-  if(x.length||y.length) gtSheet.guides={x,y}; else delete gtSheet.guides;
+  const x=keep(g.x,gtSheet.paperW), y=keep(g.y,gtSheet.paperH), any=x.length||y.length;
+  if(scope==='all'){ if(any) gtSheet.guides={x,y}; else delete gtSheet.guides; }
+  else{
+    const by={...(gtSheet.guidesBy||{})};
+    if(any) by[scope]={x,y}; else delete by[scope];
+    if(Object.keys(by).length) gtSheet.guidesBy=by; else delete gtSheet.guidesBy;
+  }
   gtNestCache=null; gtPickOnly(null);
   gtRenderSlots(); gtDraw(); gtSaveSoon(); try{ gtNestSync(); }catch(e){}
 }
@@ -42332,9 +42352,13 @@ function gtGuidesPaint(){
     lay=document.createElement('div'); lay.className='gt-guides';
     lay.style.cssText='position:absolute;left:0;top:0;width:0;height:0;z-index:3;';
     lay.innerHTML='<div data-ruler="y" title="Drag down onto the sheet for a guide across"></div>'
-      +'<div data-ruler="x" title="Drag across onto the sheet for a guide down"></div><div data-lines></div><div data-tip style="display:none"></div>';
+      +'<div data-ruler="x" title="Drag across onto the sheet for a guide down"></div>'
+      +'<button type="button" data-scope title="Which sheets a new guide goes on - tap to change"></button>'
+      +'<div data-lines></div><div data-tip style="display:none"></div>';
     card.appendChild(lay);
     lay.addEventListener('pointerdown',gtGuideDown);
+    lay.querySelector('[data-scope]').addEventListener('click',()=>{
+      gtGuideScope=gtGuideScope==='all'?'sheet':'all'; gtGuidesPaint(); });
     // a line lies over the sheet: the wheel over it still zooms the sheet
     lay.addEventListener('wheel',e=>{
       if(!e.target.closest('[data-guide]')) return;
@@ -42355,12 +42379,22 @@ function gtGuidesPaint(){
   side.style.cssText=`position:absolute;left:${L-GT_RULER-3}px;top:${T}px;width:${GT_RULER}px;height:${h}px;cursor:e-resize;touch-action:none;border-radius:4px;background-color:#2a2d33;`
     +`background-image:repeating-linear-gradient(to bottom,${ink} 0 1px,transparent 1px ${by}px),repeating-linear-gradient(to bottom,${ink2} 0 1px,transparent 1px ${sy}px);`
     +`background-size:100% 100%,45% 100%;background-repeat:repeat-y;background-position:0 ${m(oy,by)}px,100% ${m(oy,sy)}px;`;
-  const g=gtGuidesOf();
+  // where the rulers meet: which sheets a new line goes on, in that line's colour
+  const one=gtGuideScope==='sheet', sb=lay.querySelector('[data-scope]');
+  sb.textContent=one?'New guides: sheet '+(gtPage+1)+' only':'New guides: all sheets';
+  sb.style.cssText=`position:absolute;left:${L-3}px;transform:translateX(-100%);top:${T-GT_RULER-3}px;height:${GT_RULER}px;padding:0 8px;`
+    +`border:0;border-radius:4px;font-size:11px;line-height:${GT_RULER}px;white-space:nowrap;cursor:pointer;min-height:0;min-width:0;margin:0;box-sizing:border-box;box-shadow:none;`
+    +`background:${one?GT_GUIDE_ONE:GT_GUIDE_INK};color:#111;`;
   let html='';
-  g.x.forEach((X,i)=>{ const px=F.x2px(X); if(px<0||px>w) return;
-    html+=`<div data-guide="x:${i}" title="${X} mm - drag to move, back onto the ruler or double-click to take away" style="position:absolute;left:${L+px-4}px;top:${T}px;width:9px;height:${h}px;cursor:ew-resize;touch-action:none;background:linear-gradient(to right,transparent 4px,${GT_GUIDE_INK} 4px 5px,transparent 5px);"></div>`; });
-  g.y.forEach((Y,i)=>{ const py=F.y2px(Y); if(py<0||py>h) return;
-    html+=`<div data-guide="y:${i}" title="${Y} mm - drag to move, back onto the ruler or double-click to take away" style="position:absolute;left:${L}px;top:${T+py-4}px;width:${w}px;height:9px;cursor:ns-resize;touch-action:none;background:linear-gradient(to bottom,transparent 4px,${GT_GUIDE_INK} 4px 5px,transparent 5px);"></div>`; });
+  const draw=(scope,set,ink)=>{
+    const where=scope==='all'?'every sheet':'sheet '+scope+' only';
+    set.x.forEach((X,i)=>{ const px=F.x2px(X); if(px<0||px>w) return;
+      html+=`<div data-guide="${scope}|x|${i}" title="${X} mm, on ${where} - drag to move, back onto the ruler or double-click to take away" style="position:absolute;left:${L+px-4}px;top:${T}px;width:9px;height:${h}px;cursor:ew-resize;touch-action:none;background:linear-gradient(to right,transparent 4px,${ink} 4px 5px,transparent 5px);"></div>`; });
+    set.y.forEach((Y,i)=>{ const py=F.y2px(Y); if(py<0||py>h) return;
+      html+=`<div data-guide="${scope}|y|${i}" title="${Y} mm, on ${where} - drag to move, back onto the ruler or double-click to take away" style="position:absolute;left:${L}px;top:${T+py-4}px;width:${w}px;height:9px;cursor:ns-resize;touch-action:none;background:linear-gradient(to bottom,transparent 4px,${ink} 4px 5px,transparent 5px);"></div>`; });
+  };
+  draw('all',gtGuideSet('all'),GT_GUIDE_INK);
+  draw(String(gtPage+1),gtGuideSet(String(gtPage+1)),GT_GUIDE_ONE);
   lay.querySelector('[data-lines]').innerHTML=html;
 }
 // one drag: a new line off a ruler, or a line already there; the sheet is
@@ -42371,15 +42405,17 @@ function gtGuideDown(e){
   if(e.button) return;
   e.preventDefault(); e.stopPropagation();
   const lay=e.currentTarget, F=gtGuideFrame(); if(!F) return;
-  const g=gtGuidesOf();
-  let ax, i;
-  if(ln){ [ax,i]=ln.dataset.guide.split(':'); i=Number(i); }
-  else{ ax=ruler.dataset.ruler; i=g[ax].push(NaN)-1; }
+  let scope, ax, i;
+  if(ln){ [scope,ax,i]=ln.dataset.guide.split('|'); i=Number(i); }
+  else{ scope=gtGuideScope==='sheet'?String(gtPage+1):'all'; ax=ruler.dataset.ruler; }
+  const g=gtGuideSet(scope);
+  if(!ln) i=g[ax].push(NaN)-1;
+  const ink=scope==='all'?GT_GUIDE_INK:GT_GUIDE_ONE;
   const tip=lay.querySelector('[data-tip]'), {L,T}=F;
   const line=document.createElement('div');
   line.style.cssText=ax==='x'
-    ?`position:absolute;top:${T}px;width:1px;height:${F.r.height}px;background:${GT_GUIDE_INK};pointer-events:none;`
-    :`position:absolute;left:${L}px;height:1px;width:${F.r.width}px;background:${GT_GUIDE_INK};pointer-events:none;`;
+    ?`position:absolute;top:${T}px;width:1px;height:${F.r.height}px;background:${ink};pointer-events:none;`
+    :`position:absolute;left:${L}px;height:1px;width:${F.r.width}px;background:${ink};pointer-events:none;`;
   lay.appendChild(line);
   let val=null, gone=true, moved=false;
   // the line under the pointer stays put until it is really dragged: hidden
@@ -42399,7 +42435,7 @@ function gtGuideDown(e){
     if(ax==='x') line.style.left=(L+Math.max(0,Math.min(F.r.width,px)))+'px';
     else line.style.top=(T+Math.max(0,Math.min(F.r.height,py)))+'px';
     line.style.opacity=gone?'.3':'1';
-    tip.textContent=gone?'let go to take it away':val+' mm';
+    tip.textContent=gone?'let go to take it away':val+' mm'+(scope==='all'?'':' - sheet '+scope+' only');
     tip.style.cssText=`position:absolute;left:${ev.clientX-F.rc.left+F.card.scrollLeft+12}px;top:${ev.clientY-F.rc.top+F.card.scrollTop+12}px;background:#111;color:#fff;font-size:12px;padding:2px 6px;border-radius:6px;pointer-events:none;white-space:nowrap;`;
   };
   const up=()=>{
@@ -42407,13 +42443,13 @@ function gtGuideDown(e){
     tip.style.display='none'; line.remove(); if(ln) ln.style.visibility='';
     // a tap on a line moves nothing; two taps on it close together take it away
     if(ln&&!moved){
-      const now=Date.now(), last=gtGuideDown.tap;
-      gtGuideDown.tap={key:ax+':'+i,at:now};
-      if(last&&last.key===ax+':'+i&&now-last.at<450){ gtGuideDown.tap=null; g[ax].splice(i,1); gtGuidesPut(g); }
+      const now=Date.now(), last=gtGuideDown.tap, key=ln.dataset.guide;
+      gtGuideDown.tap={key,at:now};
+      if(last&&last.key===key&&now-last.at<450){ gtGuideDown.tap=null; g[ax].splice(i,1); gtGuidesPut(scope,g); }
       return;
     }
     if(gone||val==null) g[ax].splice(i,1); else g[ax][i]=val;
-    gtGuidesPut(g);
+    gtGuidesPut(scope,g);
   };
   window.addEventListener('pointermove',move); window.addEventListener('pointerup',up); window.addEventListener('pointercancel',up);
   if(!ln) move(e);
@@ -42429,9 +42465,10 @@ function gtGuideDown(e){
 // half the gutter, or its bleed where that is more. The paper's margins are
 // kept: a sheet with too little room left gets as close as it will go, and
 // the parting that leaves the least across the line is the one taken.
-// slots: {x,y,w,h} in mm on the paper, moved in place; bls: each one's bleed.
-function gtGuidePush(slots,bls,gx,gy,mx,my){
-  const g=gtGuidesOf(); if(!slots.length||(!g.x.length&&!g.y.length)) return 0;
+// slots: {x,y,w,h} in mm on the paper, moved in place; bls: each one's bleed;
+// page: which sheet (from 0), for the lines on that sheet only.
+function gtGuidePush(slots,bls,gx,gy,mx,my,page){
+  const g=gtGuidesOf(page); if(!slots.length||(!g.x.length&&!g.y.length)) return 0;
   const S=gtSheet;
   const axis=(lines,P,L,len,gap,margin)=>{
     lines.forEach(X=>{
@@ -47579,6 +47616,7 @@ function gtFinishFollow(from){
     GT_FINISH_KEYS().forEach(k=>{ if(k in next&&next[k]!==undefined) S[k]=cp(next[k]); });
     // guides are the paper's own: one set up without any has none (gtGuidesOf)
     if(!next.guides) delete S.guides;
+    if(!next.guidesBy) delete S.guidesBy;
     gtDefaultShape=typeof next.base==='string'?next.base:(S.layoutFile||'');
   }else{
     // a paper never set up starts from the one on screen, all but its back:
@@ -64729,7 +64767,7 @@ async function mcGiftBundleRun(lines,mode,side,guest){
 // the library happens to be on.
 const GT_JOB_SHEET_KEYS=['paperW','paperH','tagW','tagH','margin','marginX','marginY','gap','gapY','gridMode',
   'leadTrim','sideTrim','gridCols','gridRows','slotRadius','bleedOn','bleed','bleedMode',
-  'nestOn','nestReal','nestNeat','nestLines','nestRotate','nestRotStep','nestCut','nestHole','nestDotClear','layoutFile','cutRemoved','guides'];
+  'nestOn','nestReal','nestNeat','nestLines','nestRotate','nestRotStep','nestCut','nestHole','nestDotClear','layoutFile','cutRemoved','guides','guidesBy'];
 const PJ_KINDS={
   giftTag:{
     label:'Gift tag sheet',
@@ -64802,6 +64840,7 @@ const PJ_KINDS={
           await gtShowShape(kept.layoutFile).catch(()=>false);
         GT_JOB_SHEET_KEYS.forEach(k=>{ if(k!=='layoutFile'&&k in kept) gtSheet[k]=kept[k]; });
         if(!kept.guides) delete gtSheet.guides;
+        if(!kept.guidesBy) delete gtSheet.guidesBy;
         if(Array.isArray(kept.slots)&&kept.slots.length&&(kept.layoutFile||'')===(gtSheet.layoutFile||''))
           gtSheet.slots=JSON.parse(JSON.stringify(kept.slots));
         gtNestCache=null; gtPickOnly(null);
