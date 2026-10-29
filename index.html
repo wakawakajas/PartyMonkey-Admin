@@ -30616,9 +30616,32 @@ async function pdfSwapColours(bytes,swaps){
   const fmt=v=>(Math.round(v/255*1e4)/1e4).toString();
   const near=rgb=>{ let s=null, d=14.0001; swaps.forEach(t=>{ const e=colDist(rgb,t.from); if(e<d){ d=e; s=t; } }); return s; };
   let hits=0;
+  // the parts of a content stream that are drawing, between its (strings)
+  // and inline pictures (ID ... EI), each rewritten on its own
+  const outside=(str,fn)=>{
+    let out='', i=0, from=0;
+    const n=str.length, ws=c=>c===' '||c==='\n'||c==='\r'||c==='\t'||c==='\f'||c==='\0';
+    while(i<n){
+      const c=str[i];
+      if(c==='%'){ i++; while(i<n&&str[i]!=='\n'&&str[i]!=='\r') i++; continue; }
+      if(c==='('){
+        out+=fn(str.slice(from,i)); let d=0, j=i;
+        for(;j<n;j++){ const x=str[j]; if(x==='\\'){ j++; continue; } if(x==='(') d++; else if(x===')'&&--d===0) break; }
+        out+=str.slice(i,j+1); i=from=j+1; continue;
+      }
+      if(c==='I'&&str[i+1]==='D'&&(i===0||ws(str[i-1]))&&ws(str[i+2]||' ')){
+        out+=fn(str.slice(from,i)); let j=i+3;
+        while(j<n&&!(str[j]==='E'&&str[j+1]==='I'&&ws(str[j-1])&&(j+2>=n||ws(str[j+2])))) j++;
+        out+=str.slice(i,j+2); i=from=j+2; continue;
+      }
+      i++;
+    }
+    return out+fn(str.slice(from));
+  };
   const recolor=(data,bbox)=>{
     let s=''; for(let i=0;i<data.length;i+=8192) s+=String.fromCharCode.apply(null,data.subarray(i,i+8192));
     let hit=false;
+    s=outside(s,s=>{
     if(cms) s=s.replace(re4,(m,c,mg,y,k,op)=>{
       const sw=near(cms.rgbOfG([c,mg,y,k].map(u))); if(!sw) return m;
       hit=true; return cms.cmykG(sw.to).map(fmt).join(' ')+' '+op;
@@ -30631,6 +30654,8 @@ async function pdfSwapColours(bytes,swaps){
     s=s.replace(re1,(m,v,op)=>{
       const sw=near([v,v,v].map(u)); if(!sw) return m;
       hit=true; return sw.to.map(fmt).join(' ')+' '+(op==='g'?'rg':'RG');
+    });
+    return s;
     });
     if(white&&bbox){
       const [x0,y0,x1,y1]=bbox;
@@ -30675,9 +30700,9 @@ function artColoursAll(img,cms,src){
 }
 // What needs looking at on a side: the colours that print near black, a
 // different shade or duller, and what was done about each.
-function printColourRows(side,cms){
+function printColourRows(side,cms,only){
   const rows=[], seen=new Set();
-  sideArtObjs(side).filter(([,o])=>o&&o.img).forEach(([,o])=>{
+  sideArtObjs(side).filter(([,o])=>o&&o.img&&(!only||artImgId(o.img)===only)).forEach(([,o])=>{
     const id=artImgId(o.img), src=artSrc(o);
     const take=(dc,kind,prep)=>{
       const hx=hexOf(dc.rgb);
@@ -30761,6 +30786,7 @@ function printColourPanel(side){
 
 // ---- the Print preview pop-up: small, beside the sheets ----
 let pcPopSide='front', printShowBefore=false;
+let pcPopArt=null;                  // one design's id when a side has several, or all
 const pcAdjOpen=new Set();          // colours whose sliders are showing
 const pcPopEl=()=>document.getElementById('pcPop');
 const pcPopIsOpen=()=>{ const p=pcPopEl(); return !!p&&!p.hidden; };
@@ -30784,10 +30810,22 @@ function pcPopRender(){
       body.innerHTML=`<p class="hint">Print preview unavailable — ${escapeHtml(String((e&&e.message)||e))}.</p>`; });
     return;
   }
-  const arts=sideArtObjs(pcPopSide).filter(([,o])=>o&&o.img);
-  if(!arts.length){ body.innerHTML='<p class="hint">No artwork on this side.</p>'; return; }
-  const rows=printColourRows(pcPopSide,cms);
+  const all=sideArtObjs(pcPopSide).filter(([,o])=>o&&o.img);
+  if(!all.length){ body.innerHTML='<p class="hint">No artwork on this side.</p>'; return; }
+  // a side of several designs: the changes go to the one chosen, or to all
+  const ids=[...new Set(all.map(([,o])=>artImgId(o.img)))];
+  if(pcPopArt&&!ids.includes(pcPopArt)) pcPopArt=null;
+  const arts=pcPopArt?all.filter(([,o])=>artImgId(o.img)===pcPopArt):all;
+  const rows=printColourRows(pcPopSide,cms,pcPopArt);
   let h='';
+  if(ids.length>1){
+    const seenId=new Set(), opts=[];
+    all.forEach(([,o],i)=>{ const id=artImgId(o.img); if(seenId.has(id)) return; seenId.add(id);
+      opts.push(`<option value="${id}"${id===pcPopArt?' selected':''}>${escapeHtml(String(o.name||o.label||('Design '+(opts.length+1))))}</option>`); });
+    h+=`<label style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:12px;"><span>Changes go to</span>`
+      +`<select data-pc-artsel style="flex:1;min-width:0;padding:4px 6px;font-size:12px;">`
+      +`<option value=""${pcPopArt?'':' selected'}>All ${ids.length} designs on this side</option>${opts.join('')}</select></label>`;
+  }
   const todo=rows.filter(r=>r.kind!=='swap');
   h+=`<div style="font-weight:600;margin:12px 0 2px;font-size:13px;">${todo.length?'To check for print':'Nothing flagged for print'}</div>`;
   h+=printColourRowsHtml(rows.filter(r=>r.kind!=='swap'));
@@ -30812,7 +30850,7 @@ function pcPopRender(){
     const isWhite=m.rgb.every(v=>v>235);
     h+=`<div data-pc-adj="${hx}"${cur&&cur.base?` data-pc-base="${cur.base}"`:''} style="margin:6px 0 0;padding:6px 8px;border:1px solid var(--border);border-radius:10px;">`
       +`<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;">`
-      +`${pcSw(m.rgb,'In the file')} <span>${hx}${isWhite?' (white / background)':''}</span>`
+      +`${pcSw(m.rgb,'In the file')} <span>${isWhite?'White / background':hx}</span>`
       +(cur?` → <span data-pc-now>${pcSw(now,'What prints')}</span> <span data-pc-nowhex>${hexOf(now)}</span>`:` <span data-pc-now></span><span data-pc-nowhex></span>`)
       +`<span style="flex:1"></span>`
       +`<label class="btn-outline btn-sm" style="position:relative;display:inline-flex;align-items:center;gap:4px;cursor:pointer;"`
@@ -30837,6 +30875,7 @@ function pcPopOpen(side){
   const pop=pcPopEl(); if(!pop) return;
   const has=s=>sideArtObjs(s).some(([,o])=>o&&o.img);
   pcPopSide=side||(has(pcPopSide)?pcPopSide:has('front')?'front':has('back')?'back':'front');
+  pcPopArt=null;
   pop.hidden=false;
   document.getElementById('ppOpenBtn').classList.add('on');
   printPreviewOn=true;
@@ -30888,9 +30927,9 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&pcPopIsOpen()) pcP
 // A colour changed on a side: to `to` (a hex), or back to the file's (null).
 // The designs on that side the colour was found in take it - a line's own
 // artwork on the line (saved with Save), any other for this session.
-function printColourSet(side,from,to,adj,base){
+function printColourSet(side,from,to,adj,base,only){
   const cms=printCmsReady[printPaperKey()];
-  const objs=sideArtObjs(side).map(([,o])=>o).filter(o=>o&&o.img&&cms
+  const objs=sideArtObjs(side).map(([,o])=>o).filter(o=>o&&o.img&&cms&&(!only||artImgId(o.img)===only)
     &&artColoursAll(o.img,cms,artSrc(o)).some(dc=>hexOf(dc.rgb)===from));
   const fromRgb=hexRgb(from), ids=objs.map(o=>artImgId(o.img));
   const toRgb=to?hexRgb(to):null, keep=adj&&(adj.h||adj.l||adj.s)?{h:adj.h|0,l:adj.l|0,s:adj.s|0}:undefined;
@@ -30914,16 +30953,16 @@ function printColourClick(e){
   const host=e.target.closest('[id^="printColour"],#pcPop'); if(!host) return;
   const b=e.target.closest('button'); if(!b) return;
   if(b.dataset.pcOpen){ pcPopOpen(b.dataset.pcOpen); return; }
-  if(b.dataset.pcSide){ pcPopSide=b.dataset.pcSide; pcPopRender(); return; }
+  if(b.dataset.pcSide){ pcPopSide=b.dataset.pcSide; pcPopArt=null; pcPopRender(); return; }
   if(b.dataset.pcAdjtog){ const k=b.dataset.pcAdjtog; pcAdjOpen.has(k)?pcAdjOpen.delete(k):pcAdjOpen.add(k); pcPopRender(); return; }
-  const side=host.id==='pcPop'?pcPopSide:host.dataset.side;
+  const side=host.id==='pcPop'?pcPopSide:host.dataset.side, only=host.id==='pcPop'?pcPopArt:null;
   const from=b.dataset.pcSwap||b.dataset.pcIgnore||b.dataset.pcUndo; if(!from) return;
   if(b.dataset.pcIgnore){
     const cms=printCmsReady[printPaperKey()];
-    sideArtObjs(side).map(([,o])=>o).filter(o=>o&&o.img&&cms&&artColoursAll(o.img,cms,artSrc(o)).some(dc=>hexOf(dc.rgb)===from))
+    sideArtObjs(side).map(([,o])=>o).filter(o=>o&&o.img&&cms&&(!only||artImgId(o.img)===only)&&artColoursAll(o.img,cms,artSrc(o)).some(dc=>hexOf(dc.rgb)===from))
       .forEach(o=>colourIgnored.add(artImgId(o.img)+from));
   }else{
-    printColourSet(side,from,b.dataset.pcSwap?b.dataset.pcTo:null);
+    printColourSet(side,from,b.dataset.pcSwap?b.dataset.pcTo:null,null,null,only);
     if(b.dataset.pcUndo) pcAdjOpen.delete(from);
   }
   drawAll(); printColourCheckSoon(); pcPopRender();
@@ -30949,7 +30988,7 @@ document.addEventListener('input',e=>{
   const now=row.querySelector('[data-pc-now]'), nh=row.querySelector('[data-pc-nowhex]');
   if(now) now.innerHTML=to?'→ '+pcSw(hexRgb(to),'What prints'):'';
   if(nh) nh.textContent=to||'';
-  printColourSet(pcPopSide,from,to,adj,base);
+  printColourSet(pcPopSide,from,to,adj,base,pcPopArt);
   cancelAnimationFrame(_pcAdjRaf);
   _pcAdjRaf=requestAnimationFrame(()=>drawAll());
 });
@@ -30966,12 +31005,14 @@ document.addEventListener('input',e=>{
     if(now) now.innerHTML='→ '+pcSw(hexRgb(to),'What prints');
     if(nh) nh.textContent=to;
   }
-  printColourSet(pcPopSide,from,to===from?null:to,null,to===from?null:to);
+  printColourSet(pcPopSide,from,to===from?null:to,null,to===from?null:to,pcPopArt);
   cancelAnimationFrame(_pcAdjRaf);
   _pcAdjRaf=requestAnimationFrame(()=>drawAll());
 });
 document.addEventListener('change',e=>{
+  if(e.target.matches&&e.target.matches('#pcPop [data-pc-artsel]')){ pcPopArt=e.target.value?Number(e.target.value)||e.target.value:null; pcPopRender(); return; }
   if(!(e.target.dataset&&e.target.dataset.pcPick)) return;
+  e.target.blur();
   printColourCheckSoon();
 });
 // the screen match: every sheet on screen again, kept for this computer
