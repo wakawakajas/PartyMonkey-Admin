@@ -11112,7 +11112,8 @@ function renderSide(side,canvas,maxDim,opts){
       const bl=(lk?withLook(side,line,()=>bleedMmFor(line)):bleedMmFor(line))+0.5;
       const qt=phRotOf(ph)%180!==0, w=qt?ph.hMm:ph.wMm, h=qt?ph.wMm:ph.hMm;
       const cx=ph.xMm+ph.wMm/2, cy=ph.yMm+ph.hMm/2, m=ctx.getTransform();
-      (opts._rects||(opts._rects=[])).push({id:artId,ph:ph&&ph.id,
+      const inv=lk?withLook(side,line,()=>!!(state.bleed&&state.bleed.invert)):!!(state.bleed&&state.bleed.invert);
+      (opts._rects||(opts._rects=[])).push({id:artId,ph:ph&&ph.id,inv,
         x0:m.e+(cx-w/2-bl)*sc, y0:m.f+(cy-h/2-bl)*sc, x1:m.e+(cx+w/2+bl)*sc, y1:m.f+(cy+h/2+bl)*sc});
     }catch(e){}
     if(!lk){
@@ -30584,7 +30585,10 @@ function swapSheetPixels(imgData,rects){
   const W=imgData.width, H=imgData.height, d=imgData.data;
   let n=0;
   rects.forEach(r=>{
-    const sw=swapsForIds(new Set([r.id])); if(!sw.length) return;
+    let sw=swapsForIds(new Set([r.id])); if(!sw.length) return;
+    // drawn inverted (Invert colours): the file's colours are there turned
+    // over, so what is looked for and what it becomes are turned over too
+    if(r.inv) sw=sw.map(t=>({...t,from:t.from.map(v=>255-v),to:t.to.map(v=>255-v)}));
     const x0=Math.max(0,Math.floor(r.x0)), x1=Math.min(W,Math.ceil(r.x1));
     const y0=Math.max(0,Math.floor(r.y0)), y1=Math.min(H,Math.ceil(r.y1));
     if(x1<=x0||y1<=y0) return;
@@ -32353,12 +32357,14 @@ async function printVectorSources(side){
     // Invert colours is done to pixels: a PDF is drawn at about 1200 dpi,
     // inverted, and placed as that - not left to the 300dpi sheet
     const inv=withLook(side,key.startsWith('d:')?o:null,()=>!!(state.bleed&&state.bleed.invert));
+    const isPdf=!!bytes;
+    // a PDF's colours swapped in its own drawing - before any inverting, or
+    // the swap was dropped; one that cannot be read that way is left to the
+    // sheet, where its pixels are swapped
+    if(isPdf&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
     if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=!!bytes; }
-    else if(!bytes&&!inv&&o&&o.img&&imgFinerThanSheet(o.img,side))
+    else if(!isPdf&&!inv&&o&&o.img&&imgFinerThanSheet(o.img,side))
       bytes=await imgPdfBytes(swaps.length?swappedArtCanvas(o.img,swaps):o.img).catch(()=>null);
-    // a PDF's colours swapped in its own drawing; one that cannot be read
-    // that way is left to the sheet, where its pixels are swapped
-    else if(bytes&&!inv&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
     if(bytes) out.set(key,{bytes,page:0,inverted});
   }
   return out;
@@ -40195,7 +40201,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
     gtPcRo._art.add(id);
     const P=[[clip.x,clip.y],[clip.x+clip.w,clip.y],[clip.x,clip.y+clip.h],[clip.x+clip.w,clip.y+clip.h]]
       .map(([u,v])=>[m.a*u*sc+m.c*v*sc+m.e,m.b*u*sc+m.d*v*sc+m.f]);
-    gtPcRo._rects.push({id,ph:ds&&ds.s?ds.s.id:null,
+    gtPcRo._rects.push({id,ph:ds&&ds.s?ds.s.id:null,inv:!!invert,
       x0:Math.min(...P.map(q=>q[0])),y0:Math.min(...P.map(q=>q[1])),
       x1:Math.max(...P.map(q=>q[0])),y1:Math.max(...P.map(q=>q[1]))});
   }catch(e){}
@@ -40242,7 +40248,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
       const x1=Math.min(cv.width,Math.ceil(R.x1)), y1=Math.min(cv.height,Math.ceil(R.y1));
       if(x1>x0&&y1>y0){
         const id=ctx.getImageData(x0,y0,x1-x0,y1-y0);
-        swapSheetPixels(id,[{id:R.id,x0:0,y0:0,x1:x1-x0,y1:y1-y0}]);
+        swapSheetPixels(id,[{id:R.id,inv:R.inv,x0:0,y0:0,x1:x1-x0,y1:y1-y0}]);
         ctx.putImageData(id,x0,y0);
       }
     }
@@ -46394,10 +46400,11 @@ async function gtVectorSources(side){
       const lift=side==='back'?null:await gtCutLift(blob,!!d.cutSheet);
       let bytes=new Uint8Array(await (lift?lift.clean:blob).arrayBuffer()), inverted=false;
       // inverted at about 1200 dpi and placed as that, not left to the 300dpi sheet
-      if(inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=true; }
-      // its colours swapped in its own drawing; one that cannot be read that
-      // way is left out, and drawn on the sheet, where its pixels are swapped
-      else if(bytes&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
+      // its colours swapped in its own drawing, before any inverting; one that
+      // cannot be read that way is left out, and drawn on the sheet, where its
+      // pixels are swapped
+      if(bytes&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
+      if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=true; }
       if(bytes) out.set(key,{bytes,page:0,inverted});
     }catch(e){}
   }
