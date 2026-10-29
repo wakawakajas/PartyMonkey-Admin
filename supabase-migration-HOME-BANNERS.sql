@@ -4,7 +4,9 @@
 -- (which made public.on_team). Safe to run more than once.
 --
 -- Banners are the team's: anyone signed in can put a photo up, swap it or
--- take it down, and there are never more than three. A photo taken down is
+-- take it down, and there are never more than three.
+-- SUPERSEDED: supabase-migration-HOME-BANNERS-ADMIN.sql makes changing them
+-- admin-only. If this file is ever run again, run that one after it. A photo taken down is
 -- deleted from storage by the app, not kept.
 -- The icon layout is each person's own: the order they dragged their icons
 -- into and the size they picked, so it follows them to any phone.
