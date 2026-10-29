@@ -39282,17 +39282,21 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
       return Math.min(...ws.map(([w,h])=>{ const cw=w+ex, ch=h+ey, cols=Math.floor((W+E)/cw), per=Math.floor((H+E)/ch);
         if(cols<1||per<1) return Infinity; const rows=Math.ceil(items.length/cols);
         return Math.floor((rows-1)/per)*(H-gy)+((rows-1)%per)*ch+h+e; })); })();
-    // A design cut to the very same outline as the band just above (gift tags
-    // off one die) carries on that band's pattern, locked into its last row - it
-    // was started a whole tag lower, and the second sheet nested looser than the
-    // first. A band whose last row was only part filled starts a row down.
-    const look=rl?JSON.stringify([rl.poly,rl.rx,rl.ry,it0.sz.w,it0.sz.h,it0.bl||0]):'';
-    const follow=!!(look&&want==null&&gtNeatPrev&&gtNeatPrev.look===look&&gtNeatPrev.page===at&&gtNeatPrev.y===y);
+    // A design cut to the same outline as the band just above (gift tags off
+    // one die, each traced from its own PDF so never quite the same) carries on
+    // that band's pattern, locked into its last row - it was started a whole tag
+    // lower, and the second sheet nested looser than the first. How close it
+    // comes is measured from the two outlines themselves, and the pattern is
+    // kept only where the new outline fits it too.
+    let follow=null;
+    if(rl&&want==null&&gtNeatPrev&&gtNeatPrev.page===at&&gtNeatPrev.y===y){
+      try{ follow=gtNeatFollow(gtNeatPrev,rl,it0.sz.w,it0.sz.h,it0.bl||0); }catch(e){ follow=null; }
+    }
     const P=follow?gtNeatPrev.P:P0&&P0.cost<boxCost-0.5?P0:null;
     if(P){
       const b=it0.bl||0, Wl=W-gx-b, Hl=H-gy-b, C=P.cell;
       let r=0, k=0, top=null;
-      if(follow){ r=gtNeatPrev.r; y=gtNeatPrev.top+P.dys[(r-1)%P.dys.length]*C; }
+      if(follow){ r=gtNeatPrev.r; y=gtNeatPrev.top+follow.dy*C; }
       gtNeatPrev=null;
       while(k<items.length){
         if(y+b+P.bh>Hl+E&&want!=null&&at===want&&!squeezed){ k=squeeze(k); if(k>=items.length) break; }
@@ -39318,7 +39322,7 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
         if(!put&&y+b+P.bh>Hl+E&&!pg.items.length){ pg.items.push({it:items[k++],pos:{x:0,y:0,rot:0}}); tooBig++; }
       }
       // the next band starts a gutter under this one's last row
-      if(top!=null){ y=top+P.bh+ey; gtNeatPrev={look,P,page:at,y,top,r}; }
+      if(top!=null){ y=top+P.bh+ey; gtNeatPrev={rl,w:it0.sz.w,h:it0.sz.h,bl:it0.bl||0,P,page:at,y,top,r}; }
       usedReal=true;
       if(want==null) carry=at;
       return;
@@ -39423,6 +39427,53 @@ function gtNeatRaster(poly,w,h,deg,rx,ry,cell){
   }
   const span=D.map(d=>{ let a=-1,b=-1; for(let c=0;c<d.length;c++) if(d[c]){ if(a<0) a=c; b=c; } return [a,b]; });
   return {D,span,mw,mh,bw,bh};
+}
+// Whether a band can go on in the pattern of the band above (prev: its outline
+// rl, size, bleed, pattern P, the row it got to r and where that last row stood)
+// with outline rl: about the same size, its tags clear of each other along a row
+// and from row to row in that pattern, and how far under the last row its first
+// can come ({dy} in cells), or null.
+function gtNeatFollow(prev,rl,w,h,bl){
+  const P=prev.P, cell=P.cell;
+  if(Math.abs(prev.w-w)>1||Math.abs(prev.h-h)>1||prev.bl!==bl||prev.rl.rx!==rl.rx||prev.rl.ry!==rl.ry) return null;
+  const MA=new Map(), MB=new Map();
+  const mk=(M,poly,pw,ph)=>d=>{ if(!M.has(d)) M.set(d,gtNeatRaster(poly,pw,ph,d,rl.rx,rl.ry,cell)); return M.get(d); };
+  const A=mk(MA,prev.rl.poly,prev.w,prev.h), B=mk(MB,rl.poly,w,h);
+  const meet=(X,Y,ox,oy)=>{
+    const j0=Math.max(0,oy), j1=Math.min(X.mh,Y.mh+oy);
+    for(let j=j0;j<j1;j++){
+      const sa=X.span[j], sb=Y.span[j-oy]; if(sa[0]<0||sb[0]<0) continue;
+      const a=Math.max(sa[0],sb[0]+ox), b=Math.min(sa[1],sb[1]+ox); if(a>b) continue;
+      const ra=X.D[j], rb=Y.D[j-oy];
+      for(let c=a;c<=b;c++) if(ra[c]&&rb[c-ox]) return true;
+    }
+    return false;
+  };
+  // does a row rb of outline g2 at oy under a row ra of outline g1 touch it
+  // (a tag is not measured against itself: along a row, oy 0)
+  const touch=(g1,ra,g2,rb,oy)=>{
+    const K=Math.ceil(g1(ra.units[0].deg).mw/Math.max(1,P.period))+2;
+    return ra.units.some(ua=>rb.units.some(ub=>{
+      for(let m=-K;m<=K;m++){
+        if(!oy&&ra===rb&&ua===ub&&!m) continue;
+        if(meet(g1(ua.deg),g2(ub.deg),rb.shift+ub.x-(ra.shift+ua.x)+m*P.period,oy)) return true;
+      }
+      return false; }));
+  };
+  const n=P.rows.length;
+  // along a row, and from each row to the next, the new outline in this pattern
+  for(let i=0;i<n;i++){
+    if(touch(B,P.rows[i],B,P.rows[i],0)) return null;
+    if(touch(B,P.rows[i],B,P.rows[(i+1)%n],P.dys[i])) return null;
+    if(n===2&&touch(B,P.rows[i],B,P.rows[i],P.dys[0]+P.dys[1])) return null;
+  }
+  // its first row under the band above's last, and clear of the one above that
+  const last=P.rows[(prev.r-1)%n], first=P.rows[prev.r%n], before=P.rows[(prev.r-2+2*n)%n];
+  const far=Math.max(A(0).mh,B(0).mh)+2;
+  let dy=1;
+  for(let s=far;s>=1;s--) if(touch(A,last,B,first,s)){ dy=s+1; break; }
+  if(prev.r>=2) while(touch(A,before,B,first,dy+P.dys[(prev.r-2)%P.dys.length])) dy++;
+  return {dy};
 }
 function gtNeatPattern(rl,w,h,n,Wl,Hl,bl,rotate){
   const cell=0.25;
