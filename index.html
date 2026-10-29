@@ -39748,13 +39748,10 @@ function gtNestPlan(){
   const clear=gtDotClear()+Math.max(0,-gx,-gy), qrPad=1+Math.max(0,-gx,-gy);
   const bls=q.map(line=>gtBleedOf(gtDesign(line.designId),line)||0);
   const lead=k=>Math.min(...bls.map(b=>Math.max(0,k-2*b)));
-  // and the guides dragged off the rulers (Die Cut), so no tag sits across one
-  const dotBlocks=gtDotBlocks(x0,y0,availW+gx,availH+gy,clear,false,{x:lead(gx),y:lead(gy)},qrPad)
-    .concat(gtGuideBlocks(x0,y0,availW+gx,availH+gy,gx,gy,false,Math.max(0,...bls)));
+  const dotBlocks=gtDotBlocks(x0,y0,availW+gx,availH+gy,clear,false,{x:lead(gx),y:lead(gy)},qrPad);
   const gapR=Math.max(0,gx,gy)/2;
   const realDots=gtDotBlocks(x0,y0,availW+gx,availH+gy,
-    clear-Math.min(...bls.map(b=>Math.max(gapR,b)-b)),false,null,qrPad)
-    .concat(gtGuideBlocks(x0,y0,availW+gx,availH+gy,gx,gy,true));
+    clear-Math.min(...bls.map(b=>Math.max(gapR,b)-b)),false,null,qrPad);
   // One heuristic leaves gaps another would have filled, so the order is packed
   // several ways — tags sorted by height, area, width or longest side, each
   // placed by topmost-leftmost or by tightest fit — and the packing with the
@@ -39999,6 +39996,11 @@ function gtNestPlan(){
     return {shape:S.layoutFile,slots,per:slots.length,queue,idx,start:0,of:pages.length,at,
       lines:[...new Set(queue)],nest:true};
   });
+  // the guides dragged off the rulers (Die Cut) push the tags off them, each on
+  // its own sheet - a sheet arranged by hand is left as it was put
+  plan.guideLeft=0;
+  if(gtMode==='combo') plan.forEach((e,at)=>{ if(!(pages[at]&&pages[at].hand))
+    plan.guideLeft+=gtGuidePush(e.slots,e.queue.map(l=>gtBleedOf(gtDesign(l.designId),l)||0),gx,gy,mx,my); });
   plan.tooBig=tooBig; plan.real=realUsed;
   // what each design was nested by, for the Nest settings line
   plan.why=ids.map(id=>{
@@ -42286,8 +42288,8 @@ gtSheetDrag(document.getElementById('gtCanvas'),()=>gtMainSide());
 // ---------- Die Cut: guides dragged off the rulers ----------
 // As in Photoshop: drag down from the ruler above the sheet for a line across,
 // in from the ruler at its side for a line down. The lines cut the sheet into
-// sections, and nesting keeps every tag inside one (gtGuideBlocks) - none is
-// set down across a line. A line is dragged to move it, and dragged back onto
+// sections: the tags are nested as always, then pushed off each line on their
+// own sheet (gtGuidePush) - never onto another sheet. A line is dragged to move it, and dragged back onto
 // its ruler (or double-clicked) to take it away. Kept on the sheet in mm from
 // the paper's top-left, front side: gtSheet.guides {x:[...], y:[...]}.
 const GT_RULER=16, GT_GUIDE_INK='#00b7ff';
@@ -42339,11 +42341,6 @@ function gtGuidesPaint(){
       e.preventDefault();
       c.dispatchEvent(new WheelEvent('wheel',{deltaY:e.deltaY,deltaX:e.deltaX,deltaMode:e.deltaMode,clientX:e.clientX,clientY:e.clientY,bubbles:true,cancelable:true}));
     },{passive:false});
-    lay.addEventListener('dblclick',e=>{
-      const ln=e.target.closest('[data-guide]'); if(!ln) return;
-      const g=gtGuidesOf(), [ax,i]=ln.dataset.guide.split(':');
-      g[ax].splice(Number(i),1); gtGuidesPut(g);
-    });
   }
   lay.style.display='';
   const {L,T}=F, w=F.r.width, h=F.r.height;
@@ -42384,11 +42381,16 @@ function gtGuideDown(e){
     ?`position:absolute;top:${T}px;width:1px;height:${F.r.height}px;background:${GT_GUIDE_INK};pointer-events:none;`
     :`position:absolute;left:${L}px;height:1px;width:${F.r.width}px;background:${GT_GUIDE_INK};pointer-events:none;`;
   lay.appendChild(line);
-  if(ln) ln.style.visibility='hidden';
   let val=null, gone=true, moved=false;
+  // the line under the pointer stays put until it is really dragged: hidden
+  // at once, the second click of a double-click never landed on it
+  if(ln) line.style.display='none';
   const sx=e.clientX, sy=e.clientY;
   const move=ev=>{
-    if(Math.abs(ev.clientX-sx)+Math.abs(ev.clientY-sy)>2) moved=true;
+    if(!moved&&Math.abs(ev.clientX-sx)+Math.abs(ev.clientY-sy)>2){
+      moved=true; if(ln){ ln.style.visibility='hidden'; line.style.display=''; }
+    }
+    if(ln&&!moved) return;
     const px=ev.clientX-F.r.left, py=ev.clientY-F.r.top;
     // off the paper, back over its ruler, the line is taken away
     const max=ax==='x'?gtSheet.paperW:gtSheet.paperH;
@@ -42403,29 +42405,68 @@ function gtGuideDown(e){
   const up=()=>{
     window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); window.removeEventListener('pointercancel',up);
     tip.style.display='none'; line.remove(); if(ln) ln.style.visibility='';
-    // a tap on a line (the first half of a double-click) moves nothing
-    if(ln&&!moved) return;
+    // a tap on a line moves nothing; two taps on it close together take it away
+    if(ln&&!moved){
+      const now=Date.now(), last=gtGuideDown.tap;
+      gtGuideDown.tap={key:ax+':'+i,at:now};
+      if(last&&last.key===ax+':'+i&&now-last.at<450){ gtGuideDown.tap=null; g[ax].splice(i,1); gtGuidesPut(g); }
+      return;
+    }
     if(gone||val==null) g[ax].splice(i,1); else g[ax][i]=val;
     gtGuidesPut(g);
   };
   window.addEventListener('pointermove',move); window.addEventListener('pointerup',up); window.addEventListener('pointercancel',up);
   if(!ln) move(e);
 }
-// The guides as keep-clear strips for nesting, in the packers' own terms (x0,
-// y0 the packing area's top-left on the paper). A box carries its gutter on its
-// right and bottom, so its strip sits half a gutter past the line: a tag either
-// side stops half a gutter short of it. A real cut line is already grown by
-// half the gap, so its strip is the line itself.
-// With a bleed the box is the print, and only the gutter left between two
-// prints (gx less both bleeds) is spare: the strip sits half of that past the
-// line, so no bleed prints across it. bl: the biggest bleed on the sheet.
-function gtGuideBlocks(x0,y0,W,H,gx,gy,real,bl){
-  if(gtMode!=='combo') return [];
-  const g=gtGuidesOf(), out=[], b=Math.max(0,Number(bl)||0);
-  const sx=real?0:Math.max(0,gx-2*b)/2, sy=real?0:Math.max(0,gy-2*b)/2;
-  g.x.forEach(X=>{ const bx=X-x0+sx; if(bx>0&&bx<W) out.push({x:bx,y:0,w:0.01,h:H}); });
-  g.y.forEach(Y=>{ const by=Y-y0+sy; if(by>0&&by<H) out.push({x:0,y:by,w:W,h:0.01}); });
-  return out;
+// A sheet's tags pushed off the guides, on that sheet - never onto another:
+// the sheet is packed as it always is, then each line moves the tags either
+// side of it apart, every tag past the line on by one amount and every tag
+// before it back by one, so they keep their order, their gaps and how they
+// lock together, and only open up where the line is. Where to part them is
+// tried at every tag (nested rows overlap, and parting by each tag's middle
+// pushed a whole tag's height where the rows only needed their overlap), and
+// the parting that needs the least push taken. Each tag clears the line by
+// half the gutter, or its bleed where that is more. The paper's margins are
+// kept: a sheet with too little room left gets as close as it will go, and
+// the parting that leaves the least across the line is the one taken.
+// slots: {x,y,w,h} in mm on the paper, moved in place; bls: each one's bleed.
+function gtGuidePush(slots,bls,gx,gy,mx,my){
+  const g=gtGuidesOf(); if(!slots.length||(!g.x.length&&!g.y.length)) return 0;
+  const S=gtSheet;
+  const axis=(lines,P,L,len,gap,margin)=>{
+    lines.forEach(X=>{
+      const c=i=>Math.max(gap/2,bls[i]||0);
+      // tags in order along the axis; the first k stay before the line
+      const ord=slots.map((s,i)=>i).sort((a,b)=>(slots[a][P]+slots[a][L]/2)-(slots[b][P]+slots[b][L]/2));
+      let best=null;
+      for(let k=0;k<=ord.length;k++){
+        // a parting between two tags level with each other splits nothing
+        if(k>0&&k<ord.length){ const m=i=>slots[i][P]+slots[i][L]/2; if(m(ord[k])-m(ord[k-1])<0.01) continue; }
+        let before=0, after=0, lo=Infinity, hi=-Infinity;
+        ord.forEach((i,n)=>{ const s=slots[i], a=s[P], b=a+s[L], bl=bls[i]||0;
+          if(n<k){ before=Math.max(before,b-(X-c(i))); lo=Math.min(lo,a-bl); }
+          else{ after=Math.max(after,X+c(i)-a); hi=Math.max(hi,b+bl); } });
+        const roomB=k?Math.max(0,lo-margin):Infinity, roomA=k<ord.length?Math.max(0,len-margin-hi):Infinity;
+        const need=Math.max(0,before)+Math.max(0,after);
+        // what a side cannot move for want of room stays across the line
+        const over=Math.max(0,before-roomB)+Math.max(0,after-roomA), score=[over,need];
+        if(!best||score[0]<best.score[0]||(score[0]===best.score[0]&&score[1]<best.score[1]-1e-6))
+          best={k,before,after,roomA,roomB,score};
+      }
+      if(!best||(best.before<=0&&best.after<=0)) return;
+      let {before,after}=best;
+      before=Math.max(0,before); after=Math.max(0,after);
+      // a tag across the line is only cleared by its own side moving: short of
+      // room, that side goes as far as the margin lets it
+      before=Math.min(before,best.roomB); after=Math.min(after,best.roomA);
+      ord.forEach((i,n)=>{ const s=slots[i];
+        s[P]=Math.round((n<best.k?s[P]-before:s[P]+after)*100)/100; });
+    });
+  };
+  axis(g.x,'x','w',S.paperW,gx,mx);
+  axis(g.y,'y','h',S.paperH,gy,my);
+  // how many are still across a line, for the Nest settings line
+  return slots.filter(s=>g.x.some(X=>s.x<X-0.01&&s.x+s.w>X+0.01)||g.y.some(Y=>s.y<Y-0.01&&s.y+s.h>Y+0.01)).length;
 }
 window.addEventListener('resize',()=>{ try{ gtGuidesPaint(); }catch(e){} });
 gtSheetDrag(document.getElementById('gtCanvasBack'),()=>'back');
@@ -43651,6 +43692,7 @@ function gtNestSync(){
       :gtSheet.nestReal?(plan.real?'packed by their real cut lines'
         :'real cut lines tried — boxes were as good, or no design has a traced line')+'. ':'each design cut to its own size. ')
     +'Moving a placeholder keeps until the order, a design or the sheet changes; Reset placeholders nests again.'
+    +(plan.guideLeft?` <span style="color:var(--amber)">⚠ ${plan.guideLeft} tag${plan.guideLeft===1?' is':'s are'} still across a guide - the sheet has no room left to push ${plan.guideLeft===1?'it':'them'} off.</span>`:'')
     +(plan.tooBig?` <span style="color:var(--amber)">⚠ ${plan.tooBig} tag${plan.tooBig===1?' is':'s are'} bigger than the sheet allows.</span>`:'')
     +(plan.why&&plan.why.length?'<br>'+plan.why.map(w=>escapeHtml(w.name)+': '+escapeHtml(w.how)).join('<br>'):'');
 }
