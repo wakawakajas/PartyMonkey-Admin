@@ -11108,20 +11108,32 @@ function renderSide(side,canvas,maxDim,opts){
     // and where on the canvas it lands - its card and its bleed - so a colour
     // swapped on this picture is swapped there only, never on another
     // order's picture beside it on a merged sheet
+    // (a turned placeholder's wMm/hMm are already its size on the sheet -
+    // phRotate swaps them - as its cut line and artGeom read them)
+    // t: its trim alone, which a pixel inside belongs to before any
+    // neighbour's bleed (swapSheetPixels)
+    let R=null;
     if(artPhase!=='ghost') try{        // once: the screen draws a faint pass first
       const bl=(lk?withLook(side,line,()=>bleedMmFor(line)):bleedMmFor(line))+0.5;
-      const qt=phRotOf(ph)%180!==0, w=qt?ph.hMm:ph.wMm, h=qt?ph.wMm:ph.hMm;
+      const w=ph.wMm, h=ph.hMm;
       const cx=ph.xMm+ph.wMm/2, cy=ph.yMm+ph.hMm/2, m=ctx.getTransform();
       const inv=lk?withLook(side,line,()=>!!(state.bleed&&state.bleed.invert)):!!(state.bleed&&state.bleed.invert);
-      (opts._rects||(opts._rects=[])).push({id:artId,ph:ph&&ph.id,inv,
-        x0:m.e+(cx-w/2-bl)*sc, y0:m.f+(cy-h/2-bl)*sc, x1:m.e+(cx+w/2+bl)*sc, y1:m.f+(cy+h/2+bl)*sc});
+      R={id:artId,ph:ph&&ph.id,inv,
+        x0:m.e+(cx-w/2-bl)*sc, y0:m.f+(cy-h/2-bl)*sc, x1:m.e+(cx+w/2+bl)*sc, y1:m.f+(cy+h/2+bl)*sc,
+        t:{x0:m.e+(cx-w/2)*sc, y0:m.f+(cy-h/2)*sc, x1:m.e+(cx+w/2)*sc, y1:m.f+(cy+h/2)*sc}};
+      (opts._rects||(opts._rects=[])).push(R);
     }catch(e){}
+    // placed as its own page under the render (opts.vec took it): the sheet
+    // has no pixels of it to fill behind (swapSheetPixels)
+    const n0=opts.vec&&opts.vec.n?opts.vec.n():0;
+    const placed=()=>{ if(R&&opts.vec&&opts.vec.n) R.placed=opts.vec.n()>n0; };
     if(!lk){
       try{ return oneDraw(img,ph,line,key); }
-      finally{ if(dx||dy){ ctx.restore(); artShift=shift; } }
+      finally{ placed(); if(dx||dy){ ctx.restore(); artShift=shift; } }
     }
     try{ return withLook(side,line,()=>oneDraw(img,ph,line,key)); }
     finally{
+      placed();
       if(dx||dy){ ctx.restore(); artShift=shift; }
     }
   };
@@ -30557,45 +30569,75 @@ function mcLineColours(art){
 }
 // Each pixel near the colour taken moves by the same step as the colour does;
 // close to it fully, fading out by 48 away, so soft edges move with it.
+// one colour (r,g,b, 0-255) as the swaps move it: the nearest of them, fully
+// within 12, fading out by 48; null where none reaches. Pixels and a PDF's own
+// colour numbers alike, so the two never disagree.
+function swapRgb(r,g,b,swaps){
+  // the nearest of the colours changed: two changed colours within reach of
+  // each other gave a pixel of the second the first's change
+  let s=null, best=2304;
+  for(const t of swaps){
+    const dr=r-t.from[0],dg=g-t.from[1],db=b-t.from[2], dd=dr*dr+dg*dg+db*db;
+    if(dd<best){ best=dd; s=t; }
+  }
+  if(!s) return null;
+  const dist=Math.sqrt(best), w=dist<=12?1:(48-dist)/36;
+  return {s,rgb:[Math.max(0,Math.min(255,r+w*(s.to[0]-s.from[0]))),
+    Math.max(0,Math.min(255,g+w*(s.to[1]-s.from[1]))),Math.max(0,Math.min(255,b+w*(s.to[2]-s.from[2])))]};
+}
 function swapPixels(data,swaps,stride){
   if(!swaps.length) return;
   const st=stride||4;
   for(let i=0;i<data.length;i+=st){
     if(st===4&&!data[i+3]) continue;
-    const r=data[i],g=data[i+1],b=data[i+2];
-    // the nearest of the colours changed: two changed colours within reach of
-    // each other gave a pixel of the second the first's change
-    let s=null, best=2304;
-    for(const t of swaps){
-      const dr=r-t.from[0],dg=g-t.from[1],db=b-t.from[2], dd=dr*dr+dg*dg+db*db;
-      if(dd<best){ best=dd; s=t; }
-    }
-    if(!s) continue;
-    const dist=Math.sqrt(best), w=dist<=12?1:(48-dist)/36;
-    data[i]=Math.max(0,Math.min(255,r+w*(s.to[0]-s.from[0])));
-    data[i+1]=Math.max(0,Math.min(255,g+w*(s.to[1]-s.from[1])));
-    data[i+2]=Math.max(0,Math.min(255,b+w*(s.to[2]-s.from[2])));
+    const q=swapRgb(data[i],data[i+1],data[i+2],swaps); if(!q) continue;
+    data[i]=q.rgb[0]; data[i+1]=q.rgb[1]; data[i+2]=q.rgb[2];
   }
 }
 // A drawn sheet's swaps, each in the boxes of the pictures it belongs to
 // (renderSide's opts._rects), so a colour taken on one design never moves
 // another design's pixels on the same sheet.
+// Each pixel is swapped once: boxes reach a bleed past their cards, and where
+// cards sit closer than two bleeds they overlap - swapped by both, a small
+// change was made twice there and showed as a band along every shared edge.
+// A pixel inside a card's trim is that card's; the bleeds take what is left.
+// A see-through picture drawn as pixels, with white given a colour: on screen
+// the paper under it is white and takes the colour, so in the PDF's sheet -
+// drawn on nothing where a page is placed under it - its clear pixels inside
+// its trim are that paper too. Not where it was placed as its own page
+// (r.placed): its pixels are not there.
 function swapSheetPixels(imgData,rects){
   if(!rects||!rects.length) return 0;
   const W=imgData.width, H=imgData.height, d=imgData.data;
-  let n=0;
+  const done=new Uint8Array(W*H);
+  const live=[];
   rects.forEach(r=>{
     let sw=swapsForIds(new Set([r.id])); if(!sw.length) return;
     // drawn inverted (Invert colours): the file's colours are there turned
     // over, so what is looked for and what it becomes are turned over too
     if(r.inv) sw=sw.map(t=>({...t,from:t.from.map(v=>255-v),to:t.to.map(v=>255-v)}));
-    const x0=Math.max(0,Math.floor(r.x0)), x1=Math.min(W,Math.ceil(r.x1));
-    const y0=Math.max(0,Math.floor(r.y0)), y1=Math.min(H,Math.ceil(r.y1));
-    if(x1<=x0||y1<=y0) return;
-    for(let y=y0;y<y1;y++) swapPixels(d.subarray((y*W+x0)*4,(y*W+x1)*4),sw);
-    n++;
+    live.push({r,sw,paper:!r.placed&&!r.inv&&sw.some(t=>t.from.every(v=>v>235))});
   });
-  return n;
+  const run=(L,b,trim)=>{
+    const x0=Math.max(0,Math.floor(b.x0)), x1=Math.min(W,Math.ceil(b.x1));
+    const y0=Math.max(0,Math.floor(b.y0)), y1=Math.min(H,Math.ceil(b.y1));
+    for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){
+      const k=y*W+x; if(done[k]) continue; done[k]=1;
+      const i=k*4; let a=d[i+3];
+      if(a<255&&trim&&L.paper){
+        // on its paper, as the screen shows it
+        const f=a/255;
+        d[i]=Math.round(d[i]*f+255*(1-f)); d[i+1]=Math.round(d[i+1]*f+255*(1-f)); d[i+2]=Math.round(d[i+2]*f+255*(1-f));
+        d[i+3]=a=255;
+      }
+      if(!a) continue;
+      const q=swapRgb(d[i],d[i+1],d[i+2],L.sw); if(!q) continue;
+      d[i]=q.rgb[0]; d[i+1]=q.rgb[1]; d[i+2]=q.rgb[2];
+    }
+  };
+  live.forEach(L=>{ if(L.r.t) run(L,L.r.t,true); });
+  live.forEach(L=>run(L,L.r,!L.r.t));
+  return live.length;
 }
 // A drawn sheet on screen: its swaps, and as the Fiery would print it when
 // the preview is on. ids: the pictures renderSide drew (opts._art). The sheet
@@ -30622,8 +30664,11 @@ function printColourScreen(canvas,ro,side){
 // resolution (imgPdfBytes) rather than drawn into the sheet.
 function swappedArtCanvas(img,swaps){
   const W=img.naturalWidth||img.width, H=img.naturalHeight||img.height;
+  if(!(W>0&&H>0)||W*H>60e6) return null;      // as imgPdfBytes: left to the sheet
   const c=document.createElement('canvas'); c.width=W; c.height=H;
-  const x=c.getContext('2d'); x.drawImage(img,0,0);
+  const x=c.getContext('2d');
+  if(swaps.some(t=>t.from.every(v=>v>235))){ x.fillStyle='#fff'; x.fillRect(0,0,W,H); }
+  x.drawImage(img,0,0);
   const id=x.getImageData(0,0,W,H); swapPixels(id.data,swaps); x.putImageData(id,0,0);
   return c;
 }
@@ -30645,7 +30690,10 @@ async function pdfSwapColours(bytes,swaps){
   const white=swaps.find(t=>t.from.every(v=>v>235));
   const u=v=>Math.round(Math.min(1,Math.max(0,Number(v)))*255);
   const fmt=v=>(Math.round(v/255*1e4)/1e4).toString();
-  const near=rgb=>{ let s=null, d=14.0001; swaps.forEach(t=>{ const e=colDist(rgb,t.from); if(e<d){ d=e; s=t; } }); return s; };
+  // as a pixel of that colour moves (swapRgb): the same reach and the same
+  // fade, so the preview and the PDF agree on every colour near a changed one
+  const took=new Set();
+  const near=rgb=>{ const q=swapRgb(rgb[0],rgb[1],rgb[2],swaps); if(q) took.add(q.s); return q&&q.rgb; };
   let hits=0;
   // the parts of a content stream that are drawing, between its (strings)
   // and inline pictures (ID ... EI), each rewritten on its own
@@ -30674,24 +30722,24 @@ async function pdfSwapColours(bytes,swaps){
     let hit=false;
     s=outside(s,s=>{
     if(cms) s=s.replace(re4,(m,c,mg,y,k,op)=>{
-      const sw=near(cms.rgbOfG([c,mg,y,k].map(u))); if(!sw) return m;
-      hit=true; return cms.cmykG(sw.to).map(fmt).join(' ')+' '+op;
+      const to=near(cms.rgbOfG([c,mg,y,k].map(u))); if(!to) return m;
+      hit=true; return cms.cmykG(to.map(Math.round)).map(fmt).join(' ')+' '+op;
     });
     s=s.replace(re3,(m,r,g,b,op)=>{
-      const sw=near([r,g,b].map(u)); if(!sw) return m;
-      hit=true; return sw.to.map(fmt).join(' ')+' '+op;
+      const to=near([r,g,b].map(u)); if(!to) return m;
+      hit=true; return to.map(fmt).join(' ')+' '+op;
     });
     // greys (g/G), after rg so a grey made rg is not taken twice
     s=s.replace(re1,(m,v,op)=>{
-      const sw=near([v,v,v].map(u)); if(!sw) return m;
-      hit=true; return sw.to.map(fmt).join(' ')+' '+(op==='g'?'rg':'RG');
+      const to=near([v,v,v].map(u)); if(!to) return m;
+      hit=true; return to.map(fmt).join(' ')+' '+(op==='g'?'rg':'RG');
     });
     return s;
     });
     if(white&&bbox){
       const [x0,y0,x1,y1]=bbox;
       s=`q ${white.to.map(fmt).join(' ')} rg ${x0} ${y0} ${x1-x0} ${y1-y0} re f Q\n`+s;
-      hit=true;
+      hit=true; took.add(white);
     }
     if(!hit) return null;
     hits++;
@@ -30702,6 +30750,10 @@ async function pdfSwapColours(bytes,swaps){
   const f=await pdfPageFile(bytes,0,'artwork.pdf',null,{recolor});
   // the colour was not in its drawing (a picture inside it, say): null, and
   // the sheet carries it, its pixels swapped
+  // and so is one with a changed colour found nowhere in its drawing: it is in
+  // a picture or a shading inside it, which the sheet's pixels do carry -
+  // placed, the PDF printed it unchanged while the preview showed it changed
+  if(swaps.some(t=>!took.has(t))) return null;
   return f&&hits?new Uint8Array(await f.arrayBuffer()):null;
 }
 // ---- the panel under each sheet: preview, and the colours that print dark ----
@@ -30920,12 +30972,22 @@ function pcPopRender(){
     const hx=hexOf(r.dc.rgb); if(seen.has(hx)) return; seen.add(hx);
     main.unshift({m:{rgb:r.dc.rgb},cur:r.s});
   });
+  // and any other change on these designs - on a colour flagged on another
+  // paper and not this one, say - or it could be neither seen nor reset
+  swapsForIds(new Set(arts.map(([,o])=>artImgId(o.img)))).forEach(sw=>{
+    const hx=hexOf(sw.from); if(seen.has(hx)) return; seen.add(hx);
+    main.unshift({m:{rgb:sw.from},cur:sw});
+  });
   h+=`<div style="font-weight:600;margin:14px 0 2px;font-size:13px;">Colours in this design</div>`
     +`<p class="hint" style="margin:0 0 4px;">Change any colour — it prints and saves like the fixes above.</p>`;
   main.forEach(({m,cur})=>{
     const hx=hexOf(m.rgb), now=cur?cur.to:m.rgb, adj=(cur&&cur.adj)||{h:0,l:0,s:0}, open=pcAdjOpen.has(hx);
     const isWhite=m.rgb.every(v=>v>235);
-    h+=`<div data-pc-adj="${hx}"${cur&&cur.base?` data-pc-base="${cur.base}"`:''} style="margin:6px 0 0;padding:6px 8px;border:1px solid var(--border);border-radius:10px;">`
+    // the sliders work on the colour picked - or on a fix taken (Lighter, Truer
+    // colour, Most vivid), which has no sliders of its own: from the file's
+    // colour, moving one threw the fix away, and back to 0 took the swap off
+    const base=cur?(cur.base||(cur.adj?'':hexOf(cur.to))):'';
+    h+=`<div data-pc-adj="${hx}"${base?` data-pc-base="${base}"`:''} style="margin:6px 0 0;padding:6px 8px;border:1px solid var(--border);border-radius:10px;">`
       +`<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;">`
       +`${pcSw(m.rgb,'In the file')} <span>${isWhite?'White / background':hx}</span>`
       +(cur?` → <span data-pc-now>${pcSw(now,'What prints')}</span> <span data-pc-nowhex>${hexOf(now)}</span>`:` <span data-pc-now></span><span data-pc-nowhex></span>`)
@@ -30946,7 +31008,14 @@ function pcPopRender(){
     }
     h+=`</div>`;
   });
+  // a slider moved with the arrow keys keeps them: the redraw replaced it
+  const fe=document.activeElement, keep=fe&&fe.matches&&fe.matches('#pcPopBody input[type="range"]')
+    ?{row:(fe.closest('[data-pc-adj]')||{}).dataset,k:fe.dataset.adjK}:null;
   body.innerHTML=h;
+  if(keep&&keep.row&&keep.k){
+    const r=[...body.querySelectorAll('[data-pc-adj]')].find(x=>x.dataset.pcAdj===keep.row.pcAdj);
+    const el=r&&r.querySelector(`[data-adj-k="${keep.k}"]`); if(el) el.focus();
+  }
 }
 function pcPopOpen(side){
   const pop=pcPopEl(); if(!pop) return;
@@ -30963,6 +31032,8 @@ function pcPopOpen(side){
 function pcPopClose(){
   const pop=pcPopEl(); if(!pop) return;
   pop.hidden=true; printPreviewOn=false; printShowBefore=false;
+  const hb=document.getElementById('pcHold');
+  if(hb){ hb.classList.remove('btn-primary'); hb.textContent='Hold to see original'; }
   document.querySelectorAll('#ppOpenBtn,#gtPpBtn').forEach(b=>b.classList.remove('on'));
   pcRedraw();
 }
@@ -31013,7 +31084,8 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&pcPopIsOpen()) pcP
 function printColourSet(side,from,to,adj,base,only){
   const cms=printCmsReady[printPaperKey()];
   const objs=sideArtObjs(side).map(([,o])=>o).filter(o=>o&&o.img&&cms&&(!only||artImgId(o.img)===only)
-    &&artColoursAll(o.img,cms,artSrc(o)).some(dc=>hexOf(dc.rgb)===from));
+    &&(artColoursAll(o.img,cms,artSrc(o)).some(dc=>hexOf(dc.rgb)===from)
+      ||swapsForIds(new Set([artImgId(o.img)])).some(sw=>hexOf(sw.from)===from)));
   const fromRgb=hexRgb(from), ids=objs.map(o=>artImgId(o.img));
   const toRgb=to?hexRgb(to):null, keep=adj&&(adj.h||adj.l||adj.s)?{h:adj.h|0,l:adj.l|0,s:adj.s|0}:undefined;
   const more={...(keep?{adj:keep}:{}),...(base?{base}:{})};
@@ -31632,11 +31704,17 @@ const pdfLift=(function(){
     const pending = [];
     const mapper = old => newNum(old);
 
+    // the forms that are soft masks (an SMask dictionary's /G): their greys
+    // say how see-through, not what colour - never recoloured
+    const masks = new Set();
     const walkRefs = v => {                          // nothing to do but find them
       if (isRef(v)) { newNum(v.ref[0]); return; }
       if (Array.isArray(v)) { v.forEach(walkRefs); return; }
       if (isStream(v)) { walkRefs(v.dict); return; }
-      if (isDict(v)) { for (const [, val] of v) walkRefs(val); }
+      if (isDict(v)) {
+        if (v.has('G') && v.has('S') && isRef(v.get('G'))) masks.add(v.get('G').ref[0]);
+        for (const [, val] of v) walkRefs(val);
+      }
     };
 
     const drain = async () => {
@@ -31650,7 +31728,7 @@ const pdfLift=(function(){
         // a form's drawing with its colours swapped (pdfSwapColours): decoded,
         // rewritten and packed again; one it does not touch goes as it was
         let re = null;
-        if (opts && opts.recolor && isStream(v) && (isName(src.resolve(v.dict.get('Subtype')), 'Form')
+        if (opts && opts.recolor && isStream(v) && !masks.has(old) && (isName(src.resolve(v.dict.get('Subtype')), 'Form')
           || Number(src.resolve(v.dict.get('PatternType'))) === 1)) {
           try { re = opts.recolor(await src.streamData(v, inflateBytes)); } catch (e) { re = null; }
         }
@@ -32364,7 +32442,7 @@ async function printVectorSources(side){
     if(isPdf&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
     if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=!!bytes; }
     else if(!isPdf&&!inv&&o&&o.img&&imgFinerThanSheet(o.img,side))
-      bytes=await imgPdfBytes(swaps.length?swappedArtCanvas(o.img,swaps):o.img).catch(()=>null);
+      bytes=await Promise.resolve().then(()=>imgPdfBytes(swaps.length?swappedArtCanvas(o.img,swaps):o.img)).catch(()=>null);
     if(bytes) out.set(key,{bytes,page:0,inverted});
   }
   return out;
@@ -32378,7 +32456,7 @@ async function printVectorSources(side){
 // whole {bx,by,mirror}: the bleed is made from the page itself, its edges
 // stretched (or turned over) out by bx/by mm - see gtBuildPdf. Answers 'whole'.
 function printVecTaker(forms,place){
-  return {inverted:key=>!!(forms.get(key)&&forms.get(key).inverted),
+  return {inverted:key=>!!(forms.get(key)&&forms.get(key).inverted),n:()=>place.length,
     take(key,rect,ext,clip,whole){
     if(!key||!forms.has(key)) return false;
     if(whole){
@@ -40194,18 +40272,22 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // a turned design's page is placed turned (gtTurnRect); a back never turns
   const turn=design&&!box?gtTurnOf(design):0;
   const g=design?gtArtGrow(cutOf,b,r):b;
-  // where this picture lands on the canvas - its clip, bleed and all - so its
-  // colour swaps are made there and on no other tag (gtRenderPage)
+  // where this picture lands on the canvas - its clip, bleed and all, and its
+  // box alone (t) - so its colour swaps are made there and on no other tag
+  // (gtRenderPage, swapSheetPixels)
+  let pcR=null;
   if(gtPcRo) try{
     const id=artImgId(img), m=ctx.getTransform();
     gtPcRo._art.add(id);
-    const P=[[clip.x,clip.y],[clip.x+clip.w,clip.y],[clip.x,clip.y+clip.h],[clip.x+clip.w,clip.y+clip.h]]
-      .map(([u,v])=>[m.a*u*sc+m.c*v*sc+m.e,m.b*u*sc+m.d*v*sc+m.f]);
-    gtPcRo._rects.push({id,ph:ds&&ds.s?ds.s.id:null,inv:!!invert,
-      x0:Math.min(...P.map(q=>q[0])),y0:Math.min(...P.map(q=>q[1])),
-      x1:Math.max(...P.map(q=>q[0])),y1:Math.max(...P.map(q=>q[1]))});
+    const bb=(X,Y,Wd,Hd)=>{
+      const P=[[X,Y],[X+Wd,Y],[X,Y+Hd],[X+Wd,Y+Hd]].map(([u,v])=>[m.a*u*sc+m.c*v*sc+m.e,m.b*u*sc+m.d*v*sc+m.f]);
+      return {x0:Math.min(...P.map(q=>q[0])),y0:Math.min(...P.map(q=>q[1])),x1:Math.max(...P.map(q=>q[0])),y1:Math.max(...P.map(q=>q[1]))};
+    };
+    pcR={id,ph:ds&&ds.s?ds.s.id:null,inv:!!invert,...bb(clip.x,clip.y,clip.w,clip.h),t:bb(B.x,B.y,B.w,B.h)};
+    gtPcRo._rects.push(pcR);
   }catch(e){}
   const took=vec?vec.take({id:key,turn},r,g,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
+  if(pcR) pcR.placed=!!took;          // its page is under the render, not its pixels
   if(took===true) return;
   ctx.save();
   ctx.beginPath();
@@ -40238,21 +40320,6 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
       r.x*sc,r.y*sc,r.w*sc,r.h*sc);
   }
   ctx.restore();
-  // this tag's colours changed in the Print preview, in its own box only, now:
-  // its words go over it next, and are never swapped
-  if(gtPcRo&&gtPcRo.swap&&gtPcRo._rects.length) try{
-    const R=gtPcRo._rects[gtPcRo._rects.length-1];
-    if(swapsForIds(new Set([R.id])).length){
-      const cv=ctx.canvas;
-      const x0=Math.max(0,Math.floor(R.x0)), y0=Math.max(0,Math.floor(R.y0));
-      const x1=Math.min(cv.width,Math.ceil(R.x1)), y1=Math.min(cv.height,Math.ceil(R.y1));
-      if(x1>x0&&y1>y0){
-        const id=ctx.getImageData(x0,y0,x1-x0,y1-y0);
-        swapSheetPixels(id,[{id:R.id,inv:R.inv,x0:0,y0:0,x1:x1-x0,y1:y1-y0}]);
-        ctx.putImageData(id,x0,y0);
-      }
-    }
-  }catch(e){}
 }
 // Whether a picture covers the whole of its box - nothing see-through anywhere.
 // Read once per picture, small.
@@ -40320,8 +40387,9 @@ function gtDrawTag(ctx,line,x,y,w,h,sc,forExport,vec){
   const d=gtDesign(line.designId); if(!d) return;
   const img=gtImgGet(d.id);
   const A=gtTextRect(d,x,y,w,h);
-  if(img&&img.naturalWidth)
+  if(img&&img.naturalWidth&&gtPass!=='words')
     gtPutArt(ctx,img,d.id,d.art,x,y,w,h,gtBleedOf(d,line),sc,vec,!!gtSheet.invertArt,null,d);
+  if(gtPass==='art') return;
   gtDrawFields(ctx,d,line,A.x,A.y,A.w,A.h,sc);
   if(!forExport&&gtSheet.showHole&&d.hole&&d.hole.on){
     // on the artwork as it is drawn, its scale and nudge in (see gtHoleRect)
@@ -40348,8 +40416,9 @@ function gtBackBox(d,x,y,w,h){
 function gtDrawBack(ctx,line,x,y,w,h,sc,forExport,vec){
   const d=gtDesign(line.designId); if(!d||gtNoBackKind(d)) return;
   const bk=gtBackOf(d,line);
-  if(bk&&bk.img&&bk.img.naturalWidth)
+  if(bk&&bk.img&&bk.img.naturalWidth&&gtPass!=='words')
     gtPutArt(ctx,bk.img,bk.key,bk.art,x,y,w,h,gtBleedOf(d,line),sc,vec,false,gtBackBox(d,x,y,w,h));
+  if(gtPass==='art') return;
   const A=gtTextRect(d,x,y,w,h);
   gtDrawFields(ctx,d,line,A.x,A.y,A.w,A.h,sc,'back');
   if(!forExport&&gtSheet.showHole&&d.hole&&d.hole.on){
@@ -40790,6 +40859,7 @@ function gtBaseOver(sc){
 // (x' = paper width − x − w, the Custom Print Template's phOnSide), its back
 // picture and back words, and no base layer or dots — those are the front's.
 let gtPcRo=null;                    // the tags' boxes, while a page is drawn
+let gtPass=null;                    // 'art', 'words', or both (null): gtDrawTag
 function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   const S=gtSheet;
   const pcRo={_art:new Set(),_rects:[],swap:!!forExport||!printShowBefore}; canvas._pcRo=pcRo;
@@ -40817,7 +40887,12 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   const per=SL.length; if(!per){ if(!vec&&!back) gtDrawBase(ctx,sc); return; }
   const q=plan?plan.queue:gtQueue();
   const start=plan?plan.start:page*per;
-  gtPcRo=pcRo;
+  // With colours changed (all of the gift tag page's are loose swaps), every
+  // tag's artwork goes down first, then the swaps - each pixel once, its own
+  // tag's before a neighbour's bleed - then the words over them, never swapped.
+  const twoPass=colourSwaps.length>0;
+  const tags=pass=>{
+  gtPass=pass; gtPcRo=pass==='words'?null:pcRo;
   try{
   SL.forEach((slot,i)=>{
     const line=q[start+i]; if(!line) return;
@@ -40831,11 +40906,17 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
       finally{ gtDrawingSlot=null; if(vec) vec.turn=null; }
     });
   });
-  }finally{ gtPcRo=null; }
-  // The colours changed in the Print preview, on the tags only - before their
-  // words, the base, the QR code and the cut lines go over them. Held to see
-  // the original, the screen shows the file's own; a PDF always takes them.
-  // (made tag by tag, in gtPutArt, before each tag's words go on)
+  }finally{ gtPcRo=null; gtPass=null; }
+  };
+  if(!twoPass) tags(null);
+  else{
+    tags('art');
+    if(pcRo.swap&&swapsForIds(pcRo._art).length) try{
+      const id=ctx.getImageData(0,0,canvas.width,canvas.height);
+      if(swapSheetPixels(id,pcRo._rects)) ctx.putImageData(id,0,0);
+    }catch(e){}
+    tags('words');
+  }
   // The base layer goes over the tags, so its dots and template lines are
   // never hidden by artwork — on screen and in the PDF alike. Multiplied, so
   // its white paper lets the tags show through while its black stays black.
