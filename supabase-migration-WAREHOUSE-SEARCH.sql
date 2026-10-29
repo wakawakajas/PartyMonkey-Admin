@@ -56,22 +56,11 @@ revoke all on function public.search_procurement(text) from public;
 grant execute on function public.search_procurement(text) to authenticated;
 
 
--- ---------- PART 2 of 3 : changing a line's photo ----------
--- The one thing this screen may write. Nothing else about the line is reachable.
+-- ---------- PART 2 of 3 : no changing a line's photo here ----------
+-- This used to let anyone on the team change an SKU photo. It is gone: the
+-- SKU photo is changed only in Procurement & Shipping, by people with access.
+-- Search Warehouse may change box photos only (set_box_photo).
 drop function if exists public.set_item_photo(uuid, text);
-create function public.set_item_photo(item uuid, path text)
-returns void
-language sql
-security definer
-set search_path = public
-as $func$
-  update public.shipment_items
-     set photo_path = path, photo_url = null
-   where id = item and public.on_team(auth.uid());
-$func$;
-
-revoke all on function public.set_item_photo(uuid, text) from public;
-grant execute on function public.set_item_photo(uuid, text) to authenticated;
 
 
 -- ---------- PART 3 of 3 : seeing the picture ----------
