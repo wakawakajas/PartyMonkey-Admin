@@ -9246,7 +9246,9 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
   <div class="modal-top">
     <h4 id="photoModalTitle">Photo</h4>
     <span class="zoomlbl" id="photoModalHint">tap image for actual size</span>
+    <button class="btn-outline btn-sm" id="photoModalDraw" style="display:none;">✏️ Draw</button>
     <button class="btn-outline btn-sm" id="photoModalReplace" style="display:none;">Replace photo</button>
+    <button class="btn-outline btn-sm" id="photoModalDelete" style="display:none;">🗑 Delete</button>
     <button class="close-btn" id="photoModalClose">×</button>
   </div>
   <div class="modal-scroll" id="photoModalBody">
@@ -23386,13 +23388,18 @@ async function hydratePhotos(root){
 // one is minted each time rather than trusting the cached thumbnail URL.
 // A picture that can be replaced says so, and only where replacing it means
 // something — a SKU. Everywhere else the button stays out of the way.
-let photoModalReplacer=null;
-function setPhotoModalReplace(fn){
+// A picture that can be replaced can also be drawn on: the drawing is saved as
+// its replacement. Delete shows only where the caller says removing it is fine.
+let photoModalReplacer=null, photoModalDeleter=null;
+function setPhotoModalReplace(fn,onDelete){
   photoModalReplacer=fn||null;
+  photoModalDeleter=onDelete||null;
   document.getElementById('photoModalReplace').style.display=fn?'':'none';
+  document.getElementById('photoModalDraw').style.display=fn?'':'none';
+  document.getElementById('photoModalDelete').style.display=onDelete?'':'none';
 }
-async function openPhotoModal(path,title,directUrl,onReplace){
-  setPhotoModalReplace(onReplace);
+async function openPhotoModal(path,title,directUrl,onReplace,onDelete){
+  setPhotoModalReplace(onReplace,onDelete);
   if(!path&&directUrl){                       // imported image, shown from source
     const img=document.getElementById('photoModalImg');
     img.removeAttribute('src'); img.style.maxWidth='100%'; img.style.width=''; img.style.cursor='zoom-in';
@@ -23420,6 +23427,29 @@ document.getElementById('photoModalReplace').addEventListener('click',async()=>{
   closePhotoModal();
   const f=await pickImageFile();
   if(f) await fn(f);
+});
+// Opens the picture on show in the same editor a new photo goes through, so
+// marking up one already saved works exactly like marking up a fresh one.
+document.getElementById('photoModalDraw').addEventListener('click',async()=>{
+  const fn=photoModalReplacer; if(!fn) return;
+  const src=document.getElementById('photoModalImg').src;
+  if(!src) return;
+  let file;
+  try{
+    const blob=await (await fetch(src)).blob();
+    file=new File([blob],'photo.jpg',{type:blob.type||'image/jpeg'});
+  }catch(err){ alert('Could not open the photo to draw on: '+((err&&err.message)||err)); return; }
+  closePhotoModal();
+  let out=await editPhotoFile(file);
+  if(out===PHOTO_RETAKE) out=await pickImageFile();   // Retake means a new picture
+  // left alone or called off: nothing to save
+  if(out&&out!==file) await fn(out);
+});
+document.getElementById('photoModalDelete').addEventListener('click',async()=>{
+  const fn=photoModalDeleter; if(!fn) return;
+  if(!confirm('Delete this photo?')) return;
+  closePhotoModal();
+  await fn();
 });
 document.getElementById('photoModalClose').addEventListener('click',closePhotoModal);
 document.getElementById('photoModalBody').addEventListener('click',e=>{
@@ -25979,7 +26009,8 @@ document.getElementById('warehouseResults').addEventListener('click',e=>{
   const view=e.target.closest('[data-wh-box-view]');
   if(view){
     const b=whBox(row,view.dataset.whBoxView);
-    if(b&&b.photo_path) openPhotoModal(b.photo_path,boxName(b,row.boxes.indexOf(b)));
+    if(b&&b.photo_path) openPhotoModal(b.photo_path,boxName(b,row.boxes.indexOf(b)),null,
+      f=>replaceBoxPhoto(row,b,f),()=>deleteBoxPhoto(b));
     else if(b) pickBoxPhoto(row,b);        // an empty slot is still an invitation
     return;
   }
@@ -26025,6 +26056,25 @@ async function replaceBoxPhoto(row,box,file){
     renderWarehouseResults();
   }catch(err){
     showMsg(msg,'Could not upload: '+((err&&err.message)||'unknown error'),false);
+  }
+}
+// The same function that sets a photo clears one when handed no path; the
+// team-delete rule on the bucket lets the file go whoever took it.
+async function deleteBoxPhoto(box){
+  const msg=document.getElementById('warehouseMsg');
+  const session=await requireSession(msg); if(!session) return;
+  try{
+    const old=box.photo_path;
+    const {error}=await sb.rpc('set_box_photo',{box:box.id,path:null});
+    if(error) throw error;
+    if(old) await sb.storage.from(PHOTO_BUCKET).remove([old]);
+    warehouseRows.forEach(r=>r.boxes.forEach(b=>{
+      if(String(b.id)===String(box.id)) b.photo_path=null;
+    }));
+    showMsg(msg,'✓ Box photo deleted.',true);
+    renderWarehouseResults();
+  }catch(err){
+    showMsg(msg,'Could not delete: '+((err&&err.message)||'unknown error'),false);
   }
 }
 
