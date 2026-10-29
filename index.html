@@ -2551,6 +2551,7 @@ textarea.gt-lines:focus{outline:2px solid var(--blueprint);outline-offset:1px;bo
 #pickupScreen .pk-top{display:flex;flex-wrap:wrap;align-items:center;gap:0;margin-bottom:2px;}
 #pickupScreen .pk-top > .pick:not([style*="visibility"]){margin-right:8px;}
 #pickupScreen .pk-oid{flex:0 1 auto;font-size:14px;font-weight:500;}
+#pickupScreen a.pk-bs{color:inherit;text-decoration:underline dotted;text-underline-offset:3px;}
 /* copy sits right beside the order ID, a small blue mark as on Procurement & Shipping */
 #pickupScreen .pk-top [data-copy]{border:0;background:transparent;color:var(--blueprint);
   width:28px;min-width:28px;height:28px;min-height:28px;font-size:14px;padding:0;margin-left:0;}
@@ -17506,6 +17507,16 @@ function copyBit(text,what,cls){
     +`<button class="copy-btn" data-copy="${safe}" title="Copy ${say}" aria-label="Copy ${say}">⧉</button>`;
 }
 const oidCopy=(id,cls)=>copyBit(id,'order ID',cls);
+// A pick up's order ID opens that order in BigSeller: its order list searched by
+// the order number (BigSeller's detail is a pop-up with no address of its own).
+const BS_ORDER_URL='https://www.bigseller.com/web/order/index.htm?status=all&searchType=orderNo&searchContent=';
+function pickupOidLink(id){
+  const v=String(id||'').trim();
+  if(!v) return oidCopy(id,'pk-oid');
+  return `<a class="oid-text pk-oid pk-bs" href="${BS_ORDER_URL+encodeURIComponent(v)}" target="_blank"`
+    +` rel="noopener" title="Open in BigSeller">${escapeHtml(v)}</a>`
+    +`<button class="copy-btn" data-copy="${escapeHtml(v)}" title="Copy order ID" aria-label="Copy order ID">⧉</button>`;
+}
 async function copyText(t){
   try{
     if(navigator.clipboard&&window.isSecureContext){ await navigator.clipboard.writeText(t); return true; }
@@ -26771,7 +26782,7 @@ function renderPickups(){
       <div class="pk-top">
         <input type="checkbox" class="pick" data-pk-pick ${pickedPickups.has(p.id)?'checked':''}
           title="Select" style="${pickupSelectMode?'':'visibility:hidden;width:0;margin:0;'}"/>
-        ${oidCopy(p.order_id,'pk-oid')}
+        ${pickupOidLink(p.order_id)}
         <span class="hint pk-when">Prepared ${p.prepared?stampShort(p.prepared_at):'—'} &nbsp;·&nbsp;
           Collected ${p.collected?stampShort(p.collected_at):'—'}</span>
         <span class="hint pk-added">${stampShort(p.created_at)}</span>
@@ -27142,6 +27153,7 @@ document.getElementById('pickupList').addEventListener('click',async e=>{
   // this card holds the name and remarks boxes, so those keep their taps —
   // everything else on it, Prepared and Collected included, selects
   if(pickupSelectMode&&!inSelectField(e.target)){
+    if(e.target.closest('a.pk-bs')) e.preventDefault();   // selecting, not off to BigSeller
     toggleCardPick(card,pickedPickups,p.id,syncPickupBulk);
     return;
   }
@@ -30388,18 +30400,18 @@ function artPrintScan(img,cms,src){
       out=found.sort((a,b)=>b.n-a.n).slice(0,4);
       dull=dl.sort((a,b)=>b.n-a.n).slice(0,4);
       shift=sh.sort((a,b)=>b.n-a.n).slice(0,4);
-      // the colours it is made of - 1% of it or more, white left out - for
-      // changing by hand
+      // the colours it is made of - 1% of it or more - for changing by hand;
+      // white always, so a white background can be given a colour
       const mn=[];
       for(const b of sum.values()){
         if(b[3]<Math.max(20,total*0.01)) continue;
         const rgb=[b[0]/b[3],b[1]/b[3],b[2]/b[3]].map(Math.round);
-        if(rgb.every(v=>v>235)) continue;
         const near=mn.find(f=>colDist(f.rgb,rgb)<28);
         if(near){ if(b[3]>near.n) near.rgb=rgb; near.n+=b[3]; }
         else mn.push({rgb,n:b[3]});
       }
       main=mn.sort((a,b)=>b.n-a.n).slice(0,8);
+      if(!main.some(m=>m.rgb.every(v=>v>235))) main.push({rgb:[255,255,255],n:0});
     }
     c.width=c.height=0;
   }
@@ -30470,7 +30482,8 @@ function mcSavedColours(path){
     const c=it&&it.art&&it.art.colours&&it.art.colours[path];
     if(Array.isArray(c)) return c.filter(x=>x&&/^#[0-9a-f]{6}$/i.test(x.from)&&/^#[0-9a-f]{6}$/i.test(x.to))
       .map(x=>({from:hexRgb(x.from),to:hexRgb(x.to),...(x.adj&&typeof x.adj==='object'
-        ?{adj:{h:Number(x.adj.h)||0,l:Number(x.adj.l)||0,s:Number(x.adj.s)||0}}:{})}));
+        ?{adj:{h:Number(x.adj.h)||0,l:Number(x.adj.l)||0,s:Number(x.adj.s)||0}}:{}),
+        ...(/^#[0-9a-f]{6}$/i.test(x.base||'')?{base:x.base.toUpperCase()}:{})}));
   }
   return [];
 }
@@ -30501,12 +30514,12 @@ function mcLineColours(art){
     (finalSplitList(side)||[]).forEach(d=>objs.push(d));
   });
   paths.forEach(path=>{
-    let list=mcColourEdits.has(path)?mcColourEdits.get(path).map(x=>({from:hexOf(x.from),to:hexOf(x.to),...(x.adj?{adj:x.adj}:{})}))
+    let list=mcColourEdits.has(path)?mcColourEdits.get(path).map(x=>({from:hexOf(x.from),to:hexOf(x.to),...(x.adj?{adj:x.adj}:{}),...(x.base?{base:x.base}:{})}))
       :(Array.isArray(was[path])?was[path]:[]);
     objs.filter(o=>o&&o.img&&o.mcPath===path).forEach(o=>{
       colourSwaps.filter(x=>x.imgs.has(artImgId(o.img))).forEach(x=>{
         const f=hexOf(x.from);
-        if(!list.some(y=>y.from===f)) list=[...list,{from:f,to:hexOf(x.to),...(x.adj?{adj:x.adj}:{})}];
+        if(!list.some(y=>y.from===f)) list=[...list,{from:f,to:hexOf(x.to),...(x.adj?{adj:x.adj}:{}),...(x.base?{base:x.base}:{})}];
       });
     });
     if(list.length) out[path]=list;
@@ -30741,7 +30754,7 @@ function pcPopRender(){
   const pop=pcPopEl(); if(!pop||pop.hidden) return;
   if(_pcDarkHeld) return;            // a slider is under the finger
   const ae=document.activeElement;   // or a figure is being typed
-  if(ae&&ae.matches&&ae.matches('#pcPop input[type="number"]')) return;
+  if(ae&&ae.matches&&ae.matches('#pcPop input[type="number"],#pcPop input[type="color"]')) return;
   const paper=printPaperKey(), cms=printCmsReady[paper];
   const body=document.getElementById('pcPopBody');
   document.getElementById('pcPopTitle').textContent=`Print preview · Fiery ${PRINT_PAPER_NAMES[paper]}`;
@@ -30782,11 +30795,16 @@ function pcPopRender(){
     +`<p class="hint" style="margin:0 0 4px;">Change any colour — it prints and saves like the fixes above.</p>`;
   main.forEach(({m,cur})=>{
     const hx=hexOf(m.rgb), now=cur?cur.to:m.rgb, adj=(cur&&cur.adj)||{h:0,l:0,s:0}, open=pcAdjOpen.has(hx);
-    h+=`<div data-pc-adj="${hx}" style="margin:6px 0 0;padding:6px 8px;border:1px solid var(--border);border-radius:10px;">`
+    const isWhite=m.rgb.every(v=>v>235);
+    h+=`<div data-pc-adj="${hx}"${cur&&cur.base?` data-pc-base="${cur.base}"`:''} style="margin:6px 0 0;padding:6px 8px;border:1px solid var(--border);border-radius:10px;">`
       +`<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12px;">`
-      +`${pcSw(m.rgb,'In the file')} <span>${hx}</span>`
+      +`${pcSw(m.rgb,'In the file')} <span>${hx}${isWhite?' (white / background)':''}</span>`
       +(cur?` → <span data-pc-now>${pcSw(now,'What prints')}</span> <span data-pc-nowhex>${hexOf(now)}</span>`:` <span data-pc-now></span><span data-pc-nowhex></span>`)
       +`<span style="flex:1"></span>`
+      +`<label class="btn-outline btn-sm" style="position:relative;display:inline-flex;align-items:center;gap:4px;cursor:pointer;"`
+        +` title="Pick any colour - from the colour wheel, or type its hex">🎨 Pick`
+        +`<input type="color" value="${hexOf(now).toLowerCase()}" data-pc-pick="${hx}"`
+        +` style="position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;border:0;padding:0;"/></label>`
       +`<button type="button" class="btn-outline btn-sm" data-pc-adjtog="${hx}">${open?'Done':'Adjust'}</button>`
       +(cur?`<button type="button" class="btn-outline btn-sm" data-pc-undo="${hx}">Reset</button>`:'')
       +`</div>`;
@@ -30856,16 +30874,17 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&pcPopIsOpen()) pcP
 // A colour changed on a side: to `to` (a hex), or back to the file's (null).
 // The designs on that side the colour was found in take it - a line's own
 // artwork on the line (saved with Save), any other for this session.
-function printColourSet(side,from,to,adj){
+function printColourSet(side,from,to,adj,base){
   const cms=printCmsReady[printPaperKey()];
   const objs=sideArtObjs(side).map(([,o])=>o).filter(o=>o&&o.img&&cms
     &&artColoursAll(o.img,cms,artSrc(o)).some(dc=>hexOf(dc.rgb)===from));
   const fromRgb=hexRgb(from), ids=objs.map(o=>artImgId(o.img));
   const toRgb=to?hexRgb(to):null, keep=adj&&(adj.h||adj.l||adj.s)?{h:adj.h|0,l:adj.l|0,s:adj.s|0}:undefined;
+  const more={...(keep?{adj:keep}:{}),...(base?{base}:{})};
   objs.forEach(o=>{
     if(!o.mcPath) return;
     const list=mcColoursOf(o.mcPath).filter(x=>colDist(x.from,fromRgb)>=6);
-    if(toRgb) list.push({from:fromRgb,to:toRgb,...(keep?{adj:keep}:{})});
+    if(toRgb) list.push({from:fromRgb,to:toRgb,...more});
     mcColourEdits.set(o.mcPath,list);
   });
   const mine=new Set(ids);
@@ -30874,7 +30893,7 @@ function printColourSet(side,from,to,adj){
     if(colDist(s.from,fromRgb)<6&&[...s.imgs].some(id=>mine.has(id))) colourSwaps.splice(i,1);
   }
   const loose=objs.filter(o=>!o.mcPath).map(o=>artImgId(o.img));
-  if(toRgb&&loose.length) colourSwaps.push({from:fromRgb,to:toRgb,imgs:new Set(loose),...(keep?{adj:keep}:{})});
+  if(toRgb&&loose.length) colourSwaps.push({from:fromRgb,to:toRgb,imgs:new Set(loose),...more});
   if(typeof mcBuilderSaveSync==='function') try{ mcBuilderSaveSync(); }catch(err){}
 }
 function printColourClick(e){
@@ -30911,13 +30930,35 @@ document.addEventListener('input',e=>{
   }else if(box) box.value=range.value;
   const from=row.dataset.pcAdj, v=q=>Number(row.querySelector(`[data-adj-k="${q}"]`).value)||0;
   const adj={h:v('h'),l:v('l'),s:v('s')};
-  const to=adj.h||adj.l||adj.s?hexOf(cms.adjust(hexRgb(from),adj)):null;
+  const base=row.dataset.pcBase||null;
+  const to=adj.h||adj.l||adj.s?hexOf(cms.adjust(hexRgb(base||from),adj)):base;
   const now=row.querySelector('[data-pc-now]'), nh=row.querySelector('[data-pc-nowhex]');
   if(now) now.innerHTML=to?'→ '+pcSw(hexRgb(to),'What prints'):'';
   if(nh) nh.textContent=to||'';
-  printColourSet(pcPopSide,from,to,adj);
+  printColourSet(pcPopSide,from,to,adj,base);
   cancelAnimationFrame(_pcAdjRaf);
   _pcAdjRaf=requestAnimationFrame(()=>drawAll());
+});
+// a colour picked outright, from the wheel or typed: the new colour as it is
+// moved, the sheets drawn again
+document.addEventListener('input',e=>{
+  const from=e.target.dataset&&e.target.dataset.pcPick; if(!from) return;
+  const to=e.target.value.toUpperCase();
+  const row=e.target.closest('[data-pc-adj]');
+  if(row){
+    row.dataset.pcBase=to;
+    row.querySelectorAll('[data-adj-k],[data-adj-n]').forEach(x=>{ x.value='0'; });
+    const now=row.querySelector('[data-pc-now]'), nh=row.querySelector('[data-pc-nowhex]');
+    if(now) now.innerHTML='→ '+pcSw(hexRgb(to),'What prints');
+    if(nh) nh.textContent=to;
+  }
+  printColourSet(pcPopSide,from,to===from?null:to,null,to===from?null:to);
+  cancelAnimationFrame(_pcAdjRaf);
+  _pcAdjRaf=requestAnimationFrame(()=>drawAll());
+});
+document.addEventListener('change',e=>{
+  if(!(e.target.dataset&&e.target.dataset.pcPick)) return;
+  printColourCheckSoon();
 });
 // the screen match: every sheet on screen again, kept for this computer
 let _pcDarkRaf=0;
@@ -30938,6 +30979,7 @@ document.addEventListener('pointerdown',e=>{
 document.addEventListener('pointerup',()=>{ if(_pcDarkHeld){ _pcDarkHeld=false; printColourCheckSoon(); } });
 document.addEventListener('pointercancel',()=>{ _pcDarkHeld=false; });
 document.addEventListener('focusout',e=>{
+  if(e.target.matches&&e.target.matches('#pcPop input[type="color"]')){ setTimeout(()=>pcPopRender(),0); return; }
   if(!(e.target.matches&&e.target.matches('#pcPop input[type="number"]'))) return;
   // a figure left past the ends, or empty, shows what was taken
   const row=e.target.closest('[data-pc-adj]'), r=row&&row.querySelector(`[data-adj-k="${e.target.dataset.adjN}"]`);
