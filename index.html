@@ -39546,8 +39546,13 @@ document.addEventListener('input',e=>{
 },true);
 // sig -> {done, result, promise}; the last few kept
 var gtNestRealJobs=new Map();
-function gtNestWorkerGet(){
-  if(gtNestWorkerGet.w!==undefined) return gtNestWorkerGet.w;
+// slot: 'main' for the sheets' packing, 'guide' for a sheet laid again round
+// its guides - a worker each, as a worker packs one at a time and a new job
+// stops the one under way: the guides' would have stopped the sheets' own.
+function gtNestWorkerGet(slot){
+  slot=slot||'main';
+  const W=gtNestWorkerGet.ws||(gtNestWorkerGet.ws={});
+  if(W[slot]!==undefined) return W[slot];
   try{
     const src=[gtNestMask,gtNestRealPack,gtNestTurned,gtNestTurns,gtNestUsed,gtNestRealBetter].map(f=>f.toString()).join('\n')
       +'\nconst GT_NEST_CELL='+JSON.stringify(GT_NEST_CELL)+';\n'
@@ -39581,7 +39586,7 @@ function gtNestWorkerGet(){
       // The sheet on screen takes the packing now it is here - only if it is
       // the sheet this answers: clearing whatever plan was in hand changed an
       // export's sheets half way through it.
-      if(gtNestCache&&gtNestCache.sig===j.sig){
+      if(gtNestCache&&gtNestCache.sig===(j.planSig||j.sig)){
         gtNestCache=null;
         try{ gtDraw(); gtNestSync(); }catch(err){}
         // and the batch's views of it - the summary's sheet and the made pop-up
@@ -39590,30 +39595,39 @@ function gtNestWorkerGet(){
           if(ms&&ms.classList.contains('open')&&typeof mcRenderMade==='function') mcRenderMade(); }catch(err){}
       }
     };
-    w.onerror=()=>{ gtNestWorkerGet.w=null; [...gtNestRealJobs.values()].forEach(j=>{ if(!j.done){ j.done=true; j.result=null; j.resolve(); } }); };
-    gtNestWorkerGet.w=w;
-  }catch(e){ gtNestWorkerGet.w=null; }
-  return gtNestWorkerGet.w;
+    w.onerror=()=>{ W[slot]=null; [...gtNestRealJobs.values()].forEach(j=>{ if(!j.done&&(j.slot||'main')===slot){ j.done=true; j.result=null; j.resolve(); } }); };
+    W[slot]=w;
+  }catch(e){ W[slot]=null; }
+  return W[slot];
 }
 // The job for this sheet as it stands: asked for once, answered later. null
 // where there is no worker - the packing is then done here, as it always was.
-function gtNestRealJob(sig,rall,o){
+// slot: which worker (gtNestWorkerGet); planSig: the sheets' own sig, for a
+// guides job, so its answer redraws the sheets it was asked for.
+function gtNestRealJob(sig,rall,o,slot,planSig){
+  slot=slot||'main';
   let j=gtNestRealJobs.get(sig);
   if(j) return j;
   // A packing still running for the sheet as it was is of no use now, and the
   // worker does one at a time: it is stopped and started afresh, or this one
   // waited behind it (an export after typing waited for every old one in turn).
-  const stale=[...gtNestRealJobs.entries()].filter(([,x])=>!x.done);
-  if(stale.length&&gtNestWorkerGet.w){
-    try{ gtNestWorkerGet.w.terminate(); }catch(e){}
-    gtNestWorkerGet.w=undefined;
-    stale.forEach(([k,x])=>{ x.done=true; x.result=null; x.resolve(); gtNestRealJobs.delete(k); });
+  // A guides job stops only an old guides job for the same sheets' other
+  // state - never one for the sheets as they are (another sheet's).
+  const W=gtNestWorkerGet.ws||{};
+  const stale=[...gtNestRealJobs.entries()].filter(([,x])=>!x.done&&(x.slot||'main')===slot
+    &&(slot==='main'||x.planSig!==planSig));
+  if(stale.length&&W[slot]){
+    try{ W[slot].terminate(); }catch(e){}
+    W[slot]=undefined;
+    // the same worker's other jobs went with it
+    [...gtNestRealJobs.entries()].filter(([,x])=>!x.done&&(x.slot||'main')===slot)
+      .forEach(([k,x])=>{ x.done=true; x.result=null; x.resolve(); gtNestRealJobs.delete(k); });
   }
-  const w=gtNestWorkerGet(); if(!w) return null;
-  j={id:'n'+Math.random().toString(36).slice(2),sig,done:false,result:null};
+  const w=gtNestWorkerGet(slot); if(!w) return null;
+  j={id:'n'+Math.random().toString(36).slice(2),sig,done:false,result:null,slot,...(planSig?{planSig}:{})};
   j.promise=new Promise(r=>{ j.resolve=r; });
   gtNestRealJobs.set(sig,j);
-  while(gtNestRealJobs.size>6) gtNestRealJobs.delete(gtNestRealJobs.keys().next().value);
+  while(gtNestRealJobs.size>24) gtNestRealJobs.delete(gtNestRealJobs.keys().next().value);
   const items=rall.map(it=>({i:it.i,sz:it.sz,key:it.key,bl:it.bl||0,poly:it.poly||null,parts:(it.poly&&it.poly.parts)||null}));
   try{ w.postMessage({id:j.id,items,...o,budget:Math.max(500,o.budget)}); }
   catch(e){ j.done=true; j.resolve(); }
@@ -39630,9 +39644,10 @@ async function gtNestSettle(){
   // the sheet changed meanwhile and the one waited for was dropped as stale
   for(let k=0;k<6;k++){
     gtNestPlan();
-    const sig=gtNestCache&&gtNestCache.sig, j=sig&&gtNestRealJobs.get(sig);
-    if(!j||j.done) return;
-    await j.promise; gtNestCache=null;
+    const sig=gtNestCache&&gtNestCache.sig;
+    const wait=sig?[...gtNestRealJobs.values()].filter(x=>!x.done&&(x.sig===sig||x.planSig===sig)):[];
+    if(!wait.length) return;
+    await Promise.all(wait.map(x=>x.promise)); gtNestCache=null;
   }
   gtNestPlan();
 }
@@ -40460,13 +40475,25 @@ function gtNestPlan(){
         try{ p=flags.get(id)?flags.get(id).poly:gtNestPolyOf(gtDesign(id),size.get(id)); }catch(e){}
         return p&&p.length>2?{...it,key:id+'|'+(it.bl||0),poly:p}:null; });
       if(rall.every(Boolean)){
-        const deadline=Date.now()+1500;
-        for(const cmp of orders){
-          if(Date.now()>deadline) break;
-          let r=null;
-          try{ r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,'row',deadline,realDots.concat(strips(true)),
-            S.nestRotate!==false,gtNestStep()); }catch(e){ r=null; }
-          if(r&&r.pages.length===1&&!r.tooBig) return toPlan({items:r.pages[0].items,anchor:true},at);
+        // off the page's thread, as the sheets' own packing is: asked once,
+        // the boxes stand in meanwhile, and its answer redraws the sheet
+        const o={availW,availH,gx,gy,dotBlocks:realDots.concat(strips(true)),rotate:S.nestRotate!==false,want:gtNestStep(),budget:1500};
+        const job=gtNestRealJob(sig+'|guides|'+at+'|'+items.map(it=>it.i).join(','),rall,o,'guide',sig);
+        if(job){
+          const r=job.done&&job.result;
+          if(r&&r.pages.length===1&&!r.tooBig){
+            const byI=new Map(rall.map(it=>[it.i,it]));
+            return toPlan({items:r.pages[0].items.map(({i,pos})=>({it:byI.get(i),pos})).filter(x=>x.it),anchor:true},at);
+          }
+        }else{
+          // no worker in this browser: a short go here
+          const deadline=Date.now()+300;
+          for(const cmp of orders){
+            if(Date.now()>deadline) break;
+            let r=null;
+            try{ r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,'row',deadline,o.dotBlocks,o.rotate,o.want); }catch(e){ r=null; }
+            if(r&&r.pages.length===1&&!r.tooBig) return toPlan({items:r.pages[0].items,anchor:true},at);
+          }
         }
       }
     }
