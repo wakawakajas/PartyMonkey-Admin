@@ -26112,8 +26112,8 @@ function renderWarehouseResults(){
       <div class="wh-row">
         <div class="wh-shots">
           <div class="wh-shot"><button class="item-photo${has?' has':''}" data-wh-photo
-            title="${has?'What it looks like — tap to enlarge':'No SKU photo'}"
-            ${has?'':'disabled'}>${has?'<img data-wh-thumb alt="SKU photo"/>':'—'}</button>
+            title="${has?'What it looks like — tap to enlarge, draw, replace or delete':'No SKU photo — tap to add one'}"
+            >${has?'<img data-wh-thumb alt="SKU photo"/>':'📷'}</button>
             ${shotDate(r.photo_path)}</div>
           ${boxShots(r)}
         </div>
@@ -26212,11 +26212,53 @@ document.getElementById('warehouseResults').addEventListener('click',e=>{
     else if(b) pickBoxPhoto(row,b);        // an empty slot is still an invitation
     return;
   }
-  // The SKU photo is read-only here. It says what the goods are, which belongs
-  // to the order that bought them — this screen is about where they are now.
-  if(e.target.closest('[data-wh-photo]')&&(row.photo_path||row.photo_url))
-    openPhotoModal(row.photo_path,row.sku||'SKU photo',row.photo_url);
+  // The SKU photo can be drawn on, replaced or deleted here too, through
+  // set_item_photo, so it works for people who cannot open Procurement.
+  if(e.target.closest('[data-wh-photo]')){
+    if(row.photo_path||row.photo_url)
+      openPhotoModal(row.photo_path,row.sku||'SKU photo',row.photo_url,
+        f=>replaceItemPhoto(row,f),()=>deleteItemPhoto(row));
+    else pickImageFile().then(f=>{ if(f) replaceItemPhoto(row,f); });
+  }
 });
+async function replaceItemPhoto(row,file){
+  const msg=document.getElementById('warehouseMsg');
+  const session=await requireSession(msg); if(!session) return;
+  showMsg(msg,'Uploading photo…',true);
+  try{
+    const small=await shrinkToBudget(await fileToDataURL(file),SHIPMENT_PHOTO_MAX_PX,PHOTO_BUDGET_BYTES);
+    const blob=await (await fetch(small)).blob();
+    // <uid>/<item-id>/<stamp>.jpg — the item id is what lets the team see it
+    const path=session.user.id+'/'+row.id+'/'+Date.now()+'.jpg';
+    const up=await sb.storage.from(PHOTO_BUCKET).upload(path,blob,{contentType:'image/jpeg'});
+    if(up.error) throw up.error;
+    const old=row.photo_path;
+    const {error}=await sb.rpc('set_item_photo',{item:row.id,path});
+    if(error) throw error;
+    // only our own old file can go; one somebody else took stays behind
+    if(old&&old.startsWith(session.user.id+'/')) await sb.storage.from(PHOTO_BUCKET).remove([old]);
+    row.photo_path=path; row.photo_url=null;
+    showMsg(msg,'✓ SKU photo updated.',true);
+    renderWarehouseResults();
+  }catch(err){
+    showMsg(msg,'Could not upload: '+((err&&err.message)||'unknown error'),false);
+  }
+}
+async function deleteItemPhoto(row){
+  const msg=document.getElementById('warehouseMsg');
+  const session=await requireSession(msg); if(!session) return;
+  try{
+    const old=row.photo_path;
+    const {error}=await sb.rpc('set_item_photo',{item:row.id,path:null});
+    if(error) throw error;
+    if(old&&old.startsWith(session.user.id+'/')) await sb.storage.from(PHOTO_BUCKET).remove([old]);
+    row.photo_path=null; row.photo_url=null;
+    showMsg(msg,'✓ SKU photo deleted.',true);
+    renderWarehouseResults();
+  }catch(err){
+    showMsg(msg,'Could not delete: '+((err&&err.message)||'unknown error'),false);
+  }
+}
 // This used to open the camera directly, since it is used standing in front of
 // the box rather than at a desk. It now asks like every other photo slot, so a
 // picture already copied can be pasted here too — the camera is still the
