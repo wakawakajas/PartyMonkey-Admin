@@ -464,7 +464,7 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .pc-pop-head{display:flex;align-items:center;gap:8px;margin:-2px 0 8px;cursor:move;user-select:none;touch-action:none;}
 .pc-pop-head b{flex:1;font-family:'Space Grotesk',sans-serif;font-size:14px;}
 @media (max-width:700px){.pc-pop{left:8px;right:8px;top:auto;bottom:84px;width:auto;max-height:52vh;}}
-#ppOpenBtn.on{background:var(--ink);color:var(--paper);}
+#ppOpenBtn.on,#gtPpBtn.on{background:var(--ink);color:var(--paper);}
 #canvasFront,#canvasBack,#gtCanvas,#gtCanvasBack{width:auto;
   max-height:calc(100vh - 190px);max-height:calc(100dvh - 190px);}
 /* above .sheet-bg (64): a photo tapped from inside an open sheet — the
@@ -6934,6 +6934,7 @@ body.pd-tab-costs #fabDock [data-fab-screen="shipmentDetailScreen"]{display:none
             <button class="icon-btn" id="gtZoomBtn" title="Fill the view with the tag being worked on — the bottom-left one until a line is picked">Zoom in</button>
             <button class="icon-btn" id="gtZoomInBtn" title="Closer in">+</button>
             <button class="icon-btn" id="gtContourBtn" title="Move and resize the cut lines on the sheet instead of the words">Contours</button>
+            <button class="icon-btn" id="gtPpBtn" title="The sheet as the Fiery prints it on this stock, and every colour in the designs to change">🖨 Print preview</button>
           </div>
         </div>
         <canvas id="gtCanvas"></canvas>
@@ -30144,7 +30145,21 @@ const PRINT_FIX_L=[24,32,40];
 // the paper chosen beside the Order ID, as the Fiery's coatings: anything
 // matte prints on Coated-Matte, gloss (and nothing chosen, as the box opens on
 // gloss) on Coated-Glossy, the rest on Plain
+// The colour check, the swaps and the Print preview pop-up serve whichever
+// builder is open: the Custom Template (Place Card, Magic Create's builder) or
+// the gift tag page (Festive / Custom Gift Tag, Sticker, Combo).
+// By the screen the app is on, not by what is showing: a page being left stays
+// drawn through its leave animation, so both read as open for a moment.
+function pcCtx(){
+  try{ return currentScreen==='tool-gift-tag'?'gt':'custom'; }catch(e){ return 'custom'; }
+}
+function pcRedraw(){
+  if(pcCtx()==='gt'){ if(typeof gtDraw==='function') gtDraw(); }
+  else drawAll();
+}
 function printPaperKey(){
+  // the gift tag page's own stock: Matte, Gloss or Sticker (a gloss sticker paper)
+  if(pcCtx()==='gt'){ let f='Matte'; try{ f=gtFinish; }catch(e){} return f==='Matte'?'matte':'gloss'; }
   const p=String(state.paperType||'');
   return /matt/i.test(p)?'matte':(!p||/gloss/i.test(p))?'gloss':'plain';
 }
@@ -30310,6 +30325,7 @@ const hexOf=c=>'#'+c.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('')
 const _artIds=new WeakMap(); let _artIdN=0;
 function artImgId(img){
   if(!img||typeof img!=='object') return 0;
+  if(img._artOf) img=img._artOf;    // a turned copy is its artwork (gtTurnImg)
   if(!_artIds.has(img)) _artIds.set(img,++_artIdN);
   return _artIds.get(img);
 }
@@ -30677,6 +30693,7 @@ async function pdfSwapColours(bytes,swaps){
 // ---- the panel under each sheet: preview, and the colours that print dark ----
 // the artwork a side prints, as [key, design or final]
 function sideArtObjs(side){
+  if(pcCtx()==='gt') return gtSideArtObjs(side);
   const want=[];
   if(side==='front'&&usingPreset()) state.designs.forEach(d=>{
     if(d.img&&Number(d.qty)>0) want.push(['d:'+d.id,d]);
@@ -30688,6 +30705,30 @@ function sideArtObjs(side){
   }
   want.forEach(([,o])=>artNote(o));
   return want;
+}
+// every design on the gift tag order, front pictures or back ones, each once;
+// named by its file, so a PDF reads as one (artSrc)
+const _gtArtObjs=new WeakMap();
+function gtSideArtObjs(side){
+  const out=[], seen=new Set();
+  let q=[]; try{ q=gtQueue(); }catch(e){ return out; }
+  q.forEach(line=>{
+    const d=gtDesign(line.designId); if(!d) return;
+    let img=null, file='', key='';
+    if(side==='back'){
+      if(gtNoBackKind(d)) return;
+      const bk=gtBackOf(d,line); if(!bk||!bk.img) return;
+      img=bk.img; file=bk.file||''; key='gtb:'+bk.key;
+    }else{ img=gtImgs.get(d.id)||gtImgGet(d.id); file=d.file||''; key='gt:'+d.id; }
+    if(!img||!img.naturalWidth||seen.has(img)) return; seen.add(img);
+    // one object per picture, kept, so what is noted against it stays
+    let o=_gtArtObjs.get(img);
+    if(!o){ o={img}; _gtArtObjs.set(img,o); }
+    o.name=String(d.name||d.label||String(file).split('/').pop()||'Design');
+    o.file={name:String(file),type:gtIsPdfFile(file)?'application/pdf':''};
+    out.push([key,o]);
+  });
+  return out;
 }
 let _pcCheckT=0;
 function printColourCheckSoon(){
@@ -30763,13 +30804,13 @@ function printColourRowsHtml(rows){
 // The settings themselves are in the Print preview pop-up.
 function printColourPanel(side){
   const box=document.getElementById(side==='front'?'printColourFront':'printColourBack');
-  if(!box) return;
+  if(!box||pcCtx()==='gt') return;
   const arts=sideArtObjs(side).filter(([,o])=>o&&o.img);
   if(!arts.length){ box.innerHTML=''; return; }
   const paper=printPaperKey(), cms=printCmsReady[paper];
   if(!cms){
     box.innerHTML='<p class="hint" style="margin:8px 0 0;">Checking colours for print…</p>';
-    printCms(paper).then(()=>{ printColourPanel(side); pcPopRender(); if(printPreviewOn) drawAll(); })
+    printCms(paper).then(()=>{ printColourPanel(side); pcPopRender(); if(printPreviewOn) pcRedraw(); })
       .catch(e=>{ box.innerHTML=`<p class="hint" style="margin:8px 0 0;">Print colour check unavailable — ${escapeHtml(String((e&&e.message)||e))}.</p>`; });
     return;
   }
@@ -30792,6 +30833,13 @@ var pcLastDrawn={front:null,back:null};   // var: drawAll may run before this li
 // A placeholder clicked on the sheet while the pop-up is open: the design in it
 // is the one the changes go to (every card of that design - it is one artwork).
 // The side shown keeps to itself where it has a design there; else the other.
+function pcPopPickGtLine(line,side){
+  const d=gtDesign(line.designId); if(!d) return;
+  const img=side==='back'?(gtBackOf(d,line)||{}).img:(gtImgs.get(d.id)||gtImgGet(d.id)); if(!img) return;
+  pcPopSide=side==='back'?'back':'front';
+  pcPopArt=artImgId(img);
+  pcPopRender();
+}
 function pcPopPickPh(ph){
   if(!ph) return;
   const find=side=>((pcLastDrawn[side]&&pcLastDrawn[side]._rects)||[]).find(r=>r.ph===ph.id);
@@ -30820,7 +30868,7 @@ function pcPopRender(){
   document.getElementById('pcPopDarkVal').textContent=printProofDark()+'%';
   if(!cms){
     body.innerHTML='<p class="hint">Loading the paper\'s colours…</p>';
-    printCms(paper).then(()=>{ pcPopRender(); drawAll(); }).catch(e=>{
+    printCms(paper).then(()=>{ pcPopRender(); pcRedraw(); }).catch(e=>{
       body.innerHTML=`<p class="hint">Print preview unavailable — ${escapeHtml(String((e&&e.message)||e))}.</p>`; });
     return;
   }
@@ -30891,25 +30939,31 @@ function pcPopOpen(side){
   const has=s=>sideArtObjs(s).some(([,o])=>o&&o.img);
   pcPopSide=side||(has(pcPopSide)?pcPopSide:has('front')?'front':has('back')?'back':'front');
   pcPopArt=null;
-  pop.hidden=false;
-  document.getElementById('ppOpenBtn').classList.add('on');
+  pop.hidden=false; pcPopCtxAt=pcCtx();
+  document.querySelectorAll('#ppOpenBtn,#gtPpBtn').forEach(b=>b.classList.add('on'));
   printPreviewOn=true;
   pcPopRender();
-  if(printCmsReady[printPaperKey()]) drawAll();
-  else printCms().then(()=>{ drawAll(); pcPopRender(); }).catch(()=>{});
+  if(printCmsReady[printPaperKey()]) pcRedraw();
+  else printCms().then(()=>{ pcRedraw(); pcPopRender(); }).catch(()=>{});
 }
 function pcPopClose(){
   const pop=pcPopEl(); if(!pop) return;
   pop.hidden=true; printPreviewOn=false; printShowBefore=false;
-  document.getElementById('ppOpenBtn').classList.remove('on');
-  drawAll();
+  document.querySelectorAll('#ppOpenBtn,#gtPpBtn').forEach(b=>b.classList.remove('on'));
+  pcRedraw();
 }
+let pcPopCtxAt='custom';            // the page the pop-up was opened on
 document.getElementById('ppOpenBtn').addEventListener('click',()=>pcPopIsOpen()?pcPopClose():pcPopOpen());
+document.getElementById('gtPpBtn').addEventListener('click',()=>pcPopIsOpen()?pcPopClose():pcPopOpen());
 // it belongs to the builder: another screen opened, it closes (it stayed over
 // every screen, with the sheets left in their print colours behind)
-new MutationObserver(()=>{
-  if(pcPopIsOpen()&&getComputedStyle(document.getElementById('appScreen')).display==='none') pcPopClose();
-}).observe(document.getElementById('appScreen'),{attributes:true,attributeFilter:['style','class','hidden']});
+const pcPopWatch=new MutationObserver(()=>{
+  if(!pcPopIsOpen()) return;
+  const el=document.getElementById(pcPopCtxAt==='gt'?'giftTagScreen':'appScreen');
+  let on=pcPopCtxAt==='gt'?'tool-gift-tag':'tool-custom'; try{ on=currentScreen; }catch(e){}
+  if(!el||getComputedStyle(el).display==='none'||on!==(pcPopCtxAt==='gt'?'tool-gift-tag':'tool-custom')) pcPopClose();
+});
+['appScreen','giftTagScreen'].forEach(id=>pcPopWatch.observe(document.getElementById(id),{attributes:true,attributeFilter:['style','class','hidden']}));
 document.getElementById('pcPopClose').addEventListener('click',pcPopClose);
 document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&pcPopIsOpen()) pcPopClose(); });
 // moved by its title bar, out of the way of whichever sheet is being looked at
@@ -30931,8 +30985,8 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&pcPopIsOpen()) pcP
 // Hold to see the file's own colours; let go and the changes come back
 (()=>{
   const b=document.getElementById('pcHold');
-  const on=()=>{ if(printShowBefore) return; printShowBefore=true; b.classList.add('btn-primary'); b.textContent='Showing original'; drawAll(); };
-  const off=()=>{ if(!printShowBefore) return; printShowBefore=false; b.classList.remove('btn-primary'); b.textContent='Hold to see original'; drawAll(); };
+  const on=()=>{ if(printShowBefore) return; printShowBefore=true; b.classList.add('btn-primary'); b.textContent='Showing original'; pcRedraw(); };
+  const off=()=>{ if(!printShowBefore) return; printShowBefore=false; b.classList.remove('btn-primary'); b.textContent='Hold to see original'; pcRedraw(); };
   b.addEventListener('pointerdown',e=>{ e.preventDefault(); on(); });
   ['pointerup','pointerleave','pointercancel'].forEach(t=>b.addEventListener(t,off));
   b.addEventListener('keydown',e=>{ if(e.key===' '||e.key==='Enter'){ e.preventDefault(); on(); } });
@@ -30980,7 +31034,7 @@ function printColourClick(e){
     printColourSet(side,from,b.dataset.pcSwap?b.dataset.pcTo:null,null,null,only);
     if(b.dataset.pcUndo) pcAdjOpen.delete(from);
   }
-  drawAll(); printColourCheckSoon(); pcPopRender();
+  pcRedraw(); printColourCheckSoon(); pcPopRender();
 }
 document.addEventListener('click',printColourClick);
 // a colour's own sliders: the change made as they move, the sheets drawn again
@@ -31005,7 +31059,7 @@ document.addEventListener('input',e=>{
   if(nh) nh.textContent=to||'';
   printColourSet(pcPopSide,from,to,adj,base,pcPopArt);
   cancelAnimationFrame(_pcAdjRaf);
-  _pcAdjRaf=requestAnimationFrame(()=>drawAll());
+  _pcAdjRaf=requestAnimationFrame(()=>pcRedraw());
 });
 // a colour picked outright, from the wheel or typed: the new colour as it is
 // moved, the sheets drawn again
@@ -31022,7 +31076,7 @@ document.addEventListener('input',e=>{
   }
   printColourSet(pcPopSide,from,to===from?null:to,null,to===from?null:to,pcPopArt);
   cancelAnimationFrame(_pcAdjRaf);
-  _pcAdjRaf=requestAnimationFrame(()=>drawAll());
+  _pcAdjRaf=requestAnimationFrame(()=>pcRedraw());
 });
 document.addEventListener('change',e=>{
   if(e.target.matches&&e.target.matches('#pcPop [data-pc-artsel]')){ pcPopArt=e.target.value?Number(e.target.value)||e.target.value:null; pcPopRender(); return; }
@@ -31038,7 +31092,7 @@ document.addEventListener('input',e=>{
   document.querySelectorAll('[data-pc-dark]').forEach(x=>{ if(x!==e.target) x.value=e.target.value; });
   const dv=document.getElementById('pcPopDarkVal'); if(dv) dv.textContent=(Number(e.target.value)||0)+'%';
   cancelAnimationFrame(_pcDarkRaf);
-  _pcDarkRaf=requestAnimationFrame(()=>drawAll());
+  _pcDarkRaf=requestAnimationFrame(()=>pcRedraw());
 });
 // the panels are drawn again after every redraw; not while a slider is held,
 // or it is taken from under the finger mid-slide
@@ -31056,11 +31110,16 @@ document.addEventListener('focusout',e=>{
   if(r) e.target.value=r.value;
   setTimeout(()=>pcPopRender(),0);
 });
+document.getElementById('gtFinishSeg').addEventListener('click',e=>{
+  if(!e.target.closest('[data-gt-finish]')) return;
+  setTimeout(()=>{ printColourCheckSoon();
+    if(printPreviewOn) printCms().then(()=>{ pcRedraw(); pcPopRender(); }).catch(()=>{}); },0);
+});
 // another paper is another profile: the check and the preview follow it
 document.addEventListener('change',e=>{
   if(!e.target||e.target.id!=='artPaperType') return;
   setTimeout(()=>{ printColourCheckSoon();
-    if(printPreviewOn) printCms().then(()=>{ drawAll(); pcPopRender(); }).catch(()=>{}); },0);
+    if(printPreviewOn) printCms().then(()=>{ pcRedraw(); pcPopRender(); }).catch(()=>{}); },0);
 });
 // ---------- lifting one page out of somebody else's PDF ----------
 // Kept to itself: every name in here is the format's, not the app's.
@@ -34793,6 +34852,7 @@ function gtTurnImg(img,t){
   if(m.has(t)) return m.get(t);
   const W=img.naturalWidth, H=img.naturalHeight, q=t%180!==0;
   const c=document.createElement('canvas');
+  c._artOf=img;                     // the same artwork to its colour swaps (artImgId)
   c.width=q?H:W; c.height=q?W:H;
   const x=c.getContext('2d');
   x.translate(c.width/2,c.height/2); x.rotate(t*Math.PI/180); x.drawImage(img,-W/2,-H/2);
@@ -40119,6 +40179,17 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // a turned design's page is placed turned (gtTurnRect); a back never turns
   const turn=design&&!box?gtTurnOf(design):0;
   const g=design?gtArtGrow(cutOf,b,r):b;
+  // where this picture lands on the canvas - its clip, bleed and all - so its
+  // colour swaps are made there and on no other tag (gtRenderPage)
+  if(gtPcRo) try{
+    const id=artImgId(img), m=ctx.getTransform();
+    gtPcRo._art.add(id);
+    const P=[[clip.x,clip.y],[clip.x+clip.w,clip.y],[clip.x,clip.y+clip.h],[clip.x+clip.w,clip.y+clip.h]]
+      .map(([u,v])=>[m.a*u*sc+m.c*v*sc+m.e,m.b*u*sc+m.d*v*sc+m.f]);
+    gtPcRo._rects.push({id,ph:ds&&ds.s?ds.s.id:null,
+      x0:Math.min(...P.map(q=>q[0])),y0:Math.min(...P.map(q=>q[1])),
+      x1:Math.max(...P.map(q=>q[0])),y1:Math.max(...P.map(q=>q[1]))});
+  }catch(e){}
   const took=vec?vec.take({id:key,turn},r,g,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
   if(took===true) return;
   ctx.save();
@@ -40688,8 +40759,10 @@ function gtBaseOver(sc){
 // side 'back' draws the other side of the paper: each tag at its mirrored place
 // (x' = paper width − x − w, the Custom Print Template's phOnSide), its back
 // picture and back words, and no base layer or dots — those are the front's.
+let gtPcRo=null;                    // the tags' boxes, while a page is drawn
 function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   const S=gtSheet;
+  const pcRo={_art:new Set(),_rects:[]}; canvas._pcRo=pcRo;
   const back=side==='back';
   // a placeholder where it stands on the side being drawn - the back moved by
   // its own margin shift as well
@@ -40714,6 +40787,8 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   const per=SL.length; if(!per){ if(!vec&&!back) gtDrawBase(ctx,sc); return; }
   const q=plan?plan.queue:gtQueue();
   const start=plan?plan.start:page*per;
+  gtPcRo=pcRo;
+  try{
   SL.forEach((slot,i)=>{
     const line=q[start+i]; if(!line) return;
     const at=onSide(slot);
@@ -40726,6 +40801,14 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
       finally{ gtDrawingSlot=null; if(vec) vec.turn=null; }
     });
   });
+  }finally{ gtPcRo=null; }
+  // the colours changed in the Print preview, on the tags only - before the
+  // base, the QR code and the cut lines go over them. Held to see the
+  // original, the screen shows the file's own; a PDF always takes them.
+  if((forExport||!printShowBefore)&&swapsForIds(pcRo._art).length) try{
+    const id=ctx.getImageData(0,0,canvas.width,canvas.height);
+    if(swapSheetPixels(id,pcRo._rects)) ctx.putImageData(id,0,0);
+  }catch(e){}
   // The base layer goes over the tags, so its dots and template lines are
   // never hidden by artwork — on screen and in the PDF alike. Multiplied, so
   // its white paper lets the tags show through while its black stays black.
@@ -41069,6 +41152,13 @@ function gtDraw(){
   const bp=document.getElementById('gtBackPreview');
   bp.style.display=both?'':'none';
   if(both) gtRenderPage(document.getElementById('gtCanvasBack'),gtPage,dim,false,gtViewFor('back'),null,'back');
+  // the print look (the swaps are already made, in gtRenderPage), and the check
+  if(pcCtx()==='gt'){
+    const gc=document.getElementById('gtCanvas'), gb=document.getElementById('gtCanvasBack');
+    try{ printColourScreen(gc,{_art:gc._pcRo&&gc._pcRo._art,_rects:null},main); }catch(e){}
+    if(both) try{ printColourScreen(gb,{_art:gb._pcRo&&gb._pcRo._art,_rects:null},'back'); }catch(e){}
+    printColourCheckSoon();
+  }
   // on Both, the sheet being worked on is the one outlined
   document.getElementById('gtFrontPreview').classList.toggle('gt-working',both&&gtSheetSide==='front');
   bp.classList.toggle('gt-working',both&&gtSheetSide==='back');
@@ -41378,6 +41468,7 @@ function gtSheetDrag(c,side){
       return;
     }
     const h=hit(at(e));
+    if(h&&h.line&&pcPopIsOpen()) pcPopPickGtLine(h.line,side());
     // While the sheet is held to one text, that text is the only thing on it
     // that answers: a press anywhere else moves the view and leaves the lock,
     // the line and the boxes exactly where they were.
@@ -46265,12 +46356,15 @@ async function gtVectorSources(side){
     if(!key||out.has(key)) continue;
     // Invert colours touches the front artwork only (see gtVecTaker)
     const inv=side!=='back'&&!!gtSheet.invertArt;
+    // the colours changed in the Print preview for this picture
+    const pic=side==='back'?(bk&&bk.img):gtImgs.get(d.id);
+    const swaps=pic?swapsForIds(new Set([artImgId(pic)])):[];
     if(!gtIsPdfFile(file)){
       // a picture finer than the 300dpi sheet at the size it prints on the
       // tag goes in at every pixel it has, the way a PDF does
       const img=side==='back'?null:gtImgs.get(d.id), dpi=img?gtDesignDpi(d):null;
       if(!inv&&img&&dpi&&dpi>PRINT_SHEET_DPI*1.05){
-        try{ const bytes=await imgPdfBytes(img); if(bytes) out.set(key,{bytes,page:0}); }catch(e){}
+        try{ const bytes=await imgPdfBytes(swaps.length?swappedArtCanvas(img,swaps):img); if(bytes) out.set(key,{bytes,page:0}); }catch(e){}
       }
       continue;
     }
@@ -46280,6 +46374,9 @@ async function gtVectorSources(side){
       let bytes=new Uint8Array(await (lift?lift.clean:blob).arrayBuffer()), inverted=false;
       // inverted at about 1200 dpi and placed as that, not left to the 300dpi sheet
       if(inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=true; }
+      // its colours swapped in its own drawing; one that cannot be read that
+      // way is left out, and drawn on the sheet, where its pixels are swapped
+      else if(bytes&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
       if(bytes) out.set(key,{bytes,page:0,inverted});
     }catch(e){}
   }
