@@ -39954,7 +39954,8 @@ function gtNestPlan(){
     }
     pages=handPages.concat(after);
   }
-  const plan=pages.map((pg,at)=>{
+  // one sheet's placeholders from where its tags were packed (at: which sheet)
+  const toPlan=(pg,at)=>{
     let uw=0,uh=0;
     // what each tag fills on the sheet: its width and height, swapped where it went in turned
     // (the real-cut-line packer says the box itself, and its turn in degrees;
@@ -39976,8 +39977,9 @@ function gtNestPlan(){
       });
       ox=(S.paperW-(ux1-ux0))/2-ux0; oy=(S.paperH-(uy1-uy0))/2-uy0;
     }
-    // a sheet arranged by hand is not centred: what was put there stays put
-    if(pg.hand){ ox=x0; oy=y0; }
+    // a sheet arranged by hand is not centred: what was put there stays put -
+    // nor one laid round the guides, which stand where they are on the paper
+    if(pg.hand||pg.anchor){ ox=x0; oy=y0; }
     // idx: which of the order's tags each placeholder holds (gtNestHandKeep)
     const slots=[], queue=[], idx=[];
     (pg.fixed||[]).forEach(({it,slot},k)=>{ slots.push({...slot,id:'n'+at+'_h'+k}); queue.push(it.line); idx.push(it.i); });
@@ -39995,12 +39997,67 @@ function gtNestPlan(){
     });
     return {shape:S.layoutFile,slots,per:slots.length,queue,idx,start:0,of:pages.length,at,
       lines:[...new Set(queue)],nest:true};
-  });
+  };
+  const plan=pages.map(toPlan);
+  // A sheet's own tags laid again on that same sheet, round its guides, where
+  // pushing them off could not: rows the width of the sheet have nowhere to go
+  // sideways, and 9 tags with half the sheet empty stayed across a line. By
+  // their real cut lines where the sheet is nested by them, else as boxes; null
+  // where they do not all go back on the sheet - a tag never changes sheet.
+  const guideRelay=at=>{
+    const G=gtGuidesOf(at), items=plan[at].idx.map(i=>all[i]).filter(Boolean);
+    if(!items.length) return null;
+    const bmax=Math.max(0,...items.map(it=>it.bl||0)), W=availW+gx, H=availH+gy;
+    // a line as a keep-clear strip in the packers' terms: a box carries its
+    // gutter on its right and bottom, so its strip sits half the gutter left
+    // between two prints past the line; a real cut line is grown by half the gap
+    // already, so its strip is the line itself
+    const strips=real=>{
+      const out=[], sx=real?0:Math.max(0,gx-2*bmax)/2, sy=real?0:Math.max(0,gy-2*bmax)/2;
+      G.x.forEach(X=>{ const b=X-x0+sx; if(b>0&&b<W) out.push({x:b,y:0,w:0.01,h:H}); });
+      G.y.forEach(Y=>{ const b=Y-y0+sy; if(b>0&&b<H) out.push({x:0,y:b,w:W,h:0.01}); });
+      return out;
+    };
+    if(S.nestReal){
+      const rall=items.map(it=>{ const id=it.line.designId; let p=null;
+        try{ p=flags.get(id)?flags.get(id).poly:gtNestPolyOf(gtDesign(id),size.get(id)); }catch(e){}
+        return p&&p.length>2?{...it,key:id+'|'+(it.bl||0),poly:p}:null; });
+      if(rall.every(Boolean)){
+        const deadline=Date.now()+1500;
+        for(const cmp of orders){
+          if(Date.now()>deadline) break;
+          let r=null;
+          try{ r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,'row',deadline,realDots.concat(strips(true)),
+            S.nestRotate!==false,gtNestStep()); }catch(e){ r=null; }
+          if(r&&r.pages.length===1&&!r.tooBig) return toPlan({items:r.pages[0].items,anchor:true},at);
+        }
+      }
+    }
+    for(const cmp of orders) for(const mode of Object.keys(GT_NEST_SCORE)){
+      const bin=gtNestBin(W,H,mode,dotBlocks.concat(strips(false))), got=[];
+      let ok=true;
+      for(const it of items.slice().sort(cmp)){
+        const e=2*(it.bl||0), ex=e+Math.max(0,gx-e), ey=e+Math.max(0,gy-e);
+        const alt=(S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
+        const pos=bin.add(Math.max(0.1,it.sz.w+ex),Math.max(0.1,it.sz.h+ey),alt);
+        if(!pos){ ok=false; break; }
+        got.push({it,pos});
+      }
+      if(ok) return toPlan({items:got,anchor:true},at);
+    }
+    return null;
+  };
   // the guides dragged off the rulers (Die Cut) push the tags off them, each on
-  // its own sheet - a sheet arranged by hand is left as it was put
+  // its own sheet - a sheet arranged by hand is left as it was put. Pushed
+  // first, which keeps the sheet as it was packed; laid again on the sheet
+  // round the lines only where that leaves tags across one.
   plan.guideLeft=0;
-  if(gtMode==='combo') plan.forEach((e,at)=>{ if(!(pages[at]&&pages[at].hand))
-    plan.guideLeft+=gtGuidePush(e.slots,e.queue.map(l=>gtBleedOf(gtDesign(l.designId),l)||0),gx,gy,mx,my,at); });
+  if(gtMode==='combo') plan.forEach((e,at)=>{
+    if(pages[at]&&pages[at].hand) return;
+    let left=gtGuidePush(e.slots,e.queue.map(l=>gtBleedOf(gtDesign(l.designId),l)||0),gx,gy,mx,my,at);
+    if(left){ const re=guideRelay(at); if(re){ plan[at]=re; left=0; } }
+    plan.guideLeft+=left;
+  });
   plan.tooBig=tooBig; plan.real=realUsed;
   // what each design was nested by, for the Nest settings line
   plan.why=ids.map(id=>{
