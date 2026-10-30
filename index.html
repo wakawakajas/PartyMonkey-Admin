@@ -42159,9 +42159,25 @@ function gtNeatCopies(l,n){
 // ticked "Fill the gaps" go after, into the room the bands leave (fill packs
 // what will not go there onto sheets of their own). W, H: the sheet less its
 // margins, plus one gutter; blocks: the dots' keep-clear boxes.
-function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
+function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf,cutOf,lead){
   let usedReal=false;
   const E=1e-6, hit=(x,y,w,h)=>(blocks||[]).filter(b=>x<b.x+b.w-E&&b.x<x+w-E&&y<b.y+b.h-E&&b.y<y+h-E);
+  // A dot over a tag's box only where it is over the tag itself: its cut line
+  // (poly, from ox oy) and bleed (bl) against the dot's keep-clear box (that
+  // box less the gutter a box carries - lead - given back). A dot in the empty
+  // corner of a round tag's box took that tag's place: 54 of 54 went 53 + 1.
+  const onCut=(poly,ox,oy,bl,d)=>{
+    if(!poly) return true;
+    const lx=lead?lead.x:0, ly=lead?lead.y:0;
+    const r={x:d.x-lx-bl,y:d.y-ly-bl,w:d.w+lx+2*bl,h:d.h+ly+2*bl};
+    if(poly.some(([px,py])=>px+ox>r.x&&px+ox<r.x+r.w&&py+oy>r.y&&py+oy<r.y+r.h)) return true;
+    const inP=(X,Y)=>{ let c=false;
+      for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+        const yi=poly[i][1]+oy, yj=poly[j][1]+oy;
+        if((yi>Y)!==(yj>Y)&&X<(poly[j][0]-poly[i][0])*(Y-yi)/(yj-yi)+poly[i][0]+ox) c=!c; }
+      return c; };
+    return [[r.x,r.y],[r.x+r.w,r.y],[r.x,r.y+r.h],[r.x+r.w,r.y+r.h]].some(([X,Y])=>inP(X,Y));
+  };
   const bands=new Map(), free=[], seen=new Map(), copies=new Map(), pageOf=new Map();
   all.forEach(it=>{ const id=it.line.id; seen.set(id,(seen.get(id)||0)+1); });
   all.forEach(it=>{
@@ -42276,7 +42292,7 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
               if(x<b-E) continue;
               if(x+P.bw>Wl+E){ past=true; break; }
               if(k+out.length>=items.length) break;
-              if(dots&&hit(x-b,y,P.bw+ex,P.bh+ey).length) continue;
+              if(dots&&hit(x-b,y,P.bw+ex,P.bh+ey).some(d=>onCut(u.deg?null:rl.poly,x,y+b,b,d))) continue;
               out.push({x,deg:u.deg});
             }
             if(past) break;
@@ -42317,9 +42333,10 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf){
       while(y+c.h>H+E) newPage();
       // one row, left to right, stepping past any dot in the way: to the next
       // column clear of it, so the rows' columns stay lined up
+      const cut=!c.rot&&cutOf?cutOf(it0.line.designId):null, bl0=it0.bl||0;
       const rowAt=dx=>{ const xs=[]; let x=dx;
         while(k+xs.length<items.length&&x+c.w<=W+E){
-          const b=hit(x,y,c.w,c.h);
+          const b=hit(x,y,c.w,c.h).filter(d=>onCut(cut,x+bl0,y+bl0,bl0,d));
           if(b.length){ x=dx+Math.ceil((Math.max(...b.map(r=>r.x+r.w))-dx-E)/c.w)*c.w; continue; }
           xs.push(x); x+=c.w; }
         return xs; };
@@ -42736,7 +42753,12 @@ function gtNestPlan(){
         if(!poly.has(id)){ let p=null; try{ p=flags.get(id)?flags.get(id).poly:gtNestPolyOf(gtDesign(id),size.get(id)); }catch(e){} poly.set(id,p&&p.length>2?p:null); }
         const p=poly.get(id); return p?{poly:p,rx:Math.max(hx,it.bl||0),ry:Math.max(hy,it.bl||0),key:id+'|'+(it.bl||0)}:null;
       };
-    })():null);
+    })():null,
+    // each design's cut line, for the dots: one in the corner of a round
+    // tag's box is clear of the tag itself
+    (()=>{ const poly=new Map(); return id=>{
+      if(!poly.has(id)){ let p=null; try{ p=flags.get(id)?flags.get(id).poly:gtNestPolyOf(gtDesign(id),size.get(id)); }catch(e){} poly.set(id,p&&p.length>2?p:null); }
+      return poly.get(id); }; })(),{x:lead(gx),y:lead(gy)});
   else if(memo) packed={tooBig:memo.tooBig,fill:memo.fill,
     pages:memo.pages.map(pg=>({...pg,items:pg.items.map(({it,pos})=>({it:all[it.i],pos})).filter(x=>x.it)}))};
   else orders.forEach(cmp=>{
