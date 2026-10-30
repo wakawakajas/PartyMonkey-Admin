@@ -34216,12 +34216,15 @@ const pdfLift=(function(){
 // Only a stroke with no fill, in a plain red (CMYK 0/100/100/0, RGB red), is
 // taken: the outline has to cover most of the page, and a circle has to be small
 // and inside it. Any other red line in the artwork is left exactly as it is.
+// A stroke turned into a shape (Outline Stroke / Expand) counts as well: a red
+// fill made only of thin rings, each an outer loop with one just inside it, is
+// cut on its outer loop. A solid red shape is artwork and is left alone.
 function pdfCutScan(content,box,sheetOn){
   let s=''; for(let i=0;i<content.length;i+=8192) s+=String.fromCharCode.apply(null,content.subarray(i,i+8192));
   const n=s.length, WS=/[\0\t\n\f\r ]/, DL=/[\0\t\n\f\r ()<>\[\]{}\/%]/;
   const mul=(m,c)=>[m[0]*c[0]+m[1]*c[2],m[0]*c[1]+m[1]*c[3],m[2]*c[0]+m[3]*c[2],m[2]*c[1]+m[3]*c[3],
                     m[4]*c[0]+m[5]*c[2]+c[4],m[4]*c[1]+m[5]*c[3]+c[5]];
-  let ctm=[1,0,0,1,0,0], stroke=null; const stack=[];
+  let ctm=[1,0,0,1,0,0], stroke=null, fill=null; const stack=[];
   const isCut=c=>!!c&&(c.k==='cmyk'?(c.v[0]<=0.15&&c.v[3]<=0.15&&c.v[1]>=0.85&&c.v[2]>=0.75)
                     :c.k==='rgb'?(c.v[0]>=0.8&&c.v[1]<=0.3&&c.v[2]<=0.3):false);
   let args=[], argStart=-1, path=[], cur=null, pathStart=-1;
@@ -34248,8 +34251,8 @@ function pdfCutScan(content,box,sheetOn){
     if(!isNaN(num)){ if(argStart<0) argStart=at; args.push(num); continue; }
     const a=args, from=argStart<0?at:argStart;
     switch(tok){
-      case 'q': stack.push({ctm:ctm.slice(),stroke}); break;
-      case 'Q': { const t=stack.pop(); if(t){ ctm=t.ctm; stroke=t.stroke; } break; }
+      case 'q': stack.push({ctm:ctm.slice(),stroke,fill}); break;
+      case 'Q': { const t=stack.pop(); if(t){ ctm=t.ctm; stroke=t.stroke; fill=t.fill; } break; }
       case 'cm': if(a.length>=6) ctm=mul(a.slice(-6),ctm); break;
       case 'K': if(a.length>=4) stroke={k:'cmyk',v:a.slice(-4)}; break;
       case 'RG': if(a.length>=3) stroke={k:'rgb',v:a.slice(-3)}; break;
@@ -34257,6 +34260,12 @@ function pdfCutScan(content,box,sheetOn){
       case 'SC': case 'SCN': {
         const nums=a.filter(x=>typeof x==='number');
         stroke=nums.length===a.length&&nums.length===4?{k:'cmyk',v:nums}:nums.length===a.length&&nums.length===3?{k:'rgb',v:nums}:{k:'other',v:nums}; break; }
+      case 'k': if(a.length>=4) fill={k:'cmyk',v:a.slice(-4)}; break;
+      case 'rg': if(a.length>=3) fill={k:'rgb',v:a.slice(-3)}; break;
+      case 'g': if(a.length>=1) fill={k:'gray',v:a.slice(-1)}; break;
+      case 'sc': case 'scn': {
+        const nums=a.filter(x=>typeof x==='number');
+        fill=nums.length===a.length&&nums.length===4?{k:'cmyk',v:nums}:nums.length===a.length&&nums.length===3?{k:'rgb',v:nums}:{k:'other',v:nums}; break; }
       case 'm': if(a.length>=2){ begin(from); cur=pt(a[a.length-2],a[a.length-1]); path.push({pts:[cur],closed:false}); } break;
       case 'l': if(a.length>=2&&seg()){ begin(from); cur=pt(a[a.length-2],a[a.length-1]); seg().pts.push(cur); } break;
       case 'c': case 'v': case 'y': if(seg()&&cur){
@@ -34277,6 +34286,10 @@ function pdfCutScan(content,box,sheetOn){
         if((tok==='S'||tok==='s')&&pathStart>=0&&isCut(stroke)){
           if(tok==='s'&&seg()) seg().closed=true;
           cands.push({start:pathStart,end:i,loops:path.filter(p=>p.pts.length>=2)});
+        }
+        else if((tok==='f'||tok==='F'||tok==='f*')&&pathStart>=0&&isCut(fill)){
+          const outer=pdfRingOuters(path.filter(p=>p.pts.length>=2));
+          if(outer) cands.push({start:pathStart,end:i,loops:outer});
         }
         path=[]; cur=null; pathStart=-1; break;
       case 'BI': { const id=s.indexOf('ID',i); if(id<0){ i=n; break; }
@@ -34356,6 +34369,29 @@ function pdfCutScan(content,box,sheetOn){
           holes:holes.map(h=>({pts:dedupe(h.pts),b:h.b})),
           extras:extras.map(e=>({pts:e.closed?dedupe(e.pts):e.pts,closed:e.closed})),
           ...(pieces.length?{pieces}:{})};
+}
+
+// The loops of a filled path that is only an outlined stroke: every loop paired
+// with one just inside it (each side within 3pt), the outer one of each pair
+// given back as the line. null for anything else, so a solid shape stays art.
+function pdfRingOuters(loops){
+  if(!loops.length||loops.length%2) return null;
+  const bs=loops.map(l=>{ let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+    l.pts.forEach(([x,y])=>{ x0=Math.min(x0,x); y0=Math.min(y0,y); x1=Math.max(x1,x); y1=Math.max(y1,y); });
+    return {x0,y0,x1,y1,a:(x1-x0)*(y1-y0)}; });
+  const used=new Array(loops.length).fill(false), outs=[], T=3;
+  for(let i=0;i<loops.length;i++){ if(used[i]) continue;
+    let j=-1;
+    for(let k=i+1;k<loops.length;k++){ if(used[k]) continue;
+      const A=bs[i], B=bs[k];
+      if(Math.abs(A.x0-B.x0)<=T&&Math.abs(A.y0-B.y0)<=T&&Math.abs(A.x1-B.x1)<=T&&Math.abs(A.y1-B.y1)<=T){ j=k; break; } }
+    if(j<0) return null;
+    used[i]=used[j]=true;
+    const o=bs[i].a>=bs[j].a?i:j;
+    if(Math.min(bs[o].x1-bs[o].x0,bs[o].y1-bs[o].y0)<=2*T) return null;   // a thin bar, not a ring
+    outs.push({pts:loops[o].pts,closed:true});
+  }
+  return outs;
 }
 
 async function inflateBytes(bytes){
