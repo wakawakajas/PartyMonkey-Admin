@@ -5546,6 +5546,10 @@ html body :is(#gtNl,#pcNl) .gtnl-th small{position:absolute;right:2px;bottom:2px
   background:rgba(28,28,30,.72);color:#fff;font:700 9px/13px system-ui,sans-serif;text-align:center}
 html body :is(#gtNl,#pcNl) .gtnl-th.on small{background:#5B47F0}
 
+/* the order line whose tags are being pointed at on the sheet */
+#giftTagScreen.gt-nl #gtOrderList .ph-card.nl-hov{border-color:#CFC6FF!important;box-shadow:0 0 0 3px rgba(91,71,240,.14),0 6px 16px rgba(91,71,240,.12)!important}
+body.dk #giftTagScreen.gt-nl #gtOrderList .ph-card.nl-hov{border-color:#5A50C8!important;box-shadow:0 0 0 3px rgba(91,71,240,.3)!important}
+
 /* the sheet column: no scroll bar - the sheet fits; zoomed in it still pans with the wheel */
 #gtNlSheet,#gtNlDSheet,#pcNlSheet{scrollbar-width:none}
 :is(#gtNlSheet,#gtNlDSheet,#pcNlSheet)::-webkit-scrollbar{display:none}
@@ -38552,6 +38556,35 @@ function gtNlSavedNote(busy){
 // The order's three figures, as the mock-up has them under the order - tags,
 // sheets, and how much of this sheet's printable area its tags cover - and the
 // same used figure as a bar beside the sheets under the canvas.
+// The order and the sheet point at each other: a line hovered on the order
+// keeps its own tags bright on the sheet and fades the rest, and a tag hovered
+// on the sheet does the same and lights its line on the order.
+let gtNlHov=null;
+function gtNlHover(id){
+  id=id||null; if(id===gtNlHov) return; gtNlHov=id;
+  document.querySelectorAll('#gtOrderList [data-gt-line]').forEach(c=>c.classList.toggle('nl-hov',!!id&&c.dataset.gtLine===id));
+  try{ gtDraw(); }catch(e){}
+}
+(function gtNlHoverWiring(){
+  const list=document.getElementById('gtOrderList'), cv=document.getElementById('gtCanvas');
+  if(!list||!cv) return;
+  list.addEventListener('mouseover',e=>{ if(!gtNlOn) return; const c=e.target.closest('[data-gt-line]'); gtNlHover(c&&c.dataset.gtLine); });
+  list.addEventListener('mouseleave',()=>gtNlHover(null));
+  let raf=0;
+  cv.addEventListener('mousemove',e=>{
+    if(!gtNlOn||e.buttons) return;
+    cancelAnimationFrame(raf); raf=requestAnimationFrame(()=>{
+      if(gtMainSide()!=='front'){ gtNlHover(null); return; }
+      const r=cv.getBoundingClientRect(); if(!r.width) return;
+      const V=gtViewFor('front')||{x:0,y:0,w:gtSheet.paperW,h:gtSheet.paperH};
+      const x=V.x+(e.clientX-r.left)/r.width*V.w, y=V.y+(e.clientY-r.top)/r.height*V.h;
+      const at=gtPageAt(gtPage), SL=(at&&at.nest&&at.slots)||gtSheet.slots, q=at?at.queue:gtQueue(), st=at?at.start:0;
+      let hit=null; SL.forEach((sl,i)=>{ if(x>=sl.x&&x<=sl.x+sl.w&&y>=sl.y&&y<=sl.y+sl.h&&q[st+i]) hit=q[st+i].id; });
+      gtNlHover(hit);
+    });
+  });
+  cv.addEventListener('mouseleave',()=>{ cancelAnimationFrame(raf); gtNlHover(null); });
+})();
 function gtNlStats(q,pages){
   const box=document.getElementById('gtNlOrder'); if(!box) return;
   let st=document.getElementById('gtNlStats');
@@ -44555,6 +44588,14 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
     ctx.strokeStyle='#CCF344'; ctx.lineWidth=1; ctx.setLineDash([4,3]); ctx.strokeRect(x,y,w,h);
     ctx.restore();
   }
+  // a line hovered (on the order or on the sheet): its tags stay bright, the
+  // rest fade back - preview only
+  if(!forExport&&!vec&&typeof gtNlHov!=='undefined'&&gtNlHov&&gtNlOn){
+    ctx.save(); ctx.fillStyle='rgba(255,255,255,.68)';
+    SL.forEach((slot,i)=>{ const line=q[start+i]; if(!line||line.id===gtNlHov) return;
+      const at=onSide(slot); ctx.fillRect(at.x*sc,at.y*sc,at.w*sc,at.h*sc); });
+    ctx.restore();
+  }
   if(back&&!forExport) ctx.restore();
   // and the dots over everything, on the preview and on the printed sheet
   // alike — artwork that ran over one would blind the camera. The front's.
@@ -45320,11 +45361,19 @@ function gtGuidesPaint(){
     lay.innerHTML='<div data-ruler="y" title="Drag down onto the sheet for a guide across"></div>'
       +'<div data-ruler="x" title="Drag across onto the sheet for a guide down"></div>'
       +'<button type="button" data-scope title="Which sheets a new guide goes on - tap to change"></button>'
+      +'<button type="button" data-greset title="Take every guide line off, on every sheet">↺ Reset</button>'
       +'<div data-lines></div><div data-tip style="display:none"></div>';
     card.appendChild(lay);
     lay.addEventListener('pointerdown',gtGuideDown);
     lay.querySelector('[data-scope]').addEventListener('click',()=>{
       gtGuideScope=gtGuideScope==='all'?'sheet':'all'; gtGuidesPaint(); });
+    // every guide off, on every sheet
+    lay.querySelector('[data-greset]').addEventListener('click',()=>{
+      if(!gtSheet.guides&&!gtSheet.guidesBy) return;
+      if(!confirm('Take every guide line off, on every sheet?')) return;
+      delete gtSheet.guides; delete gtSheet.guidesBy;
+      gtNestCache=null; gtPickOnly(null); gtRenderSlots(); gtDraw(); gtSaveSoon(); try{ gtNestSync(); }catch(e){}
+    });
     // a line lies over the sheet: the wheel over it still zooms the sheet
     lay.addEventListener('wheel',e=>{
       if(!e.target.closest('[data-guide]')) return;
@@ -45353,6 +45402,11 @@ function gtGuidesPaint(){
   sb.style.cssText=`position:absolute;left:${L+2}px;top:${T-GT_RULER-3}px;height:${GT_RULER}px;padding:0 8px;`
     +`border:0;border-radius:4px;font-size:11px;line-height:${GT_RULER}px;white-space:nowrap;cursor:pointer;min-height:0;min-width:0;margin:0;box-sizing:border-box;box-shadow:none;`
     +`background:${one?GT_GUIDE_ONE:GT_GUIDE_INK};color:#111;`;
+  const rb=lay.querySelector('[data-greset]'), anyG=!!(gtSheet.guides||gtSheet.guidesBy);
+  rb.style.cssText=`position:absolute;left:${L+2+sb.offsetWidth+4}px;top:${T-GT_RULER-3}px;height:${GT_RULER}px;padding:0 8px;`
+    +`border:0;border-radius:4px;font-size:11px;line-height:${GT_RULER}px;white-space:nowrap;cursor:pointer;min-height:0;min-width:0;margin:0;box-sizing:border-box;box-shadow:none;`
+    +`background:#fff;color:#111;opacity:${anyG?1:.45};`;
+  rb.disabled=!anyG;
   let html='';
   const draw=(scope,set,ink)=>{
     const where=scope==='all'?'every sheet':'sheet '+scope+' only';
