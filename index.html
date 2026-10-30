@@ -4811,7 +4811,7 @@ body.dk #gtNlLib #gtDesignList .item-photo{background:rgba(255,255,255,.05)}
 .gtnl-tabs button.on{color:#111;font-weight:600;border-color:#5B47F0}
 .gtnl-pane{padding:8px;min-height:0}
 .gtnl-pane[hidden]{display:none!important}
-.gtnl-stage{position:relative;min-width:0;min-height:0;display:grid;grid-template-columns:290px minmax(0,1fr);gap:10px}
+.gtnl-stage{position:relative;min-width:0;min-height:0;display:grid;grid-template-columns:var(--rw,290px) minmax(0,1fr);gap:10px}
 .gtnl-rearr{padding:0}
 .gtnl-phead{position:sticky;top:0;z-index:2;padding:10px 14px;font-weight:600;font-size:14px;border-bottom:1px solid rgba(20,20,40,.07);background:rgba(255,255,255,.85);border-radius:18px 18px 0 0}
 #gtNlRearr{padding:8px}
@@ -5516,6 +5516,12 @@ html body.dk #pcNlPP :is(button,.btn-outline){color:#E5E5EA!important;background
 .nl-lb[data-nm]{width:auto!important;min-width:0!important;display:flex!important;align-items:center;justify-content:flex-start;gap:5px;height:18px}
 .nl-lb[data-nm] svg{width:16px!important;height:16px!important;flex:none}
 .nl-lb[data-nm]::after{content:attr(data-nm);font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+
+/* Rearrange's right edge drags it wider or narrower; the sheet takes the rest */
+.gtnl-rgrip{position:absolute;top:14px;bottom:14px;left:calc(var(--rw,290px) - 1px);width:12px;z-index:6;cursor:col-resize;border-radius:6px;touch-action:none}
+.gtnl-rgrip::after{content:"";position:absolute;left:4px;top:50%;width:4px;height:44px;margin-top:-22px;border-radius:3px;background:#CFC6FF;opacity:.55;transition:opacity .15s,background .15s}
+.gtnl-rgrip:hover::after,.gtnl-rgrip.drag::after{opacity:1;background:#5B47F0}
+body.nl-resizing,body.nl-resizing *{cursor:col-resize!important;user-select:none!important}
 
 /* the sheet column: no scroll bar - the sheet fits; zoomed in it still pans with the wheel */
 #gtNlSheet,#gtNlDSheet,#pcNlSheet{scrollbar-width:none}
@@ -13777,13 +13783,17 @@ function pcNlAfterDraw(page,n){
   document.getElementById('pcNlThumbs').addEventListener('click',e=>{ const b=e.target.closest('[data-pc-page]'); if(!b) return;
     state.page=+b.dataset.pcPage; drawAll(); });
   nlMagnifier(document.getElementById('pcNlMag'),document.getElementById('pcNlLens'),document.getElementById('pcNlLens').querySelector('canvas'),
-    document.getElementById('pcNlSheet'),()=>pcNlOn&&currentScreen==='tool-custom');
+    document.getElementById('pcNlSheet'),()=>pcNlOn&&currentScreen==='tool-custom',
+    (c,fx,fy,out)=>{
+      if(!state.placeholders.length) return;
+      const side=c.id==='canvasBack'?'back':'front', V=phView(side), p={x:V.x+fx*V.w,y:V.y+fy*V.h};
+      phZoomBy(out?1/2:2,p,side); const Z=phZs(side); if(!out&&Z.on){ Z.at=p; drawAll(); }
+    });
 })();
 // The magnifier on the new-layout sheets: the button or Space turns it on and
 // off; while on, a round glass follows the mouse over the sheet, a click on the
-// sheet zooms the glass closer (3x, 5x, 8x, then back) and Shift+click further
-// out. Those clicks are the glass's own - nothing on the sheet is picked or moved.
-function nlMagnifier(mag,lens,lc,sheet,active){
+// sheet zooms the whole sheet in on that spot and Shift+click back out. Those clicks are the glass's own - nothing on the sheet is picked or moved.
+function nlMagnifier(mag,lens,lc,sheet,active,zoomTo){
   const ZS=[3,5,8]; let on=false, zi=0, last=null;
   const draw=e=>{
     const c=e.target.closest&&e.target.closest('canvas'); if(!c||c===lc){ lens.hidden=true; return; }
@@ -13795,7 +13805,7 @@ function nlMagnifier(mag,lens,lc,sheet,active){
     lens.style.left=(e.clientX-sr.left+sheet.scrollLeft-100)+'px'; lens.style.top=(e.clientY-sr.top+sheet.scrollTop-100)+'px'; lens.hidden=false;
   };
   const set=v=>{ on=v; zi=0; mag.classList.toggle('on',on); sheet.classList.toggle('nl-magging',on);
-    mag.title=on?'Magnifier on - click the sheet to zoom closer, Shift+click further out; Space or this button to stop'
+    mag.title=on?'Magnifier on - click the sheet to zoom in there, Shift+click to zoom out; Space or this button to stop'
       :'Magnifier (Space) - a zoom glass that follows the mouse over the sheet';
     if(!on) lens.hidden=true; else if(last) draw(last); };
   set(false);
@@ -13808,8 +13818,12 @@ function nlMagnifier(mag,lens,lc,sheet,active){
     if(onSheet(e)){ e.stopPropagation(); e.preventDefault(); } },true));
   sheet.addEventListener('click',e=>{
     if(!onSheet(e)) return; e.stopPropagation(); e.preventDefault();
-    zi=e.shiftKey?Math.max(0,zi-1):(zi+1)%ZS.length; draw(e);
-    if(typeof gtNlToast==='function'&&sheet.id==='gtNlSheet') gtNlToast('Magnifier '+ZS[zi]+'\u00d7');
+    // the whole sheet closes in on the spot clicked (Shift+click: back out),
+    // the glass staying on to look closer still
+    const c=e.target.closest('canvas'), r=c.getBoundingClientRect();
+    if(zoomTo&&r.width&&r.height) zoomTo(c,(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height,e.shiftKey);
+    else zi=e.shiftKey?Math.max(0,zi-1):(zi+1)%ZS.length;
+    requestAnimationFrame(()=>draw(e));
   },true);
   document.addEventListener('keydown',e=>{
     if(!active()) return;
@@ -13820,6 +13834,28 @@ function nlMagnifier(mag,lens,lc,sheet,active){
     e.preventDefault(); set(!on);
   });
 }
+// Rearrange is dragged wider or narrower by its right edge (as the mock-up had
+// it); kept per page on this computer, double-click puts it back
+(function nlRearrGrips(){
+  [['gtNlStage','gtNlRw'],[document.querySelector('#pcNl .pcnl-stage'),'pcNlRw']].forEach(([st,key])=>{
+    const stage=typeof st==='string'?document.getElementById(st):st; if(!stage) return;
+    const g=document.createElement('div'); g.className='gtnl-rgrip'; g.title='Drag to make Rearrange wider or narrower (double-click: back to normal)';
+    stage.appendChild(g);
+    const set=(w,keep)=>{ w=Math.round(Math.max(230,Math.min(520,w))); stage.style.setProperty('--rw',w+'px');
+      if(keep) try{ localStorage.setItem(key,String(w)); }catch(e){} };
+    try{ const w=+localStorage.getItem(key); if(w) set(w,false); }catch(e){}
+    g.addEventListener('pointerdown',e=>{
+      e.preventDefault(); try{ g.setPointerCapture(e.pointerId); }catch(err){}
+      g.classList.add('drag'); document.body.classList.add('nl-resizing');
+      const left=stage.getBoundingClientRect().left;
+      const move=m=>set(m.clientX-left,true);
+      const up=()=>{ g.removeEventListener('pointermove',move); g.removeEventListener('pointerup',up); g.removeEventListener('pointercancel',up);
+        g.classList.remove('drag'); document.body.classList.remove('nl-resizing'); };
+      g.addEventListener('pointermove',move); g.addEventListener('pointerup',up); g.addEventListener('pointercancel',up);
+    });
+    g.addEventListener('dblclick',()=>{ stage.style.removeProperty('--rw'); try{ localStorage.removeItem(key); }catch(e){} });
+  });
+})();
 // ---------- the Custom Template's cards, boxed topic by topic ----------
 // The gift tag sheet's cards are written in boxes. These cards were written as one
 // long form with a heading at the top of each part, so the same boxes are made
@@ -38685,7 +38721,14 @@ async function gtNlNamesFile(card){
   });
   // the magnifier: on, a round glass follows the mouse over the sheet
   nlMagnifier(document.getElementById('gtNlMag'),document.getElementById('gtNlLens'),document.getElementById('gtNlLensC'),
-    document.getElementById('gtNlSheet'),()=>gtNlOn&&currentScreen==='tool-gift-tag');
+    document.getElementById('gtNlSheet'),()=>gtNlOn&&currentScreen==='tool-gift-tag',
+    (c,fx,fy,out)=>{
+      if(!gtSheet.slots.length) return;
+      const side=c.id==='gtCanvasBack'?'back':gtMainSide();
+      const V=gtViewFor(side)||{x:0,y:0,w:gtSheet.paperW,h:gtSheet.paperH};
+      let p={x:V.x+fx*V.w,y:V.y+fy*V.h}; if(side!==gtSheetSide) p={x:gtSheet.paperW-p.x,y:p.y};
+      gtZoomBy(out?1/2:2,p); if(!out&&gtZoomOn){ gtZoomAt=p; gtDraw(); }
+    });
   // the empty sheet's button opens the library
 })();
 (function gtNlFoldWiring(){
