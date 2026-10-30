@@ -44808,8 +44808,9 @@ document.getElementById('gtOrderList').addEventListener('focusin',e=>{
       if(gtZoomOn&&gtZoomAt) gtZoomAt={x:gtSheet.paperW-gtZoomAt.x,y:gtZoomAt.y};
     }
   }
-  // a quantity being typed is not a tag being looked at: the sheet stays as it is
-  if(e.target.matches('[data-gtl="qty"]')) return;
+  // a quantity being typed or stepped (its - / + buttons), a line's SHEET, a
+  // tick or a button is not a tag being looked at: the sheet stays as it is
+  if(e.target.matches('[data-gtl="qty"],[data-gt-nl-qty],[data-gtl="nestPage"],button,input[type=checkbox]')) return;
   gtZoomTo(card.dataset.gtLine);
 });
 // tapping anywhere on a line marks it too, not only a box that takes the caret
@@ -45043,7 +45044,7 @@ function gtSheetDrag(c,side){
         // be on this tag, not merely in the box round it
         if(inBox&&slot0.tw&&(P.mx<slot.x||P.my<slot.y||P.mx>slot.x+slot.w||P.my>slot.y+slot.h)) continue;
       }
-      const d=gtDesign(line.designId); if(!d){ if(inBox&&!boxHit) boxHit={line}; continue; }
+      const d=gtDesign(line.designId); if(!d){ if(inBox&&!boxHit) boxHit={line,slotId:s0.id}; continue; }
       const art=gtTagArt(line,slot);
       // topmost first, so a box drawn over another takes the tap
       const fs=gtFieldsOf(d,line).filter(f=>gtSideOf(f)===(back?'back':'front'));
@@ -45063,11 +45064,11 @@ function gtSheetDrag(c,side){
         const g=gtGripMm();
         const corner=(b.w-u*b.w)<=Math.min(g,b.w*0.35)
                    &&(b.h-v*b.h)<=Math.min(g,b.h*0.35);
-        return {line,f,b,corner};
+        return {line,f,b,corner,slotId:s0.id};
       }
       // the tag, but not a box: still its line - unless words of another tag,
       // dragged out over this one, are under the pointer further on
-      if(inBox&&!boxHit) boxHit={line};
+      if(inBox&&!boxHit) boxHit={line,slotId:s0.id};
     }
     return boxHit;
   };
@@ -45213,6 +45214,7 @@ function gtSheetDrag(c,side){
     }
     // the bare sheet is not a tag: tapping it puts the boxes away, so the
     // dashed outlines belong to the tag being worked on and nothing else
+    gtTapSlot=h&&h.slotId||null;
     if(!h){
       if(gtSelLine){ gtMarkLine(null); gtDraw(); }
       startPan(e); return;
@@ -46558,6 +46560,40 @@ function gtPickAll(){
 function gtPickNone(){ gtPickOnly(null); gtSlotCardSync(); gtSlotScopeSync(); gtDraw(); }
 function gtDeletePicked(){
   const n=gtSheet.slots.filter(s=>gtSelSet.has(s.id)).length; if(!n) return;
+  // On a nested sheet a placeholder is one of a line's tags: deleted, that
+  // line is one fewer (its qty went down), and the sheets are nested again -
+  // the placeholder alone going left the tag with nowhere to print, the order
+  // still asking for it.
+  const en=gtNestEntry();
+  if(en){
+    const count=new Map(), gone=new Set();
+    en.slots.forEach((s,k)=>{ const l=en.queue[k]; if(!l||!gtSelSet.has(s.id)) return;
+      count.set(l.id,(count.get(l.id)||0)+1);
+      if(gtNestCache&&gtNestCache.keys&&en.idx&&en.idx[k]!=null) gone.add(gtNestCache.keys[en.idx[k]]); });
+    let took=0;
+    count.forEach((c,id)=>{
+      const l=gtOrder.find(x=>x.id===id); if(!l) return;
+      // a sheet broken into stickers counts stickers, not copies: left alone
+      if(gtLineSplits(l,gtDesign(l.designId))) return;
+      const q=Math.floor(Number(l.qty)||0), nq=Math.max(0,q-c); took+=q-nq; l.qty=nq;
+      // tags moved by hand stay put: the line's copies past its new qty take
+      // the numbers of the ones deleted
+      if(gtNestHand){
+        const occ=k=>Number(k.slice(k.lastIndexOf('#')+1))||0, base=k=>k.slice(0,k.lastIndexOf('#'));
+        const mine=k=>k&&base(k).split('|')[0]===id;
+        const free=[...gone].filter(mine).map(occ).filter(o=>o<=nq).sort((a,b)=>a-b);
+        gtNestHand={...gtNestHand,sig:'',pages:gtNestHand.pages.map(pg=>pg.filter(h=>!h.key||!gone.has(h.key)).map(h=>{
+          if(!mine(h.key)||occ(h.key)<=nq) return h;
+          const o=free.shift(); return o?{...h,key:base(h.key)+'#'+o}:null; }).filter(Boolean))};
+      }
+    });
+    if(took){
+      gtNestCache=null; gtPickOnly(null);
+      gtRenderOrder(); gtRenderSlots(); gtDraw(); gtSaveSoon(); gtNestSync();
+      gtSlotToolMsg(`✓ ${took} tag${took===1?'':'s'} deleted - taken off the order`);
+      return;
+    }
+  }
   gtSetSlotsList(gtSheet.slots.filter(s=>!gtSelSet.has(s.id)));
   gtPickOnly(null);
   gtSlotsChanged();
@@ -47229,8 +47265,20 @@ document.getElementById('gtContourBtn').addEventListener('click',()=>gtSetSlotEd
 // A placeholder dropped is one fewer tag on the sheet — which is how a run is
 // made room in for a one-off. Delete takes the ones in hand, so it can be done
 // from the sheet rather than by finding its card and its little ×.
+// The tag last tapped on the sheet (gtTapSlot): Delete takes it off a nested
+// sheet, and one off its line's qty, without Contours on first.
+let gtTapSlot=null;
 document.addEventListener('keydown',e=>{
-  if(!gtSlotEdit) return;
+  if(!gtSlotEdit){
+    if(currentScreen!=='tool-gift-tag'||!gtTapSlot||(e.key!=='Delete'&&e.key!=='Backspace')) return;
+    const t=e.target;
+    if(t&&((t.tagName==='INPUT'&&t.type!=='checkbox')||t.tagName==='TEXTAREA'||t.tagName==='SELECT'||t.isContentEditable)) return;
+    if(document.querySelector('.modal-bg.open,.sheet-bg.open')) return;
+    const en=gtNestEntry(); if(!en||!en.slots.some(s=>s.id===gtTapSlot)) return;
+    e.preventDefault();
+    gtPickOnly(null); gtSelSet.add(gtTapSlot); gtTapSlot=null;
+    gtDeletePicked(); return;
+  }
   if(currentScreen!=='tool-gift-tag') return;
   // not while somebody is typing a number into one of the cards
   const t=e.target;
