@@ -41725,24 +41725,67 @@ const GT_NEST_SCORE={
   short:(f,w,h)=>[Math.min(f.w-w,f.h-h),Math.max(f.w-w,f.h-h)],
   long:(f,w,h)=>[Math.max(f.w-w,f.h-h),Math.min(f.w-w,f.h-h)]
 };
-function gtNestBin(W,H,mode,blocks){
+// A dot's keep-clear box (d) is over a tag only where it is over the tag
+// itself: its cut line (poly, mm from its top-left, set at ox oy) grown by its
+// bleed (bl), against the box with the gutter a box carries (lead) given back.
+// A dot in the empty corner of a round sticker's box is clear of the sticker.
+function gtDotOnCut(poly,ox,oy,bl,d,lead){
+  if(!poly) return true;
+  const lx=lead?lead.x:0, ly=lead?lead.y:0;
+  const r={x:d.x-lx-bl,y:d.y-ly-bl,w:d.w+lx+2*bl,h:d.h+ly+2*bl};
+  if(poly.some(([px,py])=>px+ox>r.x&&px+ox<r.x+r.w&&py+oy>r.y&&py+oy<r.y+r.h)) return true;
+  const inP=(X,Y)=>{ let c=false;
+    for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+      const yi=poly[i][1]+oy, yj=poly[j][1]+oy;
+      if((yi>Y)!==(yj>Y)&&X<(poly[j][0]-poly[i][0])*(Y-yi)/(yj-yi)+poly[i][0]+ox) c=!c; }
+    return c; };
+  return [[r.x,r.y],[r.x+r.w,r.y],[r.x,r.y+r.h],[r.x+r.w,r.y+r.h]].some(([X,Y])=>inP(X,Y));
+}
+// soft: {blocks, lead} - the dots, kept clear of each tag's real cut line
+// rather than of its whole box (gtDotOnCut). A tag with no cut line given
+// keeps clear of their boxes as before.
+function gtNestBin(W,H,mode,blocks,soft){
   const E=1e-6; let free=[{x:0,y:0,w:W,h:H}];
   (blocks||[]).forEach(B=>{ free=gtCutFree(free,B); });
+  // the same room with the dots in it too: what a box must keep to
+  const dots=soft&&soft.blocks&&soft.blocks.length?soft.blocks:null;
+  let hard=free;
+  if(dots) dots.forEach(B=>{ hard=gtCutFree(hard,B); });
   const score=GT_NEST_SCORE[mode]||GT_NEST_SCORE.tl;
+  const hit=(x,y,w,h)=>dots.filter(b=>x<b.x+b.w-E&&b.x<x+w-E&&y<b.y+b.h-E&&b.y<y+h-E);
   // alt: {w,h} the tag takes turned a quarter (its gutters are on the same sides
   // of the sheet, not of the tag), where it may be put in that way.
+  // cut: {poly, bl} its cut line, for the dots (soft).
   // Answers {x,y,rot} with the width and height it took, w and h.
-  return {add(w,h,alt){
+  return {add(w,h,alt,cut){
     let best=null, bs=null, bw=w, bh=h, br=0;
     const tries=alt?[[w,h,0],[alt.w,alt.h,1]]:[[w,h,0]];
-    for(const [tw,th,tr] of tries) for(const f of free){
-      if(tw>f.w+E||th>f.h+E) continue;
+    const take=(f,x,y,tw,th,tr)=>{
       const s=score(f,tw,th);
       if(!best||s[0]<bs[0]-E||(Math.abs(s[0]-bs[0])<=E&&(s[1]<bs[1]-E
-        ||(Math.abs(s[1]-bs[1])<=E&&(f.y<best.y-E||(Math.abs(f.y-best.y)<=E&&f.x<best.x-E)))))){ best=f; bs=s; bw=tw; bh=th; br=tr; }
+        ||(Math.abs(s[1]-bs[1])<=E&&(y<best.y-E||(Math.abs(y-best.y)<=E&&x<best.x-E)))))){ best={x,y}; bs=s; bw=tw; bh=th; br=tr; }
+    };
+    for(const [tw,th,tr] of tries) for(const f of hard){
+      if(tw>f.w+E||th>f.h+E) continue;
+      take(f,f.x,f.y,tw,th,tr);
+    }
+    // the room the dots' boxes took, where the tag's own line misses them:
+    // tried at each corner of a free space, as that is where a dot sits
+    const poly=cut&&cut.poly, bl=cut&&cut.bl||0;
+    if(dots&&poly) for(const [tw,th,tr] of tries){
+      if(tr) continue;                     // turned: its boxes, as before
+      for(const f of free){
+        if(tw>f.w+E||th>f.h+E) continue;
+        const xs=[f.x,f.x+f.w-tw], ys=[f.y,f.y+f.h-th];
+        for(const x of xs) for(const y of ys){
+          const on=hit(x,y,tw,th);
+          if(on.length&&!on.some(d=>gtDotOnCut(poly,x+bl,y+bl,bl,d,soft.lead))) take(f,x,y,tw,th,tr);
+        }
+      }
     }
     if(!best) return null;
-    free=gtCutFree(free,{x:best.x,y:best.y,w:bw,h:bh});
+    const P={x:best.x,y:best.y,w:bw,h:bh};
+    free=gtCutFree(free,P); if(dots) hard=gtCutFree(hard,P); else hard=free;
     return {x:best.x,y:best.y,rot:br,w:bw,h:bh};
   }};
 }
@@ -42193,18 +42236,8 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf,cutOf,lead){
   // (poly, from ox oy) and bleed (bl) against the dot's keep-clear box (that
   // box less the gutter a box carries - lead - given back). A dot in the empty
   // corner of a round tag's box took that tag's place: 54 of 54 went 53 + 1.
-  const onCut=(poly,ox,oy,bl,d)=>{
-    if(!poly) return true;
-    const lx=lead?lead.x:0, ly=lead?lead.y:0;
-    const r={x:d.x-lx-bl,y:d.y-ly-bl,w:d.w+lx+2*bl,h:d.h+ly+2*bl};
-    if(poly.some(([px,py])=>px+ox>r.x&&px+ox<r.x+r.w&&py+oy>r.y&&py+oy<r.y+r.h)) return true;
-    const inP=(X,Y)=>{ let c=false;
-      for(let i=0,j=poly.length-1;i<poly.length;j=i++){
-        const yi=poly[i][1]+oy, yj=poly[j][1]+oy;
-        if((yi>Y)!==(yj>Y)&&X<(poly[j][0]-poly[i][0])*(Y-yi)/(yj-yi)+poly[i][0]+ox) c=!c; }
-      return c; };
-    return [[r.x,r.y],[r.x+r.w,r.y],[r.x,r.y+r.h],[r.x+r.w,r.y+r.h]].some(([X,Y])=>inP(X,Y));
-  };
+  const onCut=(poly,ox,oy,bl,d)=>gtDotOnCut(poly,ox,oy,bl,d,lead);
+  const soft={blocks:blocks||[],lead}, cutOfIt=it=>({poly:cutOf?cutOf(it.line.designId):null,bl:it.bl||0});
   const bands=new Map(), free=[], seen=new Map(), copies=new Map(), pageOf=new Map();
   all.forEach(it=>{ const id=it.line.id; seen.set(id,(seen.get(id)||0)+1); });
   all.forEach(it=>{
@@ -42270,11 +42303,11 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf,cutOf,lead){
     let squeezed=false;
     const squeeze=k=>{
       squeezed=true;
-      const bin=gtNestBin(W,H,'tl',(blocks||[]).concat(pg.cells));
+      const bin=gtNestBin(W,H,'tl',pg.cells,soft);
       const cw=Math.max(0.1,it0.sz.w+ex), ch=Math.max(0.1,it0.sz.h+ey);
       const alt=rotate&&Math.abs(it0.sz.w-it0.sz.h)>0.01?{w:Math.max(0.1,it0.sz.h+ex),h:Math.max(0.1,it0.sz.w+ey)}:null;
       while(k<items.length){
-        const pos=bin.add(cw,ch,alt); if(!pos) break;
+        const pos=bin.add(cw,ch,alt,cutOfIt(it0)); if(!pos) break;
         pg.items.push({it:items[k++],pos}); pg.cells.push({x:pos.x,y:pos.y,w:pos.w,h:pos.h});
       }
       return k;
@@ -42400,11 +42433,11 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf,cutOf,lead){
   let rest=free;
   pages.forEach(p=>{
     if(!rest.length) return;
-    const bin=gtNestBin(W,H,'tl',(blocks||[]).concat(p.cells));
+    const bin=gtNestBin(W,H,'tl',p.cells,soft);
     rest=rest.filter(it=>{
       const e=2*(it.bl||0), ex=e+Math.max(0,gx-e), ey=e+Math.max(0,gy-e);
       const alt=rotate&&Math.abs(it.sz.w-it.sz.h)>0.01?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
-      const pos=bin.add(Math.max(0.1,it.sz.w+ex),Math.max(0.1,it.sz.h+ey),alt);
+      const pos=bin.add(Math.max(0.1,it.sz.w+ex),Math.max(0.1,it.sz.h+ey),alt,cutOfIt(it));
       if(!pos) return true;
       p.items.push({it,pos}); return false;
     });
@@ -42729,6 +42762,12 @@ function gtNestPlan(){
   // bl: how far each tag prints past its cut. Packed by cut lines alone, one
   // tag's bleed printed over the next tag, or over a registration dot.
   const all=q.map((line,i)=>({i,line,sz:size.get(line.designId),bl:gtBleedOf(gtDesign(line.designId),line)||0}));
+  // each design's cut line, for the dots: one in the corner of a round
+  // tag's box is clear of the tag itself - in every packing here (gtNestBin soft)
+  const cutOfId=(()=>{ const poly=new Map(); return id=>{
+    if(!poly.has(id)){ let p=null; try{ p=flags.get(id)?flags.get(id).poly:gtNestPolyOf(gtDesign(id),size.get(id)); }catch(e){} poly.set(id,p&&p.length>2?p:null); }
+    return poly.get(id); }; })();
+  const dotSoft={blocks:dotBlocks,lead:{x:lead(gx),y:lead(gy)}}, cutOfIt=it=>({poly:cutOfId(it.line.designId),bl:it.bl||0});
   const orders=[
     (a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i,
     (a,b)=>b.sz.w*b.sz.h-a.sz.w*a.sz.h||b.sz.h-a.sz.h||a.i-b.i,
@@ -42743,10 +42782,10 @@ function gtNestPlan(){
       const alt=(S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)
         ?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
       let pos=null, pg=null;
-      for(const p of pages){ pos=p.bin.add(cw,ch,alt); if(pos){ pg=p; break; } }
+      for(const p of pages){ pos=p.bin.add(cw,ch,alt,cutOfIt(it)); if(pos){ pg=p; break; } }
       if(!pos){
-        pg={bin:gtNestBin(availW+gx,availH+gy,mode,dotBlocks),items:[]}; pages.push(pg);
-        pos=pg.bin.add(cw,ch,alt);
+        pg={bin:gtNestBin(availW+gx,availH+gy,mode,null,dotSoft),items:[]}; pages.push(pg);
+        pos=pg.bin.add(cw,ch,alt,cutOfIt(it));
         if(!pos){ pos={x:0,y:0,rot:0}; tooBig++; }
       }
       pg.items.push({it,pos});
@@ -42781,11 +42820,7 @@ function gtNestPlan(){
         const p=poly.get(id); return p?{poly:p,rx:Math.max(hx,it.bl||0),ry:Math.max(hy,it.bl||0),key:id+'|'+(it.bl||0)}:null;
       };
     })():null,
-    // each design's cut line, for the dots: one in the corner of a round
-    // tag's box is clear of the tag itself
-    (()=>{ const poly=new Map(); return id=>{
-      if(!poly.has(id)){ let p=null; try{ p=flags.get(id)?flags.get(id).poly:gtNestPolyOf(gtDesign(id),size.get(id)); }catch(e){} poly.set(id,p&&p.length>2?p:null); }
-      return poly.get(id); }; })(),{x:lead(gx),y:lead(gy)});
+    cutOfId,dotSoft.lead);
   else if(memo) packed={tooBig:memo.tooBig,fill:memo.fill,
     pages:memo.pages.map(pg=>({...pg,items:pg.items.map(({it,pos})=>({it:all[it.i],pos})).filter(x=>x.it)}))};
   else orders.forEach(cmp=>{
@@ -42891,11 +42926,11 @@ function gtNestPlan(){
     const handPages=H.pages.map((pg,hp)=>{
       const fixed=pg.map(h=>({it:byI.get(h.i),slot:h.slot})).filter(f=>f.it);
       // a tag held where it was put is a block in the bin, its bleed and gutter round it
-      const blocks=dotBlocks.concat(fixed.map(({it,slot})=>{
+      const blocks=fixed.map(({it,slot})=>{
         const b=it.bl||0, {ex,ey}=foot(it);
         return {x:slot.x-b-x0,y:slot.y-b-y0,w:slot.w+ex,h:slot.h+ey};
-      }));
-      const bin=gtNestBin(availW+gx,availH+gy,'tl',blocks), items=[];
+      });
+      const bin=gtNestBin(availW+gx,availH+gy,'tl',blocks,dotSoft), items=[];
       rest=rest.filter(it=>{
         // a tag given a sheet tries that sheet as it is held, whatever the
         // packing without the hand moves made of it
@@ -42903,7 +42938,7 @@ function gtNestPlan(){
         const {ex,ey}=foot(it);
         const alt=(S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)
           ?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
-        const pos=bin.add(Math.max(0.1,it.sz.w+ex),Math.max(0.1,it.sz.h+ey),alt);
+        const pos=bin.add(Math.max(0.1,it.sz.w+ex),Math.max(0.1,it.sz.h+ey),alt,cutOfIt(it));
         if(!pos) return true;
         items.push({it,pos}); return false;
       });
@@ -43020,12 +43055,12 @@ function gtNestPlan(){
       }
     }
     for(const cmp of orders) for(const mode of Object.keys(GT_NEST_SCORE)){
-      const bin=gtNestBin(W,H,mode,dotBlocks.concat(strips(false))), got=[];
+      const bin=gtNestBin(W,H,mode,strips(false),dotSoft), got=[];
       let ok=true;
       for(const it of items.slice().sort(cmp)){
         const e=2*(it.bl||0), ex=e+Math.max(0,gx-e), ey=e+Math.max(0,gy-e);
         const alt=(S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
-        const pos=bin.add(Math.max(0.1,it.sz.w+ex),Math.max(0.1,it.sz.h+ey),alt);
+        const pos=bin.add(Math.max(0.1,it.sz.w+ex),Math.max(0.1,it.sz.h+ey),alt,cutOfIt(it));
         if(!pos){ ok=false; break; }
         got.push({it,pos});
       }
