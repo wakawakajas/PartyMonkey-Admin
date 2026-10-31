@@ -5046,7 +5046,12 @@ body.lt:not(.dk) #giftTagScreen.gt-nl .combo-panel{background:#fff;border-color:
 #giftTagScreen.gt-nl .gt-add-row .btn-outline{width:100%;min-width:0;height:auto!important;min-height:36px;padding:6px 8px!important;white-space:normal;line-height:1.2;font-size:13px!important;border-style:dashed}
 #giftTagScreen.gt-nl :is(.btn-outline,.btn-primary){white-space:normal;line-height:1.25}
 /* the line pop-up: every label above its box, rows that wrap instead of squeeze */
-#giftTagScreen.gt-nl #gtOrderList .ph-card.is-sel > .ph-card-body{width:360px}
+#giftTagScreen.gt-nl #gtOrderList .ph-card.is-sel > .ph-card-body{width:var(--nl-popw,360px)}
+/* the line's pop-up: its header drags it left or right, either side edge makes it wider or narrower */
+#giftTagScreen.gt-nl .nl-pophead{cursor:grab}
+#giftTagScreen.gt-nl .nl-pophead :is(button,a,input,select){cursor:pointer}
+body.nl-popmove,body.nl-popmove *{cursor:grabbing!important;user-select:none!important}
+body.nl-popsize,body.nl-popsize *{cursor:ew-resize!important;user-select:none!important}
 #gtNl.pop-room .gtnl-sheet{padding-right:374px!important}
 #giftTagScreen.gt-nl #gtOrderList .ph-card.is-sel > .ph-card-body .field{display:flex!important;flex-direction:column;align-items:stretch;gap:3px;margin:0;min-width:0;max-width:none!important;flex:1 1 auto}
 #giftTagScreen.gt-nl #gtOrderList .ph-card.is-sel > .ph-card-body .field>span{font-size:11.5px!important;color:#6b6b78;letter-spacing:0;text-transform:none!important;white-space:nowrap}
@@ -38987,13 +38992,16 @@ function gtNlFit(){
   const r=st.getBoundingClientRect();
   nl.style.setProperty('--nl-pt',(r.top+4)+'px');
   nl.style.setProperty('--nl-pb',Math.max(4,innerHeight-r.bottom+4)+'px');
-  nl.style.setProperty('--nl-pr',(innerWidth-r.right+4)+'px');
+  // the pop-up moved by hand sits that far from its place (gtNlPop)
+  const off=gtNlPop?gtNlPop.off():0;
+  nl.style.setProperty('--nl-pr',(innerWidth-r.right+4-off)+'px');
+  if(gtNlPop) nl.style.setProperty('--nl-popw',gtNlPop.w()+'px');
   // a moving screen (its slide-in) is what "fixed" is measured from while it
   // runs, so the pop-up is checked where it landed and nudged into place
   const pop=document.querySelector('#gtOrderList .ph-card.is-sel > .ph-card-body');
   if(pop&&pop.offsetParent!==null||pop&&getComputedStyle(pop).position==='fixed'){
     const b=pop.getBoundingClientRect(),cs=getComputedStyle(nl),px=k=>parseFloat(cs.getPropertyValue(k))||0;
-    const dx=b.right-(r.right-4),dt=b.top-(r.top+4),db=b.bottom-(r.bottom-4);
+    const dx=b.right-(r.right-4+off),dt=b.top-(r.top+4),db=b.bottom-(r.bottom-4);
     if(Math.abs(dx)>1) nl.style.setProperty('--nl-pr',(px('--nl-pr')+dx)+'px');
     if(Math.abs(dt)>1) nl.style.setProperty('--nl-pt',(px('--nl-pt')-dt)+'px');
     if(Math.abs(db)>1) nl.style.setProperty('--nl-pb',(px('--nl-pb')+db)+'px');
@@ -39002,6 +39010,65 @@ function gtNlFit(){
   nl.classList.toggle('pop-room',has);
   if(had!==has&&gtLoaded) requestAnimationFrame(()=>{ try{ gtDraw(); }catch(e){} });
 }
+// A picked line's pop-up is moved by its header, left or right, and made
+// wider or narrower by either side edge, as the panels are. Kept on this
+// computer; More -> Reset panel layout puts it back.
+var gtNlPop=(()=>{
+  const LS='gtNlPop', W=[280,720], DEFW=360;
+  let st={off:0,w:DEFW};
+  try{ const v=JSON.parse(localStorage.getItem(LS)||'null'); if(v){ st.off=+v.off||0; st.w=+v.w||DEFW; } }catch(e){}
+  const save=()=>{ try{ localStorage.setItem(LS,JSON.stringify(st)); }catch(e){} };
+  const w=()=>Math.max(W[0],Math.min(W[1],Math.min(st.w,innerWidth-24)));
+  // never off the window, whatever was kept from a wider one
+  const off=()=>{
+    const st2=document.getElementById('gtNlSheet'); if(!st2) return st.off;
+    const right=st2.getBoundingClientRect().right-4;
+    return Math.max(w()+8-right,Math.min(innerWidth-8-right,st.off));
+  };
+  const pop=()=>document.querySelector('#gtOrderList .ph-card.is-sel > .ph-card-body');
+  const EDGE=7;
+  const edgeAt=(p,x)=>{ const b=p.getBoundingClientRect();
+    return x-b.left<=EDGE?'l':b.right-x<=EDGE?'r':''; };
+  document.addEventListener('pointermove',e=>{
+    if(e.buttons||!gtNlOn) return;
+    const p=pop(); if(!p||!p.contains(e.target)){ return; }
+    p.style.cursor=edgeAt(p,e.clientX)?'ew-resize':'';
+  });
+  document.addEventListener('pointerdown',e=>{
+    if(e.button!==0||!gtNlOn) return;
+    const p=pop(); if(!p||!p.contains(e.target)) return;
+    const side=edgeAt(p,e.clientX);
+    const head=!side&&e.target.closest('.nl-pophead');
+    if(!side&&(!head||e.target.closest('button,a,input,select,textarea,label'))) return;
+    e.preventDefault(); e.stopPropagation();
+    const x0=e.clientX, o0=off(), w0=w(); let moved=false;
+    document.body.classList.add(side?'nl-popsize':'nl-popmove');
+    const move=m=>{
+      const d=m.clientX-x0; if(Math.abs(d)>2) moved=true;
+      if(side==='l') st.w=w0-d;
+      else if(side==='r'){ st.w=w0+d; st.off=o0+(w()-w0); }
+      else st.off=o0+d;
+      gtNlFit();
+    };
+    const up=()=>{
+      document.removeEventListener('pointermove',move,true); document.removeEventListener('pointerup',up,true);
+      document.removeEventListener('pointercancel',up,true);
+      document.body.classList.remove('nl-popmove','nl-popsize');
+      st.w=w(); st.off=off(); save(); gtNlFit();
+      // the press that ends a drag is not a click on what is under it
+      if(moved){ const eat=c=>{ c.stopPropagation(); c.preventDefault(); };
+        document.addEventListener('click',eat,true); setTimeout(()=>document.removeEventListener('click',eat,true),0); }
+    };
+    document.addEventListener('pointermove',move,true); document.addEventListener('pointerup',up,true);
+    document.addEventListener('pointercancel',up,true);
+  },true);
+  addEventListener('resize',()=>{ if(gtNlOn) gtNlFit(); });
+  const reset=()=>{ st={off:0,w:DEFW}; save(); if(gtNlOn) gtNlFit(); };
+  // More -> Reset panel layout puts the pop-up back too
+  setTimeout(()=>{ const nl=document.getElementById('gtNl'); if(!nl) return;
+    const r0=nl.nlColsReset; nl.nlColsReset=()=>{ if(r0) r0(); reset(); }; },0);
+  return {off,w,reset};
+})();
 // The Rearrange panel is drawn the mockup's way; each box, tick and button in
 // it stands for one of the page's own (data-nl-val / -chk / -btn name it), so
 // typing or clicking there is typing or clicking the real one, and gtNlPull
@@ -39320,6 +39387,8 @@ const HELP=[
    h:'<b>Order</b> tab on the right: <b>+ Choose design</b>, <b>+ One-off design</b> or <b>+ From Illustrator</b>. Or drag a design from the Library onto the sheet.',find:'Choose design'},
   {on:'sheet',t:'Change how many tags',k:'qty quantity more less delete remove',
    h:'On the line: <b>−</b> / <b>+</b> beside the big count. The small <b>SHEET</b> box after it (Neat rows) is which sheet the line starts on, not how many. On the sheet, click a tag and press <b>Delete</b> to take one off its line.'},
+  {on:'sheet',t:'Move or widen the line pop-up',k:'line popup pop-up move drag wider narrower width resize field area',
+   h:'Pick a line on the Order tab: drag its pop-up by the header to move it left or right; drag its left or right edge to make it wider or narrower. Kept on this computer; <b>More → Reset panel layout</b> puts it back.'},
   {on:'sheet',t:'How many tags are picked',k:'selected count how many picked multiple select',
    h:'Pick tags on the sheet (Shift-click, drag a box, or double-click). Under <b>tags · sheets · used</b> on the Order tab, a bar says how many are picked, e.g. <b>3 tags selected</b>.',sel:'#gtNlSelN'},
   {on:'sheet',t:'Change a line\'s words',k:'text edit words name line pop-up',
