@@ -5903,7 +5903,7 @@ html body.dk #pcNlPP :is(button,.btn-outline){color:#E5E5EA!important;background
 .nl-lb[data-nm] svg{width:16px!important;height:16px!important;flex:none}
 .nl-lb[data-nm]::after{content:attr(data-nm);font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 /* a row of labelled boxes with a button beside: the button lines up with the boxes, not the labels */
-.nl-g2l:has(.nl-lb[data-nm]){align-items:flex-end!important}
+.nl-g2l{align-items:flex-end!important}
 /* Custom Template and Place Card read like Die Cut: small bold labels above, 32px boxes with 8px corners */
 #pcNl :is(.gtnl-left,.gtnl-rearr,.gtnl-right) .field > span{font-size:11.5px!important;font-weight:600!important;letter-spacing:0!important;text-transform:none!important}
 #pcNl :is(.gtnl-left,.gtnl-rearr,.gtnl-right) .field :is(input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]),select){height:32px!important;min-height:32px!important;border-radius:8px!important;padding-top:0!important;padding-bottom:0!important}
@@ -38990,25 +38990,35 @@ function gtNlFit(){
   if(!gtNlOn) return;
   // (the stage is display:contents under nlCols: the sheet is what is measured)
   const nl=document.getElementById('gtNl'),st=document.getElementById('gtNlSheet');
+  // Every value the box gives out restyles all ~2000 things in it (3-4 ms a
+  // time), so one is written only when it changes. This runs on every scroll
+  // and resize, and setting the pop-up's place and then nudging it back cost
+  // six restyles a call however still the page was.
+  const put=(k,v)=>{ v=Math.round(v*10)/10+'px'; if(nl.style.getPropertyValue(k)!==v) nl.style.setProperty(k,v); };
   const top=Math.max(0,nl.getBoundingClientRect().top);
   const hb=document.querySelector('.homebar'),hbH=hb&&getComputedStyle(hb).display!=='none'?hb.getBoundingClientRect().height:0;
-  nl.style.setProperty('--nl-h',Math.max(520,innerHeight-top-hbH-6)+'px');
+  put('--nl-h',Math.max(520,innerHeight-top-hbH-6));
   const r=st.getBoundingClientRect();
-  nl.style.setProperty('--nl-pt',(r.top+4)+'px');
-  nl.style.setProperty('--nl-pb',Math.max(4,innerHeight-r.bottom+4)+'px');
   // the pop-up moved by hand sits that far from its place (gtNlPop)
   const off=gtNlPop?gtNlPop.off():0;
-  nl.style.setProperty('--nl-pr',(innerWidth-r.right+4-off)+'px');
-  if(gtNlPop) nl.style.setProperty('--nl-popw',gtNlPop.w()+'px');
-  // a moving screen (its slide-in) is what "fixed" is measured from while it
-  // runs, so the pop-up is checked where it landed and nudged into place
+  if(gtNlPop) put('--nl-popw',gtNlPop.w());
+  // "fixed" is measured from the screen when it has a transform (its
+  // slide-in), not the window: how far off that put the pop-up last time is
+  // kept, so it lands in place first go and only a change is nudged
+  const C=gtNlFit.c||(gtNlFit.c={pt:0,pb:0,pr:0});
+  const place=()=>{ put('--nl-pt',r.top+4+C.pt); put('--nl-pb',Math.max(4,innerHeight-r.bottom+4)+C.pb);
+    put('--nl-pr',innerWidth-r.right+4-off+C.pr); };
+  place();
   const pop=document.querySelector('#gtOrderList .ph-card.is-sel > .ph-card-body');
   if(pop&&pop.offsetParent!==null||pop&&getComputedStyle(pop).position==='fixed'){
-    const b=pop.getBoundingClientRect(),cs=getComputedStyle(nl),px=k=>parseFloat(cs.getPropertyValue(k))||0;
+    const b=pop.getBoundingClientRect();
     const dx=b.right-(r.right-4+off),dt=b.top-(r.top+4),db=b.bottom-(r.bottom-4);
-    if(Math.abs(dx)>1) nl.style.setProperty('--nl-pr',(px('--nl-pr')+dx)+'px');
-    if(Math.abs(dt)>1) nl.style.setProperty('--nl-pt',(px('--nl-pt')-dt)+'px');
-    if(Math.abs(db)>1) nl.style.setProperty('--nl-pb',(px('--nl-pb')+db)+'px');
+    if(Math.abs(dx)>1||Math.abs(dt)>1||Math.abs(db)>1){
+      if(Math.abs(dx)>1) C.pr+=dx;
+      if(Math.abs(dt)>1) C.pt-=dt;
+      if(Math.abs(db)>1) C.pb+=db;
+      place();
+    }
   }
   const had=nl.classList.contains('pop-room'),has=!!document.querySelector('#gtOrderList .ph-card.is-sel');
   nl.classList.toggle('pop-room',has);
@@ -39034,11 +39044,13 @@ var gtNlPop=(()=>{
   // the right edge is the scrollbar while there is one, which must still scroll
   const edgeAt=(p,x)=>{ const b=p.getBoundingClientRect(), bar=p.offsetWidth-p.clientWidth>2;
     return x-b.left<=EDGE?'l':!bar&&b.right-x<=EDGE?'r':''; };
+  // only over the pop-up itself, and only written when it changes
   document.addEventListener('pointermove',e=>{
     if(e.buttons||!gtNlOn) return;
-    const p=pop(); if(!p||!p.contains(e.target)){ return; }
-    p.style.cursor=edgeAt(p,e.clientX)?'ew-resize':'';
-  });
+    const p=e.target&&e.target.closest&&e.target.closest('#gtOrderList .ph-card.is-sel > .ph-card-body'); if(!p) return;
+    const c=edgeAt(p,e.clientX)?'ew-resize':'';
+    if(p.style.cursor!==c) p.style.cursor=c;
+  },{passive:true});
   document.addEventListener('pointerdown',e=>{
     if(e.button!==0||!gtNlOn) return;
     const p=pop(); if(!p||!p.contains(e.target)) return;
@@ -39048,17 +39060,20 @@ var gtNlPop=(()=>{
     e.preventDefault(); e.stopPropagation();
     const x0=e.clientX, o0=off(), w0=w(); let moved=false;
     document.body.classList.add(side?'nl-popsize':'nl-popmove');
+    // one refit a frame, however fast the mouse reports
+    let raf=0;
     const move=m=>{
       const d=m.clientX-x0; if(Math.abs(d)>2) moved=true;
       if(side==='l') st.w=w0-d;
       else if(side==='r'){ st.w=w0+d; st.off=o0+(w()-w0); }
       else st.off=o0+d;
-      gtNlFit();
+      if(!raf) raf=requestAnimationFrame(()=>{ raf=0; gtNlFit(); });
     };
     const up=()=>{
       document.removeEventListener('pointermove',move,true); document.removeEventListener('pointerup',up,true);
       document.removeEventListener('pointercancel',up,true);
       document.body.classList.remove('nl-popmove','nl-popsize');
+      if(raf){ cancelAnimationFrame(raf); raf=0; }
       st.w=w(); st.off=off(); save(); gtNlFit();
       // the press that ends a drag is not a click on what is under it
       if(moved){ const eat=c=>{ c.stopPropagation(); c.preventDefault(); };
