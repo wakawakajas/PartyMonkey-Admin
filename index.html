@@ -5938,10 +5938,12 @@ body.nl-resizing,body.nl-resizing *{cursor:col-resize!important;user-select:none
 body.dk .gtnl-stats > div{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.1)}
 body.dk .gtnl-stats b{color:#F2F2F7} body.dk .gtnl-stats span{color:#B4B4BE}
 /* how many tags are picked on the sheet, under the totals */
-.gtnl-seln{margin:6px 0 0;padding:7px 10px;border-radius:12px;text-align:center;font-size:12.5px;font-weight:600;
-  color:#4B3FD1;background:rgba(91,71,240,.1)}
+.gtnl-seln{display:flex;flex-direction:column;align-items:center;gap:1px;margin:8px 0 0;padding:9px 4px;border-radius:14px;
+  color:#4B3FD1;background:rgba(91,71,240,.1);border:1px solid #CFC6FF}
+.gtnl-seln b{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.gtnl-seln span{font-size:11.5px;font-weight:600}
 .gtnl-seln[hidden]{display:none}
-body.dk .gtnl-seln{color:#C9C2FF;background:rgba(91,71,240,.22)}
+body.dk .gtnl-seln{color:#C9C2FF;background:rgba(91,71,240,.22);border-color:rgba(160,150,255,.35)}
 #giftTagScreen.gt-nl #gtOrderCalc{display:none!important}
 .gtnl-used{display:inline-flex;align-items:center;gap:6px;padding:0 8px;font-size:12px;color:#3a3a44;white-space:nowrap}
 .gtnl-used small{font-size:12px;color:#6b6b78}
@@ -39269,7 +39271,7 @@ const HELP=[
   {on:'sheet custom design',t:'Magnifier',k:'zoom glass lens loupe space',
    h:'Press <b>🔍</b> under the sheet, or tap <b>Space</b>. A round glass follows the mouse. Click to zoom the sheet in there, <b>Shift</b>+click to zoom out. Tap Space or 🔍 again to stop.',sel:'#gtNlMag,#pcNlMag,#gtNlDMag'},
   {on:'sheet custom',t:'Zoom in and out',k:'whole sheet fit closer',
-   h:'Under the sheet: <b>Zoom in</b> fills the view with the tag or card you are on; it then reads <b>Whole sheet</b> to go back. <b>−</b> / <b>+</b> step out and in.',sel:'#gtZoomBtn,#pcNlZoom .pcz-fit'},
+   h:'Under the sheet: <b>Zoom in</b> fills the view with the tag or card you are on; it then reads <b>Whole sheet</b> to go back. <b>−</b> / <b>+</b> step out and in. On Die Cut / Sticker, zoomed in, the sheet grows to fill the whole empty area beside the panels (grey round the paper edge).',sel:'#gtZoomBtn,#pcNlZoom .pcz-fit'},
   {on:'design',t:'Zoom in on the tag',k:'whole tag fit closer',
    h:'Under the tag: <b>Zoom in</b> doubles it, then reads <b>Whole tag</b> to go back. <b>−</b> / <b>+</b> step out and in.',sel:'#gtEdZoomFit'},
   {on:'sheet custom design',t:'Pick a colour with the wheel',k:'color colour fill outline hex wheel picker',
@@ -39969,7 +39971,7 @@ function gtNlSelCount(){
   if(!el){ el=document.createElement('div'); el.id='gtNlSelN'; el.className='gtnl-seln'; st.after(el); }
   let n=0;
   try{ n=gtPageSlots(gtPageAt(gtPage)).filter(x=>gtSelSet.has(x.id)).length; }catch(e){ n=gtSelSet.size; }
-  el.hidden=!n; el.textContent=n+(n===1?' tag selected':' tags selected');
+  el.hidden=!n; el.innerHTML=`<b>${n}</b><span>${n===1?'tag selected':'tags selected'}</span>`;
 }
 function gtNlAfterDraw(){
   if(!gtNlOn) return;
@@ -45897,7 +45899,14 @@ function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   // Paper, unless artwork is being placed underneath this render — then the
   // sheet is drawn on nothing, so that everywhere a tag was left undrawn its
   // own page shows through. The paper is white either way; it is the PDF's.
-  if(!vec){ ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); }
+  if(!vec){
+    // a window wider or taller than the sheet (zoomed in on screen): grey round the paper
+    const out=V.x<-0.01||V.y<-0.01||V.x+V.w>S.paperW+0.01||V.y+V.h>S.paperH+0.01;
+    if(out&&!forExport){ ctx.fillStyle='#E9E7F0'; ctx.fillRect(0,0,canvas.width,canvas.height); }
+    ctx.fillStyle='#fff';
+    if(out&&!forExport) ctx.fillRect(-V.x*sc,-V.y*sc,S.paperW*sc,S.paperH*sc);
+    else ctx.fillRect(0,0,canvas.width,canvas.height);
+  }
   ctx.translate(-V.x*sc,-V.y*sc);
   // this sheet's own shape and its own slice of that shape's queue — the page
   // number counts across the whole order, not within one shape
@@ -46106,15 +46115,26 @@ function gtFillScale(slot){
   return Math.max(1,Math.min(GT_ZOOM_MAX,
     Math.min(S.paperW/(slot.w*1.06), S.paperH/(slot.h*1.06))));
 }
+// Zoomed in on Die Cut / Sticker, the window takes the shape of the room
+// beside the panels (gtRoomWH, set by gtDraw) rather than the sheet's: the
+// canvas grows to fill the empty area instead of staying a small page with
+// the tags blown up inside it.
+let gtRoomWH=null;
 function gtView(){
   const S=gtSheet;
   if(!gtZoomOn) return null;
   const z=Math.max(1,Math.min(GT_ZOOM_MAX,gtZoomScale));
-  const w=S.paperW/z, h=S.paperH/z;
+  let w=S.paperW/z, h=S.paperH/z;
+  const R=gtNlOn&&gtRoomWH&&!(gtBackOn()&&gtShowSide==='both')?gtRoomWH:null;
+  if(R&&R.w>50&&R.h>50){
+    const k=Math.max(S.paperW/R.w,S.paperH/R.h);   // mm per pixel with the whole sheet in the room
+    w=R.w*k/z; h=R.h*k/z;
+  }
   const c=gtZoomAt||{x:S.paperW/2,y:S.paperH/2};
   // held inside the sheet, so the window never shows a strip of nothing beside
-  // the edge tags
-  const clamp=(v,hi)=>Math.min(Math.max(v,0),Math.max(0,hi));
+  // the edge tags - unless the window is wider (or taller) than the sheet,
+  // when the sheet sits in its middle
+  const clamp=(v,hi)=>hi<0?hi/2:Math.min(Math.max(v,0),hi);
   return {x:clamp(c.x-w/2,S.paperW-w), y:clamp(c.y-h/2,S.paperH-h), w,h};
 }
 // fill the window with one placeholder, wherever it sits on the sheet
@@ -46287,10 +46307,12 @@ function gtDraw(){
   let avail=(host&&host.clientWidth?host.clientWidth-24:320)*(twoUp?0.96:0.7);
   // Die Cut and Sticker's middle column: as big as fits across and down
   if(gtNlOn&&host){
-    const room=document.getElementById('gtNlSheet'),v0=gtView();
-    const tall=v0?v0.h:gtSheet.paperH,wid=v0?v0.w:gtSheet.paperW;
+    const room=document.getElementById('gtNlSheet');
     const tools=room&&room.querySelector('.gtnl-ftop');
     let H=(room?room.clientHeight:600)-(tools?tools.offsetHeight:44)-112; if(gtBackOn()&&gtShowSide==='both') H=H/2-30;
+    if(host.clientWidth>100&&room&&room.clientHeight>150) gtRoomWH={w:host.clientWidth-24,h:Math.max(160,H)};
+    const v0=gtView();
+    const tall=v0?v0.h:gtSheet.paperH,wid=v0?v0.w:gtSheet.paperW;
     // drawn while the screen is hidden or still opening the room reads as nothing:
     // the last good size is kept, and the observer redraws once it has room
     if(host.clientWidth>100&&room&&room.clientHeight>150){
