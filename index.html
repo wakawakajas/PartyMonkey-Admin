@@ -5310,6 +5310,8 @@ body.dk #ccPop .cc-drop{background:#2d2e3a;border-color:rgba(255,255,255,.12);co
 body.dk #ccPop .cc-tip{color:#A6A7B4}
 /* holding Alt with the wheel open: the sheet is a place to pick from */
 body.cc-on.cc-alt canvas{cursor:crosshair!important}
+body.sp-hand :is(#gtNlSheet,#gtNlDSheet,#pcNlSheet) canvas{cursor:grab!important}
+body.sp-hand :is(#gtNlSheet,#gtNlDSheet,#pcNlSheet) canvas:active{cursor:grabbing!important}
 /* a colour box says it opens something */
 input[type="text"]:is([placeholder^="#"],#gtTextColor,#gtTextOc,[data-pcb="color"],[data-pcb="oc"]){cursor:pointer}
 /* Die Cut / Sticker design editor: the Text fields column wide enough that
@@ -5675,7 +5677,11 @@ body.dk #helpPop .help-row.open{background:linear-gradient(150deg,#2B2670,#352C9
 body.dk #helpPop .help-h{color:#D4D4DC}
 body.dk #helpPop :is(.help-x,.help-none){color:#A6A7B4}
 /* Show me: the button it is about, lit for a moment */
-.help-flash{animation:helpFlash .8s ease-in-out 3;position:relative;z-index:3}
+#helpSpot{position:fixed;z-index:10045;pointer-events:none;border-radius:14px;border:3px solid #9D8CFF;
+  box-shadow:0 0 0 9999px rgba(8,6,24,.55),0 0 0 6px rgba(157,140,255,.35),0 0 28px 8px rgba(124,107,255,.85);animation:helpSpot 1s ease-in-out infinite}
+#helpSpot[hidden]{display:none}
+@keyframes helpSpot{50%{box-shadow:0 0 0 9999px rgba(8,6,24,.55),0 0 0 12px rgba(157,140,255,.2),0 0 40px 14px rgba(124,107,255,1)}}
+.help-flash{animation:helpFlash .8s ease-in-out 4;position:relative;z-index:3}
 @keyframes helpFlash{0%,100%{box-shadow:0 0 0 0 rgba(91,71,240,0)}50%{box-shadow:0 0 0 4px #5B47F0,0 0 22px 6px rgba(91,71,240,.55)}}
 #gtNlD #gtNlDFB :is(#gtNlDUndo,#gtNlDRedo,#gtNlDMag){min-width:30px!important;padding:0 6px!important;font-size:15px}
 #gtNlD #gtNlDFB :is(#gtNlDUndo,#gtNlDRedo):disabled{opacity:.35;cursor:default}
@@ -14115,6 +14121,40 @@ function nlThumbPics(box,draw){
 // The magnifier on the new-layout sheets: the button or Space turns it on and
 // off; while on, a round glass follows the mouse over the sheet, a click on the
 // sheet zooms the whole sheet in on that spot and Shift+click back out. Those clicks are the glass's own - nothing on the sheet is picked or moved.
+// Space held on a sheet: the hand. Every sheet: dragged, it moves the view - the
+// sheet's own zoomed window where it has one, else the box it scrolls in.
+const spaceHand={down:false,dragged:false};
+(function spaceHandWiring(){
+  const typing=t=>t&&(t.isContentEditable||/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(t.tagName));
+  const nl=()=>['tool-gift-tag','tool-gift-tag-design','tool-custom'].includes(currentScreen);
+  document.addEventListener('keydown',e=>{
+    if(!nl()||(e.code!=='Space'&&e.key!==' ')||typing(e.target)) return;
+    if(!e.repeat){ spaceHand.down=true; spaceHand.dragged=false; document.body.classList.add('sp-hand'); }
+  },true);
+  const off=()=>{ spaceHand.down=false; document.body.classList.remove('sp-hand'); };
+  document.addEventListener('keyup',e=>{ if(e.code==='Space'||e.key===' ') setTimeout(off,0); },true);
+  window.addEventListener('blur',off);
+  let scr=null;
+  document.addEventListener('pointerdown',e=>{
+    if(!spaceHand.down||!nl()) return;
+    const cv=e.target.closest&&e.target.closest('canvas'); if(!cv) return;
+    spaceHand.dragged=true;
+    // Custom Template's sheet has its hand already (phPanHeld)
+    if(currentScreen==='tool-custom') return;
+    e.preventDefault(); e.stopPropagation();
+    if(cv._startPan&&cv._startPan(e)) return;
+    // else whatever the sheet scrolls in
+    const can=x=>{ const st=getComputedStyle(x); return (/(auto|scroll)/.test(st.overflowY)&&x.scrollHeight>x.clientHeight+2)||(/(auto|scroll)/.test(st.overflowX)&&x.scrollWidth>x.clientWidth+2); };
+    let s=cv.parentElement; while(s&&s!==document.body&&!can(s)) s=s.parentElement;
+    if(s===document.body) s=null;
+    if(!s) return;
+    scr={s,x:e.clientX,y:e.clientY,l:s.scrollLeft,t:s.scrollTop};
+    try{ cv.setPointerCapture(e.pointerId); }catch(err){}
+  },true);
+  document.addEventListener('pointermove',e=>{ if(!scr) return; e.preventDefault();
+    scr.s.scrollLeft=scr.l-(e.clientX-scr.x); scr.s.scrollTop=scr.t-(e.clientY-scr.y); },true);
+  ['pointerup','pointercancel'].forEach(t=>document.addEventListener(t,()=>{ scr=null; },true));
+})();
 function nlMagnifier(mag,lens,lc,sheet,active,zoomTo){
   const ZS=[3,5,8]; let on=false, zi=0, last=null;
   const draw=e=>{
@@ -14147,13 +14187,21 @@ function nlMagnifier(mag,lens,lc,sheet,active,zoomTo){
     else zi=e.shiftKey?Math.max(0,zi-1):(zi+1)%ZS.length;
     requestAnimationFrame(()=>draw(e));
   },true);
+  // Space tapped turns the glass on or off; Space held while the sheet is
+  // dragged is the hand (spaceHand), and leaves the glass as it was
   document.addEventListener('keydown',e=>{
     if(!active()) return;
     if(e.key==='Escape'&&on){ set(false); return; }
     if(e.code!=='Space'&&e.key!==' ') return;
-    if(e.ctrlKey||e.metaKey||e.altKey||e.repeat) return;
     const t=e.target; if(t&&(t.isContentEditable||/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-    e.preventDefault(); set(!on);
+    e.preventDefault();
+  });
+  document.addEventListener('keyup',e=>{
+    if(!active()||(e.code!=='Space'&&e.key!==' ')) return;
+    if(e.ctrlKey||e.metaKey||e.altKey) return;
+    const t=e.target; if(t&&(t.isContentEditable||/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    if(spaceHand.dragged) return;
+    set(!on);
   });
 }
 // Rearrange is dragged wider or narrower by its right edge (as the mock-up had
@@ -15088,6 +15136,7 @@ window.addEventListener('blur',()=>phPanSet(false));
   // Space held: the hand. A drag moves the sheet about and never takes hold of
   // a card, a corner or a marquee, wherever on the paper it starts.
   const spaceOn=()=>phPanHeld();
+  c._ccHandle=e=>{ const q=at(e); const h=q&&hit(q); return !!(h&&h.corner); };
   c.addEventListener('pointerdown',e=>{
     if(spaceOn()){
       band=null; tap=null; drag=null;
@@ -15154,13 +15203,18 @@ window.addEventListener('blur',()=>phPanSet(false));
     e.preventDefault();
     // a few pixels of wobble is still a click; past that it is a drag
     if(tap&&(Math.abs(e.clientX-tap.x)>4||Math.abs(e.clientY-tap.y)>4)) tap=null;
-    const dx=q.x-drag.x, dy=q.y-drag.y;
+    let dx=q.x-drag.x, dy=q.y-drag.y;
+    // Shift held: straight across or straight up and down
+    if(drag.mode==='move'&&e.shiftKey){ if(Math.abs(dx)>=Math.abs(dy)) dy=0; else dx=0; }
     if(drag.mode==='move') drag.from.forEach(f=>{ f.p.xMm=f.x+dx; f.p.yMm=f.y+dy; });
     else{
       const f=drag.from.find(z=>z.p===drag.ph)||{x:drag.ph.xMm,y:drag.ph.yMm,
         w:drag.ph.wMm,h:drag.ph.hMm,p:drag.ph};
-      // a card smaller than a couple of millimetres is a slip, not a card
-      f.p.wMm=Math.max(2,f.w+dx); f.p.hMm=Math.max(2,f.h+dy);
+      // a card smaller than a couple of millimetres is a slip, not a card;
+      // Alt held: it grows the same on every side, its middle staying put
+      const k=e.altKey?2:1;
+      f.p.wMm=Math.max(2,f.w+dx*k); f.p.hMm=Math.max(2,f.h+dy*k);
+      f.p.xMm=e.altKey?f.x-(f.p.wMm-f.w)/2:f.x; f.p.yMm=e.altKey?f.y-(f.p.hMm-f.h)/2:f.y;
     }
     drawAll();
   });
@@ -32328,9 +32382,16 @@ document.getElementById('pcBoxProps').addEventListener('change',pcBoxEdit);
       const all=pcBoxDrag.all.length?pcBoxDrag.all:[{x:t,r:r0}];
       // held to the design by whichever of them reaches its edge first
       let dx=p.x-p0.x, dy=p.y-p0.y;
+      if(e.shiftKey){ if(Math.abs(dx)>=Math.abs(dy)) dy=0; else dx=0; }
       all.forEach(({x,r})=>{ dx=Math.max(-r.x,Math.min(1-x.w-r.x,dx)); dy=Math.max(-r.y,Math.min(1-x.h-r.y,dy)); });
       all.forEach(({x,r})=>{ x.x=r.x+dx; x.y=r.y+dy; });
+    }else if(e.altKey){
+      // Alt held: grows the same on every side, its middle staying put
+      const gx=(p.x-r0.x)-r0.w, gy=(p.y-r0.y)-r0.h;
+      t.w=Math.max(0.03,r0.w+2*gx); t.h=Math.max(0.03,r0.h+2*gy);
+      t.x=r0.x-(t.w-r0.w)/2; t.y=r0.y-(t.h-r0.h)/2;
     }else{
+      t.x=r0.x; t.y=r0.y;
       t.w=Math.min(1-r0.x,Math.max(0.03,p.x-r0.x)); t.h=Math.min(1-r0.y,Math.max(0.03,p.y-r0.y));
     }
     pcBoxPaint();
@@ -38704,7 +38765,10 @@ function gtNlDressWords(){
   document.addEventListener('pointerdown',async e=>{
     if(!e.altKey||(inp&&box&&!box.hidden)||panning()) return;
     const el=fillTarget(); if(!el) return;
-    if(!document.elementsFromPoint(e.clientX,e.clientY).some(x=>x.tagName==='CANVAS')) return;
+    const under=document.elementsFromPoint(e.clientX,e.clientY), cvs=under.find(x=>x.tagName==='CANVAS');
+    if(!cvs) return;
+    // Alt + drag on a box’s corner resizes it from the middle
+    if((cvs._ccHandle&&cvs._ccHandle(e))||(e.target.closest&&e.target.closest('[data-pcbox-grip]'))) return;
     e.preventDefault(); e.stopPropagation(); altTook=true;
     const got=canvasAt(e);
     if(Array.isArray(got)){ takeInto(el,got); return; }
@@ -38753,7 +38817,7 @@ const HELP=[
   {on:'sheet custom design',t:'Undo and redo',k:'back mistake ctrl z y',
    h:'Press <b>↶</b> / <b>↷</b> in the bar under the sheet, or <b>Ctrl+Z</b> / <b>Ctrl+Y</b>.',sel:'#gtNlUndo,#pcNlUndo,#gtNlDUndo'},
   {on:'sheet custom design',t:'Magnifier',k:'zoom glass lens loupe space',
-   h:'Press <b>🔍</b> under the sheet, or <b>Space</b>. A round glass follows the mouse. Click to zoom the sheet in there, <b>Shift</b>+click to zoom out. Space or 🔍 again to stop.',sel:'#gtNlMag,#pcNlMag,#gtNlDMag'},
+   h:'Press <b>🔍</b> under the sheet, or tap <b>Space</b>. A round glass follows the mouse. Click to zoom the sheet in there, <b>Shift</b>+click to zoom out. Tap Space or 🔍 again to stop.',sel:'#gtNlMag,#pcNlMag,#gtNlDMag'},
   {on:'sheet custom',t:'Zoom in and out',k:'whole sheet fit closer',
    h:'Under the sheet: <b>Zoom in</b> fills the view with the tag or card you are on; it then reads <b>Whole sheet</b> to go back. <b>−</b> / <b>+</b> step out and in.',sel:'#gtZoomBtn,#pcNlZoom .pcz-fit'},
   {on:'design',t:'Zoom in on the tag',k:'whole tag fit closer',
@@ -38761,7 +38825,13 @@ const HELP=[
   {on:'sheet custom design',t:'Pick a colour with the wheel',k:'color colour fill outline hex wheel picker',
    h:'Click any colour box (Fill, Outline, Colour). A wheel opens: the edge is the hue, the middle is paler, the slider makes it darker. Type a hex in the box, or press <b>💧</b> to take a colour from anywhere on screen.',sel:'#gtTextColor,[data-gtf$="|color"],[data-cf="color"],[data-pcb="color"]'},
   {on:'sheet custom design',t:'Take a colour off the sheet (Alt + click)',k:'eyedropper eye drop alt pick colour color sample',
-   h:'Select a text on the sheet, hold <b>Alt</b> (the pointer turns into a cross) and click the colour you want on the sheet. The text takes it. Also works with the colour wheel open.'},
+   h:'Select a text on the sheet, hold <b>Alt</b> (the pointer turns into a cross) and click the colour you want on the sheet. The text takes it. Also works with the colour wheel open. (Alt on a box’s corner resizes it instead.)'},
+  {on:'sheet custom design',t:'Move in a straight line (Shift)',k:'shift straight line horizontal vertical constrain move drag',
+   h:'Start dragging a text or box, then hold <b>Shift</b>: it moves only straight across or straight up and down, whichever way you are going more.'},
+  {on:'sheet custom design',t:'Resize from the middle (Alt)',k:'alt resize centre center middle evenly photoshop corner',
+   h:'Drag a box’s corner with <b>Alt</b> held: it grows or shrinks the same on every side and its middle stays put, as in Photoshop.'},
+  {on:'sheet custom design',t:'Move around the sheet (Space)',k:'space hand pan move canvas view drag scroll',
+   h:'Hold <b>Space</b> and drag the sheet: it moves the view, and nothing on it is picked up. Zoom in first (Zoom in, + or the magnifier). A quick tap of Space is the magnifier instead.'},
   {on:'sheet custom',t:'Front, Back or Both',k:'side reverse duplex',
    h:'Top right of the sheet: <b>Front</b>, <b>Back</b> or <b>Both</b> to see both sheets together.',sel:'#gtSideSwitch,#sideSwitch'},
   {on:'design',t:'Front or Back of the tag',k:'side reverse',h:'Top right of the tag: <b>Front</b> / <b>Back</b>. Text fields lists the side on show.',sel:'#gtSideSeg'},
@@ -39027,7 +39097,16 @@ const HELP=[
       hide();
       el.scrollIntoView({block:'center',behavior:'smooth'});
       el.classList.remove('help-flash'); void el.offsetWidth; el.classList.add('help-flash');
-      setTimeout(()=>el.classList.remove('help-flash'),2600); return;
+      // the rest of the screen dims and a ring sits round it, following it as it scrolls into view
+      let spot=document.getElementById('helpSpot'); if(!spot){ spot=document.createElement('div'); spot.id='helpSpot'; document.body.appendChild(spot); }
+      const t0=performance.now();
+      const follow=()=>{ const r=el.getBoundingClientRect();
+        Object.assign(spot.style,{left:(r.left-8)+'px',top:(r.top-8)+'px',width:(r.width+16)+'px',height:(r.height+16)+'px'});
+        spot.hidden=false; if(performance.now()-t0<3200&&!spot.hidden) requestAnimationFrame(follow); };
+      follow();
+      clearTimeout(spot._t); spot._t=setTimeout(()=>{ spot.hidden=true; el.classList.remove('help-flash'); },3200);
+      const away=()=>{ spot.hidden=true; el.classList.remove('help-flash'); document.removeEventListener('pointerdown',away,true); };
+      setTimeout(()=>document.addEventListener('pointerdown',away,true),50); return;
     }
     const r=e.target.closest('[data-help]'); if(r){ const i=+r.dataset.help; open=open===i?-1:i; render(); }
   });
@@ -45965,6 +46044,9 @@ function gtSheetDrag(c,side){
   // Dragging the paper between the tags moves the window, the way a map is
   // pushed about; dragging a tag's own words still moves the words. Which one
   // it is answers itself from what is under the pointer when it goes down.
+  c._startPan=e=>startPan(e);
+  c._ccHandle=e=>{ const q=at(e); if(!q) return false; const h=hit(q); if(h&&h.corner) return true;
+    if(gtSlotEdit){ const s=hitSlot(q); return !!(s&&s.corner); } return false; };
   const startPan=e=>{
     if(!gtZoomOn) return false;
     const r=c.getBoundingClientRect();
@@ -46130,17 +46212,25 @@ function gtSheetDrag(c,side){
       e.preventDefault();
       const s=sdrag.slot;
       if(sdrag.mode==='move'){
-        s.x=round(sdrag.x+p.mx-sdrag.px);
-        s.y=round(sdrag.y+p.my-sdrag.py);
-        sdrag.group.forEach(g=>{ g.s.x=round(g.x+p.mx-sdrag.px); g.s.y=round(g.y+p.my-sdrag.py); });
+        let mx=p.mx-sdrag.px, my=p.my-sdrag.py;
+        if(e.shiftKey){ if(Math.abs(mx)>=Math.abs(my)) my=0; else mx=0; }
+        s.x=round(sdrag.x+mx);
+        s.y=round(sdrag.y+my);
+        sdrag.group.forEach(g=>{ g.s.x=round(g.x+mx); g.s.y=round(g.y+my); });
       }else{
         // 2mm is about the smallest thing worth putting a blade round, and it
-        // stops a slip from collapsing a contour to nothing
-        s.w=Math.max(2,round(sdrag.w+p.mx-sdrag.px));
-        s.h=Math.max(2,round(sdrag.h+p.my-sdrag.py));
+        // stops a slip from collapsing a contour to nothing. Alt: from the middle.
+        const k=e.altKey?2:1, ex=(p.mx-sdrag.px)*k, ey=(p.my-sdrag.py)*k;
+        s.w=Math.max(2,round(sdrag.w+ex));
+        s.h=Math.max(2,round(sdrag.h+ey));
+        s.x=e.altKey?round(sdrag.x-(s.w-sdrag.w)/2):sdrag.x;
+        s.y=e.altKey?round(sdrag.y-(s.h-sdrag.h)/2):sdrag.y;
         sdrag.rgroup.forEach(g=>{
-          g.s.w=Math.max(2,round(g.w+p.mx-sdrag.px));
-          g.s.h=Math.max(2,round(g.h+p.my-sdrag.py));
+          if(g.x0==null){ g.x0=g.s.x; g.y0=g.s.y; }
+          g.s.w=Math.max(2,round(g.w+ex));
+          g.s.h=Math.max(2,round(g.h+ey));
+          g.s.x=e.altKey?round(g.x0-(g.s.w-g.w)/2):g.x0;
+          g.s.y=e.altKey?round(g.y0-(g.s.h-g.h)/2):g.y0;
         });
         gtKeepArtSize(sdrag.keep);
       }
@@ -46160,11 +46250,18 @@ function gtSheetDrag(c,side){
     const vals=drag.line.vals||(drag.line.vals={});
     const v=vals[drag.f.id]||(vals[drag.f.id]={});
     if(drag.mode==='move'){
-      v.dx=round(drag.dx+p.mx-drag.px);
-      v.dy=round(drag.dy+p.my-drag.py);
+      // Shift held: straight across or straight up and down, whichever it is more
+      let mx=p.mx-drag.px, my=p.my-drag.py;
+      if(e.shiftKey){ if(Math.abs(mx)>=Math.abs(my)) my=0; else mx=0; }
+      v.dx=round(drag.dx+mx);
+      v.dy=round(drag.dy+my);
     }else{
-      v.bw=Math.max(3,round(drag.bw+p.mx-drag.px));
-      v.bh=Math.max(2,round(drag.bh+p.my-drag.py));
+      // Alt held: the box grows the same on every side, its middle staying put
+      const ex=p.mx-drag.px, ey=p.my-drag.py, k=e.altKey?2:1;
+      v.bw=Math.max(3,round(drag.bw+ex*k));
+      v.bh=Math.max(2,round(drag.bh+ey*k));
+      v.dx=e.altKey?round(drag.dx-(v.bw-drag.bw)/2):drag.dx;
+      v.dy=e.altKey?round(drag.dy-(v.bh-drag.bh)/2):drag.dy;
     }
     gtDraw();
   });
@@ -49895,6 +49992,11 @@ document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
     }
     return {u:bw?(dx+bw/2)/bw:0, v:bh?(dy+bh/2)/bh:0};
   };
+  // its resize corner, for the Alt key outside it (Alt on a corner resizes; elsewhere it picks a colour)
+  c._ccHandle=e=>{ const d=gtCurrentDesign; if(!d) return false; const p=at(e);
+    return gtSideFields(d).some(f=>{ const l=localFrac(p,f,p.g); if(l.u<0||l.u>1||l.v<0||l.v>1) return false;
+      const bw=f.w*p.g.art.w, bh=f.h*p.g.art.h, g=Math.max(0.8,c.width?8*p.g.vw/c.width:2);
+      return bw&&bh&&(bw-l.u*bw)<=Math.min(g,bw*0.35)&&(bh-l.v*bh)<=Math.min(g,bh*0.35); }); };
   c.addEventListener('pointerdown',e=>{
     const d=gtCurrentDesign; if(!d) return;
     const p=at(e);
@@ -49967,6 +50069,8 @@ document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
       // held back at the edge by whichever of them reaches it first, so the
       // arrangement inside a group survives being pushed into a corner
       let mx=dx,my=dy;
+      // Shift held: straight across or straight up and down
+      if(e.shiftKey){ if(Math.abs(mx)>=Math.abs(my)) my=0; else mx=0; }
       // a box may go out past the artwork by half the artwork again - a big
       // box, or words that belong under it, are not stopped short (the view
       // widens to keep every box in sight)
@@ -49975,7 +50079,12 @@ document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
         my=clamp(my,Math.min(0,-0.5-m.y),Math.max(0,1.5-m.f.h-m.y));
       });
       g.moving.forEach(m=>{ m.f.x=m.x+mx; m.f.y=m.y+my; });
+    }else if(e.altKey){
+      // Alt held: grows the same on every side, its middle staying put
+      g.f.w=clamp(g.w+2*dx,0.04,1.5); g.f.h=clamp(g.h+2*dy,0.03,1.5);
+      g.f.x=g.x-(g.f.w-g.w)/2; g.f.y=g.y-(g.f.h-g.h)/2;
     }else{
+      g.f.x=g.x; g.f.y=g.y;
       g.f.w=clamp(g.w+dx,0.04,Math.max(0.04,g.w,1.5-g.f.x));
       g.f.h=clamp(g.h+dy,0.03,Math.max(0.03,g.h,1.5-g.f.y));
     }
