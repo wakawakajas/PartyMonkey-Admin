@@ -630,8 +630,14 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
 .pc-qfoot>span:first-child{font-size:13px;color:var(--muted);}
 .pc-qfoot b{font-size:20px;color:var(--ink);margin-left:4px;}
 .pc-qfoot .btn-outline{margin-left:auto;}
-.pc-qmsg{white-space:pre-wrap;font-family:inherit;font-size:12.5px;color:var(--muted);background:#1B1B1A;border:1px solid var(--border);
-  border-radius:8px;padding:10px 12px;margin:10px 0 0;}
+.pc-qmsg{white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.5;color:var(--ink);background:var(--nest);border:1px solid var(--border-strong);
+  border-radius:8px;padding:10px 12px;margin:4px 0 0;width:100%;box-sizing:border-box;resize:vertical;min-height:170px;}
+.pc-qmsg-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;font-size:12px;color:var(--muted);}
+.pc-qmsg-head .btn-outline{margin-left:auto;}
+.ps-skin .pc-qadd{margin-top:8px;border-style:dashed;}
+.ps-skin .pc-qt input.pc-qname{display:block;width:100%;max-width:340px;text-align:left;font-weight:600;margin:0 0 3px;}
+.pc-qt .it span{display:block;}
+.pc-ups-save[hidden]{display:none!important;}
 .pc-info{font-size:12.5px;color:var(--muted);margin-top:10px;}
 .pc-info .warn{color:var(--amber);font-weight:600;}
 .pc-ups-save{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:8px;}
@@ -7222,10 +7228,13 @@ body.dk #giftTagScreen.gt-nl #gtOrderList .ph-card-head > .del-btn:hover{backgro
       <div class="oo-lbl" style="margin:0 0 6px;">Quote</div>
       <table class="pc-qt"><thead><tr><th>Item</th><th>Qty</th><th class="r">Price / pc</th><th class="r">Amount</th><th class="r">Profit</th><th></th></tr></thead>
         <tbody id="pcQuoteRows"></tbody></table>
+      <button type="button" class="btn-outline btn-sm pc-qadd" id="pcQuoteAdd" title="A line of your own, e.g. delivery or design fee">+ Add line</button>
       <div class="pc-qfoot"><span>Total <b id="pcQuoteTotal"></b></span><span class="hint" id="pcQuoteProfit"></span>
         <button type="button" class="btn-outline btn-sm" id="pcQuoteClear">Clear</button>
         <button type="button" class="btn-primary" id="pcQuoteCopy" style="padding:0 18px;height:38px;">📋 Copy message</button></div>
-      <pre class="pc-qmsg" id="pcQuoteMsg"></pre>
+      <div class="pc-qmsg-head"><span>Message — type in it to change it</span>
+        <button type="button" class="btn-outline btn-sm" id="pcQuoteMsgReset" hidden title="Write the message again from the lines above">↻ Rebuild from lines</button></div>
+      <textarea class="pc-qmsg" id="pcQuoteMsg" rows="9" aria-label="Quote message"></textarea>
     </div>
   </div>
 
@@ -39253,7 +39262,11 @@ const HELP=[
   {on:'finance',t:'Paper and laminate costs',k:'settings paper cost print cost laminate gsm',
    h:'<b>Settings</b> on the left: the paper, print and laminate costs every Finance page uses. Press <b>Save</b> when done.',sel:'#finNl [data-fin-go="finance-settings"]'},
   {on:'finance',t:'Price a print job',k:'quote calculator price profit',
-   h:'<b>Print Calculator</b>: pick the paper, size and quantity and your price; <b>+ Add to quote</b>, then <b>📋 Copy message</b>.',sel:'#finNl [data-fin-go="finance-print-calc"]'}
+   h:'<b>Print Calculator</b>: pick the paper, size and quantity and your price; <b>+ Add to quote</b>, then <b>📋 Copy message</b>. Do it again for each item: every <b>+ Add to quote</b> adds one more line.',sel:'#finNl [data-fin-go="finance-print-calc"]'},
+  {on:'finance',t:'Add a line of your own to a quote',k:'quote line delivery design fee extra item custom add more',
+   h:'Print Calculator, under the quote: <b>+ Add line</b>. Type the item, qty and price; it has no paper cost. Item names on any line can be typed over too.',sel:'#pcQuoteAdd'},
+  {on:'finance',t:'Change the quote message',k:'quote message edit text type rebuild copy whatsapp',
+   h:'Print Calculator: type in the message box under the quote, then <b>📋 Copy message</b> copies what you typed. <b>↻ Rebuild from lines</b> writes it again from the lines.',sel:'#pcQuoteMsg'}
 ];
 (function helpWiring(){
   const ROOTS={gtNl:'sheet',gtNlD:'design',pcNl:'custom',finNl:'finance'};
@@ -72416,15 +72429,19 @@ function pcCalc(){
 let pcQuote=[];
 try{ pcQuote=JSON.parse(localStorage.getItem('pcQuote2')||'[]')||[]; }catch(e){ pcQuote=[]; }
 const pcQuoteKeep=()=>{ try{ localStorage.setItem('pcQuote2',JSON.stringify(pcQuote)); }catch(e){} };
-const pcLineName=l=>l.name||l.size;
+const pcLineName=l=>l.name||l.size||'Item';
+// the message as typed over (kept like the quote), or '' while it follows the lines
+let pcMsgEdited='';
+try{ pcMsgEdited=localStorage.getItem('pcQuoteMsg2')||''; }catch(e){}
+const pcMsgKeep=()=>{ try{ localStorage.setItem('pcQuoteMsg2',pcMsgEdited); }catch(e){} };
 function pcRenderQuote(){
   document.getElementById('pcQuote').hidden=!pcQuote.length;
   let total=0, profit=0, gap=false;
   document.getElementById('pcQuoteRows').innerHTML=pcQuote.map((l,i)=>{
-    const w=pcWork(l); total+=w.amount; if(w.profit==null) gap=true; else profit+=w.profit;
-    return `<tr data-pc-q="${i}"><td class="it"><b>${escapeHtml(pcLineName(l))}</b>
-        <span>${escapeHtml(l.size)} · ${escapeHtml(l.paper)}, ${PC_SIDE[l.side]}</span>
-        ${w.missing?'<span class="warn">paper no longer in Finance settings</span>':''}</td>
+    const w=pcWork(l); total+=w.amount; if(w.profit!=null) profit+=w.profit; else if(!l.custom) gap=true;
+    return `<tr data-pc-q="${i}"><td class="it"><input type="text" class="pc-qname" data-pc-qf="name" value="${escapeHtml(l.custom?(l.name||''):pcLineName(l))}" placeholder="${l.custom?'Item, e.g. Delivery':escapeHtml(l.size)}"/>
+        ${l.custom?'<span>Your own line — no paper cost</span>':`<span>${escapeHtml(l.size)} · ${escapeHtml(l.paper)}, ${PC_SIDE[l.side]}</span>`}
+        ${w.missing&&!l.custom?'<span class="warn">paper no longer in Finance settings</span>':''}</td>
       <td><input type="number" min="1" data-pc-qf="qty" value="${escapeHtml(String(l.qty))}"/></td>
       <td class="r"><input type="number" min="0" step="0.01" data-pc-qf="price" value="${escapeHtml(String(l.price))}"/></td>
       <td class="r"><b>${ooMoney(w.amount)}</b></td>
@@ -72433,14 +72450,19 @@ function pcRenderQuote(){
   }).join('');
   document.getElementById('pcQuoteTotal').textContent=ooMoney(total);
   document.getElementById('pcQuoteProfit').textContent=`Est profit ${ooMoney(profit)}${gap?' (some lines have no paper cost)':''} — not in the message`;
-  document.getElementById('pcQuoteMsg').textContent=pcQuoteMessage();
+  // the message follows the lines until it is typed in; then it is left alone
+  const msgBox=document.getElementById('pcQuoteMsg'), want=pcMsgEdited||pcQuoteMessage();
+  if(msgBox.value!==want) msgBox.value=want;
+  document.getElementById('pcQuoteMsgReset').hidden=!pcMsgEdited;
 }
 // what goes to the customer: items, quantities and prices — never cost or profit
 function pcQuoteMessage(){
   if(!pcQuote.length) return '';
   const total=pcQuote.reduce((a,l)=>a+pcWork(l).amount,0);
   return 'Hi! Here is the quote for your printing:\n\n'
-    +pcQuote.map((l,i)=>`${i+1}. ${pcLineName(l)}${l.name&&l.name!==l.size?` (${l.size})`:''}, ${l.side==='double'?'double sided':l.side==='single'?'single sided':'blank'}\n    ${finNum(l.qty)} pcs × ${ooMoney(l.price)} = ${ooMoney(pcWork(l).amount)}`).join('\n')
+    +pcQuote.map((l,i)=>l.custom
+      ?`${i+1}. ${pcLineName(l)}\n    ${finNum(l.qty)} × ${ooMoney(l.price)} = ${ooMoney(pcWork(l).amount)}`
+      :`${i+1}. ${pcLineName(l)}${l.name&&l.name!==l.size?` (${l.size})`:''}, ${l.side==='double'?'double sided':l.side==='single'?'single sided':'blank'}\n    ${finNum(l.qty)} pcs × ${ooMoney(l.price)} = ${ooMoney(pcWork(l).amount)}`).join('\n')
     +`\n\nTotal: ${ooMoney(total)}\n\nLet us know if you would like to go ahead 😊`;
 }
 (()=>{
@@ -72466,7 +72488,9 @@ function pcQuoteMessage(){
   });
   document.getElementById('pcAddLine').addEventListener('click',()=>{
     const f=pcForm();
-    if(!f.paper||!(f.qty>0)||!(f.price>0)) return showMsg(document.getElementById('pcMsg'),'Pick a paper, and type a quantity and a selling price.',false);
+    const miss=[!f.paper&&'pick a paper',!(f.qty>0)&&'type a quantity',!(f.price>0)&&'type a selling price'].filter(Boolean);
+    if(miss.length) return showMsg(document.getElementById('pcMsg'),'To add another line, '+miss.join(', ').replace(/, ([^,]*)$/,' and $1')+' in the boxes above.',false);
+    document.getElementById('pcMsg').innerHTML='';
     pcQuote.push(f); pcQuoteKeep(); pcRenderQuote();
     ['pcQty','pcName'].forEach(id=>document.getElementById(id).value=''); pcCalc();
     document.getElementById('pcQty').focus();
@@ -72474,7 +72498,7 @@ function pcQuoteMessage(){
   const qRows=document.getElementById('pcQuoteRows');
   qRows.addEventListener('input',e=>{
     const k=e.target.dataset.pcQf; if(!k) return;
-    pcQuote[+e.target.closest('[data-pc-q]').dataset.pcQ][k]=finNum(e.target.value); pcQuoteKeep();
+    pcQuote[+e.target.closest('[data-pc-q]').dataset.pcQ][k]=k==='name'?e.target.value:finNum(e.target.value); pcQuoteKeep();
   });
   qRows.addEventListener('change',e=>{ if(e.target.dataset.pcQf) pcRenderQuote(); });
   qRows.addEventListener('click',e=>{
@@ -72482,9 +72506,18 @@ function pcQuoteMessage(){
     pcQuote.splice(+e.target.closest('[data-pc-q]').dataset.pcQ,1); pcQuoteKeep(); pcRenderQuote();
   });
   document.getElementById('pcQuoteClear').addEventListener('click',()=>{
-    if(!confirm('Clear the quote?')) return; pcQuote=[]; pcQuoteKeep(); pcRenderQuote(); });
+    if(!confirm('Clear the quote?')) return; pcQuote=[]; pcQuoteKeep(); pcMsgEdited=''; pcMsgKeep(); pcRenderQuote(); });
+  document.getElementById('pcQuoteAdd').addEventListener('click',()=>{
+    pcQuote.push({custom:true,name:'',size:'',paper:'',side:'',ups:1,qty:1,price:0}); pcQuoteKeep(); pcRenderQuote();
+    const ins=qRows.querySelectorAll('input.pc-qname'); if(ins.length) ins[ins.length-1].focus();
+  });
+  document.getElementById('pcQuoteMsg').addEventListener('input',e=>{
+    pcMsgEdited=e.target.value===pcQuoteMessage()?'':e.target.value; pcMsgKeep();
+    document.getElementById('pcQuoteMsgReset').hidden=!pcMsgEdited;
+  });
+  document.getElementById('pcQuoteMsgReset').addEventListener('click',()=>{ pcMsgEdited=''; pcMsgKeep(); pcRenderQuote(); });
   document.getElementById('pcQuoteCopy').addEventListener('click',async e=>{
-    const b=e.currentTarget, txt=pcQuoteMessage(); if(!txt) return;
+    const b=e.currentTarget, txt=document.getElementById('pcQuoteMsg').value||pcQuoteMessage(); if(!txt) return;
     try{ await navigator.clipboard.writeText(txt); }
     catch(err){ const ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
     const was=b.textContent; b.textContent='✓ Copied'; setTimeout(()=>b.textContent=was,1500);
