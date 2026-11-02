@@ -1464,6 +1464,16 @@ body.lt .tile-grid:not(#homeScreen .tile-grid) .tile-shop{grid-column:span 2;fle
 .mc-dock{position:fixed;right:16px;top:50%;transform:translateY(-50%);z-index:52;
   display:none;flex-direction:column;align-items:flex-end;gap:9px;}
 .mc-dock.on{display:flex;}
+/* moved by hand: placed by its top-left corner wherever it was dropped */
+.mc-dock.moved{right:auto;bottom:auto;transform:none;}
+/* a finger on it drags it rather than scrolling the page under it */
+.mc-dock{touch-action:none;}
+.mc-dock.dragging{opacity:.85;}
+.mc-dock.dragging *{cursor:grabbing !important;}
+.mc-dock-grip{align-self:center;padding:2px 10px;border-radius:999px;cursor:grab;
+  color:var(--faint);font-size:16px;line-height:1;background:var(--card);
+  border:1px solid var(--border-strong);user-select:none;touch-action:none;}
+.mc-dock-grip:hover{color:var(--ink);}
 .mc-dock-btn,.mc-pdf-bubble{display:flex;flex-direction:column;align-items:center;gap:1px;
   width:78px;padding:11px 6px;border-radius:16px;border:1px solid var(--border-strong);
   background:var(--card);color:var(--ink);box-shadow:0 8px 22px rgba(0,0,0,.45);
@@ -6039,6 +6049,11 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
        the top or the foot of a list that can be two hundred lines long, which
        on a long batch is nowhere near the hand that wants them. -->
   <div class="mc-dock" id="mcDock">
+    <!-- the dock floats: held anywhere and dragged, it goes where it is put
+         and stays there on this computer; a double-click on the grip puts it
+         back in the margin -->
+    <div class="mc-dock-grip" id="mcDockGrip" title="Drag to move these buttons · double-click to put them back"
+         aria-hidden="true">⠿</div>
     <button type="button" class="mc-dock-btn" id="mcPaperBtn"
             title="How much paper this batch has sent to the Fiery, and what is still to print"
             aria-label="Paper summary">
@@ -39425,6 +39440,8 @@ const HELP=[
    h:'Press <b>«</b> at the top of the left panel; the sheet gets the room. The icons left on the edge open it again (🖼 Library, ✨ Batch).',sel:'#gtNlFold,#pcNlFold'},
   {on:'sheet custom',t:'Magic Create beside the template',k:'batch list order magic create tab',
    h:'Opening a line from Magic Create puts the batch list in the left panel as a <b>Magic Create</b> tab, next to Library. The line being worked on glows. Fold it with <b>«</b>; <b>✨ Batch</b> brings it back. Back returns to the batch screen. Create on a line of another order starts a clean sheet with that line’s own paper - the last order’s cards never carry over.',sel:'.gtnl-mctab,.pcnl-mctab,.gtnl-mcrail,.pcnl-mcrail'},
+  {on:'sheet custom',t:'Move the Paper / Log / Find / SKUs buttons',k:'float floating drag move dock side buttons paper log find sku summary out of the way',
+   h:'The buttons at the side of the batch float: hold any of them (or the <b>⠿</b> grip on top) and drag them anywhere. A short tap still presses the button. Kept on this computer; double-click <b>⠿</b> to put them back at the side.',sel:'#mcDock'},
 
   // Die Cut / Sticker sheet
   {on:'sheet',t:'Add a design to the order',k:'new line choose design one-off illustrator drag library',
@@ -58632,6 +58649,73 @@ function mcPdfBubbleSync(n){
   b.setAttribute('aria-label',b.title);
 }
 document.getElementById('mcPdfBubble').addEventListener('click',()=>mcOpenPlan());
+// The dock is moved by holding any part of it and dragging. A press that moves
+// less than a few pixels is still a tap on the button under it; one that moves
+// further is a drag, and the click it would end in is swallowed. Where it was
+// dropped is kept on this computer, and kept on screen as the window changes.
+(function mcDockDrag(){
+  const dock=document.getElementById('mcDock'); if(!dock) return;
+  const KEY='mcDockPos';
+  const place=(x,y)=>{
+    const w=dock.offsetWidth||80, h=dock.offsetHeight||200;
+    x=Math.max(4,Math.min(window.innerWidth-w-4,x));
+    y=Math.max(4,Math.min(window.innerHeight-h-4,y));
+    dock.style.left=x+'px'; dock.style.top=y+'px';
+    if(!dock.classList.contains('moved')) dock.classList.add('moved');
+    return {x,y};
+  };
+  const reset=()=>{
+    dock.classList.remove('moved'); dock.style.left=''; dock.style.top='';
+    try{ localStorage.removeItem(KEY); }catch(e){}
+  };
+  const saved=()=>{ try{ return JSON.parse(localStorage.getItem(KEY)||'null'); }catch(e){ return null; } };
+  const restore=()=>{ const p=saved(); if(p&&isFinite(p.x)&&isFinite(p.y)&&dock.offsetWidth) place(p.x,p.y); };
+  // hidden (display:none) until the batch screen shows it, so it is placed
+  // once it has a size to keep on screen — only as it comes on: placing it
+  // writes its class too, and answering that hung the page in a loop
+  let wasOn=false;
+  new MutationObserver(()=>{
+    const on=dock.classList.contains('on');
+    if(on&&!wasOn) restore();
+    wasOn=on;
+  }).observe(dock,{attributes:true,attributeFilter:['class']});
+  window.addEventListener('resize',()=>{ if(dock.classList.contains('moved')) restore(); });
+  let start=null, dragged=false;
+  dock.addEventListener('pointerdown',e=>{
+    if(e.button!==0) return;
+    const r=dock.getBoundingClientRect();
+    start={px:e.clientX,py:e.clientY,x:r.left,y:r.top,id:e.pointerId};
+    dragged=false;
+  });
+  // followed on the window: a quick drag leaves the dock behind at once, and
+  // the moves after that land on whatever is under the pointer instead
+  window.addEventListener('pointermove',e=>{
+    if(!start||e.pointerId!==start.id) return;
+    const dx=e.clientX-start.px, dy=e.clientY-start.py;
+    if(!dragged&&Math.hypot(dx,dy)<6) return;
+    if(!dragged){ dragged=true; dock.classList.add('dragging'); }
+    place(start.x+dx,start.y+dy);
+  });
+  const end=e=>{
+    if(!start||(e&&e.pointerId!==start.id)) return;
+    start=null; dock.classList.remove('dragging');
+    if(dragged){
+      const r=dock.getBoundingClientRect();
+      try{ localStorage.setItem(KEY,JSON.stringify({x:r.left,y:r.top})); }catch(err){}
+      // a drop with no click after it (let go off the window) must not eat
+      // the next real tap somewhere else
+      setTimeout(()=>{ dragged=false; },0);
+    }
+  };
+  window.addEventListener('pointerup',end);
+  window.addEventListener('pointercancel',end);
+  // the click a drag ends in is not a tap on the button it ended over, nor on
+  // whatever it was dropped on
+  window.addEventListener('click',e=>{
+    if(dragged){ dragged=false; e.stopPropagation(); e.preventDefault(); }
+  },true);
+  document.getElementById('mcDockGrip').addEventListener('dblclick',reset);
+})();
 document.addEventListener('click',e=>{
   const b=e.target.closest&&e.target.closest('[data-mc-plan-count]');
   if(b&&!mcBusy&&!mcPlanCounting) mcPlanCountAll();
