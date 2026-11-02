@@ -11301,6 +11301,12 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
     <span class="hint" style="margin:0;">warmer</span>
     <b data-pc-tune-val="w" style="min-width:38px;text-align:right;">0</b></label>
   <label style="display:flex;gap:8px;align-items:center;margin-top:4px;font-size:12px;"
+    title="If no Warmth makes the white white - it stays bluish or yellowish - slide this till the green or pink in it goes - kept on this computer.">
+    <span style="min-width:92px;">Tint</span><span class="hint" style="margin:0;">greener</span>
+    <input type="range" min="-100" max="100" step="5" data-pc-tune="t" style="flex:1;min-width:70px;"/>
+    <span class="hint" style="margin:0;">pinker</span>
+    <b data-pc-tune-val="t" style="min-width:38px;text-align:right;">0</b></label>
+  <label style="display:flex;gap:8px;align-items:center;margin-top:4px;font-size:12px;"
     title="A wide-colour screen shows colours stronger than they are. Slide down until the colours look as strong as the print's - kept on this computer.">
     <span style="min-width:92px;">Colour strength</span>
     <input type="range" min="10" max="100" step="5" data-pc-tune="s" style="flex:1;min-width:70px;"/>
@@ -33290,7 +33296,7 @@ const PRINT_PAPER_NAMES={gloss:'Coated-Glossy',matte:'Coated-Matte',plain:'Plain
 // read with the ES-2000 and made into a profile (Argyll, avg 0.54 dE2000 to
 // the readings). Its RGB is the numbers sent, so it is the whole path - the
 // Fiery's Adobe RGB reading, its rendering, the press - and the preview takes
-// the printed colour from it, the paper's tint included; the red shift (a
+// the printed colour from it, relative to the paper's white; the red shift (a
 // guess for that path) is left out. The colour check and its fixes still go
 // through the Fiery's own profile.
 const PRINT_MEASURED={matte:'profiles/fiery-matte-measured.icm'};
@@ -33420,15 +33426,17 @@ function printCms(paper){
     // of that - #420001 takes 74% black and prints darker than K 95%.
     const kOnly=new Uint8Array(256*4); for(let k=0;k<256;k++) kOnly[k*4+3]=k;
     const kL=run(kLab,kOnly,256).filter((_,i)=>i%3===0);
-    // the measured paper (PRINT_MEASURED): its printed colour, absolute so the
-    // paper's tint shows, then its black taken to the screen's black and its
-    // white to the screen's white, as lift does. A picture's sRGB goes in as
-    // the Adobe RGB numbers of the same colour: both are matrix profiles, so
-    // the Fiery reaches the same ink from either.
+    // the measured paper (PRINT_MEASURED): its printed colour relative to the
+    // paper's white, which the screen shows as its own white, then its black
+    // taken to the screen's black, as lift does. Not absolute: the paper's
+    // blue tint is its brightener under the ES-2000's UV, which the shop's
+    // light does not show - the preview's white came out bluish on Isabel-PC
+    // and no Warmth made it white. A picture's sRGB goes in as the Adobe RGB
+    // numbers of the same colour: both are matrix profiles, so the Fiery
+    // reaches the same ink from either.
     let mLab=null, s2a=null, mLift=null;
     if(meas){
-      const A=L.INTENT_ABSOLUTE_COLORIMETRIC!=null?L.INTENT_ABSOLUTE_COLORIMETRIC:3;
-      mLab=T(meas,L.TYPE_RGB_8,lab,L.TYPE_Lab_16,A,0);
+      mLab=T(meas,L.TYPE_RGB_8,lab,L.TYPE_Lab_16,R,0);
       s2a=T(srgb,L.TYPE_RGB_8,adobe,L.TYPE_RGB_8,R,0);
       const wb=run(mLab,new Uint8Array([255,255,255,0,0,0]),2), mW=wb[0], mK=wb[3];
       mLift=v=>Math.max(0,Math.min(65535,(v-mK)*65535/(mW-mK)));
@@ -33708,7 +33716,7 @@ const PROOF_TUNE_BANDS=[
   {k:'red',name:'Red',h:29,dot:'#E03030'},{k:'yel',name:'Yellow / orange',h:85,dot:'#F0B020'},
   {k:'grn',name:'Green',h:142,dot:'#2E9E4A'},{k:'cyn',name:'Teal / cyan',h:195,dot:'#20A8B8'},
   {k:'blu',name:'Blue / purple',h:264,dot:'#3A5AE0'},{k:'pnk',name:'Pink / magenta',h:345,dot:'#F06AB0'}];
-const PROOF_TUNE_KEY='pigu.proofTune', PROOF_TUNE_DEF={b:100,w:0,s:100};
+const PROOF_TUNE_KEY='pigu.proofTune', PROOF_TUNE_DEF={b:100,w:0,t:0,s:100};
 PROOF_TUNE_BANDS.forEach(B=>{ PROOF_TUNE_DEF[B.k+'S']=100; PROOF_TUNE_DEF[B.k+'L']=0; });
 function printScreenTune(){
   const t={...PROOF_TUNE_DEF};
@@ -33717,7 +33725,7 @@ function printScreenTune(){
     if(v&&typeof v==='object') for(const k in t){ const n=Number(v[k]); if(isFinite(n)) t[k]=n; }
   }catch(e){}
   const cl=(v,a,b)=>Math.max(a,Math.min(b,v));
-  t.b=cl(t.b,40,100); t.w=cl(t.w,-100,100); t.s=cl(t.s,10,100);
+  t.b=cl(t.b,40,100); t.w=cl(t.w,-100,100); t.t=cl(t.t,-100,100); t.s=cl(t.s,10,100);
   PROOF_TUNE_BANDS.forEach(B=>{ t[B.k+'S']=cl(t[B.k+'S'],10,200); t[B.k+'L']=cl(t[B.k+'L'],-30,30); });
   return t;
 }
@@ -33760,9 +33768,13 @@ function printTuneOne(t,R,G,B){
   // full warmth: a white of about 5000K, as paper under the shop's light;
   // full cool (w -100): a white of about 9000K, as a bright paper's
   // brightener shows it - the screen's white could not be taken colder
-  const f=t.b/100, w=t.w/100;
-  if(w<0){ const c=-w; return [_tuneEncF(r*f*(1-0.16*c)),_tuneEncF(g*f*(1-0.06*c)),_tuneEncF(b*f)]; }
-  return [_tuneEncF(r*f),_tuneEncF(g*f*(1-0.06*w)),_tuneEncF(b*f*(1-0.2*w))];
+  // Tint, across that (left greener, right pinker): Warmth alone took the
+  // white only bluish or yellowish, never to white
+  const f=t.b/100, w=t.w/100, tn=t.t/100;
+  if(w<0){ const c=-w; r*=1-0.16*c; g*=1-0.06*c; }
+  else { g*=1-0.06*w; b*=1-0.2*w; }
+  if(tn>0) g*=1-0.1*tn; else if(tn<0){ r*=1+0.08*tn; b*=1+0.08*tn; }
+  return [_tuneEncF(r*f),_tuneEncF(g*f),_tuneEncF(b*f)];
 }
 // the tune as a 33-step table, made again only when the tune changes
 let _tuneLut=null, _tuneLutKey='';
@@ -34700,7 +34712,7 @@ function pcTuneShow(){
   document.querySelectorAll('#pcPop [data-pc-tune]').forEach(x=>{ x.value=t[x.dataset.pcTune]; });
   document.querySelectorAll('#pcPop [data-pc-tune-val]').forEach(x=>{
     const k=x.dataset.pcTuneVal, v=t[k];
-    x.textContent=/L$|^w$/.test(k)?(v>0?'+':'')+v:v+'%';
+    x.textContent=/L$|^[wt]$/.test(k)?(v>0?'+':'')+v:v+'%';
   });
 }
 document.getElementById('pcTuneBands').addEventListener('click',e=>{
@@ -39721,8 +39733,8 @@ const HELP=[
   {on:'sheet',t:'Show bounding box, cut lines, punch holes',k:'show hide bounding cut lines punch holes view',
    h:'Top left of the sheet: <b>Show bounding box</b>, <b>Show cut lines</b>, <b>Show punch holes</b>.',sel:'#gtShownBar'},
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
-  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte is measured off this printer (title says <b>measured</b>), paper tint included; gloss still uses the Fiery\'s own profile.',sel:'#gtPpBtn'},
-  {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
+  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte is measured off this printer (title says <b>measured</b>), its white shown as the screen\'s white; gloss still uses the Fiery\'s own profile.',sel:'#gtPpBtn'},
+  {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
   {on:'sheet',t:'Saved sheets',k:'save keep later open job',h:'Left panel → <b>Saved sheets</b>: keep this sheet for later, or open one.',find:'Saved sheets'},
@@ -39755,8 +39767,8 @@ const HELP=[
   {on:'custom',t:'Rotate the sheet or open it full screen',k:'rotate turn full screen enlarge',h:'Under the sheet: <b>↺</b> / <b>↻</b> turn it, <b>⤢</b> opens it over the whole screen.',sel:'#pcNlZoom [data-pcz="big"]'},
   {on:'custom',t:'Show cut lines / reference line',k:'show cut lines reference line view',h:'Top left of the sheet: <b>Show cut lines</b>, <b>Show reference line</b>.',sel:'#pcShownBar'},
   {on:'custom',t:'Order ID, paper and GSM',k:'order id paper type gsm file name',h:'Top bar: <b>Order ID</b>, <b>Paper type</b>, <b>GSM</b> - they name the files.',sel:'#pcJobBar'},
-  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte is measured off this printer (title says <b>measured</b>), paper tint included; gloss still uses the Fiery\'s own profile.',sel:'#ppOpenBtn'},
-  {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
+  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte is measured off this printer (title says <b>measured</b>), its white shown as the screen\'s white; gloss still uses the Fiery\'s own profile.',sel:'#ppOpenBtn'},
+  {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Download and print',k:'download print front back pdf fiery',
    h:'Top bar → <b>Download &amp; Print front</b> / <b>back</b>. <b>⚠ to check</b> lists anything to fix first.',sel:'#printFrontBtn'},
   {on:'custom',t:'Place Card words',k:'place card words category names list',h:'Place Card: right panel → <b>Words</b> tab - the categories and the names on the cards.',find:'Words'},
