@@ -39769,7 +39769,7 @@ const HELP=[
   {on:'sheet',t:'Edge margin',k:'edge margin border',
    h:'Rearrange → Spacing → <b>Edge</b>: the margin round the sheet.',find:'Edge'},
   {on:'sheet',t:'Bleed for the whole order',k:'bleed add all sides style offset stretch mirror extend content-aware ai fill',
-   h:'Right panel → <b>Cut &amp; print</b> → <b>Bleed</b>: <b>Add bleed to all sides</b>, the bleed in mm, and how it is made - Offset, Stretch, Mirror, Extend edges, Content-aware or AI fill.',tab:'#gtNl [data-nltab="cut"]',find:'Add bleed to all sides'},
+   h:'Right panel → <b>Cut &amp; print</b> → <b>Bleed</b>: <b>Add bleed to all sides</b>, the bleed in mm, and how it is made - Offset, Stretch, Mirror, Extend edges, Content-aware or AI fill. On a PDF, the printed file makes the bleed from the PDF\'s own edges (Content-aware and AI fill print as Extend there, after any Trim edge), so the bleed prints the same colour as the tag.',tab:'#gtNl [data-nltab="cut"]',find:'Add bleed to all sides'},
   {on:'sheet',t:'Invert colours',k:'invert negative colours',
    h:'Right panel → <b>Cut &amp; print</b> → <b>Invert colours</b>.',tab:'#gtNl [data-nltab="cut"]',find:'Invert colours'},
   {on:'sheet',t:'Registration dots',k:'dots registration cutter four corner',
@@ -45615,18 +45615,30 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // and a tag cut to the placeholder's shape (slotPath) the same: its bleed
   // ring met the page at the square box, which runs on the cut where a circle
   // touches it, and printed there as a line
-  // (Stretch with no gap to cross already enlarges the page itself into the
-  // bleed, seamless and sharp, so it is left to do that)
-  const stretchWhole=gtSheet.bleedMode==='scale'&&!(gap.x>0.05||gap.y>0.05);
-  let own=!!(vec&&design&&b>0&&(gtCutsOwnLine(design)||(slotPath&&!stretchWhole)));
+  // Every tag with a bleed does this where it can, not only those: a bleed of
+  // pixels is the screen's picture of the page, whose CMYK reads darker than
+  // the page prints, so a CMYK file's tag printed one colour and its bleed
+  // band another. Content-aware and AI fill go in as Extend from the page;
+  // an edge trimmed off first (Trim px) is cut off the page and the bleed
+  // stretched from inside it (ix/iy, mm on the sheet's axes - img is already
+  // turned with the design).
+  const bm=gtSheet.bleedMode;
+  const trimPx=Math.max(0,Number(gtSheet.bleedTrimPx)||0);
+  const ix=trimPx&&img.naturalWidth?trimPx/img.naturalWidth*r.w:0;
+  const iy=trimPx&&img.naturalHeight?trimPx/img.naturalHeight*r.h:0;
+  // Stretch with no gap to cross already enlarges the page itself into the
+  // bleed, seamless and sharp, so it is left to do that
+  const stretchWhole=bm==='scale'&&!(gap.x>0.05||gap.y>0.05);
   // Grow is the artwork's own shape grown outward: the same as Extend only for
-  // a picture with nothing see-through in it. And an edge trimmed off first
-  // (Trim px) is done to the pixels, which a sliver of the page cannot follow.
-  // Those it is not: the page is still placed (sharp), with the bleed made
-  // from pixels round it - it used to drop the whole tag to a 300dpi picture
-  if(own&&(!['extend','offset','mirror'].includes(gtSheet.bleedMode)
-     ||(gtSheet.bleedMode==='offset'&&!gtArtOpaque(img))
-     ||(Number(gtSheet.bleedTrimPx)||0)>0)) own=false;
+  // a picture with nothing see-through in it. Mirror turns the page over once,
+  // so no deeper than the page itself. Those it is not: the page is still
+  // placed (sharp), with the bleed made from pixels round it
+  let own=!!(vec&&b>0&&!stretchWhole&&['extend','offset','mirror','content','ai'].includes(bm)
+    &&!(bm==='offset'&&!gtArtOpaque(img))
+    &&!(bm==='mirror'&&(b+gap.x+ix>r.w-ix*2||b+gap.y+iy>r.h-iy*2
+      // a plain tag's mirrored bleed stays pixels, as before: turned over,
+      // it cannot run in over the page, and met it as a pale hairline
+      ||!((design&&gtCutsOwnLine(design))||slotPath))));
   // a placed page is clipped to the same shape the screen clips it to (see
   // gtClipToTrace): without it a circle-cut PDF went out as its whole square
   if(vec&&design&&b>0&&!cutOf.cutSheet){
@@ -45668,7 +45680,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
     }
     gtPcRo._rects.push(pcR);
   }catch(e){}
-  const took=vec?vec.take({id:key,turn},r,g,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
+  const took=vec?vec.take({id:key,turn,...(own&&(ix||iy)?{ix,iy}:{})},r,g,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
   if(pcR) pcR.placed=!!took;          // its page is under the render, not its pixels
   if(took===true) return;
   ctx.save();
@@ -52272,8 +52284,13 @@ async function gtBuildPdf(count,render,sources){
         sides.forEach(([sx,dx])=>ups.forEach(([sy,dy])=>{
           if(!sx&&!sy) return;
           if((sx&&!(dx>0))||(sy&&!(dy>0))) return;
-          const rx=sx<0?X-dx:sx>0?X+TW:X, rw=sx?dx:TW;
-          const ry=sy<0?Y-dy:sy>0?Y+TH:Y, rh=sy?dy:TH;
+          // each stretched piece runs half a point in over the page: the two
+          // soft edges met on one line and let paper through as a pale
+          // hairline. Not a mirrored one, which would show what lies past
+          // the edge there.
+          const ox=sx&&!E.mirror?0.5:0, oy=sy&&!E.mirror?0.5:0;
+          const rx=sx<0?X-dx:sx>0?X+TW-ox:X, rw=sx?dx+ox:TW;
+          const ry=sy<0?Y-dy:sy>0?Y+TH-oy:Y, rh=sy?dy+oy:TH;
           let a=1,ex=0,d=1,ey=0;
           if(sx){
             const edge=sx<0?X:X+TW;
@@ -52410,7 +52427,7 @@ function gtVecTaker(forms,place){
     if(whole){
       const e={l:Math.max(0,r.x-clip.x),t:Math.max(0,r.y-clip.y),
         r:Math.max(0,clip.x+clip.w-(r.x+r.w)),b:Math.max(0,clip.y+clip.h-(r.y+r.h)),
-        mirror:whole==='mirror'};
+        mirror:whole==='mirror',...(d.ix||d.iy?{ix:d.ix||0,iy:d.iy||0}:{})};
       put({key:d.id,rect:{x:r.x,y:r.y,w:r.w,h:r.h},clip,ext:e});
       return true;
     }
