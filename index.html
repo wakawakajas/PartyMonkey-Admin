@@ -33284,6 +33284,15 @@ function iccObject(num){
 const PRINT_PROFILES={gloss:'profiles/fiery-coated-glossy.icc',matte:'profiles/fiery-coated-matte.icc',
   plain:'profiles/fiery-plain.icc'};
 const PRINT_PAPER_NAMES={gloss:'Coated-Glossy',matte:'Coated-Matte',plain:'Plain'};
+// Papers measured off this printer: a 400-patch chart of untagged RGB printed
+// through the Fiery as a customer's job is (after calibrating, 2 Nov 2026),
+// read with the ES-2000 and made into a profile (Argyll, avg 0.54 dE2000 to
+// the readings). Its RGB is the numbers sent, so it is the whole path - the
+// Fiery's Adobe RGB reading, its rendering, the press - and the preview takes
+// the printed colour from it, the paper's tint included; the red shift (a
+// guess for that path) is left out. The colour check and its fixes still go
+// through the Fiery's own profile.
+const PRINT_MEASURED={matte:'profiles/fiery-matte-measured.icm'};
 const LCMS_URL='https://cdn.jsdelivr.net/npm/lcms-wasm@1.0.5/dist/lcms.js';
 // how light a colour prints, L* from the paper's black (0) to its white (100),
 // at or under which a colour is flagged, and the two its fixes are lifted to
@@ -33382,6 +33391,7 @@ function printCms(paper){
   if(!_printCms[paper]) _printCms[paper]=(async()=>{
     const {L,lcms,prof,srgb,lab,adobe}=await lcmsLib();
     const out=await prof(PRINT_PROFILES[paper]);
+    const meas=PRINT_MEASURED[paper]?await prof(PRINT_MEASURED[paper]):null;
     const P=L.INTENT_PERCEPTUAL, R=L.INTENT_RELATIVE_COLORIMETRIC, BPC=L.cmsFLAGS_BLACKPOINTCOMPENSATION;
     const T=(a,af,b,bf,i,f)=>lcms.cmsCreateTransform(a,af,b,bf,i,f);
     const toK={pdf:T(adobe,L.TYPE_RGB_8,out,L.TYPE_CMYK_8,P,BPC),img:T(srgb,L.TYPE_RGB_8,out,L.TYPE_CMYK_8,P,BPC)};
@@ -33409,7 +33419,20 @@ function printCms(paper){
     // of that - #420001 takes 74% black and prints darker than K 95%.
     const kOnly=new Uint8Array(256*4); for(let k=0;k<256;k++) kOnly[k*4+3]=k;
     const kL=run(kLab,kOnly,256).filter((_,i)=>i%3===0);
-    const cms={paper,
+    // the measured paper (PRINT_MEASURED): its printed colour, absolute so the
+    // paper's tint shows, then its black taken to the screen's black and its
+    // white to the screen's white, as lift does. A picture's sRGB goes in as
+    // the Adobe RGB numbers of the same colour: both are matrix profiles, so
+    // the Fiery reaches the same ink from either.
+    let mLab=null, s2a=null, mLift=null;
+    if(meas){
+      const A=L.INTENT_ABSOLUTE_COLORIMETRIC!=null?L.INTENT_ABSOLUTE_COLORIMETRIC:3;
+      mLab=T(meas,L.TYPE_RGB_8,lab,L.TYPE_Lab_16,A,0);
+      s2a=T(srgb,L.TYPE_RGB_8,adobe,L.TYPE_RGB_8,R,0);
+      const wb=run(mLab,new Uint8Array([255,255,255,0,0,0]),2), mW=wb[0], mK=wb[3];
+      mLift=v=>Math.max(0,Math.min(65535,(v-mK)*65535/(mW-mK)));
+    }
+    const cms={paper,measured:!!meas,
       ink:(rgb,src)=>[...run(toK[src],new Uint8Array(rgb),1)],        // 0-255 each
       // the black-ink-only strength, %, that prints as dark as this colour
       looksK:(rgb,src)=>{
@@ -33484,12 +33507,12 @@ function printCms(paper){
       // bright colour duller than they print; at 50, red and electric blue
       // were still taken down).
       proof:(rgb,n,src,g)=>{
-        const lb=run(kLab,run(toK[src],rgb,n),n);
+        const lb=mLab?run(mLab,src==='img'?run(s2a,rgb,n):rgb,n):run(kLab,run(toK[src],rgb,n),n);
         g=g>0?g:1;
         const T=19661;                               // L* 30, 16-bit
         for(let i=0;i<lb.length;i+=3){
-          printHueFix16(lb,i);                       // this printer's reds
-          const L1=lift(lb[i]);
+          if(!mLab) printHueFix16(lb,i);             // this printer's reds
+          const L1=mLab?mLift(lb[i]):lift(lb[i]);
           if(g===1||!(L1>0)||L1>=T){ lb[i]=L1; continue; }
           const L2=T*Math.pow(L1/T,g), k=Math.pow(L2/L1,0.75);
           lb[i]=L2;
@@ -34298,7 +34321,7 @@ function pcPopRender(){
   if(ae&&ae.matches&&ae.matches('#pcPop input[type="number"],#pcPop input[type="color"]')) return;
   const paper=printPaperKey(), cms=printCmsReady[paper];
   const body=document.getElementById('pcPopBody');
-  document.getElementById('pcPopTitle').textContent=`Print preview · Fiery ${PRINT_PAPER_NAMES[paper]}`;
+  document.getElementById('pcPopTitle').textContent=`Print preview · Fiery ${PRINT_PAPER_NAMES[paper]}${cms&&cms.measured?' · measured':''}`;
   const has=s=>sideArtObjs(s).some(([,o])=>o&&o.img);
   const seg=document.getElementById('pcPopSides');
   seg.style.display=has('front')&&has('back')?'':'none';
@@ -39694,7 +39717,7 @@ const HELP=[
   {on:'sheet',t:'Show bounding box, cut lines, punch holes',k:'show hide bounding cut lines punch holes view',
    h:'Top left of the sheet: <b>Show bounding box</b>, <b>Show cut lines</b>, <b>Show punch holes</b>.',sel:'#gtShownBar'},
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
-  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock.',sel:'#gtPpBtn'},
+  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte is measured off this printer (title says <b>measured</b>), paper tint included; gloss still uses the Fiery\'s own profile.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> up till the paper tint matches, <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
@@ -39728,7 +39751,7 @@ const HELP=[
   {on:'custom',t:'Rotate the sheet or open it full screen',k:'rotate turn full screen enlarge',h:'Under the sheet: <b>↺</b> / <b>↻</b> turn it, <b>⤢</b> opens it over the whole screen.',sel:'#pcNlZoom [data-pcz="big"]'},
   {on:'custom',t:'Show cut lines / reference line',k:'show cut lines reference line view',h:'Top left of the sheet: <b>Show cut lines</b>, <b>Show reference line</b>.',sel:'#pcShownBar'},
   {on:'custom',t:'Order ID, paper and GSM',k:'order id paper type gsm file name',h:'Top bar: <b>Order ID</b>, <b>Paper type</b>, <b>GSM</b> - they name the files.',sel:'#pcJobBar'},
-  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>.',sel:'#ppOpenBtn'},
+  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte is measured off this printer (title says <b>measured</b>), paper tint included; gloss still uses the Fiery\'s own profile.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> up till the paper tint matches, <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Download and print',k:'download print front back pdf fiery',
    h:'Top bar → <b>Download &amp; Print front</b> / <b>back</b>. <b>⚠ to check</b> lists anything to fix first.',sel:'#printFrontBtn'},
