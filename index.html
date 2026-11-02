@@ -39445,6 +39445,8 @@ const HELP=[
    h:'Press <b>«</b> at the top of the left panel; the sheet gets the room. The icons left on the edge open it again (🖼 Library, ✨ Batch).',sel:'#gtNlFold,#pcNlFold'},
   {on:'sheet custom',t:'Magic Create beside the template',k:'batch list order magic create tab',
    h:'Opening a line from Magic Create puts the batch list in the left panel as a <b>Magic Create</b> tab, next to Library. The line being worked on glows. Fold it with <b>«</b>; <b>✨ Batch</b> brings it back. Back returns to the batch screen. Create on a line of another order starts a clean sheet with that line’s own paper - the last order’s cards never carry over.',sel:'.gtnl-mctab,.pcnl-mctab,.gtnl-mcrail,.pcnl-mcrail'},
+  {on:'sheet',t:'Tags moved by hand on a Magic Create sheet',k:'magic create save to line move placeholder drag position kept held nested pack',
+   h:'On a packed (nested) Die Cut / Sticker sheet lent from Magic Create, drag a tag where you want it, then <b>Save to line</b>. Each line keeps where its tags were put: opening the sheet again and Download All print them there. Changing the paper, margins or gaps packs the sheet afresh.'},
   {on:'design',t:'Design editor from Magic Create',k:'magic create batch one-off one time design layout colour old new full width',
    h:'A Die Cut / Sticker design opened from a Magic Create line uses this same layout and colours, across the whole window. <b>Back</b> returns to the sheet with the batch beside it.',sel:'#gtNlD'},
   {on:'sheet custom',t:'Move the Paper / Log / Find / SKUs buttons',k:'float floating drag move dock side buttons paper log find sku summary out of the way',
@@ -67181,6 +67183,49 @@ function mcGtNamesSay(line){
     ${NL.warn.map(w=>`<div class="gt-names-warn">⚠ ${escapeHtml(w)}</div>`).join('')}
     <div class="gt-names-tot">${NL.total} tag${NL.total===1?'':'s'}${bad?` · <span class="bad">${bad} row${bad>1?'s':''} not printed</span>`:''}</div>`;
 }
+// Tags moved by hand on a nested Die Cut / Sticker sheet (gtNestHand) live on
+// the sheet and nowhere else: Save to line wrote the design, the words and the
+// count onto the line, and the next open or the export packed the sheet afresh
+// - every placeholder dragged into place was back where the packer put it. So
+// each line keeps where its own tags were held: {frame, held:[{p,k,slot}]} -
+// the sheet they were on, which copy (designId#n) and the placeholder itself.
+// The frame is the sheet's paper and margins; changed since, they are let go.
+function mcGtHandOf(H,id){
+  if(!H||!Array.isArray(H.pages)) return undefined;
+  const pre='mc-'+id+'|', held=[];
+  H.pages.forEach((pg,p)=>(pg||[]).forEach(h=>{
+    if(h&&h.slot&&typeof h.key==='string'&&h.key.startsWith(pre))
+      held.push({p,k:h.key.slice(pre.length),slot:{...h.slot}});
+  }));
+  return held.length?{frame:H.frame,held}:undefined;
+}
+// the held tags of these lines, as a gtNestHand of their own (null: none)
+function mcGtHandFrom(lines){
+  let frame=null; const pages=[];
+  for(const x of lines||[]){
+    const h=x&&x.sheet_item&&x.sheet_item.hand;
+    if(!h||!Array.isArray(h.held)||!h.held.length) continue;
+    if(frame===null) frame=h.frame; else if(h.frame!==frame) continue;
+    h.held.forEach(e=>{ if(!(e.p>=0)||!e.slot) return;
+      (pages[e.p]||(pages[e.p]=[])).push({i:null,slot:{...e.slot},key:'mc-'+x.id+'|'+e.k}); });
+  }
+  if(frame===null) return null;
+  for(let p=0;p<pages.length;p++) if(!pages[p]) pages[p]=[];
+  return {sig:'',frame,pages};
+}
+// put these lines' held tags onto the sheet open now, in place of whatever it
+// held for them; the page's own held tags stay as they are
+function mcGtHandPut(lines){
+  const kept=mcGtHandFrom(lines); if(!kept) return;
+  const mine=lines.map(x=>'mc-'+x.id+'|');
+  const H=gtNestHand;
+  if(H&&H.frame===kept.frame){
+    const pages=H.pages.map(pg=>pg.filter(h=>!(typeof h.key==='string'&&mine.some(m=>h.key.startsWith(m)))));
+    kept.pages.forEach((pg,p)=>{ while(pages.length<=p) pages.push([]); pages[p]=pages[p].concat(pg); });
+    gtNestHand={...H,sig:'',pages};
+  }else gtNestHand=kept;
+  gtNestCache=null;
+}
 const mcGtLine=it=>({id:'mc-'+it.id,
   // The SKU it was lent for. Everything that asks "where is this SKU" looks
   // for it here first, and a lent row carried none — so Remove on the summary
@@ -67962,6 +68007,7 @@ async function mcGtOpenFullRun(page,finish){
         // that — unless it is the very line being opened, which is asked for.
         if(mcGtHome.ids.includes(x.id)&&!(here&&x.id===here.id)) continue;
         gtOrder.push(mcGtLine(x));
+        mcGtHandPut([x]);
         if(!mcGtHome.ids.includes(x.id)) mcGtHome.ids.push(x.id);
         continue;
       }
@@ -67985,6 +68031,8 @@ async function mcGtOpenFullRun(page,finish){
     mcGtHome={ids:lines.map(l=>l.id),page:want,finish:fin,dropped:gtOrder.filter(dupe),loan:++mcGtLoanSeq};
     if(!own.length) gtJobBack=null;    // a new order: no saved sheet's back on it
     gtOrder=own.concat(lines.map(mcGtLine));
+    // and each tag where it was moved to by hand when the line was saved
+    mcGtHandPut(lines);
   }
   // and the sheet says which run it is, because that is what names its PDF -
   // and is that run's own sheet, its cut line as saved for that paper
@@ -68101,6 +68149,7 @@ async function mcGtReturnRun(){
     try{ alert(`${n} sheet row${n>1?'s':''} with a name list stood for several orders and ${n>1?'were':'was'} not saved to them - put each order's names on its own line.`); }catch(e){}
   }
   const home=mcGtHome; mcGtHome=null;
+  home.hand=typeof gtNestHand==='undefined'?null:gtNestHand;
   // Rows lent to a page that was then switched away from are parked in that
   // page's own order rather than sitting in gtOrder, and they are the batch's
   // work just the same — so they are gathered up before anything is put back,
@@ -68224,6 +68273,9 @@ async function mcGtAdoptNewRows(edited,home,asked){
 let mcGtWriteTried=0;
 async function mcGtWriteBack(edited,home,asked){
   await mcGtAdoptNewRows(edited,home,asked);
+  // the tags held by hand, as the sheet had them (taken before the way back
+  // put the page's own sheet up again)
+  const hand=(home&&'hand' in home)?home.hand:(typeof gtNestHand==='undefined'?null:gtNestHand);
   // how many tags reached their line - what the chip says it saved - and how
   // many were tried (mcGtWriteTried): a row whose order prompt was cancelled,
   // or whose line is gone, was never going to be, and counted as a failure
@@ -68252,7 +68304,9 @@ async function mcGtWriteBack(edited,home,asked){
       // the extras are whatever the sheet now prints past the order; left as
       // they were, the line went on saying the old number of extras
       extra_qty:Math.max(0,(Number(l.qty)||0)-(Number(it.qty)||0)),
-      page:(it.sheet_item&&it.sheet_item.page)||home.page||gtMode};
+      page:(it.sheet_item&&it.sheet_item.page)||home.page||gtMode,
+      // where its tags were moved to by hand, if anywhere (mcGtHandOf)
+      hand:mcGtHandOf(hand,it.id)};
     // A design picked over there can be a one-off, which lives in this session
     // and nowhere else. The line takes its own copy, or it comes back tomorrow
     // pointing at a design the library has never heard of.
@@ -69725,8 +69779,10 @@ async function mcGiftBundleRun(lines,mode,side,guest){
     throw new Error(`the ${where} gift tag sheet has no places on it — set its layout up `
       +'on the Gift Tag screen first');
   // taken after the switch: the order to put back is that page's own
-  const keep=gtOrder, jb=gtJobBack;
+  const keep=gtOrder, jb=gtJobBack, hand=gtNestHand;
   gtOrder=lines.map(mcGtLine); gtJobBack=null;   // the library's back, as mcGiftSides
+  // the tags these lines were saved with moved by hand print where they were put
+  gtNestHand=mcGtHandFrom(lines); gtNestCache=null;
   const wasShape=gtSheet.layoutFile;
   let unMerge=()=>{};
   try{
@@ -69800,7 +69856,7 @@ async function mcGiftBundleRun(lines,mode,side,guest){
   }finally{
     gtNoThaw();
     unMerge();
-    gtOrder=keep; gtJobBack=jb; gtNestCache=null;
+    gtOrder=keep; gtJobBack=jb; gtNestHand=hand; gtNestCache=null;
     // back onto the sheet this started on, whatever the last page was cut to
     if(wasShape&&gtSheet.layoutFile!==wasShape) await gtShowShape(wasShape);
   }
