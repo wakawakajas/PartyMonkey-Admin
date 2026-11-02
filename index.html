@@ -17480,8 +17480,10 @@ function bleedJob(img,bx,by,mode){
   bleedWant(img,k);
   let job=memo.get(k);
   // an export asks again for a fill that failed before, rather than stopping
-  // on the old failure until the page is reloaded
-  if(job&&job.error&&bleedAsked){ memo.delete(k); job=null; }
+  // on the old failure until the page is reloaded - once: a fill that failed
+  // in this export redrew the sheets, which asked for it again, and the
+  // export never finished
+  if(job&&job.error&&bleedAsked&&!bleedAsked.has(job)){ memo.delete(k); job=null; }
   if(job&&!job.dropped){ if(bleedAsked) bleedAsked.add(job); return job; }
   if(!bleedAsked&&memo.size>=4) for(const [key,j] of memo) if(j.canvas||j.dropped) memo.delete(key);
   job={canvas:null,error:null,dropped:false};
@@ -36027,18 +36029,22 @@ async function renderSidePdfAll(side,pages,onPage,from){
   // A filled bleed is worked out in the background. The sheets are drawn once
   // small to ask for every fill they need, and the PDF waits for all of them —
   // never a sheet printed with the stand-in edge because a fill was still going.
+  const sources=await printVectorSources(side);
   const filled=m=>m==='content'||m==='ai';
   if(filled(bleedModeNow())||(state.designs||[]).some(d=>d.look&&d.look.bleed&&filled(d.look.bleed.mode))){
     // held until every fill has landed, as the gift tag export holds it: cleared
     // first, each finished fill redrew the screen with no export running and
     // dropped this export's other fills, which then printed the stand-in edge
+    // A PDF placed with its bleed made from its page needs no fill: drawn
+    // with the placing, it asks for none - an AI fill that failed (or ran
+    // minutes) stopped an export that would never print it
     const asked=bleedAsked=new Set();
     try{
-      for(let i=0;i<pages;i++) renderSide(side,document.createElement('canvas'),160,{forExport:true,page:(from||0)+i});
+      for(let i=0;i<pages;i++) renderSide(side,document.createElement('canvas'),160,
+        {forExport:true,page:(from||0)+i,vec:sources.size?printVecTaker(sources,[]):null});
       await bleedJobsSettled(asked);
     }finally{ bleedAsked=null; }
   }
-  const sources=await printVectorSources(side);
   return await gtBuildPdf(pages,async(i,forms)=>{
     if(onPage) onPage(i);
     const c=document.createElement('canvas');
@@ -52386,15 +52392,20 @@ async function gtFillBleeds(pages,plan,withBack){
   if(!gtBleedFilled()) return;
   // held until every fill has landed: a redraw of the screen in between asks
   // with no export running, and would drop this export's other fills
+  // A PDF placed with its bleed made from its page needs no fill: drawn with
+  // the placing, it asks for none - an AI fill that failed (or ran minutes)
+  // stopped an export that would never print it
+  const src=await gtVectorSources('front'), srcB=withBack?await gtVectorSources('back'):null;
+  const vecOf=s=>s&&s.size?gtVecTaker(s,[]):null;
   const asked=new Set(); bleedAsked=asked;
   try{
     for(let i=0;i<pages;i++){
       const at=plan&&plan[i];
       if(at&&at.shape&&at.shape!==gtSheet.layoutFile) await gtShowShape(at.shape);
       const c=document.createElement('canvas');
-      gtRenderPage(c,i,300,true,null,null);
+      gtRenderPage(c,i,300,true,null,vecOf(src));
       // and the back's pictures, whose bleed is filled the same way
-      if(withBack) gtRenderPage(c,i,300,true,null,null,'back');
+      if(withBack) gtRenderPage(c,i,300,true,null,vecOf(srcB),'back');
       c.width=c.height=0;
     }
     await bleedJobsSettled(asked);
