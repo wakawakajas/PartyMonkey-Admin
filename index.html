@@ -13267,18 +13267,22 @@ function renderSide(side,canvas,maxDim,opts){
       if(grow){
         // on the sheet's axes, which a quarter turn swaps
         const ix=swapped?insH:insW, iy=swapped?insW:insH;
-        if(trimPx) vclip=cut(vclip,mx-wMm/2+ix,my-hMm/2+iy,wMm-ix*2,hMm-iy*2);
-        if(holes.length) vclip.holes=vHoles;
         // A bleed made from pixels round a placed page met it at the trim in
         // two colourings - the page's own, the picture's sRGB - and printed
         // there as a faint frame. Extend, Mirror and Offset (on art with
         // nothing see-through) make the bleed from the page itself instead,
         // as the gift tag does - turned or not, the page's edges are
         // stretched along the sheet's axes (gtBuildPdf).
-        const whole=!trimPx&&(bleedMode==='extend'
-          ||(bleedMode==='mirror'&&bX<=wMm&&bY<=hMm)
+        // Content-aware and AI fill too, and an edge trimmed off first (the
+        // page stretched from inside the trim, ix/iy): their pixels came from
+        // the preview, whose CMYK reads darker than the page prints, so a
+        // CMYK file's card printed one green and its bleed band another.
+        const whole=(bleedMode==='extend'||bleedMode==='content'||bleedMode==='ai'
+          ||(bleedMode==='mirror'&&bX+ix<=wMm-ix*2&&bY+iy<=hMm-iy*2)
           ||(bleedMode==='offset'&&gtArtOpaque(img)))
-          ?{bx:bX,by:bY,mirror:bleedMode==='mirror'}:null;
+          ?{bx:bX,by:bY,mirror:bleedMode==='mirror',...(trimPx?{ix,iy}:{})}:null;
+        if(trimPx&&!whole) vclip=cut(vclip,mx-wMm/2+ix,my-hMm/2+iy,wMm-ix*2,hMm-iy*2);
+        if(holes.length) vclip.holes=vHoles;
         ringOnly=opts.vec.take(key,
           {x:mx-trimW/2, y:my-trimH/2, w:trimW, h:trimH, rot:rotDeg},
           reach((wMm-ph.wMm)/2, (hMm-ph.hMm)/2), vclip, whole);
@@ -35996,12 +36000,15 @@ async function printVectorSources(side){
 // the marks went out as a soft 300dpi picture.
 // whole {bx,by,mirror}: the bleed is made from the page itself, its edges
 // stretched (or turned over) out by bx/by mm - see gtBuildPdf. Answers 'whole'.
+// ix/iy: an edge trimmed off first, on the sheet's axes - the page is cut
+// back by that much and stretched from there.
 function printVecTaker(forms,place){
   return {inverted:key=>!!(forms.get(key)&&forms.get(key).inverted),n:()=>place.length,
     take(key,rect,ext,clip,whole){
     if(!key||!forms.has(key)) return false;
     if(whole){
-      place.push({key,rect,clip,ext:{l:whole.bx,r:whole.bx,t:whole.by,b:whole.by,mirror:!!whole.mirror}});
+      place.push({key,rect,clip,ext:{l:whole.bx,r:whole.bx,t:whole.by,b:whole.by,mirror:!!whole.mirror,
+        ...(whole.ix||whole.iy?{ix:whole.ix||0,iy:whole.iy||0}:{})}});
       return 'whole';
     }
     place.push({key,rect,clip});
@@ -39836,7 +39843,7 @@ const HELP=[
   {on:'custom',t:'Crop or remove the background',k:'crop background bg',
    h:'Artwork → <b>✂ Crop / BG…</b>.',tab:'#pcNlTabs [data-pctab="art"]',find:'Crop / BG'},
   {on:'custom',t:'Bleed',k:'bleed add all sides offset stretch mirror extend content-aware ai fill',
-   h:'Artwork → <b>Bleed</b>: <b>Add bleed to all sides</b>, mm, and the style (Offset, Stretch, Mirror, Extend edges, Content-aware, AI fill).',tab:'#pcNlTabs [data-pctab="art"]',find:'Add bleed to all sides'},
+   h:'Artwork → <b>Bleed</b>: <b>Add bleed to all sides</b>, mm, and the style (Offset, Stretch, Mirror, Extend edges, Content-aware, AI fill). On a PDF, the printed file makes the bleed from the PDF\'s own edges (Content-aware and AI fill print as Extend there, after any Trim edge), so the bleed prints the same colour as the card.',tab:'#pcNlTabs [data-pctab="art"]',find:'Add bleed to all sides'},
   {on:'custom',t:'Fix a client file',k:'client file fix print ready',
    h:'Artwork → <b>⚡ Make print-ready</b>: wrong size, low resolution or no bleed, fixed in one go.',tab:'#pcNlTabs [data-pctab="art"]',find:'Make print-ready'},
   {on:'custom',t:'Invert colours',k:'invert negative',
@@ -52240,19 +52247,28 @@ async function gtBuildPdf(count,render,sources){
       const cut=c?`${re(c)}W n `+(c.holes||[]).map(hb=>`${re(c)}${re(hb)}W* n `).join('')
         // and to a cut line's shape, bleed and all, where the tag has one
         +(c.path?c.path.map(([x,y],k)=>`${f(mmToPt(x))} ${f(mmToPt(hMm-y))} ${k?'l':'m'} `).join('')+'h W n ':''):'';
-      cs+=`q ${tc}${cut}${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
+      // the box the bleed is made from, as it stands on the sheet: a
+      // quarter-turned page's is its own box turned, about the same middle;
+      // an edge trimmed off first (ix/iy) takes it in by that much
+      let B=null;
+      if(u.e){
+        const q=r.rot&&(((Math.round(r.rot)%180)+180)%180)===90;
+        const ix=mmToPt(u.e.ix||0), iy=mmToPt(u.e.iy||0);
+        B={X:(q?X0+TW0/2-TH0/2:X0)+ix, Y:(q?Y0+TH0/2-TW0/2:Y0)+iy,
+          TW:(q?TH0:TW0)-ix*2, TH:(q?TW0:TH0)-iy*2, ix, iy};
+      }
+      const inner=B&&(B.ix||B.iy)?`${f(B.X)} ${f(B.Y)} ${f(B.TW)} ${f(B.TH)} re W n `:'';
+      cs+=`q ${tc}${cut}${inner}${M.map(f).join(' ')} cm /${names.get(em.form)} Do Q\n`;
       // A bleed made from the page: each side and corner outside the box gets
       // the page again, its last sliver stretched out to the clip's edge
       // (Extend) or turned over about that edge (Mirror) - the page's own
       // colours, so nothing meets the artwork in a different shade.
       if(u.e){
-        // the box as it stands on the sheet: a quarter-turned page's is its
-        // own box turned, about the same middle
-        const q=r.rot&&(((Math.round(r.rot)%180)+180)%180)===90;
-        const X=q?X0+TW0/2-TH0/2:X0, Y=q?Y0+TH0/2-TW0/2:Y0, TW=q?TH0:TW0, TH=q?TW0:TH0;
+        const {X,Y,TW,TH}=B;
         const E=u.e, eps=0.25;
-        const sides=[[-1,mmToPt(E.l)],[0,0],[1,mmToPt(E.r)]];
-        const ups=[[1,mmToPt(E.t)],[0,0],[-1,mmToPt(E.b)]];   // +1: the top, which is up in a PDF
+        // from a trimmed box the bleed reaches the trim it lost as well
+        const sides=[[-1,mmToPt(E.l)+B.ix],[0,0],[1,mmToPt(E.r)+B.ix]];
+        const ups=[[1,mmToPt(E.t)+B.iy],[0,0],[-1,mmToPt(E.b)+B.iy]];   // +1: the top, which is up in a PDF
         sides.forEach(([sx,dx])=>ups.forEach(([sy,dy])=>{
           if(!sx&&!sy) return;
           if((sx&&!(dx>0))||(sy&&!(dy>0))) return;
