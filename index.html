@@ -11283,6 +11283,27 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
     <input type="range" min="0" max="100" step="5" data-pc-dark id="pcPopDark" style="flex:1;min-width:70px;"/>
     <span class="hint" style="margin:0;">darker</span>
     <b id="pcPopDarkVal" style="min-width:38px;text-align:right;">40%</b></label>
+  <!-- the screen tune: what turning the screen down to sRGB mode, about 120
+       nits and 6500K would do, done to the preview sheets instead -->
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:12px;">
+    <b>Screen tune</b>
+    <button type="button" class="btn-outline btn-sm" id="pcTuneReset" title="Back to the screen as it is">Reset</button>
+  </div>
+  <label style="display:flex;gap:8px;align-items:center;margin-top:4px;font-size:12px;"
+    title="A screen is brighter than paper. Slide down until the sheet's white looks like the paper's white beside it - kept on this computer.">
+    <span style="min-width:92px;">Brightness</span>
+    <input type="range" min="40" max="100" step="5" data-pc-tune="b" style="flex:1;min-width:70px;"/>
+    <b data-pc-tune-val="b" style="min-width:38px;text-align:right;">100%</b></label>
+  <label style="display:flex;gap:8px;align-items:center;margin-top:4px;font-size:12px;"
+    title="A screen's white is bluer than paper. Slide up until the sheet's white has the paper's tint - kept on this computer.">
+    <span style="min-width:92px;">Warmth</span>
+    <input type="range" min="0" max="100" step="5" data-pc-tune="w" style="flex:1;min-width:70px;"/>
+    <b data-pc-tune-val="w" style="min-width:38px;text-align:right;">0%</b></label>
+  <label style="display:flex;gap:8px;align-items:center;margin-top:4px;font-size:12px;"
+    title="A wide-colour screen shows colours stronger than they are. Slide down until the colours look as strong as the print's - kept on this computer.">
+    <span style="min-width:92px;">Colour strength</span>
+    <input type="range" min="50" max="100" step="5" data-pc-tune="s" style="flex:1;min-width:70px;"/>
+    <b data-pc-tune-val="s" style="min-width:38px;text-align:right;">100%</b></label>
   <div id="pcPopBody"></div>
   </div>
   <!-- another panel of the page, brought in while its button is on (pcPopView) -->
@@ -33625,6 +33646,39 @@ function printProofDark(){
 // the darkest the slider went (1.8) was still lighter than the print on the
 // shop's screen: it runs to 3.2 now, and starts where it used to end
 const printProofGamma=()=>1+printProofDark()/100*2.2;
+// The screen tune, for this computer's screen and kept on it: the preview
+// sheets shown as they would be on a screen set to about 120 nits (b, % of
+// its light), 6500K or warmer (w, 0-100) and sRGB mode (s, % of its colour),
+// so the screen itself is left as it is. Worked in linear light. The sheets
+// only - the colours to check and their fixes are shown as measured.
+const PROOF_TUNE_KEY='pigu.proofTune', PROOF_TUNE_DEF={b:100,w:0,s:100};
+function printScreenTune(){
+  const t={...PROOF_TUNE_DEF};
+  try{
+    const v=JSON.parse(localStorage.getItem(PROOF_TUNE_KEY)||'null');
+    if(v&&typeof v==='object') for(const k in t){ const n=Number(v[k]); if(isFinite(n)) t[k]=n; }
+  }catch(e){}
+  t.b=Math.max(40,Math.min(100,t.b)); t.w=Math.max(0,Math.min(100,t.w)); t.s=Math.max(50,Math.min(100,t.s));
+  return t;
+}
+const _tuneLin=new Float32Array(256).map((_,i)=>{ const c=i/255; return c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4); });
+const _tuneEnc=new Uint8Array(4096).map((_,i)=>{ const c=i/4095; return Math.round(255*(c<=0.0031308?c*12.92:1.055*Math.pow(c,1/2.4)-0.055)); });
+// RGBA pixels, in place
+function printTunePixels(d){
+  const t=printScreenTune();
+  if(t.b===100&&t.w===0&&t.s===100) return;
+  // full warmth: a white of about 5000K, as paper under the shop's light
+  const f=t.b/100, w=t.w/100, s=t.s/100;
+  const kr=f, kg=f*(1-0.06*w), kb=f*(1-0.2*w);
+  for(let i=0;i<d.length;i+=4){
+    if(!d[i+3]) continue;
+    let r=_tuneLin[d[i]], g=_tuneLin[d[i+1]], b=_tuneLin[d[i+2]];
+    if(s<1){ const y=0.2126*r+0.7152*g+0.0722*b; r=y+(r-y)*s; g=y+(g-y)*s; b=y+(b-y)*s; }
+    d[i]=_tuneEnc[Math.min(4095,Math.max(0,Math.round(r*kr*4095)))];
+    d[i+1]=_tuneEnc[Math.min(4095,Math.max(0,Math.round(g*kg*4095)))];
+    d[i+2]=_tuneEnc[Math.min(4095,Math.max(0,Math.round(b*kb*4095)))];
+  }
+}
 const hexRgb=hx=>[1,3,5].map(i=>parseInt(String(hx).slice(i,i+2),16));
 const _artMcPaths=new Map();        // picture id -> the line artwork file it is
 // The key a picture's changes are kept under on a Magic Create line: the file
@@ -33881,6 +33935,7 @@ function printColourScreen(canvas,ro,side){
     const src=sideArtObjs(side).some(([,o])=>o&&o.img&&artSrc(o)==='pdf')?'pdf':'img';
     const p=cms.proof(rgb,n,src,printProofGamma());
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ d[i]=p[j]; d[i+1]=p[j+1]; d[i+2]=p[j+2]; }
+    printTunePixels(d);
   }
   ctx.putImageData(id,0,0);
 }
@@ -34159,6 +34214,7 @@ function pcPopRender(){
   seg.querySelectorAll('[data-pc-side]').forEach(b=>b.classList.toggle('btn-primary',b.dataset.pcSide===pcPopSide));
   document.getElementById('pcPopDark').value=printProofDark();
   document.getElementById('pcPopDarkVal').textContent=printProofDark()+'%';
+  pcTuneShow();
   if(!cms){
     body.innerHTML='<p class="hint">Loading the paper\'s colours…</p>';
     printCms(paper).then(()=>{ pcPopRender(); pcRedraw(); }).catch(e=>{
@@ -34506,6 +34562,23 @@ document.addEventListener('input',e=>{
   cancelAnimationFrame(_pcDarkRaf);
   _pcDarkRaf=requestAnimationFrame(()=>pcRedraw());
 });
+// the screen tune: the same, its three sliders kept together
+function pcTuneShow(){
+  const t=printScreenTune();
+  document.querySelectorAll('#pcPop [data-pc-tune]').forEach(x=>{ x.value=t[x.dataset.pcTune]; });
+  document.querySelectorAll('#pcPop [data-pc-tune-val]').forEach(x=>{ x.textContent=t[x.dataset.pcTuneVal]+'%'; });
+}
+function pcTuneSave(t){
+  try{ localStorage.setItem(PROOF_TUNE_KEY,JSON.stringify(t)); }catch(err){}
+  pcTuneShow();
+  cancelAnimationFrame(_pcDarkRaf);
+  _pcDarkRaf=requestAnimationFrame(()=>pcRedraw());
+}
+document.addEventListener('input',e=>{
+  if(!e.target.matches||!e.target.matches('[data-pc-tune]')) return;
+  pcTuneSave({...printScreenTune(),[e.target.dataset.pcTune]:Number(e.target.value)});
+});
+document.getElementById('pcTuneReset').addEventListener('click',()=>pcTuneSave({...PROOF_TUNE_DEF}));
 // the panels are drawn again after every redraw; not while a slider is held,
 // or it is taken from under the finger mid-slide
 let _pcDarkHeld=false;
@@ -39503,6 +39576,7 @@ const HELP=[
    h:'Top left of the sheet: <b>Show bounding box</b>, <b>Show cut lines</b>, <b>Show punch holes</b>.',sel:'#gtShownBar'},
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
   {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock.',sel:'#gtPpBtn'},
+  {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> up till the paper tint matches, <b>Colour strength</b> down till colours look as strong. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
   {on:'sheet',t:'Saved sheets',k:'save keep later open job',h:'Left panel → <b>Saved sheets</b>: keep this sheet for later, or open one.',find:'Saved sheets'},
@@ -39536,6 +39610,7 @@ const HELP=[
   {on:'custom',t:'Show cut lines / reference line',k:'show cut lines reference line view',h:'Top left of the sheet: <b>Show cut lines</b>, <b>Show reference line</b>.',sel:'#pcShownBar'},
   {on:'custom',t:'Order ID, paper and GSM',k:'order id paper type gsm file name',h:'Top bar: <b>Order ID</b>, <b>Paper type</b>, <b>GSM</b> - they name the files.',sel:'#pcJobBar'},
   {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>.',sel:'#ppOpenBtn'},
+  {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> up till the paper tint matches, <b>Colour strength</b> down till colours look as strong. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Download and print',k:'download print front back pdf fiery',
    h:'Top bar → <b>Download &amp; Print front</b> / <b>back</b>. <b>⚠ to check</b> lists anything to fix first.',sel:'#printFrontBtn'},
   {on:'custom',t:'Place Card words',k:'place card words category names list',h:'Place Card: right panel → <b>Words</b> tab - the categories and the names on the cards.',find:'Words'},
