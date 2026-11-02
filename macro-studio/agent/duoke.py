@@ -445,6 +445,14 @@ class CloudError(RuntimeError):
     pass
 
 
+# Drafts already written, by what was sent for them: {key: (when, words, photos)}.
+# Six hours covers a chat left unanswered over a morning; a new line from the
+# buyer changes the key and gets a new draft at once.
+DRAFT_CACHE_SECONDS = 6 * 3600
+_draft_cache: dict[str, tuple[float, str, list[str]]] = {}
+_draft_cache_lock = threading.Lock()
+
+
 class Cloud:
     """The smallest Supabase client that will do: sign in with a password,
     keep the token, retry once when it has aged out.
@@ -560,10 +568,34 @@ class Cloud:
 
     def draft(self, message: str, history: list[dict]) -> tuple[str, list[str]]:
         """A draft from the reply-draft function, in the shop's voice, and the
-        storage paths of the photos its matched saved replies carry."""
+        storage paths of the photos its matched saved replies carry.
+
+        The same chat with nothing new in it gets the draft it got last time.
+        Four paths ask for drafts (the unread pass, the pre-draft, a chat being
+        opened, and the next hour's fingerprint) and none of them knew what the
+        others had asked: an unanswered chat was drafted again every pass, and
+        every call is logged and read through on Supabase's free plan."""
         body = {"message": message[:4000],
                 "history": [{"inbound": bool(l.get("inbound")),
                              "text": str(l.get("text") or "")[:400]} for l in history]}
+        key = hashlib.sha1(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
+        now = time.time()
+        with _draft_cache_lock:
+            hit = _draft_cache.get(key)
+            if hit and now - hit[0] < DRAFT_CACHE_SECONDS:
+                return hit[1], list(hit[2])
+        words, photos = self._draft_call(body)
+        if not words:
+            return words, photos      # nothing written is not worth keeping
+        with _draft_cache_lock:
+            if len(_draft_cache) > 500:
+                for k in [k for k, v in _draft_cache.items()
+                          if now - v[0] >= DRAFT_CACHE_SECONDS] or list(_draft_cache)[:250]:
+                    _draft_cache.pop(k, None)
+            _draft_cache[key] = (now, words, list(photos))
+        return words, photos
+
+    def _draft_call(self, body: dict) -> tuple[str, list[str]]:
         try:
             out = self._call("POST", "/functions/v1/reply-draft", body, self._auth())
         except CloudError as exc:

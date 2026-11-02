@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -181,9 +182,31 @@ def _chat(buyer: str, sessions: list[dict]) -> list[dict]:
     return lines
 
 
+# Notes already written, by order and chat: {key: (when, remarks)}. Every press
+# of "From BigSeller" reads every pick up still waiting, and a chat with nothing
+# new in it gets the note it got last time instead of another AI call. Two
+# hours, so "tomorrow" in a note is still the tomorrow it meant.
+REMARKS_CACHE_SECONDS = 2 * 3600
+_remarks_cache: dict[str, tuple[float, str]] = {}
+
+
 def _remarks(cloud: Cloud, order: dict, lines: list[dict]) -> str:
     if not lines:
         return ""
+    key = json.dumps([order["order_id"], lines], sort_keys=True)
+    now = time.time()
+    hit = _remarks_cache.get(key)
+    if hit and now - hit[0] < REMARKS_CACHE_SECONDS:
+        return hit[1]
+    out = _remarks_call(cloud, order, lines)
+    if out:
+        if len(_remarks_cache) > 300:
+            _remarks_cache.clear()
+        _remarks_cache[key] = (now, out)
+    return out
+
+
+def _remarks_call(cloud: Cloud, order: dict, lines: list[dict]) -> str:
     body = {"pickup_when": True, "history": lines, "order": order["order_id"],
             "now": datetime.now(SGT).strftime("%a %d/%m/%Y %H:%M")}
     try:

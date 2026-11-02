@@ -20103,7 +20103,7 @@ function showScreen(name,viaBack){
       ? document.getElementById('bundleSharedSlot')
       : document.getElementById('pickListSettingsScreen');
     if(shared&&slot&&shared.parentElement!==slot) slot.appendChild(shared); }
-  if(name==='bundle-sku'){ refreshBundles(); refreshBundleJobs(); }
+  if(name==='bundle-sku'){ refreshBundles(); refreshBundleJobs({fresh:true}); }
   if(name==='bundle-order') openBundleOrder();
   if(name==='bundle-settings') openBundleSettings();
   // the bubble belongs to the order it starts, and follows nothing else --
@@ -21526,22 +21526,37 @@ let bundleOrderId=null;        // the order being worked through
 let bundleJobTab='pending';
 let bundleJobAt=0;             // which piece the voice has reached
 
-async function refreshBundleJobs(){
+// This runs on every tick from every phone packing, so what it reads besides
+// the jobs themselves is rationed: the sweep is a few times a day per phone,
+// and the settings are read when the screen opens and after that once a
+// minute at most. Each was a dozen requests a tick, and every request is
+// logged (Supabase's free plan counts the logs, and the egress).
+const BUNDLE_PURGE_EVERY=6*60*60*1000, BUNDLE_SETTINGS_EVERY=60*1000;
+let bundleSettingsAt=0;
+async function refreshBundleJobs(opts={}){
   const el=document.getElementById('bundleJobList');
   if(!el) return;
   if(!sb){ el.innerHTML='<p class="hint" style="margin:4px 0 0;">Sync unavailable.</p>'; return; }
   // a finished job is worth two days and no more; the sweep is asked for
   // whenever the screen is opened rather than being anybody's job to remember
-  try{ await sb.rpc('purge_old_bundle_jobs'); }catch(e){}
-  // and the labels that went out with them -- two days, the same two days
-  try{ await sb.rpc('purge_old_label_jobs'); }catch(e){}
+  let purgedAt=0;
+  try{ purgedAt=+localStorage.getItem('bundlePurgeAt')||0; }catch(e){}
+  if(Date.now()-purgedAt>BUNDLE_PURGE_EVERY){
+    try{ localStorage.setItem('bundlePurgeAt',String(Date.now())); }catch(e){}
+    try{ await sb.rpc('purge_old_bundle_jobs'); }catch(e){}
+    // and the labels that went out with them -- two days, the same two days
+    try{ await sb.rpc('purge_old_label_jobs'); }catch(e){}
+  }
   // There is one set of settings for reading work out loud, and it lives on
   // Daily Pick List: the voice, the words said differently, the words not said
   // at all, and which SKUs are somebody else's job. Read afresh here for the
   // same reason the pick list reads them afresh -- a word added on Settings
   // should be in force by the time anybody picks up a box.
-  try{ await Promise.all([loadPlHidden(),loadPlVoice(),loadBundleRules(),
-    loadBundleHiddenWords()]); }catch(e){}
+  if(opts.fresh||Date.now()-bundleSettingsAt>BUNDLE_SETTINGS_EVERY){
+    bundleSettingsAt=Date.now();
+    try{ await Promise.all([loadPlHidden(),loadPlVoice(),loadBundleRules(),
+      loadBundleHiddenWords()]); }catch(e){}
+  }
   let orders,jobs,items;
   try{
     [orders,jobs,items]=await Promise.all([
@@ -22089,8 +22104,15 @@ function bundleSkuPhoto(sku){
 function bundleSkuUrl(sku){
   return bundleSkuUrls[bundleSkuKey(sku)]||'';
 }
+// The whole warehouse list is several pages, and an open order redraws on
+// every tick from every phone: read once, then kept for a quarter of an hour.
+// A photo taken in Ad-Hoc Picking turns up in packing within that.
+const BUNDLE_PHOTOS_EVERY=15*60*1000;
+let bundleSkuPhotosAt=0;
 async function loadBundleSkuPhotos(){
   if(!sb) return;
+  if(Date.now()-bundleSkuPhotosAt<BUNDLE_PHOTOS_EVERY) return;
+  bundleSkuPhotosAt=Date.now();
   try{
     const rows=await bundleFetchAll(()=>sb.from('warehouse_skus').select('sku,photo_path,photo_url'));
     const map={}, urls={};
@@ -22100,7 +22122,7 @@ async function loadBundleSkuPhotos(){
       if(r.photo_url) urls[k]=r.photo_url;
     });
     bundleSkuPhotos=map; bundleSkuUrls=urls;
-  }catch(e){ /* a bundle without pictures is still packable */ }
+  }catch(e){ bundleSkuPhotosAt=0; /* a bundle without pictures is still packable */ }
 }
 // A photo that arrives after the piece has been read is a photo nobody looked
 // at. Every picture in the bundle is asked for the moment the bundle opens,
