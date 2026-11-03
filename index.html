@@ -13383,9 +13383,11 @@ function renderSide(side,canvas,maxDim,opts){
     // two soft edges left a pale hairline down the middle of every gutter
     const ep=opts.forExport&&pass==='art'?1:0;
     // the bleed along the picture's own axes, which a quarter turn swaps
-    // a CMYK PDF in the Print preview: its CMYK as printed (printArtImg)
-    const pimg=printArtImg(img,opts.forExport), fillB=bleedMode==='content'||bleedMode==='ai';
-    ctx.drawImage(grow?bleedArt(fillB?img:pimg,trimW,trimH,swapped?bY:bX,bleedMode,swapped?bX:bY,bleedTrimPx(),bleedMm,fillB&&pimg!==img?pimg:null)
+    // a PDF drawn as its page prints (printArtImg), its bleed made as the
+    // export makes it (printBleedMode); a fill is made from the file's own pixels
+    const bmP=printBleedMode(img,opts.forExport,bleedMode), fillB=bmP==='content'||bmP==='ai';
+    const pimg=fillB?img:printArtImg(img,opts.forExport);
+    ctx.drawImage(grow?bleedArt(pimg,trimW,trimH,swapped?bY:bX,bmP,swapped?bX:bY,bleedTrimPx(),bleedMm)
       // the edge trim is part of making a bleed: with no bleed on this card, or
       // a page that brings its own, the picture prints whole as it always did
       :!tf&&!own&&bleedMm>0&&bleedTrimPx()>0
@@ -17286,16 +17288,14 @@ var bleedArtMemo=new WeakMap();
 // round the client's file is cut away and the bleed is made from inside it
 // grownMm: how far Offset grows the shape — the bleed itself, never the gap
 // a wrong-ratio design leaves, which is made up from its edges instead
-// over: a picture of the same size to lay inside a Content-aware / AI fill
-// made from img (printArtImg) - the fill is kept, and asked for, as img's
-function bleedArt(img,trimW,trimH,mm,mode,mmY,trim,grownMm,over){
+function bleedArt(img,trimW,trimH,mm,mode,mmY,trim,grownMm){
   const nW=img.naturalWidth||img.width, nH=img.naturalHeight||img.height;
   if(!nW||!nH||!(trimW>0)||!(trimH>0)) return img;
   if(mmY===undefined) mmY=mm;
   let bx=Math.max(1,Math.round(mm*nW/trimW));
   let by=Math.max(1,Math.round(mmY*nH/trimH));
   const t=Math.min(trim|0,Math.floor((Math.min(nW,nH)-2)/2));
-  if(t>0){ img=bleedTrimmed(img,t); bx+=t; by+=t; if(over) over=bleedTrimmed(over,t); }
+  if(t>0){ img=bleedTrimmed(img,t); bx+=t; by+=t; }
   // One mirrored copy is as far as a mirror can honestly reach. Capping the
   // bleed there instead squeezed the picture when it was drawn into its box,
   // so a gap wider than the picture is extended rather than mirrored.
@@ -17307,23 +17307,10 @@ function bleedArt(img,trimW,trimH,mm,mode,mmY,trim,grownMm,over){
     return bleedOffsetPx(img,bx,by,gx,gy);
   }
   if(mode==='content'||mode==='ai'){
-    const job=bleedJob(img,bx,by,mode), base=job.canvas||bleedArtPx(img,bx,by,'extend');
-    return over?bleedOver(base,over,bx,by):base;
+    const job=bleedJob(img,bx,by,mode);
+    return job.canvas||bleedArtPx(img,bx,by,'extend');
   }
   return bleedArtPx(img,bx,by,mode);
-}
-// a fill with another picture laid where its own sits, kept per fill
-const bleedOverMemo=new WeakMap();
-function bleedOver(base,over,bx,by){
-  let m=bleedOverMemo.get(base); if(!m){ m=new WeakMap(); bleedOverMemo.set(base,m); }
-  let c=m.get(over);
-  if(!c){
-    c=document.createElement('canvas'); c.width=base.width; c.height=base.height;
-    const x=c.getContext('2d'); x.drawImage(base,0,0);
-    x.clearRect(bx,by,over.width,over.height); x.drawImage(over,bx,by);
-    m.set(over,c);
-  }
-  return c;
 }
 function bleedTrimPx(){
   const v=Number(state.bleed&&state.bleed.trimPx);
@@ -33665,7 +33652,7 @@ function pdfIsCmyk(f){
   const v=_pdfCmyk.get(f);
   if(v!==undefined) return v===true;
   _pdfCmyk.set(f,null);
-  (async()=>{
+  const scan=(async()=>{
     const bytes=new Uint8Array(await f.arrayBuffer());
     // each colour operator with the numbers before it: k/K, and sc/scn of
     // four, are CMYK; rg/RG, and sc/scn of three, RGB
@@ -33691,51 +33678,73 @@ function pdfIsCmyk(f){
   })().then(c=>{
     _pdfCmyk.set(f,c);
     if(c&&printPreviewOn){ pcRedraw(); printColourCheckSoon(); pcPopRender(); }
-  }).catch(()=>_pdfCmyk.set(f,false));
+  }).catch(()=>_pdfCmyk.set(f,false)).finally(()=>_pdfScans.delete(scan));
+  _pdfScans.add(scan);
   return false;
 }
-// A CMYK PDF in the Print preview, drawn by pdf.js 5 through the paper's own
-// measured CMYK (profiles/pdf5-<paper>/). The Fiery prints CMYK by its
-// numbers - "Print CMYK gray using black only" and Pure Black On keep a K the
-// file has - so two mixes that look alike as GRACoL, or as pdf.js 3 draws
+// A PDF's picture, drawn again so it prints, and previews, as its page does.
+// In the Print preview (printArtImg): a CMYK PDF drawn by pdf.js 5 through the
+// paper's own measured CMYK (profiles/pdf5-<paper>/). The Fiery prints CMYK by
+// its numbers - "Print CMYK gray using black only" and Pure Black On keep a K
+// the file has - so two mixes that look alike as GRACoL, or as pdf.js 3 draws
 // them, print apart, and no table read off RGB pixels can tell them (about
 // 2.5 dE2000 at best, PRINT_MEASURED_PDFK). pdf.js 5 converts CMYK through an
 // ICC profile (qcms) when it is given one under the name it asks for; given
 // the measured one, each CMYK is drawn as it printed, relative to the paper,
 // its black the paper's black: 1.3 dE76 median on the 840-patch chart, the
-// misses 100% cyans no sRGB screen shows. Screen only, and only while the
-// preview shows a measured paper: the sheet keeps the picture it had for
-// everything else, and this one is drawn in its place - not for a design
-// whose colours were changed (its swaps are made on its own pixels) or a
-// turned copy. A Content-aware / AI fill bleed is made from, and paid for
-// on, the file's own pixels, so it is kept and this picture laid over it
-// (bleedArt's over): only the band past the trim is the old colours. A CMYK profile embedded in the PDF is used by pdf.js 5
-// where the Fiery ignores it ("Use CMYK embedded profiles" off), so such a
-// file is drawn by its profile. Should pdf.js 5 not load, the preview is
-// PRINT_MEASURED_PDFK's, as before.
+// misses 100% cyans no sRGB screen shows. Its bleed, whatever the kind, is
+// made from that picture the way the export makes a PDF's (from its page, a
+// Content-aware / AI fill as Extend), so the band prints as the card does.
+// In an export (printArtExportImg): where a PDF's bleed is pixels round its
+// placed page (a Mirror deeper than the page, Offset round see-through art, a
+// plain tag's Mirror, or the page itself drawn), those pixels become CMYK as
+// the sheet's sRGB through GRACoL, so they are drawn as what turns back into
+// the page's own colours: a CMYK PDF by pdf.js 5 through GRACoL as the export
+// reads it back (profiles/pdf5-gracol/, relative + BPC), an RGB PDF's numbers
+// as the Adobe RGB the Fiery reads them as. Made only for an export whose
+// bleed can be pixels (printExportPixels), which waits for them, and let go
+// after it (printArtExportReady, gtBuildPdf): Extend, Content-aware and AI
+// fill make a PDF's bleed from its page, and need none.
+// Neither for a design whose colours were changed (its swaps are made on its
+// own pixels) or a turned copy. A CMYK profile embedded in the PDF is used by
+// pdf.js 5 where the Fiery ignores it ("Use CMYK embedded profiles" off), so
+// such a file is drawn by its profile. Should pdf.js 5 not load, the sheet
+// keeps its own picture, as before.
 const PDF5_URL='https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/';
-const PRINT_PDF5_ICC={matte:'profiles/pdf5-matte/',gloss:'profiles/pdf5-gloss/'};
+const PRINT_PDF5_ICC={matte:'profiles/pdf5-matte/',gloss:'profiles/pdf5-gloss/',export:'profiles/pdf5-gracol/'};
 const PDF5_ICC_NAME='CGATS001Compat-v2-micro.icc';
 let _pdf5=null;
-const _pdf5Workers={}, _artFileOf=new WeakMap(), _cmykPrinted=new WeakMap();
+const _pdf5Workers={}, _artFileOf=new WeakMap(), _cmykPrinted=new WeakMap(), _artExport=new WeakMap();
+const _pdfScans=new Set(), _artExportMade=[];
 function pdf5Lib(){
-  // tried once: a failed load stays failed, and the preview stays as before
+  // tried once: a failed load stays failed, and the sheet stays as before
   if(!_pdf5) _pdf5=import(PDF5_URL+'build/pdf.min.mjs').then(L=>{
     L.GlobalWorkerOptions.workerSrc=PDF5_URL+'build/pdf.worker.min.mjs';
     return L;
   });
   return _pdf5;
 }
+const printIsPdfFile=f=>!!f&&(f.type==='application/pdf'||/\.pdf$/i.test(String(f.name||'')));
+// a picture of a PDF (not a turned copy) whose colours were not changed
+function printArtPdf(img){
+  if(!img||img._artOf) return null;
+  const f=_artFileOf.get(img);
+  if(!printIsPdfFile(f)||swapsForIds(new Set([artImgId(img)])).length) return null;
+  return f;
+}
+// shown in the Print preview as it prints: a PDF there
+const printArtPreviewPdf=(img,forExport)=>!forExport&&printPreviewOn&&!printShowBefore&&!!printArtPdf(img);
 function printArtUsable(img,forExport){
-  if(forExport||!printPreviewOn||printShowBefore||!img||img._artOf) return null;
+  if(!printArtPreviewPdf(img,forExport)) return null;
   const f=_artFileOf.get(img), paper=printPaperKey();
-  if(!f||!PRINT_PDF5_ICC[paper]||_pdfCmyk.get(f)!==true) return null;
-  if(swapsForIds(new Set([artImgId(img)])).length) return null;
+  if(!PRINT_PDF5_ICC[paper]||_pdfCmyk.get(f)!==true) return null;
   return {f,paper};
 }
-// What to draw for img: its CMYK as printed once that is drawn, else img -
-// and the drawing is started, the sheets drawn again when it is done
+// What to draw for img: on an export, printArtExportImg's; in the preview its
+// CMYK as printed once that is drawn, else img - and the drawing is started,
+// the sheets drawn again when it is done
 function printArtImg(img,forExport){
+  if(forExport) return printArtExportImg(img);
   const u=printArtUsable(img,forExport); if(!u) return img;
   let m=_cmykPrinted.get(img); if(!m){ m={}; _cmykPrinted.set(img,m); }
   const v=m[u.paper];
@@ -33751,8 +33760,68 @@ function printArtIsPrinted(img){
   const u=printArtUsable(img,false), m=u&&_cmykPrinted.get(img);
   return !!(m&&m[u.paper]);
 }
+// A PDF's bleed made from its page, as the export makes it: a Content-aware /
+// AI fill goes in as Extend - in the preview, and where an export draws the
+// page as pixels (Invert colours), from its export picture (renderSide,
+// gtPutArt); no fill is asked for it
+const printBleedMode=(img,forExport,mode)=>
+  (mode==='content'||mode==='ai')&&(forExport?!!printArtPdf(img):printArtPreviewPdf(img,false))?'extend':mode;
+// the picture an export draws for a PDF's pixels, once made, else img
+function printArtExportImg(img){
+  if(!printArtPdf(img)) return img;
+  const e=_artExport.get(img);
+  return e&&e.c||img;
+}
+// whether this page's export can draw a PDF's bleed as pixels: a Mirror,
+// Offset or Stretch bleed (which round a page too deep, see-through or with a
+// gap is pixels), or Invert colours (the page itself drawn)
+function printExportPixels(){
+  const px=m=>m==='mirror'||m==='offset'||m==='scale';
+  try{
+    if(pcCtx()==='gt') return px(gtSheet.bleedMode)||!!gtSheet.invertArt;
+    return px(bleedModeNow())||!!(state.bleed&&state.bleed.invert)
+      ||(state.designs||[]).some(d=>d.look&&d.look.bleed&&(px(d.look.bleed.mode)||d.look.bleed.invert));
+  }catch(e){ return true; }
+}
+// Before an export: every PDF on the page read, and, where its bleed can be
+// pixels, its export picture made - one at a time, a few minutes at most,
+// past which the export goes on with the pictures it has. Let go after.
+async function printArtExportReady(){
+  const by=ms=>new Promise(r=>setTimeout(r,ms));
+  const arts=()=>{ const a=[]; ['front','back'].forEach(s=>{ try{ sideArtObjs(s).forEach(([,o])=>{ if(o&&o.img){ artSrc(o); a.push(o); } }); }catch(e){} }); return a; };
+  arts();
+  await Promise.race([Promise.allSettled([..._pdfScans]),by(20000)]);
+  if(!printExportPixels()) return;
+  const until=Date.now()+180000, seen=new Set();
+  for(const o of arts()){
+    const img=o.img, f=printArtPdf(img);
+    if(!f||seen.has(img)||_artExport.has(img)) continue;
+    seen.add(img);
+    const cm=_pdfCmyk.get(f); if(cm!==true&&cm!==false) continue;
+    const e={}; _artExport.set(img,e); _artExportMade.push(img);
+    const left=until-Date.now(); if(left<=0) break;
+    await Promise.race([(cm?pdf5Draw(img,f,'export'):pdfRgbAsAdobe(img)).then(c=>{ e.c=c; }).catch(()=>{}),by(left)]);
+  }
+}
+// the export pictures let go once the file is written (gtBuildPdf)
+function printArtExportDone(){ _artExportMade.splice(0).forEach(img=>_artExport.delete(img)); }
+// an RGB PDF's numbers, as the Adobe RGB the Fiery reads them as, in sRGB
+async function pdfRgbAsAdobe(img){
+  const {L,lcms,srgb,adobe}=await lcmsLib();
+  const W=img.naturalWidth||img.width, H=img.naturalHeight||img.height;
+  const c=document.createElement('canvas'); c.width=W; c.height=H;
+  const x=c.getContext('2d',{willReadFrequently:true}); x.drawImage(img,0,0);
+  const id=x.getImageData(0,0,W,H), d=id.data, n=W*H, rgb=new Uint8Array(n*3);
+  for(let i=0,j=0;i<d.length;i+=4,j+=3){ rgb[j]=d[i]; rgb[j+1]=d[i+1]; rgb[j+2]=d[i+2]; }
+  const t=lcms.cmsCreateTransform(adobe,L.TYPE_RGB_8,srgb,L.TYPE_RGB_8,L.INTENT_RELATIVE_COLORIMETRIC,L.cmsFLAGS_BLACKPOINTCOMPENSATION);
+  const o=lcms.cmsDoTransform(t,rgb,n);
+  for(let i=0,j=0;i<d.length;i+=4,j+=3){ d[i]=o[j]; d[i+1]=o[j+1]; d[i+2]=o[j+2]; }
+  x.putImageData(id,0,0);
+  c.naturalWidth=W; c.naturalHeight=H;
+  return c;
+}
 // the page drawn at the picture's own size, see-through where it was: one
-// pdf.js 5 worker to each paper, as the CMYK profile is read once a worker
+// pdf.js 5 worker to each profile, as the CMYK profile is read once a worker
 async function pdf5Draw(img,f,paper){
   const L=await pdf5Lib();
   const worker=_pdf5Workers[paper]||(_pdf5Workers[paper]=new L.PDFWorker({name:'pigu-cmyk-'+paper}));
@@ -45704,11 +45773,7 @@ function gtGrowArt(id,img,bpx){
 // gap: how much paper the fitted artwork leaves either side of its placeholder,
 // always carried across with bleed on, so a wrong-ratio design still bleeds
 // its full depth past the cut.
-// printed: the CMYK-as-printed picture to draw for img (printArtImg) - in
-// place of it, or over a Content-aware / AI fill made from it
-function gtDrawArt(ctx,img,x,y,w,h,b,sc,mode,id,gap,printed){
-  const fillM=b>0&&w>0&&h>0&&(mode==='content'||mode==='ai');
-  if(printed&&!fillM) img=printed;
+function gtDrawArt(ctx,img,x,y,w,h,b,sc,mode,id,gap){
   const trim=Math.max(0,Math.round(Number(gtSheet.bleedTrimPx)||0));
   // a hair of gap is rounding, not a wrong-ratio design
   const gx=(gap&&mode!=='offset'&&gap.x>0.05)?gap.x:0;
@@ -45726,7 +45791,7 @@ function gtDrawArt(ctx,img,x,y,w,h,b,sc,mode,id,gap,printed){
       return;
     }
     const m=mode==='scale'?'extend':mode;
-    const art=bleedArt(img,w,h,bx,m,by,trim,undefined,fillM?printed:null);
+    const art=bleedArt(img,w,h,bx,m,by,trim);
     ctx.drawImage(art,(x-bx)*sc,(y-by)*sc,(w+bx*2)*sc,(h+by*2)*sc);
     return;
   }
@@ -45961,9 +46026,11 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
     ctx.closePath(); ctx.clip();
   }
   if(invert) ctx.filter='invert(1)';
-  // a CMYK PDF in the Print preview: its CMYK as printed (printArtImg)
-  const pimg=printArtImg(img,!gtPcRo||gtPcRo.forExport);
-  gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,g,sc,gtSheet.bleedMode,turn?key+'@t'+turn:key,gap,pimg!==img?pimg:null);
+  // a PDF drawn as its page prints (printArtImg), its bleed made as the
+  // export makes it (printBleedMode); a fill is made from the file's own pixels
+  const gx=!gtPcRo||gtPcRo.forExport, bmP=printBleedMode(img,gx,gtSheet.bleedMode);
+  const pimg=bmP==='content'||bmP==='ai'?img:printArtImg(img,gx);
+  gtDrawArt(ctx,pimg,r.x,r.y,r.w,r.h,g,sc,bmP,turn?key+'@t'+turn:key,gap);
   // a pixel short of the trim, so the ring overlaps the placed page rather
   // than leaving a hairline of paper between them
   // A whole pixel in, not half: at half, the ring's soft edge and the page's
@@ -52449,6 +52516,11 @@ function mtxMul(m,n){
           m[4]*n[0]+m[5]*n[2]+n[4], m[4]*n[1]+m[5]*n[3]+n[5]];
 }
 async function gtBuildPdf(count,render,sources){
+  // every PDF's bleed pixels drawn as its page prints, let go once written
+  try{ await printArtExportReady(); return await gtBuildPdfNow(count,render,sources); }
+  finally{ printArtExportDone(); }
+}
+async function gtBuildPdfNow(count,render,sources){
   await gtHydrateWait();              // every design's picture, drawn behind the page
   const enc=new TextEncoder();
   const parts=[],off=new Map(); let last=0,pos=0;
