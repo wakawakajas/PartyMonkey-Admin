@@ -468,6 +468,8 @@ canvas{border:1px solid var(--border-strong);border-radius:6px;background:#fff;m
   overflow:auto;background:var(--card);color:var(--ink);border:1px solid var(--border-strong);border-radius:14px;
   box-shadow:0 14px 36px rgba(0,0,0,.45);z-index:65;padding:10px 14px 14px;}
 .pc-pop[hidden]{display:none;}
+/* solid: the glass theme's card let the sheet show through the colour list */
+.pc-pop{background:linear-gradient(var(--card),var(--card)),var(--paper);}
 .pc-pop-head{display:flex;align-items:center;gap:8px;margin:-2px 0 8px;cursor:move;user-select:none;touch-action:none;}
 .pc-pop-head b{flex:1;font-family:'Space Grotesk',sans-serif;font-size:14px;}
 @media (max-width:700px){.pc-pop{left:8px;right:8px;top:auto;bottom:84px;width:auto;max-height:52vh;}}
@@ -11312,6 +11314,11 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
       <span>Lightness</span><input type="range" min="-100" max="100" step="1" data-hsl-k="l"/>
       <input type="number" min="-100" max="100" step="1" data-hsl-n="l" inputmode="numeric" aria-label="Lightness"
         style="width:58px;padding:3px 6px;font-size:12px;text-align:right;"/></label>
+    <label style="display:grid;grid-template-columns:78px 1fr 58px;gap:6px;align-items:center;margin-top:8px;"
+      title="The whole print lighter or darker, its white and black kept (Photoshop's Brightness)">
+      <b>Brightness</b><input type="range" min="-100" max="100" step="1" data-hsl-k="b"/>
+      <input type="number" min="-100" max="100" step="1" data-hsl-n="b" inputmode="numeric" aria-label="Brightness"
+        style="width:58px;padding:3px 6px;font-size:12px;text-align:right;"/></label>
   </div>
   <!-- the screen tune: what turning the screen down to sRGB mode, about 120
        nits and 6500K would do, done to the preview sheets instead. Set once
@@ -19552,6 +19559,7 @@ function pcShowSide(which,draw){
   // looked like one sheet with nowhere to turn to the next
   pcPlaceSheetNav();
   try{ localStorage.setItem('pcShowSide',which); }catch(e){}
+  if(draw&&which!=='both'&&typeof pcPopFollow==='function') pcPopFollow(which);
   if(draw) drawAll();
 }
 (function(){
@@ -33593,9 +33601,11 @@ function printHsl(){
   let v={}; try{ v=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){}
   const cl=(x,a,b)=>Math.max(a,Math.min(b,Math.round(Number(x)||0)));
   PRINT_HSL_BANDS.forEach(([k])=>{ const b=v[k]||{}; out[k]={h:cl(b.h,-180,180),s:cl(b.s,-100,100),l:cl(b.l,-100,100)}; });
+  // Brightness, the whole print's: one figure, whichever range is picked
+  out.bright=cl(v.bright&&v.bright.b,-100,100);
   return out;
 }
-const printHslOn=s=>PRINT_HSL_BANDS.some(([k])=>s[k].h||s[k].s||s[k].l);
+const printHslOn=s=>!!s.bright||PRINT_HSL_BANDS.some(([k])=>s[k].h||s[k].s||s[k].l);
 // one colour through the settings, 0-1 each
 function printHslOne(r,g,b,s){
   const mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn;
@@ -33610,14 +33620,21 @@ function printHslOne(r,g,b,s){
     w*=Math.min(1,sat*5);                       // greys are left alone
     dh+=e.h*w; ds+=e.s*w; dl+=e.l*w;
   }
-  if(!dh&&!ds&&!dl) return [r,g,b];
+  if(!dh&&!ds&&!dl) return printBright(r,g,b,s.bright);
   h=((h+dh)%360+360)%360;
   sat=ds<0?sat*(1+ds/100):sat+(1-sat)*ds/100;
   l=dl<0?l*(1+dl/100):l+(1-l)*dl/100;
   sat=Math.max(0,Math.min(1,sat)); l=Math.max(0,Math.min(1,l));
   const C=(1-Math.abs(2*l-1))*sat, X=C*(1-Math.abs((h/60)%2-1)), m=l-C/2;
   const [r1,g1,b1]=h<60?[C,X,0]:h<120?[X,C,0]:h<180?[0,C,X]:h<240?[0,X,C]:h<300?[X,0,C]:[C,0,X];
-  return [r1+m,g1+m,b1+m];
+  return printBright(r1+m,g1+m,b1+m,s.bright);
+}
+// Brightness as Photoshop's: the midtones lifted or lowered by a curve, white
+// and black where they are - +100 takes a 50% grey to about 71%
+function printBright(r,g,b,v){
+  if(!v) return [r,g,b];
+  const e=Math.pow(2,-v/100);
+  return [Math.pow(r,e),Math.pow(g,e),Math.pow(b,e)];
 }
 let _hslLut=null, _hslLutKey='';
 function printHslLut(){
@@ -34803,6 +34820,7 @@ function printColourScreen(canvas,ro,side){
   }
   const cms=printPreviewOn&&!printShowBefore?printCmsReady[printPaperKey()]:null;
   if(!cms) return;
+  if(_pcFast&&!canvas.offsetParent) return;          // out of view: on the exact pass
   if(!(canvas.width>0&&canvas.height>0)) return;
   const ctx=canvas.getContext('2d');
   let id;
@@ -35288,6 +35306,10 @@ function pcPopPickPh(ph){
   pcPopRender();
 }
 const pcAdjOpen=new Set();          // colours whose sliders are showing
+function pcPopFollow(side){
+  if(pcCtx()!=='custom'||pcPopSide===side||!sideArtObjs(side).some(([,o])=>o&&o.img)) return;
+  pcPopSide=side; pcPopArt=null; pcPopRender();
+}
 const pcPopEl=()=>document.getElementById('pcPop');
 const pcPopIsOpen=()=>{ const p=pcPopEl(); return !!p&&!p.hidden; };
 function pcPopRender(){
@@ -35436,7 +35458,10 @@ function pcPopOpen(side){
   document.getElementById('pcPrintView').hidden=false;
   pop.classList.remove('pc-wide');
   const has=s=>sideArtObjs(s).some(([,o])=>o&&o.img);
-  pcPopSide=side||(has(pcPopSide)?pcPopSide:has('front')?'front':has('back')?'back':'front');
+  // the sheet on show first (Back picked over the sheets, the back)
+  let shown=''; try{ shown=pcCtx()==='custom'?document.getElementById('appScreen').dataset.show:''; }catch(e){}
+  pcPopSide=side||((shown==='front'||shown==='back')&&has(shown)?shown
+    :has(pcPopSide)?pcPopSide:has('front')?'front':has('back')?'back':'front');
   pcPopArt=null;
   pop.hidden=false; pcPopCtxAt=pcCtx();
   document.querySelectorAll('#ppOpenBtn,#gtPpBtn').forEach(b=>b.classList.add('on'));
@@ -35598,7 +35623,6 @@ function printColourClick(e){
 }
 document.addEventListener('click',printColourClick);
 // a colour's own sliders: the change made as they move, the sheets drawn again
-let _pcAdjRaf=0;
 document.addEventListener('input',e=>{
   const ds=e.target.dataset||{}, k=ds.adjK||ds.adjN; if(!k) return;
   const row=e.target.closest('[data-pc-adj]'); if(!row) return;
@@ -35618,8 +35642,7 @@ document.addEventListener('input',e=>{
   if(now) now.innerHTML=to?'→ '+pcSw(hexRgb(to),'What prints'):'';
   if(nh) nh.textContent=to||'';
   printColourSet(pcPopSide,from,to,adj,base,pcPopArt);
-  cancelAnimationFrame(_pcAdjRaf);
-  _pcAdjRaf=requestAnimationFrame(()=>pcRedraw());
+  pcSlideSoon(true);
 });
 // a colour picked outright, from the wheel or typed: the new colour as it is
 // moved, the sheets drawn again
@@ -35635,8 +35658,7 @@ document.addEventListener('input',e=>{
     if(nh) nh.textContent=to;
   }
   printColourSet(pcPopSide,from,to===from?null:to,null,to===from?null:to,pcPopArt);
-  cancelAnimationFrame(_pcAdjRaf);
-  _pcAdjRaf=requestAnimationFrame(()=>pcRedraw());
+  pcSlideSoon(true);
 });
 document.addEventListener('change',e=>{
   if(e.target.matches&&e.target.matches('#pcPop [data-pc-artsel]')){ pcPopArt=e.target.value?Number(e.target.value)||e.target.value:null; pcPopRender(); return; }
@@ -35654,7 +35676,7 @@ document.addEventListener('click',e=>{
 // Hue/Saturation: the range picked, its three values shown, kept as moved
 function pcHslShow(){
   const sel=document.getElementById('pcHslBand'); if(!sel) return;
-  const e=printHsl()[sel.value]||{h:0,s:0,l:0};
+  const s=printHsl(), e={...(s[sel.value]||{h:0,s:0,l:0}),b:s.bright};
   document.querySelectorAll('#pcHsl [data-hsl-k],#pcHsl [data-hsl-n]').forEach(el=>{
     if(document.activeElement===el) return;
     el.value=e[el.dataset.hslK||el.dataset.hslN];
@@ -35664,7 +35686,7 @@ document.addEventListener('input',e=>{
   const el=e.target; if(!el||!el.closest||!el.closest('#pcHsl')) return;
   const k=el.dataset.hslK||el.dataset.hslN; if(!k) return;
   if(el.value===''||el.value==='-') return;            // still being typed
-  const band=document.getElementById('pcHslBand').value, lim=k==='h'?180:100;
+  const band=k==='b'?'bright':document.getElementById('pcHslBand').value, lim=k==='h'?180:100;
   const v=Math.max(-lim,Math.min(lim,Math.round(Number(el.value)||0)));
   let all={}; try{ all=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(err){}
   all[band]={...(all[band]||{}),[k]:v};
@@ -35682,8 +35704,8 @@ document.addEventListener('click',e=>{
   pcHslShow(); if(printPreviewShow()!=='file') pcRedraw();
 });
 let _pcSlideT=0;
-function pcSlideSoon(){
-  if(printPreviewShow()==='file') return;           // the file's colours: unchanged
+function pcSlideSoon(always){
+  if(!always&&printPreviewShow()==='file') return;  // the file's colours: unchanged
   _pcFast=true; _pcFastLut=new Map();
   cancelAnimationFrame(_pcDarkRaf);
   _pcDarkRaf=requestAnimationFrame(()=>{ try{ pcRedraw(); }finally{ _pcFast=false; } });
@@ -40768,7 +40790,7 @@ const HELP=[
   {on:'sheet',t:'Show bounding box, cut lines, punch holes',k:'show hide bounding cut lines punch holes view',
    h:'Top left of the sheet: <b>Show bounding box</b>, <b>Show cut lines</b>, <b>Show punch holes</b>.',sel:'#gtShownBar'},
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
-  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness; greys and white are left alone, and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
+  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, its white and black kept; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
@@ -40802,7 +40824,7 @@ const HELP=[
   {on:'custom',t:'Rotate the sheet or open it full screen',k:'rotate turn full screen enlarge',h:'Under the sheet: <b>↺</b> / <b>↻</b> turn it, <b>⤢</b> opens it over the whole screen.',sel:'#pcNlZoom [data-pcz="big"]'},
   {on:'custom',t:'Show cut lines / reference line',k:'show cut lines reference line view',h:'Top left of the sheet: <b>Show cut lines</b>, <b>Show reference line</b>.',sel:'#pcShownBar'},
   {on:'custom',t:'Order ID, paper and GSM',k:'order id paper type gsm file name',h:'Top bar: <b>Order ID</b>, <b>Paper type</b>, <b>GSM</b> - they name the files.',sel:'#pcJobBar'},
-  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness; greys and white are left alone, and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#ppOpenBtn'},
+  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, its white and black kept; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Download and print',k:'download print front back pdf fiery',
    h:'Top bar → <b>Download &amp; Print front</b> / <b>back</b>. <b>⚠ to check</b> lists anything to fix first.',sel:'#printFrontBtn'},
