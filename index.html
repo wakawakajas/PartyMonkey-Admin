@@ -12110,22 +12110,45 @@ async function pdfCropFile(bytes,fr,trimFr,fileName){
 // placed as it is: a file the export cannot copy, and Invert colours, which
 // has to be done to pixels. At that resolution it still prints sharp, where
 // the old stand-in was the 300dpi sheet. null when even this cannot be done.
+// Drawn by pdf.js 5 through GRACoL as the export reads it back (pdf5Raster):
+// a CMYK picture inside is drawn as GRACoL, not by pdf.js 3's own formula
+// (about 12 dE off), and one tagged with an RGB profile by its profile, as
+// the Fiery would have read either; pdf.js 3 should pdf.js 5 not load.
 async function pdfHiResBytes(bytes,invert,dpi){
-  if(!window.pdfjsLib) return null;
-  const pdf=await pdfjsLib.getDocument({data:bytes.slice(0)}).promise;
-  const page=await pdf.getPage(1);
-  const b=page.getViewport({scale:1});
-  const scale=Math.min((dpi||1200)/72,8000/Math.max(b.width,b.height));
-  const vp=page.getViewport({scale});
-  const c=document.createElement('canvas'); c.width=Math.round(vp.width); c.height=Math.round(vp.height);
+  let c=await pdf5Raster(bytes,dpi||1200).catch(()=>null), pdf=null;
+  if(!c){
+    if(!window.pdfjsLib) return null;
+    pdf=await pdfjsLib.getDocument({data:bytes.slice(0)}).promise;
+    const page=await pdf.getPage(1);
+    const b=page.getViewport({scale:1});
+    const scale=Math.min((dpi||1200)/72,8000/Math.max(b.width,b.height));
+    const vp=page.getViewport({scale});
+    c=document.createElement('canvas'); c.width=Math.round(vp.width); c.height=Math.round(vp.height);
+    await page.render({canvasContext:c.getContext('2d'),viewport:vp,background:'rgba(0,0,0,0)'}).promise;
+  }
   const ctx=c.getContext('2d');
-  await page.render({canvasContext:ctx,viewport:vp,background:'rgba(0,0,0,0)'}).promise;
   if(invert){
     const id=ctx.getImageData(0,0,c.width,c.height), a=id.data;
     for(let i=0;i<a.length;i+=4){ a[i]=255-a[i]; a[i+1]=255-a[i+1]; a[i+2]=255-a[i+2]; }
     ctx.putImageData(id,0,0);
   }
-  try{ return await imgPdfBytes(c); } finally{ c.width=c.height=0; try{ pdf.destroy(); }catch(e){} }
+  try{ return await imgPdfBytes(c); } finally{ c.width=c.height=0; try{ if(pdf) pdf.destroy(); }catch(e){} }
+}
+// A PDF's page drawn whole by pdf.js 5 at dpi (8000 px at most), see-through
+// where it is, its CMYK through GRACoL as the export reads it back
+async function pdf5Raster(bytes,dpi){
+  const L=await pdf5Lib();
+  const worker=_pdf5Workers.export||(_pdf5Workers.export=new L.PDFWorker({name:'pigu-cmyk-export'}));
+  const pdf=await L.getDocument({data:bytes.slice(0),worker,useWorkerFetch:true,useWasm:true,wasmUrl:PDF5_URL+'wasm/',
+    iccUrl:new URL(PRINT_PDF5_ICC.export,location.href).href,
+    cMapUrl:PDF5_URL+'cmaps/',cMapPacked:true,standardFontDataUrl:PDF5_URL+'standard_fonts/'}).promise;
+  try{
+    const page=await pdf.getPage(1), v=page.getViewport({scale:1});
+    const vp=page.getViewport({scale:Math.min(dpi/72,8000/Math.max(v.width,v.height))});
+    const c=document.createElement('canvas'); c.width=Math.round(vp.width); c.height=Math.round(vp.height);
+    await page.render({canvasContext:c.getContext('2d'),canvas:c,viewport:vp,background:'rgba(0,0,0,0)'}).promise;
+    return c;
+  }finally{ pdf.destroy(); }
 }
 async function pdfPageFile(bytes,index,fileName,label,opts){
   const enc=new TextEncoder();
@@ -33863,7 +33886,7 @@ function printArtUsable(img,forExport){
 // sheet's colours (printColourScreen)
 function printArtImg(img,forExport,ro){
   if(forExport) return printArtExportImg(img);
-  const v=printArtPrinted(img);
+  const v=printArtPrinted(img)||printArtRgbPrinted(img);
   if(ro&&printPreviewOn){
     const f=img&&_artFileOf.get(img._artOf||img);
     if(f&&_pdfCmyk.get(f)===true){
@@ -33871,6 +33894,22 @@ function printArtImg(img,forExport,ro){
     }
   }
   return v||img;
+}
+// An RGB PDF in the preview, drawn as its export draws it (pdfHiResBytes:
+// pdf.js 5, any CMYK in it through GRACoL, its pictures by their own
+// profiles) - its sRGB then read as a picture's ('img'), as the export does
+function printArtRgbPrinted(img){
+  if(!PDF_AS_CMYK||!printArtPreviewPdf(img,false)) return null;
+  const f=_artFileOf.get(img); if(_pdfCmyk.get(f)!==false) return null;
+  let m=_cmykPrinted.get(img); if(!m){ m={}; _cmykPrinted.set(img,m); }
+  const v=m.rgb;
+  if(v) return v;
+  if(v===undefined){
+    m.rgb=null;
+    pdf5Draw(img,f,'export').then(pdf5Picture).then(c=>{ m.rgb=c; if(printPreviewOn) pcRedraw(); })
+      .catch(()=>{ m.rgb=false; });
+  }
+  return null;
 }
 function printArtPrinted(img){
   const u=printArtUsable(img,false); if(!u) return null;
