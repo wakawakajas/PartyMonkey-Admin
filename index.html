@@ -33280,7 +33280,13 @@ function wholeArtSet(on){
 const PRINT_CMYK_OUT=true;
 async function sheetScanlines(imgData){
   if(PRINT_CMYK_OUT){
-    try{ const {toGracol}=await lcmsLib(); return {cmyk:true,rows:rgbaToCmykScanlines(imgData,toGracol)}; }
+    try{
+      const {toGracol}=await lcmsLib();
+      // matched to the file on a measured paper (PRINT_MATCH)
+      const mp=printMatchPaper(), mc=mp?await printCms(mp).catch(()=>null):null;
+      const to=mc&&mc.matchImg?(a,n)=>toGracol(mc.matchImg(a,n),n):toGracol;
+      return {cmyk:true,rows:rgbaToCmykScanlines(imgData,to)};
+    }
     catch(e){ console.warn('CMYK conversion unavailable, writing sRGB',e); }
   }
   return {cmyk:false,rows:rgbaToRawRgbScanlines(imgData)};
@@ -33414,6 +33420,26 @@ function printPaperKey(){
   const p=String(state.paperType||'');
   return /matt/i.test(p)?'matte':(!p||/gloss/i.test(p))?'gloss':'plain';
 }
+// Colours matched to the file, from the measured papers: a picture, the
+// sheet's words and marks, and a PDF's own RGB are sent as the numbers that
+// print as the file's colour - not the file's numbers, which this printer
+// prints otherwise (#561219 came out L 28.5, plum, on gloss; the file's is
+// L 18). Measured inverse, relative colorimetric - the paper's white the
+// file's white - and in the shadows, from L* 40 down to 15, eased into the
+// same with black point compensation, so the darkest greys keep their steps
+// rather than all printing as the paper's black. Over 216 screen colours
+// the printable third went from 5.7 dE76 off the file to 1.0 (gloss and
+// matte alike); one past the ink's reach goes to the nearest it has, about
+// as before. A PDF's CMYK, its greys and its profile-tagged colours are left as
+// the designer set them. Only on a measured paper - not Plain, not Sticker
+// (printMatchPaper). The preview and the colour check show the matched print.
+const PRINT_MATCH=true;
+function printMatchPaper(){
+  if(!PRINT_MATCH) return null;
+  try{ if(pcCtx()==='gt'&&gtFinish==='Sticker') return null; }catch(e){}
+  const p=printPaperKey();
+  return PRINT_MEASURED_PIGU[p]?p:null;
+}
 let _lcms=null;
 function lcmsLib(){
   if(!_lcms) _lcms=(async()=>{
@@ -33527,7 +33553,32 @@ function printCms(paper){
       const wb=run(T(meas5,L.TYPE_CMYK_8,lab,L.TYPE_Lab_16,R,0),new Uint8Array([0,0,0,0,255,255,255,255]),2), xW=wb[0], xK=wb[3];
       xLift=v=>Math.max(0,Math.min(65535,(v-xK)*65535/(xW-xK)));
     }
+    // matched (PRINT_MATCH): the file's colour, as the numbers that print as it
+    // - a picture's through this tool's CMYK (measP), a PDF's RGB as the Fiery
+    // reads it (meas)
+    const BPCm=L.cmsFLAGS_BLACKPOINTCOMPENSATION;
+    // exact over L* 40, black point compensated under 15, eased between
+    const matchTo=dst=>{
+      const ex=T(srgb,L.TYPE_RGB_8,dst,L.TYPE_RGB_8,R,0), bp=T(srgb,L.TYPE_RGB_8,dst,L.TYPE_RGB_8,R,BPCm);
+      return (a,n)=>{
+        const e=run(ex,a,n), k=run(bp,a,n), l=run(scrLab,a,n), o=new Uint8Array(n*3);
+        for(let i=0,j=0;i<n;i++,j+=3){
+          const w=Math.max(0,Math.min(1,(l[j]/655.35-15)/25));
+          o[j]=Math.round(e[j]*w+k[j]*(1-w)); o[j+1]=Math.round(e[j+1]*w+k[j+1]*(1-w)); o[j+2]=Math.round(e[j+2]*w+k[j+2]*(1-w));
+        }
+        return o;
+      };
+    };
+    const mImg=PRINT_MATCH&&measP?matchTo(measP):null;
+    const mPdf=PRINT_MATCH&&meas?matchTo(meas):null;
+    const mOf=src=>src==='img'?mImg:src==='pdf'?mPdf:null;
     const cms={paper,measured:!!(meas||measP||measK),
+      // the numbers sent for these (export), and the print of a colour matched
+      matchImg:mImg,
+      matchPdf:mPdf?rgb=>[...mPdf(new Uint8Array(rgb),1)]:null,
+      matched:src=>!!(mOf(src)&&(src==='img'?pLab:mLab)),
+      matchedLab:(rgb,src)=>lab16(run(src==='img'?pLab:mLab,mOf(src)(new Uint8Array(rgb),1),1)),
+
       ink:(rgb,src)=>[...toKrun(src,new Uint8Array(rgb),1)],        // 0-255 each
       // the black-ink-only strength, %, that prints as dark as this colour
       looksK:(rgb,src)=>{
@@ -33539,6 +33590,7 @@ function printCms(paper){
       // as shown on the screen and as printed, L*a*b*, and the printed one as
       // the nearest screen colour (no screen match: the paper as measured)
       screenLab:rgb=>lab16(run(scrLab,new Uint8Array(rgb),1)),
+      labToRgb:v=>[...run(labRgb,new Uint16Array([Math.round(v[0]*655.35),Math.round((v[1]+128)*257),Math.round((v[2]+128)*257)].map(x=>Math.max(0,Math.min(65535,x)))),1)],
       // adj {h: degrees, l: L*, s: % of chroma}, worked on the screen's colour
       adjust:(rgb,adj)=>{
         const v=lab16(run(scrLab,new Uint8Array(rgb),1));
@@ -33604,7 +33656,8 @@ function printCms(paper){
       // were still taken down).
       proof:(rgb,n,src,g)=>{
         const x=xLift&&src==='pdfx', p=pLab&&src==='img', q=kLabP&&src==='pdfk', m=x||p||q||(mLab&&!viaG(src)), ml=x?xLift:p?pLift:q?kLift:mLift;
-        const lb=x?run(scrLab,rgb,n):p?run(pLab,rgb,n):q?run(kLabP,rgb,n):m?run(mLab,src==='img'?run(s2a,rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
+        const lb=x?run(scrLab,rgb,n):p?run(pLab,mImg?mImg(rgb,n):rgb,n):q?run(kLabP,rgb,n)
+          :m?run(mLab,src==='img'?run(s2a,rgb,n):src==='pdf'&&mPdf?mPdf(rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
         g=m?1:g>0?g:1;                               // measured: shown as read
         const T=19661;                               // L* 30, 16-bit
         for(let i=0;i<lb.length;i+=3){
@@ -33813,6 +33866,9 @@ async function printArtExportReady(){
     const cm=_pdfCmyk.get(f); if(cm!==true&&cm!==false) continue;
     const e={}; _artExport.set(img,e); _artExportMade.push(img);
     const left=until-Date.now(); if(left<=0) break;
+    // an RGB PDF's page is matched (pdfMatchColours), so its band is its own
+    // numbers, matched with the sheet; unmatched, read as the Adobe RGB it is
+    if(!cm&&printMatchPaper()) continue;
     await Promise.race([(cm?pdf5Draw(img,f,'export'):pdfRgbAsAdobe(img)).then(c=>{ e.c=c; }).catch(()=>{}),by(left)]);
   }
 }
@@ -33915,6 +33971,19 @@ function artPrintScan(img,cms,src){
         if(b[3]<min) continue;
         const rgb=[b[0]/b[3],b[1]/b[3],b[2]/b[3]].map(Math.round);
         if(Math.max(...rgb)-Math.min(...rgb)<24) continue;        // grey or black: meant to be dark
+        // matched (PRINT_MATCH): it prints as the file's colour wherever the ink
+        // reaches - neither dark nor a shade off - so only a colour past that
+        // (neon green, electric blue) is said, as the ink's nearest
+        if(cms.matched(src)){
+          const a=cms.screenLab(rgb), p=cms.matchedLab(rgb,src), ca=Math.hypot(a[1],a[2]), cp=Math.hypot(p[1],p[2]);
+          if(ca>=PRINT_DULL_C&&Math.hypot(a[0]-p[0],a[1]-p[1],a[2]-p[2])>=PRINT_DULL_DE){
+            const near=dl.find(f=>colDist(f.rgb,rgb)<28);
+            const to=cms.labToRgb(p), loss=Math.max(0,Math.round((ca-cp)/ca*100));
+            if(near){ if(b[3]>near.n){ near.rgb=rgb; near.to=to; near.loss=loss; } near.n+=b[3]; }
+            else dl.push({rgb,to,loss,n:b[3]});
+          }
+          continue;
+        }
         if(cms.printL(rgb,src)>PRINT_DARK_L){
           const a=cms.screenLab(rgb), p=cms.printLab(rgb,src);
           const ca=Math.hypot(a[1],a[2]), cp=Math.hypot(p[1],p[2]);
@@ -34430,6 +34499,28 @@ function swappedArtCanvas(img,swaps){
   const id=x.getImageData(0,0,W,H); swapPixels(id.data,swaps); x.putImageData(id,0,0);
   return c;
 }
+// the parts of a content stream that are drawing, between its (strings)
+// and inline pictures (ID ... EI), each rewritten on its own by fn
+function pdfOutsideStrings(str,fn){
+  let out='', i=0, from=0;
+  const n=str.length, ws=c=>c===' '||c==='\n'||c==='\r'||c==='\t'||c==='\f'||c==='\0';
+  while(i<n){
+    const c=str[i];
+    if(c==='%'){ i++; while(i<n&&str[i]!=='\n'&&str[i]!=='\r') i++; continue; }
+    if(c==='('){
+      out+=fn(str.slice(from,i)); let d=0, j=i;
+      for(;j<n;j++){ const x=str[j]; if(x==='\\'){ j++; continue; } if(x==='(') d++; else if(x===')'&&--d===0) break; }
+      out+=str.slice(i,j+1); i=from=j+1; continue;
+    }
+    if(c==='I'&&str[i+1]==='D'&&(i===0||ws(str[i-1]))&&ws(str[i+2]||' ')){
+      out+=fn(str.slice(from,i)); let j=i+3;
+      while(j<n&&!(str[j]==='E'&&str[j+1]==='I'&&ws(str[j-1])&&(j+2>=n||ws(str[j+2])))) j++;
+      out+=str.slice(i,j+2); i=from=j+2; continue;
+    }
+    i++;
+  }
+  return out+fn(str.slice(from));
+}
 // A PDF with its swaps done: every rg/RG (and sc/scn of three numbers) near
 // the colour taken is set to the new one; a k/K is read through GRACoL2013 and
 // given the new colour's ink. The page's content and every form it draws are
@@ -34455,26 +34546,7 @@ async function pdfSwapColours(bytes,swaps){
   let hits=0;
   // the parts of a content stream that are drawing, between its (strings)
   // and inline pictures (ID ... EI), each rewritten on its own
-  const outside=(str,fn)=>{
-    let out='', i=0, from=0;
-    const n=str.length, ws=c=>c===' '||c==='\n'||c==='\r'||c==='\t'||c==='\f'||c==='\0';
-    while(i<n){
-      const c=str[i];
-      if(c==='%'){ i++; while(i<n&&str[i]!=='\n'&&str[i]!=='\r') i++; continue; }
-      if(c==='('){
-        out+=fn(str.slice(from,i)); let d=0, j=i;
-        for(;j<n;j++){ const x=str[j]; if(x==='\\'){ j++; continue; } if(x==='(') d++; else if(x===')'&&--d===0) break; }
-        out+=str.slice(i,j+1); i=from=j+1; continue;
-      }
-      if(c==='I'&&str[i+1]==='D'&&(i===0||ws(str[i-1]))&&ws(str[i+2]||' ')){
-        out+=fn(str.slice(from,i)); let j=i+3;
-        while(j<n&&!(str[j]==='E'&&str[j+1]==='I'&&ws(str[j-1])&&(j+2>=n||ws(str[j+2])))) j++;
-        out+=str.slice(i,j+2); i=from=j+2; continue;
-      }
-      i++;
-    }
-    return out+fn(str.slice(from));
-  };
+  const outside=pdfOutsideStrings;
   const recolor=(data,bbox)=>{
     let s=''; for(let i=0;i<data.length;i+=8192) s+=String.fromCharCode.apply(null,data.subarray(i,i+8192));
     let hit=false;
@@ -34513,6 +34585,42 @@ async function pdfSwapColours(bytes,swaps){
   // placed, the PDF printed it unchanged while the preview showed it changed
   if(swaps.some(t=>!took.has(t))) return null;
   return f&&hits?new Uint8Array(await f.arrayBuffer()):null;
+}
+// A PDF with its own RGB (rg/RG, DeviceRGB, as Canva writes) sent as the
+// numbers that print as it on this paper (PRINT_MATCH): read through the
+// measured PDF RGB the Fiery's Adobe RGB reading and rendering included.
+// Its CMYK, greys, profile-tagged sc/scn and pictures go as they are. The
+// bytes as they were when nothing is matched or the page cannot be read.
+async function pdfMatchColours(bytes){
+  const mp=printMatchPaper(); if(!mp) return bytes;
+  const cms=await printCms(mp).catch(()=>null);
+  if(!cms||!cms.matchPdf) return bytes;
+  const N='(-?(?:\\d+\\.?\\d*|\\.\\d+))';
+  const lead='(?<=^|[\\s\\[\\]()<>{}])(?<![\\d.]\\s+)';
+  const re3=new RegExp(lead+N+'\\s+'+N+'\\s+'+N+'\\s+(rg|RG)(?![A-Za-z])','g');
+  const u=v=>Math.round(Math.min(1,Math.max(0,Number(v)))*255);
+  const fmt=v=>(Math.round(v/255*1e4)/1e4).toString();
+  const memo=new Map();
+  let hits=0;
+  const recolor=data=>{
+    let s=''; for(let i=0;i<data.length;i+=8192) s+=String.fromCharCode.apply(null,data.subarray(i,i+8192));
+    let hit=false;
+    // drawing only: not inside (strings) or an inline picture (pdfSwapColours)
+    s=pdfOutsideStrings(s,t=>t.replace(re3,(m,r,g,bl,op)=>{
+      const k=[r,g,bl].map(u).join(',');
+      let to=memo.get(k); if(!to){ to=cms.matchPdf([r,g,bl].map(u)); memo.set(k,to); }
+      hit=true; return to.map(fmt).join(' ')+' '+op;
+    }));
+    if(!hit) return null;
+    hits++;
+    const out=new Uint8Array(s.length);
+    for(let i=0;i<s.length;i++) out[i]=s.charCodeAt(i);
+    return out;
+  };
+  try{
+    const f=await pdfPageFile(bytes,0,'artwork.pdf',null,{recolor});
+    return f&&hits?new Uint8Array(await f.arrayBuffer()):bytes;
+  }catch(e){ return bytes; }
 }
 // ---- the panel under each sheet: preview, and the colours that print dark ----
 // the artwork a side prints, as [key, design or final]
@@ -36373,6 +36481,7 @@ async function printVectorSources(side){
     // the swap was dropped; one that cannot be read that way is left to the
     // sheet, where its pixels are swapped
     if(isPdf&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
+    if(bytes&&isPdf) bytes=await pdfMatchColours(bytes);
     if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=!!bytes; }
     else if(!isPdf&&!inv&&o&&o.img&&imgFinerThanSheet(o.img,side))
       bytes=await Promise.resolve().then(()=>imgPdfBytes(swaps.length?swappedArtCanvas(o.img,swaps):o.img)).catch(()=>null);
@@ -40080,7 +40189,7 @@ const HELP=[
   {on:'sheet',t:'Show bounding box, cut lines, punch holes',k:'show hide bounding cut lines punch holes view',
    h:'Top left of the sheet: <b>Show bounding box</b>, <b>Show cut lines</b>, <b>Show punch holes</b>.',sel:'#gtShownBar'},
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
-  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
+  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
@@ -40114,7 +40223,7 @@ const HELP=[
   {on:'custom',t:'Rotate the sheet or open it full screen',k:'rotate turn full screen enlarge',h:'Under the sheet: <b>↺</b> / <b>↻</b> turn it, <b>⤢</b> opens it over the whole screen.',sel:'#pcNlZoom [data-pcz="big"]'},
   {on:'custom',t:'Show cut lines / reference line',k:'show cut lines reference line view',h:'Top left of the sheet: <b>Show cut lines</b>, <b>Show reference line</b>.',sel:'#pcShownBar'},
   {on:'custom',t:'Order ID, paper and GSM',k:'order id paper type gsm file name',h:'Top bar: <b>Order ID</b>, <b>Paper type</b>, <b>GSM</b> - they name the files.',sel:'#pcJobBar'},
-  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#ppOpenBtn'},
+  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Download and print',k:'download print front back pdf fiery',
    h:'Top bar → <b>Download &amp; Print front</b> / <b>back</b>. <b>⚠ to check</b> lists anything to fix first.',sel:'#printFrontBtn'},
@@ -52892,6 +53001,7 @@ async function gtVectorSources(side){
       // cannot be read that way is left out, and drawn on the sheet, where its
       // pixels are swapped
       if(bytes&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
+      if(bytes) bytes=await pdfMatchColours(bytes);
       if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=true; }
       if(bytes) out.set(key,{bytes,page:0,inverted});
     }catch(e){}
