@@ -33333,6 +33333,12 @@ const PRINT_PAPER_NAMES={gloss:'Coated-Glossy',matte:'Coated-Matte',plain:'Plain
 // guess for that path) is left out. The colour check and its fixes still go
 // through the Fiery's own profile.
 const PRINT_MEASURED={matte:'profiles/fiery-matte-measured.icm'};
+// Papers measured through this tool's own CMYK (PRINT_CMYK_OUT): the same
+// 400 patches as sRGB, written by imgPdfBytes - the code every download goes
+// through - so the Fiery got the GRACoL numbers a real job gets. Its RGB is
+// the picture's sRGB, so a picture's preview is read straight off it: the
+// preview and the download are the same numbers. Add a paper once read.
+const PRINT_MEASURED_PIGU={};
 const LCMS_URL='https://cdn.jsdelivr.net/npm/lcms-wasm@1.0.5/dist/lcms.js';
 // how light a colour prints, L* from the paper's black (0) to its white (100),
 // at or under which a colour is flagged, and the two its fixes are lifted to
@@ -33433,6 +33439,7 @@ function printCms(paper){
     const {L,lcms,prof,srgb,lab,adobe,gracol,toGracol}=await lcmsLib();
     const out=await prof(PRINT_PROFILES[paper]);
     const meas=PRINT_MEASURED[paper]?await prof(PRINT_MEASURED[paper]):null;
+    const measP=PRINT_MEASURED_PIGU[paper]&&PRINT_CMYK_OUT?await prof(PRINT_MEASURED_PIGU[paper]):null;
     const P=L.INTENT_PERCEPTUAL, R=L.INTENT_RELATIVE_COLORIMETRIC, BPC=L.cmsFLAGS_BLACKPOINTCOMPENSATION;
     const T=(a,af,b,bf,i,f)=>lcms.cmsCreateTransform(a,af,b,bf,i,f);
     const toK={pdf:T(adobe,L.TYPE_RGB_8,out,L.TYPE_CMYK_8,P,BPC),img:T(srgb,L.TYPE_RGB_8,out,L.TYPE_CMYK_8,P,BPC)};
@@ -33482,7 +33489,14 @@ function printCms(paper){
       const wb=run(mLab,new Uint8Array([255,255,255,0,0,0]),2), mW=wb[0], mK=wb[3];
       mLift=v=>Math.max(0,Math.min(65535,(v-mK)*65535/(mW-mK)));
     }
-    const cms={paper,measured:!!meas,
+    // a picture on a paper measured through this tool's CMYK: its sRGB as sent
+    let pLab=null, pLift=null;
+    if(measP){
+      pLab=T(measP,L.TYPE_RGB_8,lab,L.TYPE_Lab_16,R,0);
+      const wb=run(pLab,new Uint8Array([255,255,255,0,0,0]),2), pW=wb[0], pK=wb[3];
+      pLift=v=>Math.max(0,Math.min(65535,(v-pK)*65535/(pW-pK)));
+    }
+    const cms={paper,measured:!!(meas||measP),
       ink:(rgb,src)=>[...toKrun(src,new Uint8Array(rgb),1)],        // 0-255 each
       // the black-ink-only strength, %, that prints as dark as this colour
       looksK:(rgb,src)=>{
@@ -33557,13 +33571,13 @@ function printCms(paper){
       // bright colour duller than they print; at 50, red and electric blue
       // were still taken down).
       proof:(rgb,n,src,g)=>{
-        const m=mLab&&!viaG(src);
-        const lb=m?run(mLab,src==='img'?run(s2a,rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
+        const p=pLab&&src==='img', m=p||(mLab&&!viaG(src)), ml=p?pLift:mLift;
+        const lb=p?run(pLab,rgb,n):m?run(mLab,src==='img'?run(s2a,rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
         g=g>0?g:1;
         const T=19661;                               // L* 30, 16-bit
         for(let i=0;i<lb.length;i+=3){
           if(!m) printHueFix16(lb,i);                // this printer's reds
-          const L1=m?mLift(lb[i]):lift(lb[i]);
+          const L1=m?ml(lb[i]):lift(lb[i]);
           if(g===1||!(L1>0)||L1>=T){ lb[i]=L1; continue; }
           const L2=T*Math.pow(L1/T,g), k=Math.pow(L2/L1,0.75);
           lb[i]=L2;
