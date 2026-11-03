@@ -13383,12 +13383,14 @@ function renderSide(side,canvas,maxDim,opts){
     // two soft edges left a pale hairline down the middle of every gutter
     const ep=opts.forExport&&pass==='art'?1:0;
     // the bleed along the picture's own axes, which a quarter turn swaps
-    ctx.drawImage(grow?bleedArt(img,trimW,trimH,swapped?bY:bX,bleedMode,swapped?bX:bY,bleedTrimPx(),bleedMm)
+    // a CMYK PDF in the Print preview: its CMYK as printed (printArtImg)
+    const pimg=printArtImg(img,opts.forExport), fillB=bleedMode==='content'||bleedMode==='ai';
+    ctx.drawImage(grow?bleedArt(fillB?img:pimg,trimW,trimH,swapped?bY:bX,bleedMode,swapped?bX:bY,bleedTrimPx(),bleedMm,fillB&&pimg!==img?pimg:null)
       // the edge trim is part of making a bleed: with no bleed on this card, or
       // a page that brings its own, the picture prints whole as it always did
       :!tf&&!own&&bleedMm>0&&bleedTrimPx()>0
         &&Math.min(img.naturalWidth||img.width,img.naturalHeight||img.height)>bleedTrimPx()*2+2
-        ?bleedTrimmed(img,bleedTrimPx()):img,
+        ?bleedTrimmed(pimg,bleedTrimPx()):pimg,
       -srcW/2-artTrimOff(img,tf).x*srcW-ep,-srcH/2-artTrimOff(img,tf).y*srcH-ep,srcW+ep*2,srcH+ep*2);
     // a whole pixel short of the trim, so the ring overlaps the placed page
     // rather than leaving a hairline of paper between them. Half a pixel (as
@@ -17284,14 +17286,16 @@ var bleedArtMemo=new WeakMap();
 // round the client's file is cut away and the bleed is made from inside it
 // grownMm: how far Offset grows the shape — the bleed itself, never the gap
 // a wrong-ratio design leaves, which is made up from its edges instead
-function bleedArt(img,trimW,trimH,mm,mode,mmY,trim,grownMm){
+// over: a picture of the same size to lay inside a Content-aware / AI fill
+// made from img (printArtImg) - the fill is kept, and asked for, as img's
+function bleedArt(img,trimW,trimH,mm,mode,mmY,trim,grownMm,over){
   const nW=img.naturalWidth||img.width, nH=img.naturalHeight||img.height;
   if(!nW||!nH||!(trimW>0)||!(trimH>0)) return img;
   if(mmY===undefined) mmY=mm;
   let bx=Math.max(1,Math.round(mm*nW/trimW));
   let by=Math.max(1,Math.round(mmY*nH/trimH));
   const t=Math.min(trim|0,Math.floor((Math.min(nW,nH)-2)/2));
-  if(t>0){ img=bleedTrimmed(img,t); bx+=t; by+=t; }
+  if(t>0){ img=bleedTrimmed(img,t); bx+=t; by+=t; if(over) over=bleedTrimmed(over,t); }
   // One mirrored copy is as far as a mirror can honestly reach. Capping the
   // bleed there instead squeezed the picture when it was drawn into its box,
   // so a gap wider than the picture is extended rather than mirrored.
@@ -17303,10 +17307,23 @@ function bleedArt(img,trimW,trimH,mm,mode,mmY,trim,grownMm){
     return bleedOffsetPx(img,bx,by,gx,gy);
   }
   if(mode==='content'||mode==='ai'){
-    const job=bleedJob(img,bx,by,mode);
-    return job.canvas||bleedArtPx(img,bx,by,'extend');
+    const job=bleedJob(img,bx,by,mode), base=job.canvas||bleedArtPx(img,bx,by,'extend');
+    return over?bleedOver(base,over,bx,by):base;
   }
   return bleedArtPx(img,bx,by,mode);
+}
+// a fill with another picture laid where its own sits, kept per fill
+const bleedOverMemo=new WeakMap();
+function bleedOver(base,over,bx,by){
+  let m=bleedOverMemo.get(base); if(!m){ m=new WeakMap(); bleedOverMemo.set(base,m); }
+  let c=m.get(over);
+  if(!c){
+    c=document.createElement('canvas'); c.width=base.width; c.height=base.height;
+    const x=c.getContext('2d'); x.drawImage(base,0,0);
+    x.clearRect(bx,by,over.width,over.height); x.drawImage(over,bx,by);
+    m.set(over,c);
+  }
+  return c;
 }
 function bleedTrimPx(){
   const v=Number(state.bleed&&state.bleed.trimPx);
@@ -33450,6 +33467,7 @@ function printCms(paper){
     const meas=PRINT_MEASURED[paper]?await prof(PRINT_MEASURED[paper]):null;
     const measP=PRINT_MEASURED_PIGU[paper]&&PRINT_CMYK_OUT?await prof(PRINT_MEASURED_PIGU[paper]):null;
     const measK=PRINT_MEASURED_PDFK[paper]?await prof(PRINT_MEASURED_PDFK[paper]):null;
+    const meas5=PRINT_PDF5_ICC[paper]?await prof(PRINT_PDF5_ICC[paper]+PDF5_ICC_NAME).catch(()=>null):null;
     const P=L.INTENT_PERCEPTUAL, R=L.INTENT_RELATIVE_COLORIMETRIC, BPC=L.cmsFLAGS_BLACKPOINTCOMPENSATION;
     const T=(a,af,b,bf,i,f)=>lcms.cmsCreateTransform(a,af,b,bf,i,f);
     const toK={pdf:T(adobe,L.TYPE_RGB_8,out,L.TYPE_CMYK_8,P,BPC),img:T(srgb,L.TYPE_RGB_8,out,L.TYPE_CMYK_8,P,BPC)};
@@ -33460,7 +33478,7 @@ function printCms(paper){
     const g2o=T(gracol,L.TYPE_CMYK_8,out,L.TYPE_CMYK_8,R,BPC);
     // A CMYK PDF ('pdfk') reaches it as CMYK too; for the checks its pixels
     // (pdf.js's RGB of that CMYK) are taken back through GRACoL.
-    const viaG=src=>src==='pdfk'||src==='img'&&PRINT_CMYK_OUT;
+    const viaG=src=>src==='pdfk'||src==='pdfx'||src==='img'&&PRINT_CMYK_OUT;
     const toKrun=(src,a,n)=>viaG(src)?run(g2o,toGracol(a,n),n):run(toK[src],a,n);
     const kLab=T(out,L.TYPE_CMYK_8,lab,L.TYPE_Lab_16,R,0);
     const labRgb=T(lab,L.TYPE_Lab_16,srgb,L.TYPE_RGB_8,R,0);
@@ -33514,6 +33532,13 @@ function printCms(paper){
       kLabP=T(measK,L.TYPE_RGB_8,lab,L.TYPE_Lab_16,R,0);
       const wb=run(kLabP,new Uint8Array([255,255,255,0,0,0]),2), kW=wb[0], kK=wb[3];
       kLift=v=>Math.max(0,Math.min(65535,(v-kK)*65535/(kW-kK)));
+    }
+    // a CMYK PDF drawn by pdf.js 5 through the measured CMYK (printArtImg,
+    // 'pdfx'): its pixels are already as printed, the paper's white and black
+    let xLift=null;
+    if(meas5){
+      const wb=run(T(meas5,L.TYPE_CMYK_8,lab,L.TYPE_Lab_16,R,0),new Uint8Array([0,0,0,0,255,255,255,255]),2), xW=wb[0], xK=wb[3];
+      xLift=v=>Math.max(0,Math.min(65535,(v-xK)*65535/(xW-xK)));
     }
     const cms={paper,measured:!!(meas||measP||measK),
       ink:(rgb,src)=>[...toKrun(src,new Uint8Array(rgb),1)],        // 0-255 each
@@ -33591,8 +33616,8 @@ function printCms(paper){
       // bright colour duller than they print; at 50, red and electric blue
       // were still taken down).
       proof:(rgb,n,src,g)=>{
-        const p=pLab&&src==='img', q=kLabP&&src==='pdfk', m=p||q||(mLab&&!viaG(src)), ml=p?pLift:q?kLift:mLift;
-        const lb=p?run(pLab,rgb,n):q?run(kLabP,rgb,n):m?run(mLab,src==='img'?run(s2a,rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
+        const x=xLift&&src==='pdfx', p=pLab&&src==='img', q=kLabP&&src==='pdfk', m=x||p||q||(mLab&&!viaG(src)), ml=x?xLift:p?pLift:q?kLift:mLift;
+        const lb=x?run(scrLab,rgb,n):p?run(pLab,rgb,n):q?run(kLabP,rgb,n):m?run(mLab,src==='img'?run(s2a,rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
         g=m?1:g>0?g:1;                               // measured: shown as read
         const T=19661;                               // L* 30, 16-bit
         for(let i=0;i<lb.length;i+=3){
@@ -33626,6 +33651,7 @@ function artSrc(o){
   if(!o) return 'img';
   const f=o.file, nm=String((f&&f.name)||o.name||(o.source&&o.source.path)||'');
   if(!((f&&f.type==='application/pdf')||/\.pdf$/i.test(nm))) return 'img';
+  if(o.img&&f instanceof Blob) _artFileOf.set(o.img,f);     // printArtImg
   return pdfIsCmyk(f)?'pdfk':'pdf';
 }
 // Whether a PDF is drawn in CMYK: more k/K (and four-number sc/scn) than
@@ -33667,6 +33693,85 @@ function pdfIsCmyk(f){
     if(c&&printPreviewOn){ pcRedraw(); printColourCheckSoon(); pcPopRender(); }
   }).catch(()=>_pdfCmyk.set(f,false));
   return false;
+}
+// A CMYK PDF in the Print preview, drawn by pdf.js 5 through the paper's own
+// measured CMYK (profiles/pdf5-<paper>/). The Fiery prints CMYK by its
+// numbers - "Print CMYK gray using black only" and Pure Black On keep a K the
+// file has - so two mixes that look alike as GRACoL, or as pdf.js 3 draws
+// them, print apart, and no table read off RGB pixels can tell them (about
+// 2.5 dE2000 at best, PRINT_MEASURED_PDFK). pdf.js 5 converts CMYK through an
+// ICC profile (qcms) when it is given one under the name it asks for; given
+// the measured one, each CMYK is drawn as it printed, relative to the paper,
+// its black the paper's black: 1.3 dE76 median on the 840-patch chart, the
+// misses 100% cyans no sRGB screen shows. Screen only, and only while the
+// preview shows a measured paper: the sheet keeps the picture it had for
+// everything else, and this one is drawn in its place - not for a design
+// whose colours were changed (its swaps are made on its own pixels) or a
+// turned copy. A Content-aware / AI fill bleed is made from, and paid for
+// on, the file's own pixels, so it is kept and this picture laid over it
+// (bleedArt's over): only the band past the trim is the old colours. A CMYK profile embedded in the PDF is used by pdf.js 5
+// where the Fiery ignores it ("Use CMYK embedded profiles" off), so such a
+// file is drawn by its profile. Should pdf.js 5 not load, the preview is
+// PRINT_MEASURED_PDFK's, as before.
+const PDF5_URL='https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/';
+const PRINT_PDF5_ICC={matte:'profiles/pdf5-matte/',gloss:'profiles/pdf5-gloss/'};
+const PDF5_ICC_NAME='CGATS001Compat-v2-micro.icc';
+let _pdf5=null;
+const _pdf5Workers={}, _artFileOf=new WeakMap(), _cmykPrinted=new WeakMap();
+function pdf5Lib(){
+  // tried once: a failed load stays failed, and the preview stays as before
+  if(!_pdf5) _pdf5=import(PDF5_URL+'build/pdf.min.mjs').then(L=>{
+    L.GlobalWorkerOptions.workerSrc=PDF5_URL+'build/pdf.worker.min.mjs';
+    return L;
+  });
+  return _pdf5;
+}
+function printArtUsable(img,forExport){
+  if(forExport||!printPreviewOn||printShowBefore||!img||img._artOf) return null;
+  const f=_artFileOf.get(img), paper=printPaperKey();
+  if(!f||!PRINT_PDF5_ICC[paper]||_pdfCmyk.get(f)!==true) return null;
+  if(swapsForIds(new Set([artImgId(img)])).length) return null;
+  return {f,paper};
+}
+// What to draw for img: its CMYK as printed once that is drawn, else img -
+// and the drawing is started, the sheets drawn again when it is done
+function printArtImg(img,forExport){
+  const u=printArtUsable(img,forExport); if(!u) return img;
+  let m=_cmykPrinted.get(img); if(!m){ m={}; _cmykPrinted.set(img,m); }
+  const v=m[u.paper];
+  if(v) return v;
+  if(v===undefined){
+    m[u.paper]=null;
+    pdf5Draw(img,u.f,u.paper).then(c=>{ m[u.paper]=c; if(printPreviewOn) pcRedraw(); })
+      .catch(()=>{ m[u.paper]=false; });
+  }
+  return img;
+}
+function printArtIsPrinted(img){
+  const u=printArtUsable(img,false), m=u&&_cmykPrinted.get(img);
+  return !!(m&&m[u.paper]);
+}
+// the page drawn at the picture's own size, see-through where it was: one
+// pdf.js 5 worker to each paper, as the CMYK profile is read once a worker
+async function pdf5Draw(img,f,paper){
+  const L=await pdf5Lib();
+  const worker=_pdf5Workers[paper]||(_pdf5Workers[paper]=new L.PDFWorker({name:'pigu-cmyk-'+paper}));
+  const pdf=await L.getDocument({data:new Uint8Array(await f.arrayBuffer()),worker,
+    useWorkerFetch:true,useWasm:true,wasmUrl:PDF5_URL+'wasm/',
+    iccUrl:new URL(PRINT_PDF5_ICC[paper],location.href).href,
+    cMapUrl:PDF5_URL+'cmaps/',cMapPacked:true,standardFontDataUrl:PDF5_URL+'standard_fonts/'}).promise;
+  try{
+    const page=await pdf.getPage(1), b=page.getViewport({scale:1});
+    const W=img.naturalWidth||img.width, H=img.naturalHeight||img.height;
+    const c=document.createElement('canvas'); c.width=W; c.height=H;
+    const x=c.getContext('2d');
+    const opaque=gtArtOpaque(img);
+    if(opaque){ x.fillStyle='#fff'; x.fillRect(0,0,W,H); }
+    await page.render({canvasContext:x,canvas:c,viewport:page.getViewport({scale:W/b.width}),
+      ...(opaque?{}:{background:'rgba(0,0,0,0)'})}).promise;
+    c.naturalWidth=W; c.naturalHeight=H;
+    return c;
+  }finally{ pdf.destroy(); }
 }
 // The colours a picture is mostly made of, and those that will print dark:
 // enough of the art to matter (0.3% of it), clearly a colour rather than a
@@ -34182,8 +34287,9 @@ function printColourScreen(canvas,ro,side){
   if(cms){
     const n=canvas.width*canvas.height, d=id.data, rgb=new Uint8Array(n*3);
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ rgb[j]=d[i]; rgb[j+1]=d[i+1]; rgb[j+2]=d[i+2]; }
-    const srcs=sideArtObjs(side).filter(([,o])=>o&&o.img).map(([,o])=>artSrc(o));
-    const src=srcs.includes('pdfk')?'pdfk':srcs.includes('pdf')?'pdf':'img';
+    const arts=sideArtObjs(side).filter(([,o])=>o&&o.img), srcs=arts.map(([,o])=>artSrc(o));
+    const ks=arts.filter((_,i)=>srcs[i]==='pdfk');
+    const src=ks.length?(ks.every(([,o])=>printArtIsPrinted(o.img))?'pdfx':'pdfk'):srcs.includes('pdf')?'pdf':'img';
     const p=cms.proof(rgb,n,src,printProofGamma());
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ d[i]=p[j]; d[i+1]=p[j+1]; d[i+2]=p[j+2]; }
     printTunePixels(d);
@@ -39844,7 +39950,7 @@ const HELP=[
   {on:'sheet',t:'Show bounding box, cut lines, punch holes',k:'show hide bounding cut lines punch holes view',
    h:'Top left of the sheet: <b>Show bounding box</b>, <b>Show cut lines</b>, <b>Show punch holes</b>.',sel:'#gtShownBar'},
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
-  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF to within about 2-3, its deepest mixes less sure.',sel:'#gtPpBtn'},
+  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
@@ -39878,7 +39984,7 @@ const HELP=[
   {on:'custom',t:'Rotate the sheet or open it full screen',k:'rotate turn full screen enlarge',h:'Under the sheet: <b>↺</b> / <b>↻</b> turn it, <b>⤢</b> opens it over the whole screen.',sel:'#pcNlZoom [data-pcz="big"]'},
   {on:'custom',t:'Show cut lines / reference line',k:'show cut lines reference line view',h:'Top left of the sheet: <b>Show cut lines</b>, <b>Show reference line</b>.',sel:'#pcShownBar'},
   {on:'custom',t:'Order ID, paper and GSM',k:'order id paper type gsm file name',h:'Top bar: <b>Order ID</b>, <b>Paper type</b>, <b>GSM</b> - they name the files.',sel:'#pcJobBar'},
-  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF to within about 2-3, its deepest mixes less sure.',sel:'#ppOpenBtn'},
+  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Download and print',k:'download print front back pdf fiery',
    h:'Top bar → <b>Download &amp; Print front</b> / <b>back</b>. <b>⚠ to check</b> lists anything to fix first.',sel:'#printFrontBtn'},
@@ -45598,7 +45704,11 @@ function gtGrowArt(id,img,bpx){
 // gap: how much paper the fitted artwork leaves either side of its placeholder,
 // always carried across with bleed on, so a wrong-ratio design still bleeds
 // its full depth past the cut.
-function gtDrawArt(ctx,img,x,y,w,h,b,sc,mode,id,gap){
+// printed: the CMYK-as-printed picture to draw for img (printArtImg) - in
+// place of it, or over a Content-aware / AI fill made from it
+function gtDrawArt(ctx,img,x,y,w,h,b,sc,mode,id,gap,printed){
+  const fillM=b>0&&w>0&&h>0&&(mode==='content'||mode==='ai');
+  if(printed&&!fillM) img=printed;
   const trim=Math.max(0,Math.round(Number(gtSheet.bleedTrimPx)||0));
   // a hair of gap is rounding, not a wrong-ratio design
   const gx=(gap&&mode!=='offset'&&gap.x>0.05)?gap.x:0;
@@ -45616,7 +45726,7 @@ function gtDrawArt(ctx,img,x,y,w,h,b,sc,mode,id,gap){
       return;
     }
     const m=mode==='scale'?'extend':mode;
-    const art=bleedArt(img,w,h,bx,m,by,trim);
+    const art=bleedArt(img,w,h,bx,m,by,trim,undefined,fillM?printed:null);
     ctx.drawImage(art,(x-bx)*sc,(y-by)*sc,(w+bx*2)*sc,(h+by*2)*sc);
     return;
   }
@@ -45851,7 +45961,9 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
     ctx.closePath(); ctx.clip();
   }
   if(invert) ctx.filter='invert(1)';
-  gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,g,sc,gtSheet.bleedMode,turn?key+'@t'+turn:key,gap);
+  // a CMYK PDF in the Print preview: its CMYK as printed (printArtImg)
+  const pimg=printArtImg(img,!gtPcRo||gtPcRo.forExport);
+  gtDrawArt(ctx,img,r.x,r.y,r.w,r.h,g,sc,gtSheet.bleedMode,turn?key+'@t'+turn:key,gap,pimg!==img?pimg:null);
   // a pixel short of the trim, so the ring overlaps the placed page rather
   // than leaving a hairline of paper between them
   // A whole pixel in, not half: at half, the ring's soft edge and the page's
@@ -46416,7 +46528,7 @@ let gtPcRo=null;                    // the tags' boxes, while a page is drawn
 let gtPass=null;                    // 'art', 'words', or both (null): gtDrawTag
 function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   const S=gtSheet;
-  const pcRo={_art:new Set(),_rects:[],swap:!!forExport||!printShowBefore}; canvas._pcRo=pcRo;
+  const pcRo={_art:new Set(),_rects:[],swap:!!forExport||!printShowBefore,forExport:!!forExport}; canvas._pcRo=pcRo;
   const back=side==='back';
   // a placeholder where it stands on the side being drawn - the back moved by
   // its own margin shift as well
