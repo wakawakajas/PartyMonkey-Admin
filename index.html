@@ -34811,6 +34811,7 @@ function printColourScreen(canvas,ro,side){
   // File colours: the sheets as the file is, the screen's white set to the
   // paper's (Screen tune) - no print look. The screen's own white is greener
   // than this paper (du'v' 0.0038 measured 3 Nov), the tuned one nearer.
+  canvas._pcPre=null;                                // kept below, when proofed
   if(printPreviewOn&&!printShowBefore&&printPreviewShow()==='file'){
     if(!(canvas.width>0&&canvas.height>0)) return;
     const c2=canvas.getContext('2d'); let id2;
@@ -34825,11 +34826,18 @@ function printColourScreen(canvas,ro,side){
   const ctx=canvas.getContext('2d');
   let id;
   try{ id=ctx.getImageData(0,0,canvas.width,canvas.height); }catch(e){ return; }
-  if(cms){
-    const n=canvas.width*canvas.height, d=id.data, rgb=new Uint8Array(n*3);
+  canvas._pcPre={d:new Uint8ClampedArray(id.data),ro,side,W:canvas.width,H:canvas.height,ctx:pcCtx()};
+  _pcPreCanvases.add(canvas);
+  pcProofPixels(id.data,canvas.width,canvas.height,ro,side,cms);
+  ctx.putImageData(id,0,0);
+}
+// the sheet's pixels (RGBA, W x H) as printed, in place
+function pcProofPixels(d,W,H,ro,side,cms){
+  {
+    const n=W*H, rgb=new Uint8Array(n*3);
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ rgb[j]=d[i]; rgb[j+1]=d[i+1]; rgb[j+2]=d[i+2]; }
     const arts=sideArtObjs(side).filter(([,o])=>o&&o.img), srcs=arts.map(([,o])=>artSrc(o));
-    const g=printProofGamma(), W=canvas.width, H=canvas.height;
+    const g=printProofGamma();
     const rects=(ro&&ro._rects||[]).filter(R=>R&&R.id&&!R.placed);
     let src;
     if(rects.length) src='img';
@@ -34859,7 +34867,26 @@ function printColourScreen(canvas,ro,side){
     // the paper's own colour is simulated: no Screen tune on top
     if(printPreviewShow()!=='print') printTunePixels(d);
   }
-  ctx.putImageData(id,0,0);
+}
+// Printer warmth, Hue/Saturation and Brightness change no drawing, only the
+// colours it prints in: as one is slid, the sheets on show are proofed again
+// from the drawing kept (no 21 pictures drawn again a step); false when
+// there is none to go from, and the sheets are drawn whole
+var _pcPreCanvases=new Set();     // var: a sheet may be drawn before this line has run
+function pcReproof(){
+  const cms=printPreviewOn&&!printShowBefore&&printPreviewShow()==='print'?printCmsReady[printPaperKey()]:null;
+  if(!cms) return false;
+  let did=false;
+  for(const c of [..._pcPreCanvases]){
+    const P=c._pcPre;
+    if(!c.isConnected||!P){ _pcPreCanvases.delete(c); continue; }
+    if(P.ctx!==pcCtx()||c.width!==P.W||c.height!==P.H||!c.offsetParent) continue;
+    const d=new Uint8ClampedArray(P.d);
+    pcProofPixels(d,P.W,P.H,P.ro,P.side,cms);
+    c.getContext('2d').putImageData(new ImageData(d,P.W,P.H),0,0);
+    did=true;
+  }
+  return did;
 }
 // A picture with its swaps done, as a canvas - for one placed at its own
 // resolution (imgPdfBytes) rather than drawn into the sheet.
@@ -35704,14 +35731,25 @@ document.addEventListener('click',e=>{
   pcHslShow(); if(printPreviewShow()!=='file') pcRedraw();
 });
 let _pcSlideT=0;
+var _pcSlidePend=false;
 function pcSlideSoon(always){
   if(!always&&printPreviewShow()==='file') return;  // the file's colours: unchanged
-  _pcFast=true; _pcFastLut=new Map();
+  _pcFastLut=new Map();
   cancelAnimationFrame(_pcDarkRaf);
-  _pcDarkRaf=requestAnimationFrame(()=>{ try{ pcRedraw(); }finally{ _pcFast=false; } });
+  _pcDarkRaf=requestAnimationFrame(()=>{
+    _pcFast=true;
+    try{ if(always||!pcReproof()) pcRedraw(); }finally{ _pcFast=false; }
+  });
   clearTimeout(_pcSlideT);
-  _pcSlideT=setTimeout(()=>{ cancelAnimationFrame(_pcDarkRaf); _pcFast=false; pcRedraw(); },250);
+  // held: exact when let go; typed or keyed: a moment after the last
+  if(_pcDarkHeld) _pcSlidePend=true;
+  else _pcSlideT=setTimeout(pcSlideSettle,250);
 }
+function pcSlideSettle(){
+  _pcSlidePend=false; clearTimeout(_pcSlideT);
+  cancelAnimationFrame(_pcDarkRaf); _pcFast=false; pcRedraw();
+}
+['pointerup','pointercancel'].forEach(t=>document.addEventListener(t,()=>{ if(_pcSlidePend) setTimeout(pcSlideSettle,0); }));
 // Printer warmth: kept as it is slid or typed (the slider and its box move
 // together); the export reads it (printWarm)
 document.addEventListener('input',e=>{
