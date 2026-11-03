@@ -33414,9 +33414,12 @@ function pcRedraw(){
   if(pcCtx()==='gt'){ if(typeof gtDraw==='function') gtDraw(); }
   else drawAll();
 }
-function printPaperKey(){
+// The builder an export is writing for (gtBuildPdf's ctx), which is not
+// always the page up: Magic Create exports gift tags from its own page
+let _printCtxNow=null;
+function printPaperKey(ctx){
   // the gift tag page's own stock: Matte, Gloss or Sticker (a gloss sticker paper)
-  if(pcCtx()==='gt'){ let f='Matte'; try{ f=gtFinish; }catch(e){} return f==='Matte'?'matte':'gloss'; }
+  if((ctx||_printCtxNow||pcCtx())==='gt'){ let f='Matte'; try{ f=gtFinish; }catch(e){} return f==='Matte'?'matte':'gloss'; }
   const p=String(state.paperType||'');
   return /matt/i.test(p)?'matte':(!p||/gloss/i.test(p))?'gloss':'plain';
 }
@@ -33434,10 +33437,11 @@ function printPaperKey(){
 // the designer set them. Only on a measured paper - not Plain, not Sticker
 // (printMatchPaper). The preview and the colour check show the matched print.
 const PRINT_MATCH=true;
-function printMatchPaper(){
+function printMatchPaper(ctx){
   if(!PRINT_MATCH) return null;
-  try{ if(pcCtx()==='gt'&&gtFinish==='Sticker') return null; }catch(e){}
-  const p=printPaperKey();
+  const c=ctx||_printCtxNow||pcCtx();
+  try{ if(c==='gt'&&gtFinish==='Sticker') return null; }catch(e){}
+  const p=printPaperKey(c);
   return PRINT_MEASURED_PIGU[p]?p:null;
 }
 let _lcms=null;
@@ -33576,7 +33580,7 @@ function printCms(paper){
       // the numbers sent for these (export), and the print of a colour matched
       matchImg:mImg,
       matchPdf:mPdf?rgb=>[...mPdf(new Uint8Array(rgb),1)]:null,
-      matched:src=>!!(mOf(src)&&(src==='img'?pLab:mLab)),
+      matched:src=>!!(mOf(src)&&(src==='img'?pLab:mLab)&&printMatchPaper()===paper),
       matchedLab:(rgb,src)=>lab16(run(src==='img'?pLab:mLab,mOf(src)(new Uint8Array(rgb),1),1)),
 
       ink:(rgb,src)=>[...toKrun(src,new Uint8Array(rgb),1)],        // 0-255 each
@@ -33656,8 +33660,9 @@ function printCms(paper){
       // were still taken down).
       proof:(rgb,n,src,g)=>{
         const x=xLift&&src==='pdfx', p=pLab&&src==='img', q=kLabP&&src==='pdfk', m=x||p||q||(mLab&&!viaG(src)), ml=x?xLift:p?pLift:q?kLift:mLift;
-        const lb=x?run(scrLab,rgb,n):p?run(pLab,mImg?mImg(rgb,n):rgb,n):q?run(kLabP,rgb,n)
-          :m?run(mLab,src==='img'?run(s2a,rgb,n):src==='pdf'&&mPdf?mPdf(rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
+        const mm=printMatchPaper()===paper;           // matched where the export matches
+        const lb=x?run(scrLab,rgb,n):p?run(pLab,mImg&&mm?mImg(rgb,n):rgb,n):q?run(kLabP,rgb,n)
+          :m?run(mLab,src==='img'?run(s2a,rgb,n):src==='pdf'&&mPdf&&mm?mPdf(rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
         g=m?1:g>0?g:1;                               // measured: shown as read
         const T=19661;                               // L* 30, 16-bit
         for(let i=0;i<lb.length;i+=3){
@@ -34591,8 +34596,8 @@ async function pdfSwapColours(bytes,swaps){
 // measured PDF RGB the Fiery's Adobe RGB reading and rendering included.
 // Its CMYK, greys, profile-tagged sc/scn and pictures go as they are. The
 // bytes as they were when nothing is matched or the page cannot be read.
-async function pdfMatchColours(bytes){
-  const mp=printMatchPaper(); if(!mp) return bytes;
+async function pdfMatchColours(bytes,ctx){
+  const mp=printMatchPaper(ctx); if(!mp) return bytes;
   const cms=await printCms(mp).catch(()=>null);
   if(!cms||!cms.matchPdf) return bytes;
   const N='(-?(?:\\d+\\.?\\d*|\\.\\d+))';
@@ -36481,7 +36486,8 @@ async function printVectorSources(side){
     // the swap was dropped; one that cannot be read that way is left to the
     // sheet, where its pixels are swapped
     if(isPdf&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
-    if(bytes&&isPdf) bytes=await pdfMatchColours(bytes);
+    // its pixels are matched instead when it is inverted (pdfHiResBytes, sheetScanlines)
+    if(bytes&&isPdf&&!inv) bytes=await pdfMatchColours(bytes,'custom');
     if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=!!bytes; }
     else if(!isPdf&&!inv&&o&&o.img&&imgFinerThanSheet(o.img,side))
       bytes=await Promise.resolve().then(()=>imgPdfBytes(swaps.length?swappedArtCanvas(o.img,swaps):o.img)).catch(()=>null);
@@ -36554,7 +36560,7 @@ async function renderSidePdfAll(side,pages,onPage,from){
     // straight on, the canvas is released as soon as the page is packed.
     setTimeout(()=>{ c.width=c.height=0; },0);
     return {imgData,wMm:p.w,hMm:p.h,place,clear:!!vec,over:words};
-  },sources);
+  },sources,'custom');
 }
 async function renderSidePdf(side,page){
   return await renderSidePdfAll(side,1,null,page||0);
@@ -52686,10 +52692,13 @@ function mtxMul(m,n){
           m[2]*n[0]+m[3]*n[2], m[2]*n[1]+m[3]*n[3],
           m[4]*n[0]+m[5]*n[2]+n[4], m[4]*n[1]+m[5]*n[3]+n[5]];
 }
-async function gtBuildPdf(count,render,sources){
+// ctx: the builder the file is for ('custom' / 'gt'), whose paper it is matched
+// to (printMatchPaper)
+async function gtBuildPdf(count,render,sources,ctx){
   // every PDF's bleed pixels drawn as its page prints, let go once written
+  const was=_printCtxNow; _printCtxNow=ctx||null;
   try{ await gtHydrateWait(); await printArtExportReady(); return await gtBuildPdfNow(count,render,sources); }
-  finally{ printArtExportDone(); }
+  finally{ printArtExportDone(); _printCtxNow=was; }
 }
 async function gtBuildPdfNow(count,render,sources){
   await gtHydrateWait();              // every design's picture, drawn behind the page
@@ -53001,7 +53010,8 @@ async function gtVectorSources(side){
       // cannot be read that way is left out, and drawn on the sheet, where its
       // pixels are swapped
       if(bytes&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
-      if(bytes) bytes=await pdfMatchColours(bytes);
+      // its pixels are matched instead when it is inverted
+      if(bytes&&!inv) bytes=await pdfMatchColours(bytes,'gt');
       if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=true; }
       if(bytes) out.set(key,{bytes,page:0,inverted});
     }catch(e){}
@@ -53037,7 +53047,7 @@ async function gtBuildSide(side,pages,plan,cuts){
                over:words.concat((vec&&!back)?gtBaseOver(px/Math.max(S.paperW,S.paperH)):[])};
     setTimeout(()=>{ c.width=c.height=0; },0);
     return out;
-  },sources);
+  },sources,'gt');
   return {bytes,placed};
 }
 
@@ -70595,7 +70605,7 @@ async function mcGiftBundleRun(lines,mode,side,guest){
       return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH,place,clear:!!vec,
               ink:back?'':[gtDotsPdfOps(gtSheet.paperH),gtQrPdfOps(i,gtSheet.paperH)].filter(Boolean).join('\n'),
               over:words.concat((vec&&!back)?gtBaseOver(px/Math.max(gtSheet.paperW,gtSheet.paperH)):[])};
-    },sources);
+    },sources,'gt');
     // handed to mcPut, which every caller saves this PDF through next
     if(cuts) mcPendingCuts=cuts.filter(Boolean);
     // and the QR numbers it printed, spent when it is saved
