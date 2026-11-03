@@ -13306,7 +13306,10 @@ function renderSide(side,canvas,maxDim,opts){
         // page stretched from inside the trim, ix/iy): their pixels came from
         // the preview, whose CMYK reads darker than the page prints, so a
         // CMYK file's card printed one green and its bleed band another.
-        const whole=(bleedMode==='extend'||bleedMode==='content'||bleedMode==='ai'
+        // a picture placed at its own resolution keeps its fill: its pixels are
+        // the picture's own, made CMYK with it - only a PDF's fill is its page
+        const fillHere=(bleedMode==='content'||bleedMode==='ai')&&!(opts.vec.pdf&&opts.vec.pdf(key));
+        const whole=!fillHere&&(bleedMode==='extend'||bleedMode==='content'||bleedMode==='ai'
           ||(bleedMode==='mirror'&&bX+ix<=wMm-ix*2&&bY+iy<=hMm-iy*2)
           ||(bleedMode==='offset'&&gtArtOpaque(img)))
           ?{bx:bX,by:bY,mirror:bleedMode==='mirror',...(trimPx?{ix,iy}:{})}:null;
@@ -36732,7 +36735,7 @@ async function printVectorSources(side){
     if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=!!bytes; }
     else if(!isPdf&&!inv&&o&&o.img&&imgFinerThanSheet(o.img,side))
       bytes=await Promise.resolve().then(()=>imgPdfBytes(swaps.length?swappedArtCanvas(o.img,swaps):o.img)).catch(()=>null);
-    if(bytes) out.set(key,{bytes,page:0,inverted});
+    if(bytes) out.set(key,{bytes,page:0,inverted,pdf:isPdf});
   }
   return out;
 }
@@ -36748,6 +36751,7 @@ async function printVectorSources(side){
 // back by that much and stretched from there.
 function printVecTaker(forms,place){
   return {inverted:key=>!!(forms.get(key)&&forms.get(key).inverted),n:()=>place.length,
+    pdf:key=>!!(forms.get(key)&&forms.get(key).pdf),
     take(key,rect,ext,clip,whole){
     if(!key||!forms.has(key)) return false;
     if(whole){
@@ -46381,7 +46385,9 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // a picture with nothing see-through in it. Mirror turns the page over once,
   // so no deeper than the page itself. Those it is not: the page is still
   // placed (sharp), with the bleed made from pixels round it
+  // a picture placed at its own resolution keeps its Content-aware / AI fill
   let own=!!(vec&&b>0&&!stretchWhole&&['extend','offset','mirror','content','ai'].includes(bm)
+    &&!((bm==='content'||bm==='ai')&&!(vec.pdf&&vec.pdf(key)))
     &&!(bm==='offset'&&!gtArtOpaque(img))
     &&!(bm==='mirror'&&(b+gap.x+ix>r.w-ix*2||b+gap.y+iy>r.h-iy*2
       // a plain tag's mirrored bleed stays pixels, as before: turned over,
@@ -52968,6 +52974,7 @@ async function gtBuildPdfNow(count,render,sources){
     if(!em) continue;               // unreadable either way: drawn as pixels, as it always was
     em.objs.forEach(o=>{ mark(o.num); o.parts.forEach(push); });
     em.inverted=!!src.inverted;
+    em.pdf=!!src.pdf;                    // a PDF's page, not a picture's
     forms.set(key,em);
   }
   const kids=[];
@@ -53182,7 +53189,7 @@ function gtVecTaker(forms,place){
   // noInvert: a back picture, which Invert colours never touches
   // turn: set while a turned placeholder is drawn (gtRenderPage) - each page
   // placed then is turned with it
-  const me={turn:null,take(d,r,b,gap,clip,noInvert,whole){
+  const me={turn:null,pdf:id=>!!(forms.get(id)&&forms.get(id).pdf),take(d,r,b,gap,clip,noInvert,whole){
     // d.turn: the design's artwork turned, so its page goes in turned the same
     const put=o=>{ if(d.turn) o={...o,rect:gtTurnRect(o.rect,d.turn)}; place.push(me.turn?{...o,turn:me.turn}:o); };
     if(!forms.has(d.id)) return false;
@@ -53238,7 +53245,7 @@ async function gtVectorSources(side){
       // tag goes in at every pixel it has, the way a PDF does
       const img=side==='back'?null:gtImgs.get(d.id), dpi=img?gtDesignDpi(d):null;
       if(!inv&&img&&dpi&&dpi>PRINT_SHEET_DPI*1.05){
-        try{ const bytes=await imgPdfBytes(swaps.length?swappedArtCanvas(img,swaps):img); if(bytes) out.set(key,{bytes,page:0}); }catch(e){}
+        try{ const bytes=await imgPdfBytes(swaps.length?swappedArtCanvas(img,swaps):img); if(bytes) out.set(key,{bytes,page:0,pdf:false}); }catch(e){}
       }
       continue;
     }
@@ -53254,7 +53261,7 @@ async function gtVectorSources(side){
       // its pixels are matched instead when it is inverted
       if(bytes&&!inv) bytes=await pdfExportCmyk(bytes,'gt');
       if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=true; }
-      if(bytes) out.set(key,{bytes,page:0,inverted});
+      if(bytes) out.set(key,{bytes,page:0,inverted,pdf:true});
     }catch(e){}
   }
   return out;
