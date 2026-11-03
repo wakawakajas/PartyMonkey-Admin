@@ -33404,11 +33404,11 @@ async function sheetToCmyk(){
       // a PDF's neutral pixels as black ink only, as dark as they print
       const kt=_sheetKOnly>0?await printKOnly(mp):null;
       const to1=kt?(a,n)=>{ const k=to0(a,n); for(let i=0,j=0;i<n;i++,j+=3){ if(a[j]===a[j+1]&&a[j]===a[j+2]){ const q=i*4; k[q]=k[q+1]=k[q+2]=0; k[q+3]=kt[a[j]]; } } return k; }:to0;
-      // and the press's drift taken out (Printer warmth)
-      const w=printWarm();
-      const to2=w?(a,n)=>{ const k=to1(a,n); for(let i=2;i<k.length;i+=4) k[i]=printWarmY(k[i],w); return k; }:to1;
-      // and the print's Hue/Saturation, first (its table made now, for the
-      // values of this moment)
+      // the press's drift (Printer warmth) is taken out in the print look,
+      // with Brightness and Hue/Saturation
+      const to2=to1;
+      // and the print look first - Hue/Saturation, Brightness, Printer
+      // warmth (its table made now, for the values of this moment)
       const T=printHslLut();
       const to=T?(a,n)=>to2(printHslApplyT(T,a,n),n):to2;
       return to;
@@ -33651,9 +33651,10 @@ function printHsl(){
   PRINT_HSL_BANDS.forEach(([k])=>{ const b=v[k]||{}; out[k]={h:cl(b.h,-180,180),s:cl(b.s,-100,100),l:cl(b.l,-100,100)}; });
   // Brightness, the whole print's: one figure, whichever range is picked
   out.bright=cl(_printOv&&_printOv.bright!=null?_printOv.bright:v.bright&&v.bright.b,-100,100);
+  out.warm=printWarm();
   return out;
 }
-const printHslOn=s=>!!s.bright||PRINT_HSL_BANDS.some(([k])=>s[k].h||s[k].s||s[k].l);
+const printHslOn=s=>!!s.bright||!!s.warm||PRINT_HSL_BANDS.some(([k])=>s[k].h||s[k].s||s[k].l);
 // one colour through the settings, 0-1 each
 function printHslOne(r,g,b,s){
   const mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn;
@@ -33668,21 +33669,53 @@ function printHslOne(r,g,b,s){
     w*=Math.min(1,sat*5);                       // greys are left alone
     dh+=e.h*w; ds+=e.s*w; dl+=e.l*w;
   }
-  if(!dh&&!ds&&!dl) return printBright(r,g,b,s.bright);
+  if(!dh&&!ds&&!dl) return printLook(r,g,b,s);
   h=((h+dh)%360+360)%360;
   sat=ds<0?sat*(1+ds/100):sat+(1-sat)*ds/100;
   l=dl<0?l*(1+dl/100):l+(1-l)*dl/100;
   sat=Math.max(0,Math.min(1,sat)); l=Math.max(0,Math.min(1,l));
   const C=(1-Math.abs(2*l-1))*sat, X=C*(1-Math.abs((h/60)%2-1)), m=l-C/2;
   const [r1,g1,b1]=h<60?[C,X,0]:h<120?[X,C,0]:h<180?[0,C,X]:h<240?[0,X,C]:h<300?[X,0,C]:[C,0,X];
-  return printBright(r1+m,g1+m,b1+m,s.bright);
+  return printLook(r1+m,g1+m,b1+m,s);
 }
-// Brightness as Photoshop's: the midtones lifted or lowered by a curve, white
-// and black where they are - +100 takes a 50% grey to about 71%
-function printBright(r,g,b,v){
-  if(!v) return [r,g,b];
-  const e=Math.pow(2,-v/100);
-  return [Math.pow(r,e),Math.pow(g,e),Math.pow(b,e)];
+// Brightness and Printer warmth, on every colour alike, in Lab:
+// - Brightness moves lightness by up to 25 L* at +-100, darks and strong
+//   colours as much as the middle (a curve on the midtones moved a maroon
+//   or a navy next to nothing); only the paper's white and the deepest
+//   black are eased out of it, so white stays paper and black stays black.
+// - Printer warmth moves every colour towards yellow (or blue) by up to 6 b*
+//   at +-50, as a press drifting blue makes everything bluer - its yellow
+//   toner scaled warmed only what had yellow in it, a blue not at all.
+//   Eased out to the paper's white, which no drift changes.
+// A grey stays a grey (printed with black alone, it does not drift blue).
+function printLook(r,g,b,s){
+  const vb=s.bright||0, vw=s.warm||0;
+  if(!vb&&!vw) return [r,g,b];
+  const grey=r===g&&g===b;
+  let [L,A,B]=srgbToLab(r,g,b);
+  if(vb) L+=vb/100*25*Math.min(1,(100-L)/10)*Math.min(1,L/8);
+  if(vw&&!grey) B+=vw/50*6*Math.min(1,(100-L)/12);
+  L=Math.max(0,Math.min(100,L));
+  const o=labToSrgb(L,A,B);
+  if(grey){ const v=(o[0]+o[1]+o[2])/3; return [v,v,v]; }
+  return o;
+}
+// sRGB 0-1 to CIE Lab (D65) and back, clipped to sRGB
+function srgbToLab(r,g,b){
+  const li=c=>c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4);
+  const R=li(r), G=li(g), B=li(b);
+  const X=(0.4124564*R+0.3575761*G+0.1804375*B)/0.95047, Y=0.2126729*R+0.7151522*G+0.0721750*B, Z=(0.0193339*R+0.1191920*G+0.9503041*B)/1.08883;
+  const f=t=>t>0.008856?Math.cbrt(t):7.787*t+16/116;
+  const fx=f(X), fy=f(Y), fz=f(Z);
+  return [116*fy-16,500*(fx-fy),200*(fy-fz)];
+}
+function labToSrgb(L,A,B){
+  const fy=(L+16)/116, fx=fy+A/500, fz=fy-B/200;
+  const fi=t=>t>6/29?t*t*t:(t-16/116)/7.787;
+  const X=fi(fx)*0.95047, Y=fi(fy), Z=fi(fz)*1.08883;
+  const R=3.2404542*X-1.5371385*Y-0.4985314*Z, G=-0.9692660*X+1.8760108*Y+0.0415560*Z, Bl=0.0556434*X-0.2040259*Y+1.0572252*Z;
+  const ga=c=>{ c=Math.max(0,Math.min(1,c)); return c<=0.0031308?12.92*c:1.055*Math.pow(c,1/2.4)-0.055; };
+  return [ga(R),ga(G),ga(Bl)];
 }
 let _hslLut=null, _hslLutKey='';
 function printHslLut(){
@@ -33693,8 +33726,12 @@ function printHslLut(){
     const o=printHslOne(i/(N-1),j/(N-1),k/(N-1),s);
     lut[q]=o[0]*255; lut[q+1]=o[1]*255; lut[q+2]=o[2]*255;
   }
-  if(_printOv) return {N,lut};                       // a test sheet's version: not kept
-  _hslLut={N,lut}; _hslLutKey=key;
+  // a grey through it exactly (between the table's steps it took a tint, and
+  // lost the black ink alone it prints with)
+  const grey=new Uint8Array(256);
+  for(let v=0;v<256;v++) grey[v]=Math.round(printHslOne(v/255,v/255,v/255,s)[0]*255);
+  if(_printOv) return {N,lut,grey};                  // a test sheet's version: not kept
+  _hslLut={N,lut,grey}; _hslLutKey=key;
   return _hslLut;
 }
 // sRGB triples (n of them) through the print's Hue/Saturation; the same array
@@ -33702,8 +33739,9 @@ function printHslLut(){
 function printHslApply(a,n){ return printHslApplyT(printHslLut(),a,n); }
 function printHslApplyT(T,a,n){
   if(!T) return a;
-  const {N,lut}=T, S=(N-1)/255, o=new Uint8Array(n*3), N2=N*N;
+  const {N,lut,grey}=T, S=(N-1)/255, o=new Uint8Array(n*3), N2=N*N;
   for(let p=0;p<n*3;p+=3){
+    if(grey&&a[p]===a[p+1]&&a[p]===a[p+2]){ o[p]=o[p+1]=o[p+2]=grey[a[p]]; continue; }
     const x=a[p]*S, y=a[p+1]*S, z=a[p+2]*S;
     const i=Math.min(N-2,x|0), j=Math.min(N-2,y|0), k=Math.min(N-2,z|0), fx=x-i, fy=y-j, fz=z-k;
     const b0=(i*N2+j*N+k)*3;
@@ -33989,13 +34027,17 @@ function printCms(paper){
           // warmer than the print came out; the CMYK chart and the print agreed.
           if(k5A&&src==='img'){
             const rh=printHslApply(rgb,n);
-            const k=toGracol(mImg&&mm?mImg(rh,n):rh,n), w1=printWarm();
-            if(w1) for(let i=2;i<k.length;i+=4) k[i]=printWarmY(k[i],w1);
+            const k=toGracol(mImg&&mm?mImg(rh,n):rh,n);
             return run(labRgb,run(k5A,k,n),n);
           }
+          // a picture's and an RGB PDF's colours through the print look, as
+          // the export does; a CMYK PDF's own CMYK takes Printer warmth as
+          // yellow toner, below
+          const kx=x||q||src==='pdfk'||src==='pdfx';
+          if(!kx) rgb=printHslApply(rgb,n);
           const la=x?relToAbs(run(scrLab,rgb,n)):p?run(pLabA,mImg&&mm?mImg(rgb,n):rgb,n):q?run(kLabPA,rgb,n)
             :m&&mLabA?run(mLabA,src==='img'?run(s2a,rgb,n):src==='pdf'&&mPdf&&mm?mPdf(rgb,n):rgb,n):run(kLabA,toKrun(src,rgb,n),n);
-          const w0=printWarm();
+          const w0=kx?printWarm():0;
           if(w0){
             const k=toGracol(rgb,n), k2=k.slice(); for(let i=2;i<k2.length;i+=4) k2[i]=printWarmY(k2[i],w0);
             const a1=run(g2lab,k,n), a2=run(g2lab,k2,n);
@@ -35127,7 +35169,11 @@ async function pdfConvertCmyk(bytes,mp,warm){
   const kt=await printKOnly(cms&&cms.matched('img')?mp:null).catch(()=>null);
   const toK0=(a,n)=>toGracol(cms&&cms.matchImg?cms.matchImg(a,n):a,n);
   const w=Number(warm)||0;
-  const toK=w?(a,n)=>{ const k=toK0(a,n); for(let i=2;i<k.length;i+=4) k[i]=printWarmY(k[i],w); return k; }:toK0;
+  // its RGB, as a picture's: through the print look (Hue/Saturation,
+  // Brightness, Printer warmth) for an export; its own CMYK takes Printer
+  // warmth as yellow toner (w), below
+  const look=warm!==undefined&&warm!==null&&printHslLut();
+  const toK=look?(a,n)=>toK0(printHslApply(a,n),n):toK0;
   const N='(-?(?:\\d+\\.?\\d*|\\.\\d+))';
   const lead='(?<=^|[\\s\\[\\]()<>{}])(?<![\\d.]\\s+)';
   const re3=new RegExp(lead+N+'\\s+'+N+'\\s+'+N+'\\s+(rg|RG)(?![A-Za-z])','g');
