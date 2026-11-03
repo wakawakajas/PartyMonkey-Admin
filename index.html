@@ -11274,13 +11274,18 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
       <button type="button" class="btn-outline btn-sm" data-pc-side="front">Front</button>
       <button type="button" class="btn-outline btn-sm" data-pc-side="back">Back</button>
     </span>
+    <!-- what the sheets show: the file's own colours, or the print simulated -->
+    <span id="pcPopShow" style="display:inline-flex;gap:4px;">
+      <button type="button" class="btn-outline btn-sm" data-pc-show="file" title="The customer's file as it is - the reference: hold the print beside it and bring the print to it with Printer warmth">File colours</button>
+      <button type="button" class="btn-outline btn-sm" data-pc-show="print" title="The print as this printer prints it, from the measured papers">As printed</button>
+    </span>
     <button type="button" class="btn-outline btn-sm" id="pcHold"
       title="Hold to see the sheets as uploaded - the file's own colours, no print look and no changes; let go to see them as they print">Hold to see original</button>
   </div>
   <!-- the press's drift taken out by eye: the yellow toner of every export,
        not the preview (printWarm) -->
   <label style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;"
-    title="Prints coming out bluer than the file? Slide towards yellower; yellower, towards bluer. The preview and the printed file both take it. Kept on this computer.">
+    title="Prints coming out bluer than the file? Slide towards yellower; yellower, towards bluer. Under File colours the screen stays the file and only the print changes; under As printed the preview shows it too. Kept on this computer.">
     <span style="min-width:92px;">Printer warmth</span><span class="hint" style="margin:0;">bluer</span>
     <input type="range" min="-50" max="50" step="1" id="pcPrintWarm" style="flex:1;min-width:70px;"/>
     <span class="hint" style="margin:0;">yellower</span>
@@ -33525,8 +33530,17 @@ const PDF_AS_CMYK=true;
 // is yellow - so white paper and black-ink-only words stay as they are. The
 // pixels this tool makes CMYK and a PDF's own CMYK alike; a CMYK JPEG inside
 // a PDF cannot be read as its numbers here and goes as it is. The preview
-// shows it too (proof: the change that yellow makes through GRACoL), so the
-// screen is held beside the print and slid till they agree.
+// shows it under As printed (proof: the change that yellow makes through
+// GRACoL); under File colours the screen stays the file, and the print is
+// slid till it looks like it.
+// What the Print preview's sheets show, kept on this computer: 'file', the
+// customer's own colours - a backlit screen never looks like paper beside
+// it, so the file itself is what a print is held against and brought to
+// (Printer warmth); 'print', the print as the measured papers say it comes
+// out. A CMYK PDF's own colours are its CMYK as GRACoL, as Illustrator and
+// Acrobat show it. The colours to check are listed either way.
+const PREVIEW_SHOW_KEY='pigu.previewShow';
+function printPreviewShow(){ try{ return localStorage.getItem(PREVIEW_SHOW_KEY)==='print'?'print':'file'; }catch(e){ return 'file'; } }
 const PRINT_WARM_KEY='pigu.printWarm';
 function printWarm(){
   try{ const v=Number(localStorage.getItem(PRINT_WARM_KEY)); if(isFinite(v)) return Math.max(-50,Math.min(50,Math.round(v))); }catch(e){}
@@ -33772,7 +33786,7 @@ function printCms(paper){
         const lb=x?run(scrLab,rgb,n):p?run(pLab,mImg&&mm?mImg(rgb,n):rgb,n):q?run(kLabP,rgb,n)
           :m?run(mLab,src==='img'?run(s2a,rgb,n):src==='pdf'&&mPdf&&mm?mPdf(rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
         g=m?1:g>0?g:1;                               // measured: shown as read
-        const wm=printWarm();
+        const wm=printPreviewShow()==='print'?printWarm():0;
         if(wm){
           const k=toGracol(rgb,n), k2=k.slice(); for(let i=2;i<k2.length;i+=4) k2[i]=printWarmY(k2[i],wm);
           const a1=run(g2lab,k,n), a2=run(g2lab,k2,n);
@@ -33924,7 +33938,7 @@ function printArtUsable(img,forExport){
 // sheet's colours (printColourScreen)
 function printArtImg(img,forExport,ro){
   if(forExport) return printArtExportImg(img);
-  const v=printArtPrinted(img)||printArtRgbPrinted(img);
+  const v=(printPreviewShow()==='file'?null:printArtPrinted(img))||printArtRgbPrinted(img);
   if(ro&&printPreviewOn){
     const f=img&&_artFileOf.get(img._artOf||img);
     if(f&&_pdfCmyk.get(f)===true){
@@ -33938,7 +33952,9 @@ function printArtImg(img,forExport,ro){
 // profiles) - its sRGB then read as a picture's ('img'), as the export does
 function printArtRgbPrinted(img){
   if(!PDF_AS_CMYK||!printArtPreviewPdf(img,false)) return null;
-  const f=_artFileOf.get(img); if(_pdfCmyk.get(f)!==false) return null;
+  // under File colours any PDF, its CMYK as GRACoL; else an RGB one
+  const f=_artFileOf.get(img), cm=_pdfCmyk.get(f);
+  if(printPreviewShow()==='file'?(cm!==true&&cm!==false):cm!==false) return null;
   let m=_cmykPrinted.get(img); if(!m){ m={}; _cmykPrinted.set(img,m); }
   const v=m.rgb;
   if(v) return v;
@@ -34591,6 +34607,15 @@ function swapSheetPixels(imgData,rects){
 function printColourScreen(canvas,ro,side){
   // the swaps are made as the sheet is drawn (renderSide, gtPutArt): here, the
   // print look - none while Hold to see original is held
+  // File colours: the sheets as the file is, the screen's white set to the
+  // paper's (Screen tune) - no print look
+  if(printPreviewOn&&!printShowBefore&&printPreviewShow()==='file'){
+    if(!(canvas.width>0&&canvas.height>0)) return;
+    const c2=canvas.getContext('2d'); let id2;
+    try{ id2=c2.getImageData(0,0,canvas.width,canvas.height); }catch(e){ return; }
+    printTunePixels(id2.data); c2.putImageData(id2,0,0);
+    return;
+  }
   const cms=printPreviewOn&&!printShowBefore?printCmsReady[printPaperKey()]:null;
   if(!cms) return;
   if(!(canvas.width>0&&canvas.height>0)) return;
@@ -35085,12 +35110,13 @@ function pcPopRender(){
   if(ae&&ae.matches&&ae.matches('#pcPop input[type="number"],#pcPop input[type="color"]')) return;
   const paper=printPaperKey(), cms=printCmsReady[paper];
   const body=document.getElementById('pcPopBody');
-  document.getElementById('pcPopTitle').textContent=`Print preview · Fiery ${PRINT_PAPER_NAMES[paper]}${cms&&cms.measured?' · measured':''}`;
+  document.getElementById('pcPopTitle').textContent=`Print preview · Fiery ${PRINT_PAPER_NAMES[paper]}${printPreviewShow()==='file'?' · file colours':cms&&cms.measured?' · measured':''}`;
   const has=s=>sideArtObjs(s).some(([,o])=>o&&o.img);
   const seg=document.getElementById('pcPopSides');
   seg.style.display=has('front')&&has('back')?'':'none';
   seg.querySelectorAll('[data-pc-side]').forEach(b=>b.classList.toggle('btn-primary',b.dataset.pcSide===pcPopSide));
   pcTuneShow();
+  document.querySelectorAll('#pcPopShow [data-pc-show]').forEach(x=>x.classList.toggle('btn-primary',x.dataset.pcShow===printPreviewShow()));
   { const w=printWarm();
     ['pcPrintWarm','pcPrintWarmNum'].forEach(id=>{ const el=document.getElementById(id); if(el&&document.activeElement!==el) el.value=w; }); }
   if(!cms){
@@ -35431,6 +35457,12 @@ document.addEventListener('change',e=>{
   printColourCheckSoon();
 });
 let _pcDarkRaf=0;
+// File colours / As printed: kept, and the sheets drawn again
+document.addEventListener('click',e=>{
+  const bt=e.target.closest&&e.target.closest('#pcPopShow [data-pc-show]'); if(!bt) return;
+  try{ localStorage.setItem(PREVIEW_SHOW_KEY,bt.dataset.pcShow); }catch(err){}
+  pcRedraw(); pcPopRender();
+});
 // Printer warmth: kept as it is slid or typed (the slider and its box move
 // together); the export reads it (printWarm)
 document.addEventListener('input',e=>{
@@ -40509,7 +40541,7 @@ const HELP=[
   {on:'sheet',t:'Show bounding box, cut lines, punch holes',k:'show hide bounding cut lines punch holes view',
    h:'Top left of the sheet: <b>Show bounding box</b>, <b>Show cut lines</b>, <b>Show punch holes</b>.',sel:'#gtShownBar'},
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
-  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower. The preview and the printed file both take it; kept on this computer. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
+  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower; it changes the print (and the As printed view), kept on this computer. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
@@ -40543,7 +40575,7 @@ const HELP=[
   {on:'custom',t:'Rotate the sheet or open it full screen',k:'rotate turn full screen enlarge',h:'Under the sheet: <b>↺</b> / <b>↻</b> turn it, <b>⤢</b> opens it over the whole screen.',sel:'#pcNlZoom [data-pcz="big"]'},
   {on:'custom',t:'Show cut lines / reference line',k:'show cut lines reference line view',h:'Top left of the sheet: <b>Show cut lines</b>, <b>Show reference line</b>.',sel:'#pcShownBar'},
   {on:'custom',t:'Order ID, paper and GSM',k:'order id paper type gsm file name',h:'Top bar: <b>Order ID</b>, <b>Paper type</b>, <b>GSM</b> - they name the files.',sel:'#pcJobBar'},
-  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower. The preview and the printed file both take it; kept on this computer. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#ppOpenBtn'},
+  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower; it changes the print (and the As printed view), kept on this computer. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Download and print',k:'download print front back pdf fiery',
    h:'Top bar → <b>Download &amp; Print front</b> / <b>back</b>. <b>⚠ to check</b> lists anything to fix first.',sel:'#printFrontBtn'},
