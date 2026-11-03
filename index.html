@@ -11320,6 +11320,33 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
       <input type="number" min="-100" max="100" step="1" data-hsl-n="b" inputmode="numeric" aria-label="Brightness"
         style="width:58px;padding:3px 6px;font-size:12px;text-align:right;"/></label>
   </div>
+  <!-- Test sheet: this design in many numbered versions, one sheet (testSheetPdf) -->
+  <div id="pcTest" style="margin-top:10px;padding:8px;border:1px solid var(--border);border-radius:10px;font-size:12px;"
+    title="This design in numbered versions on one sheet, each printed as an export prints it. Print it, then type the number that matches and press Use.">
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+      <b>Test sheet</b>
+      <select id="pcTestMode" style="padding:3px 6px;font-size:12px;">
+        <option value="grid">Lighter/darker × cooler/warmer</option>
+        <option value="lighter">Lighter</option>
+        <option value="darker">Darker</option>
+        <option value="warmth">Cooler/warmer</option>
+      </select>
+      <select id="pcTestStep" style="padding:3px 6px;font-size:12px;" aria-label="Step between versions">
+        <option value="fine">Fine steps</option><option value="medium" selected>Medium steps</option><option value="coarse">Big steps</option>
+      </select>
+      <input type="number" id="pcTestCount" min="2" max="80" step="1" value="50" inputmode="numeric" aria-label="Versions"
+        style="width:52px;padding:3px 6px;font-size:12px;text-align:right;"/><span>versions</span>
+      <button type="button" class="btn-primary btn-sm" id="pcTestMake">Make test sheet</button>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;margin-top:6px;">
+      <span>Best number</span>
+      <input type="number" id="pcTestNum" min="1" step="1" inputmode="numeric" aria-label="Number from the test sheet"
+        style="width:58px;padding:3px 6px;font-size:12px;text-align:right;"/>
+      <button type="button" class="btn-outline btn-sm" id="pcTestUse">Use</button>
+      <span class="hint" id="pcTestKept" style="margin:0;"></span>
+    </div>
+    <p class="hint" id="pcTestMsg" style="margin:4px 0 0;"></p>
+  </div>
   <!-- the screen tune: what turning the screen down to sRGB mode, about 120
        nits and 6500K would do, done to the preview sheets instead. Set once
        for a screen (Isabel-PC's white was measured with the ES-2000), so it
@@ -33358,6 +33385,16 @@ const PRINT_CMYK_OUT=true;
 async function sheetScanlines(imgData){
   if(PRINT_CMYK_OUT){
     try{
+      return {cmyk:true,rows:rgbaToCmykScanlines(imgData,await sheetToCmyk())};
+    }
+    catch(e){ console.warn('CMYK conversion unavailable, writing sRGB',e); }
+  }
+  return {cmyk:false,rows:rgbaToRawRgbScanlines(imgData)};
+}
+// sRGB triples to the export's CMYK, as the settings are now
+async function sheetToCmyk(){
+  {
+    {
       const {toGracol}=await lcmsLib();
       // matched to the file on a measured paper (PRINT_MATCH)
       const mp=printMatchPaper(), mc=mp?await printCms(mp).catch(()=>null):null;
@@ -33368,13 +33405,13 @@ async function sheetScanlines(imgData){
       // and the press's drift taken out (Printer warmth)
       const w=printWarm();
       const to2=w?(a,n)=>{ const k=to1(a,n); for(let i=2;i<k.length;i+=4) k[i]=printWarmY(k[i],w); return k; }:to1;
-      // and the print's Hue/Saturation, first
-      const to=printHslLut()?(a,n)=>to2(printHslApply(a,n),n):to2;
-      return {cmyk:true,rows:rgbaToCmykScanlines(imgData,to)};
+      // and the print's Hue/Saturation, first (its table made now, for the
+      // values of this moment)
+      const T=printHslLut();
+      const to=T?(a,n)=>to2(printHslApplyT(T,a,n),n):to2;
+      return to;
     }
-    catch(e){ console.warn('CMYK conversion unavailable, writing sRGB',e); }
   }
-  return {cmyk:false,rows:rgbaToRawRgbScanlines(imgData)};
 }
 // Black ink alone for each neutral grey 0-255, as dark as that grey prints
 // otherwise: on a measured paper the matched grey's print against black ink's
@@ -33585,7 +33622,9 @@ const PDF_AS_CMYK=true;
 const PREVIEW_SHOW_KEY='pigu.previewShow';
 function printPreviewShow(){ try{ return localStorage.getItem(PREVIEW_SHOW_KEY)==='print'?'print':'file'; }catch(e){ return 'file'; } }
 const PRINT_WARM_KEY='pigu.printWarm';
+var _printOv=null;                // a test sheet's version: {warm, bright} in place of the kept
 function printWarm(){
+  if(_printOv&&_printOv.warm!=null) return _printOv.warm;
   try{ const v=Number(localStorage.getItem(PRINT_WARM_KEY)); if(isFinite(v)) return Math.max(-50,Math.min(50,Math.round(v))); }catch(e){}
   return 0;
 }
@@ -33609,7 +33648,7 @@ function printHsl(){
   const cl=(x,a,b)=>Math.max(a,Math.min(b,Math.round(Number(x)||0)));
   PRINT_HSL_BANDS.forEach(([k])=>{ const b=v[k]||{}; out[k]={h:cl(b.h,-180,180),s:cl(b.s,-100,100),l:cl(b.l,-100,100)}; });
   // Brightness, the whole print's: one figure, whichever range is picked
-  out.bright=cl(v.bright&&v.bright.b,-100,100);
+  out.bright=cl(_printOv&&_printOv.bright!=null?_printOv.bright:v.bright&&v.bright.b,-100,100);
   return out;
 }
 const printHslOn=s=>!!s.bright||PRINT_HSL_BANDS.some(([k])=>s[k].h||s[k].s||s[k].l);
@@ -33652,13 +33691,15 @@ function printHslLut(){
     const o=printHslOne(i/(N-1),j/(N-1),k/(N-1),s);
     lut[q]=o[0]*255; lut[q+1]=o[1]*255; lut[q+2]=o[2]*255;
   }
+  if(_printOv) return {N,lut};                       // a test sheet's version: not kept
   _hslLut={N,lut}; _hslLutKey=key;
   return _hslLut;
 }
 // sRGB triples (n of them) through the print's Hue/Saturation; the same array
 // when it is all at 0
-function printHslApply(a,n){
-  const T=printHslLut(); if(!T) return a;
+function printHslApply(a,n){ return printHslApplyT(printHslLut(),a,n); }
+function printHslApplyT(T,a,n){
+  if(!T) return a;
   const {N,lut}=T, S=(N-1)/255, o=new Uint8Array(n*3), N2=N*N;
   for(let p=0;p<n*3;p+=3){
     const x=a[p]*S, y=a[p+1]*S, z=a[p+2]*S;
@@ -35391,7 +35432,7 @@ function pcPopRender(){
   document.querySelectorAll('#pcPopShow [data-pc-show]').forEach(x=>x.classList.toggle('btn-primary',x.dataset.pcShow===printPreviewShow()));
   { const w=printWarm();
     ['pcPrintWarm','pcPrintWarmNum'].forEach(id=>{ const el=document.getElementById(id); if(el&&document.activeElement!==el) el.value=w; }); }
-  pcHslShow();
+  pcHslShow(); testSheetShow();
   if(!cms){
     body.innerHTML='<p class="hint">Loading the paper\'s colours…</p>';
     printCms(paper).then(()=>{ pcPopRender(); pcRedraw(); }).catch(e=>{
@@ -35791,6 +35832,169 @@ function pcSlideSettle(){
   cancelAnimationFrame(_pcDarkRaf); _pcFast=false; pcRedraw();
 }
 ['pointerup','pointercancel'].forEach(t=>document.addEventListener(t,()=>{ if(_pcSlidePend) setTimeout(pcSlideSettle,0); }));
+// ---------- Test sheet: one design in many numbered versions, one sheet ----------
+// Rather than printing the job again and again to find its colour, one sheet of
+// the design in up to 80 numbered versions - lighter and darker, cooler and
+// warmer - printed exactly as an export would print each (its own Brightness
+// and Printer warmth through the same CMYK making, on the paper picked). The
+// number that matches the customer's file is then typed in and its values
+// taken for the job (Use). The versions made are kept on this computer with
+// their numbers, so a sheet printed earlier can still be chosen from.
+const TEST_SHEET_KEY='pigu.testSheet';
+const TEST_STEPS={fine:{b:3,w:2},medium:{b:6,w:4},coarse:{b:10,w:7}};
+// the versions, numbered from 1: {n,b,w} - Brightness and Printer warmth
+function testSheetVersions(mode,count,step){
+  const S=TEST_STEPS[step]||TEST_STEPS.medium, b0=printHsl().bright, w0=printWarm();
+  const cb=v=>Math.max(-100,Math.min(100,Math.round(v))), cw=v=>Math.max(-50,Math.min(50,Math.round(v)));
+  const out=[], seen=new Set();
+  const add=(b,w)=>{ b=cb(b); w=cw(w); const k=b+'|'+w; if(seen.has(k)) return; seen.add(k); out.push({n:out.length+1,b,w}); };
+  let cols=0;
+  if(mode==='grid'){
+    // across: cooler to warmer; down: lighter to darker; the job as it is in the middle
+    cols=Math.max(3,Math.round(Math.sqrt(count/2))|1);
+    const rows=Math.ceil(count/cols);
+    for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+      if(r*cols+c>=count) break;
+      add(b0+(Math.floor((rows-1)/2)-r)*S.b,w0+(c-(cols-1)/2)*S.w);   // one row is the job as it is
+    }
+    if(out.length!==rows*cols&&out.length<count) cols=0;   // ends clipped: laid out as they fit
+  }else{
+    for(let i=0;i<count;i++){
+      if(mode==='lighter') add(b0+i*S.b,w0);
+      else if(mode==='darker') add(b0-i*S.b,w0);
+      else add(b0,w0+(i-Math.floor((count-1)/2))*S.w);   // cooler to warmer, the job as it is among them
+    }
+  }
+  return {list:out,cols};
+}
+// the design to try: the panel's side (and design, if one is picked), its
+// colour changes made
+function testSheetArt(){
+  const all=sideArtObjs(pcPopSide).filter(([,o])=>o&&o.img);
+  const pick=pcPopArt?all.find(([,o])=>artImgId(o.img)===pcPopArt):all[0];
+  if(!pick) return null;
+  const img=pick[1].img, sw=swapsForIds(new Set([artImgId(img)]));
+  return (sw.length&&swappedArtCanvas(img,sw))||img;
+}
+async function testSheetPdf(mode,count,step){
+  const art=testSheetArt(); if(!art) throw new Error('No artwork on this side');
+  const {list,cols:fixedCols}=testSheetVersions(mode,count,step);
+  const p=paperMm(), DPI=200, px=mm=>Math.round(mm/25.4*DPI);
+  const W=px(p.w), H=px(p.h);
+  const aw=art.naturalWidth||art.width, ah=art.naturalHeight||art.height, a=aw/ah;
+  // the biggest versions that fit, each with its number under it
+  const M=8, TOP=14, GAP=3, LAB=4.5, n=list.length;
+  let best=null;
+  for(let c=1;c<=n;c++){
+    if(fixedCols&&c!==fixedCols) continue;
+    const r=Math.ceil(n/c);
+    const cw=Math.min((p.w-2*M-(c-1)*GAP)/c,((p.h-M-TOP-(r-1)*GAP)/r-LAB)*a);
+    if(cw>0&&(!best||cw>best.cw)) best={c,r,cw};
+  }
+  if(!best) throw new Error('The paper is too small for that many');
+  const cwMm=best.cw, chMm=cwMm/a, x0=(p.w-(best.c*cwMm+(best.c-1)*GAP))/2;
+  const cv=document.createElement('canvas'); cv.width=W; cv.height=H;
+  const g=cv.getContext('2d');
+  g.fillStyle='#fff'; g.fillRect(0,0,W,H);
+  g.fillStyle='#000'; g.textBaseline='top';
+  g.font=`600 ${px(3.6)}px "IBM Plex Sans",system-ui,sans-serif`;
+  const now=new Date(), b0=printHsl().bright, w0=printWarm();
+  g.fillText(`Pigu test sheet - ${PRINT_PAPER_NAMES[printPaperKey()]||''} - ${now.toLocaleDateString()} ${now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`
+    +` - now: Brightness ${b0}, Printer warmth ${w0}`,px(M),px(3));
+  g.font=`400 ${px(2.8)}px "IBM Plex Sans",system-ui,sans-serif`;
+  g.fillText('Type the best number in Pigu: Print preview, Test sheet, Best number, Use.  B = Brightness, W = Printer warmth.',px(M),px(7.6));
+  const cells=[];
+  list.forEach((v,i)=>{
+    const c=i%best.c, r=(i/best.c)|0;
+    const X=px(x0+c*(cwMm+GAP)), Y=px(TOP+r*(chMm+LAB+GAP)), w=px(cwMm), h=px(chMm);
+    g.drawImage(art,X,Y,w,h);
+    cells.push({v,X,Y,w,h});
+    g.font=`700 ${px(2.8)}px "IBM Plex Sans",system-ui,sans-serif`;
+    const mark=v.b===b0&&v.w===w0?'  (now)':'';
+    g.fillText(`#${v.n}`,X,Y+h+px(0.7));
+    g.font=`400 ${px(2.3)}px "IBM Plex Sans",system-ui,sans-serif`;
+    g.fillText(`B ${v.b>0?'+':''}${v.b}  W ${v.w>0?'+':''}${v.w}${mark}`,X+px(7),Y+h+px(1));
+  });
+  const id=g.getImageData(0,0,W,H); cv.width=cv.height=0;
+  // the sheet as the export makes it, then each version with its own values
+  const sl=await sheetScanlines(id);
+  if(sl.cmyk){
+    const row=1+W*4, d=id.data;
+    for(const {v,X,Y,w,h} of cells){
+      const x1=Math.min(W,X+w), y1=Math.min(H,Y+h), ww=x1-X, n2=ww*(y1-Y);
+      if(ww<=0||y1<=Y) continue;
+      const rgb=new Uint8Array(n2*3);
+      for(let y=Y,j=0;y<y1;y++) for(let x=X,q=(y*W+X)*4;x<x1;x++,q+=4,j+=3){ rgb[j]=d[q]; rgb[j+1]=d[q+1]; rgb[j+2]=d[q+2]; }
+      _printOv={warm:v.w,bright:v.b};
+      let k; try{ k=(await sheetToCmyk())(rgb,n2); }finally{ _printOv=null; }
+      for(let y=Y;y<y1;y++) sl.rows.set(k.subarray((y-Y)*ww*4,(y-Y+1)*ww*4),y*row+1+X*4);
+    }
+  }
+  const body=await deflateBytes(sl.rows);
+  const enc=new TextEncoder(), parts=[], off=[]; let pos=0;
+  const push=u8=>{ parts.push(u8); pos+=u8.length; };
+  const obj=(n,head,stream)=>{
+    off[n]=pos;
+    if(stream){ push(enc.encode(`${n} 0 obj\n${head}\nstream\n`)); push(stream); push(enc.encode('\nendstream\nendobj\n')); }
+    else push(enc.encode(`${n} 0 obj\n${head}\nendobj\n`));
+  };
+  const pw=(p.w/25.4*72).toFixed(2), ph=(p.h/25.4*72).toFixed(2);
+  const content=enc.encode(`q ${pw} 0 0 ${ph} 0 0 cm /Im0 Do Q`);
+  push(enc.encode('%PDF-1.7\n'));
+  obj(1,'<< /Type /Catalog /Pages 2 0 R >>');
+  obj(2,'<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
+  obj(3,`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pw} ${ph}] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>`);
+  obj(4,`<< /Length ${content.length} >>`,content);
+  obj(5,`<< /Type /XObject /Subtype /Image /Width ${W} /Height ${H} /Interpolate true `+sheetColourSpace(sl,6)
+    +`/BitsPerComponent 8 /Columns ${W} >> /Length ${body.length} >>`,body);
+  off[6]=pos; push(iccObject(6));
+  const xref=pos;
+  let x=`xref\n0 7\n0000000000 65535 f \n`;
+  for(let i=1;i<=6;i++) x+=String(off[i]).padStart(10,'0')+' 00000 n \n';
+  push(enc.encode(x+`trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`));
+  const out=new Uint8Array(pos); let o=0;
+  parts.forEach(u=>{ out.set(u,o); o+=u.length; });
+  try{ localStorage.setItem(TEST_SHEET_KEY,JSON.stringify({made:now.toISOString(),paper:printPaperKey(),list})); }catch(e){}
+  return {bytes:out,count:list.length};
+}
+function testSheetKept(){ try{ return JSON.parse(localStorage.getItem(TEST_SHEET_KEY)||'null'); }catch(e){ return null; } }
+// a number from the sheet taken for the job: its Brightness and Printer warmth
+function testSheetUse(num){
+  const t=testSheetKept(), v=t&&t.list.find(x=>x.n===num);
+  if(!v) return false;
+  try{ localStorage.setItem(PRINT_WARM_KEY,String(v.w)); }catch(e){}
+  let all={}; try{ all=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){}
+  all.bright={b:v.b};
+  try{ localStorage.setItem(PRINT_HSL_KEY,JSON.stringify(all)); }catch(e){}
+  return v;
+}
+function testSheetShow(){
+  const el=document.getElementById('pcTestKept'); if(!el) return;
+  const t=testSheetKept();
+  el.textContent=t?`Last sheet: ${t.list.length} versions, ${new Date(t.made).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}`:'No test sheet made yet.';
+}
+document.addEventListener('click',async e=>{
+  const b=e.target&&e.target.closest&&e.target.closest('#pcTestMake,#pcTestUse'); if(!b) return;
+  const msg=document.getElementById('pcTestMsg');
+  if(b.id==='pcTestUse'){
+    const num=Math.round(Number(document.getElementById('pcTestNum').value));
+    const v=testSheetUse(num);
+    msg.textContent=v?`#${v.n} taken: Brightness ${v.b}, Printer warmth ${v.w}. The export prints with them.`
+      :(testSheetKept()?`No #${num} on the last sheet.`:'Make a test sheet first.');
+    if(v){ pcPopRender(); pcRedraw(); }
+    return;
+  }
+  const mode=document.getElementById('pcTestMode').value, step=document.getElementById('pcTestStep').value;
+  const count=Math.max(2,Math.min(80,Math.round(Number(document.getElementById('pcTestCount').value)||50)));
+  b.disabled=true; msg.textContent='Making the test sheet…';
+  try{
+    const {bytes,count:n}=await testSheetPdf(mode,count,step);
+    const name=`Test sheet ${(state.orderId||'').trim()||'design'} ${pcPopSide} ${n} versions.pdf`.replace(/[\\/:*?"<>|]+/g,'-');
+    downloadBlob(new Blob([bytes],{type:'application/pdf'}),name);
+    msg.textContent=`${n} versions saved (${name}). Print it on this paper, then type the best number and press Use.`;
+  }catch(err){ msg.textContent='Test sheet not made - '+((err&&err.message)||err); }
+  finally{ b.disabled=false; testSheetShow(); }
+});
 // Printer warmth: kept as it is slid or typed (the slider and its box move
 // together); the export reads it (printWarm)
 document.addEventListener('input',e=>{
