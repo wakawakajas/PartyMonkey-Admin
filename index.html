@@ -33537,7 +33537,10 @@ const PDF_AS_CMYK=true;
 // customer's own colours - a backlit screen never looks like paper beside
 // it, so the file itself is what a print is held against and brought to
 // (Printer warmth); 'print', the print as the measured papers say it comes
-// out. Both through the Screen tune, so the screen's white is the paper's.
+// out on its paper - its white the paper's tint and lightness, its black the
+// print's grey, as Photoshop's Simulate Paper Color shows it (which the user
+// found near identical to the paper, 3 Nov). File colours go through the
+// Screen tune, so the file's white is the paper's.
 // A CMYK PDF's own colours are its CMYK as GRACoL, as Illustrator and
 // Acrobat show it. The colours to check are listed either way.
 const PREVIEW_SHOW_KEY='pigu.previewShow';
@@ -33699,6 +33702,30 @@ function printCms(paper){
     const mImg=PRINT_MATCH&&measP?matchTo(measP):null;
     const mPdf=PRINT_MATCH&&meas?matchTo(meas):null;
     const mOf=src=>src==='img'?mImg:src==='pdf'?mPdf:null;
+    // As printed with the paper's own colour (Simulate Paper Color): each
+    // measured paper read absolute - its white the paper's tint and lightness
+    // under the screen's white, its black the print's dark grey
+    const ABS=L.INTENT_ABSOLUTE_COLORIMETRIC!=null?L.INTENT_ABSOLUTE_COLORIMETRIC:3;
+    const pLabA=measP?T(measP,L.TYPE_RGB_8,lab,L.TYPE_Lab_16,ABS,0):null;
+    const mLabA=meas?T(meas,L.TYPE_RGB_8,lab,L.TYPE_Lab_16,ABS,0):null;
+    const kLabPA=measK?T(measK,L.TYPE_RGB_8,lab,L.TYPE_Lab_16,ABS,0):null;
+    const kLabA=T(out,L.TYPE_CMYK_8,lab,L.TYPE_Lab_16,ABS,0);
+    // a CMYK PDF's pixels drawn as printed relative to its paper (pdfx), put
+    // under that paper's white: Lab to XYZ, scaled by it, back
+    const pw5=meas5?lab16(run(T(meas5,L.TYPE_CMYK_8,lab,L.TYPE_Lab_16,ABS,0),new Uint8Array([0,0,0,0]),1)):null;
+    const fI=t=>t>6/29?t*t*t:3*(6/29)*(6/29)*(t-4/29), fF=t=>t>0.008856?Math.cbrt(t):7.787*t+16/116;
+    const relToAbs=lb=>{
+      if(!pw5) return lb;
+      const xs=fI((pw5[0]+16)/116+pw5[1]/500), ys=fI((pw5[0]+16)/116), zs=fI((pw5[0]+16)/116-pw5[2]/200);
+      for(let i=0;i<lb.length;i+=3){
+        const fy=(lb[i]/655.35+16)/116, fx=fy+(lb[i+1]/257-128)/500, fz=fy-(lb[i+2]/257-128)/200;
+        const X=fI(fx)*xs, Y=fI(fy)*ys, Z=fI(fz)*zs, gy=fF(Y);
+        lb[i]=Math.max(0,Math.min(65535,Math.round((116*gy-16)*655.35)));
+        lb[i+1]=Math.max(0,Math.min(65535,Math.round((500*(fF(X)-gy)+128)*257)));
+        lb[i+2]=Math.max(0,Math.min(65535,Math.round((200*(gy-fF(Z))+128)*257)));
+      }
+      return lb;
+    };
     const cms={paper,measured:!!(meas||measP||measK),
       // the numbers sent for these (export), and the print of a colour matched
       matchImg:mImg,
@@ -33784,6 +33811,20 @@ function printCms(paper){
       proof:(rgb,n,src,g)=>{
         const x=xLift&&src==='pdfx', p=pLab&&src==='img', q=kLabP&&src==='pdfk', m=x||p||q||(mLab&&!viaG(src)), ml=x?xLift:p?pLift:q?kLift:mLift;
         const mm=printMatchPaper()===paper;           // matched where the export matches
+        // As printed: as it comes out on its paper, the paper's colour and the
+        // print's black as they are (no black taken to the screen's)
+        if(printPreviewShow()==='print'){
+          const la=x?relToAbs(run(scrLab,rgb,n)):p?run(pLabA,mImg&&mm?mImg(rgb,n):rgb,n):q?run(kLabPA,rgb,n)
+            :m&&mLabA?run(mLabA,src==='img'?run(s2a,rgb,n):src==='pdf'&&mPdf&&mm?mPdf(rgb,n):rgb,n):run(kLabA,toKrun(src,rgb,n),n);
+          const w0=printWarm();
+          if(w0){
+            const k=toGracol(rgb,n), k2=k.slice(); for(let i=2;i<k2.length;i+=4) k2[i]=printWarmY(k2[i],w0);
+            const a1=run(g2lab,k,n), a2=run(g2lab,k2,n);
+            for(let i=0;i<la.length;i++) la[i]=Math.max(0,Math.min(65535,la[i]+a2[i]-a1[i]));
+          }
+          if(!m) for(let i=0;i<la.length;i+=3) printHueFix16(la,i);   // this printer's reds
+          return run(labRgb,la,n);
+        }
         const lb=x?run(scrLab,rgb,n):p?run(pLab,mImg&&mm?mImg(rgb,n):rgb,n):q?run(kLabP,rgb,n)
           :m?run(mLab,src==='img'?run(s2a,rgb,n):src==='pdf'&&mPdf&&mm?mPdf(rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
         g=m?1:g>0?g:1;                               // measured: shown as read
@@ -34654,7 +34695,8 @@ function printColourScreen(canvas,ro,side){
       rects.forEach(R=>{ const s=own(R); if(s!==src&&R.t) redo(R.t,s); });
     }
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ d[i]=p[j]; d[i+1]=p[j+1]; d[i+2]=p[j+2]; }
-    printTunePixels(d);
+    // the paper's own colour is simulated: no Screen tune on top
+    if(printPreviewShow()!=='print') printTunePixels(d);
   }
   ctx.putImageData(id,0,0);
 }
