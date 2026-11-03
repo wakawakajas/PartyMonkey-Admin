@@ -13517,9 +13517,16 @@ function renderSide(side,canvas,maxDim,opts){
   // own that was never swapped. Held to see the original, the screen shows
   // the file's own; a PDF always takes them.
   try{
-    if((opts.forExport||!printShowBefore)&&opts._rects&&swapsForIds(opts._art).length){
+    // the preview open: the sheet before its colours are changed kept, so a
+    // colour's slider can change them again without drawing every card
+    const keep=!opts.forExport&&!printShowBefore&&printPreviewOn&&opts._rects&&opts._rects.length;
+    canvas._pcRaw=null;
+    if(keep||((opts.forExport||!printShowBefore)&&opts._rects&&swapsForIds(opts._art).length)){
       const id=ctx.getImageData(0,0,canvas.width,canvas.height);
-      if(swapSheetPixels(id,opts._rects)) ctx.putImageData(id,0,0);
+      const d0=keep?new Uint8ClampedArray(id.data):null;
+      const did=opts._rects&&swapsForIds(opts._art).length&&swapSheetPixels(id,opts._rects);
+      if(did) ctx.putImageData(id,0,0);
+      if(keep) canvas._pcRaw={d0,d1:did?new Uint8ClampedArray(id.data):d0,rects:opts._rects};
     }
   }catch(e){}
 
@@ -34776,12 +34783,12 @@ function swapSheetPixels(imgData,rects){
 // With no boxes noted the whole sheet goes the one way its artwork mostly
 // does, as before.
 // While Printer warmth or Hue/Saturation is being slid the sheet is proofed
-// off a 33-step table of the proof itself - 36 thousand colours through it
+// off a 25-step table of the proof itself - 16 thousand colours through it
 // instead of every pixel (a full sheet took half a second a step, 3 Nov) -
 // and exactly again a moment after the slider stops (pcSlideSoon).
 let _pcFast=false, _pcFastLut=new Map();
 function proofFast(cms,rgb,n,src,g){
-  const N=33, key=src+'|'+g;
+  const N=25, key=src+'|'+g;
   let lut=_pcFastLut.get(key);
   if(!lut){
     const grid=new Uint8Array(N*N*N*3);
@@ -34790,18 +34797,24 @@ function proofFast(cms,rgb,n,src,g){
     }
     lut=cms.proof(grid,N*N*N,src,g); _pcFastLut.set(key,lut);
   }
-  const o=new Uint8Array(n*3), S=(N-1)/255, N2=N*N, dj=N*3, di=N2*3;
+  const o=new Uint8Array(n*3), S=(N-1)/255, N2=N*N, dj=N*3, di=N2*3, dij=di+dj;
+  const one=(q,fx,fy,fz)=>{
+    const c0=lut[q]+(lut[q+3]-lut[q])*fz, c1=lut[q+dj]+(lut[q+dj+3]-lut[q+dj])*fz;
+    const c2=lut[q+di]+(lut[q+di+3]-lut[q+di])*fz, c3=lut[q+dij]+(lut[q+dij+3]-lut[q+dij])*fz;
+    const a0=c0+(c1-c0)*fy;
+    return a0+(c2+(c3-c2)*fy-a0)*fx+0.5;
+  };
+  let lr=-1, lg=-1, lb=-1, o0=0, o1=0, o2=0;
   for(let p=0;p<n*3;p+=3){
-    const x=rgb[p]*S, y=rgb[p+1]*S, z=rgb[p+2]*S;
-    const i=x>=N-1?N-2:x|0, j=y>=N-1?N-2:y|0, k=z>=N-1?N-2:z|0, fx=x-i, fy=y-j, fz=z-k;
-    const b0=(i*N2+j*N+k)*3;
-    for(let c=0;c<3;c++){
-      const q=b0+c;
-      const c0=lut[q]+(lut[q+3]-lut[q])*fz, c1=lut[q+dj]+(lut[q+dj+3]-lut[q+dj])*fz;
-      const c2=lut[q+di]+(lut[q+di+3]-lut[q+di])*fz, c3=lut[q+di+dj]+(lut[q+di+dj+3]-lut[q+di+dj])*fz;
-      const a0=c0+(c1-c0)*fy, a1=c2+(c3-c2)*fy;
-      o[p+c]=a0+(a1-a0)*fx+0.5;
+    const r=rgb[p], gg=rgb[p+1], bb=rgb[p+2];
+    if(r!==lr||gg!==lg||bb!==lb){                 // a run of one colour: once
+      lr=r; lg=gg; lb=bb;
+      const x=r*S, y=gg*S, z=bb*S;
+      const i=x>=N-1?N-2:x|0, j=y>=N-1?N-2:y|0, k=z>=N-1?N-2:z|0, fx=x-i, fy=y-j, fz=z-k;
+      const q=(i*N2+j*N+k)*3;
+      o0=one(q,fx,fy,fz); o1=one(q+1,fx,fy,fz); o2=one(q+2,fx,fy,fz);
     }
+    o[p]=o0; o[p+1]=o1; o[p+2]=o2;
   }
   return o;
 }
@@ -34816,6 +34829,7 @@ function printColourScreen(canvas,ro,side){
     if(!(canvas.width>0&&canvas.height>0)) return;
     const c2=canvas.getContext('2d'); let id2;
     try{ id2=c2.getImageData(0,0,canvas.width,canvas.height); }catch(e){ return; }
+    pcKeepPre(canvas,id2.data,ro,side,'file');
     printTunePixels(id2.data); c2.putImageData(id2,0,0);
     return;
   }
@@ -34826,8 +34840,7 @@ function printColourScreen(canvas,ro,side){
   const ctx=canvas.getContext('2d');
   let id;
   try{ id=ctx.getImageData(0,0,canvas.width,canvas.height); }catch(e){ return; }
-  canvas._pcPre={d:new Uint8ClampedArray(id.data),ro,side,W:canvas.width,H:canvas.height,ctx:pcCtx()};
-  _pcPreCanvases.add(canvas);
+  pcKeepPre(canvas,id.data,ro,side,'print');
   pcProofPixels(id.data,canvas.width,canvas.height,ro,side,cms);
   ctx.putImageData(id,0,0);
 }
@@ -34873,20 +34886,43 @@ function pcProofPixels(d,W,H,ro,side,cms){
 // from the drawing kept (no 21 pictures drawn again a step); false when
 // there is none to go from, and the sheets are drawn whole
 var _pcPreCanvases=new Set();     // var: a sheet may be drawn before this line has run
-function pcReproof(){
-  const cms=printPreviewOn&&!printShowBefore&&printPreviewShow()==='print'?printCmsReady[printPaperKey()]:null;
-  if(!cms) return false;
-  let did=false;
+function pcKeepPre(canvas,d,ro,side,mode){
+  const W=canvas.width, H=canvas.height, P={d:new Uint8ClampedArray(d),ro,side,W,H,ctx:pcCtx(),mode,raw:null};
+  const R=canvas._pcRaw; canvas._pcRaw=null;
+  if(R&&R.d0.length===d.length){
+    // drawn over the cards after their colours (cut lines, fold, names): kept as drawn
+    const over=new Uint8Array(W*H);
+    for(let k=0,i=0;k<over.length;k++,i+=4)
+      if(d[i]!==R.d1[i]||d[i+1]!==R.d1[i+1]||d[i+2]!==R.d1[i+2]||d[i+3]!==R.d1[i+3]) over[k]=1;
+    P.raw={d0:R.d0,over,rects:R.rects};
+  }
+  canvas._pcPre=P; _pcPreCanvases.add(canvas);
+}
+function pcReproof(swaps){
+  if(!printPreviewOn||printShowBefore) return false;
+  const mode=printPreviewShow(), cms=mode==='print'?printCmsReady[printPaperKey()]:null;
+  if(mode==='print'&&!cms) return false;
+  let did=false, miss=false;
   for(const c of [..._pcPreCanvases]){
     const P=c._pcPre;
     if(!c.isConnected||!P){ _pcPreCanvases.delete(c); continue; }
-    if(P.ctx!==pcCtx()||c.width!==P.W||c.height!==P.H||!c.offsetParent) continue;
-    const d=new Uint8ClampedArray(P.d);
-    pcProofPixels(d,P.W,P.H,P.ro,P.side,cms);
+    if(P.ctx!==pcCtx()||!c.offsetParent) continue;
+    if(c.width!==P.W||c.height!==P.H||P.mode!==mode||(swaps&&!P.raw)){ miss=true; continue; }
+    let d;
+    if(swaps){
+      // the cards' colours changed again from the sheet as first drawn, and
+      // what was drawn over them put back
+      const im=new ImageData(new Uint8ClampedArray(P.raw.d0),P.W,P.H);
+      swapSheetPixels(im,P.raw.rects);
+      d=im.data; const o=P.raw.over, s=P.d;
+      for(let k=0,i=0;k<o.length;k++,i+=4) if(o[k]){ d[i]=s[i]; d[i+1]=s[i+1]; d[i+2]=s[i+2]; d[i+3]=s[i+3]; }
+    }else d=new Uint8ClampedArray(P.d);
+    if(mode==='print') pcProofPixels(d,P.W,P.H,P.ro,P.side,cms);
+    else printTunePixels(d);
     c.getContext('2d').putImageData(new ImageData(d,P.W,P.H),0,0);
     did=true;
   }
-  return did;
+  return did&&!miss;
 }
 // A picture with its swaps done, as a canvas - for one placed at its own
 // resolution (imgPdfBytes) rather than drawn into the sheet.
@@ -35669,7 +35705,7 @@ document.addEventListener('input',e=>{
   if(now) now.innerHTML=to?'→ '+pcSw(hexRgb(to),'What prints'):'';
   if(nh) nh.textContent=to||'';
   printColourSet(pcPopSide,from,to,adj,base,pcPopArt);
-  pcSlideSoon(true);
+  pcSlideSoon('swap');
 });
 // a colour picked outright, from the wheel or typed: the new colour as it is
 // moved, the sheets drawn again
@@ -35685,11 +35721,12 @@ document.addEventListener('input',e=>{
     if(nh) nh.textContent=to;
   }
   printColourSet(pcPopSide,from,to===from?null:to,null,to===from?null:to,pcPopArt);
-  pcSlideSoon(true);
+  pcSlideSoon('pick');
 });
 document.addEventListener('change',e=>{
   if(e.target.matches&&e.target.matches('#pcPop [data-pc-artsel]')){ pcPopArt=e.target.value?Number(e.target.value)||e.target.value:null; pcPopRender(); return; }
   if(!(e.target.dataset&&e.target.dataset.pcPick)) return;
+  if(_pcSlidePend) pcSlideSettle();                 // the colour wheel closed
   e.target.blur();
   printColourCheckSoon();
 });
@@ -35732,17 +35769,21 @@ document.addEventListener('click',e=>{
 });
 let _pcSlideT=0;
 var _pcSlidePend=false;
-function pcSlideSoon(always){
-  if(!always&&printPreviewShow()==='file') return;  // the file's colours: unchanged
+function pcSlideSoon(kind){
+  kind=kind||'print';
+  const show=printPreviewShow();
+  if(kind==='print'&&show==='file') return;          // the file's colours: unchanged
+  if(kind==='tune'&&show==='print') return;          // As printed takes no Screen tune
   _pcFastLut=new Map();
   cancelAnimationFrame(_pcDarkRaf);
   _pcDarkRaf=requestAnimationFrame(()=>{
     _pcFast=true;
-    try{ if(always||!pcReproof()) pcRedraw(); }finally{ _pcFast=false; }
+    try{ if(!pcReproof(kind==='swap'||kind==='pick')) pcRedraw(); }finally{ _pcFast=false; }
   });
   clearTimeout(_pcSlideT);
-  // held: exact when let go; typed or keyed: a moment after the last
-  if(_pcDarkHeld) _pcSlidePend=true;
+  // held: exact when let go; the colour wheel: when it is closed; typed or
+  // keyed: a moment after the last
+  if(_pcDarkHeld||kind==='pick'){ _pcSlidePend=true; if(kind==='pick') _pcSlideT=setTimeout(pcSlideSettle,1500); }
   else _pcSlideT=setTimeout(pcSlideSettle,250);
 }
 function pcSlideSettle(){
@@ -35795,8 +35836,7 @@ document.getElementById('pcTuneBands').addEventListener('click',e=>{
 function pcTuneSave(t){
   try{ localStorage.setItem(PROOF_TUNE_KEY,JSON.stringify(t)); }catch(err){}
   pcTuneShow();
-  cancelAnimationFrame(_pcDarkRaf);
-  _pcDarkRaf=requestAnimationFrame(()=>pcRedraw());
+  pcSlideSoon('tune');
 }
 document.addEventListener('input',e=>{
   if(!e.target.matches||!e.target.matches('[data-pc-tune]')) return;
