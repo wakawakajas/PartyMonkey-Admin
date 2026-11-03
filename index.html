@@ -33267,6 +33267,39 @@ function wholeArtOn(){ return true; }
 function wholeArtSet(on){
   try{ localStorage.setItem(WHOLE_ART_KEY,on?'1':'0'); }catch(e){}
 }
+// ---------- the sheet's pixels as CMYK ----------
+// Everything this tool draws - pictures, words, a bleed made of pixels - goes
+// to the Fiery as GRACoL2013 CMYK, the profile it reads CMYK by and the one
+// Illustrator's exports use, so the whole file is CMYK: a PDF's own page is
+// placed as it is beside it. Converted with LittleCMS, relative colorimetric
+// with black point compensation (as Illustrator and Photoshop convert). Off,
+// or with LittleCMS not loading, the pixels go as sRGB-tagged RGB as before.
+const PRINT_CMYK_OUT=true;
+async function sheetScanlines(imgData){
+  if(PRINT_CMYK_OUT){
+    try{ const {toGracol}=await lcmsLib(); return {cmyk:true,rows:rgbaToCmykScanlines(imgData,toGracol)}; }
+    catch(e){ console.warn('CMYK conversion unavailable, writing sRGB',e); }
+  }
+  return {cmyk:false,rows:rgbaToRawRgbScanlines(imgData)};
+}
+// rows of CMYK with a leading filter byte, converted a slice at a time
+function rgbaToCmykScanlines(imgData,toGracol){
+  const w=imgData.width,h=imgData.height,data=imgData.data,row=1+w*4;
+  const out=new Uint8Array(row*h);
+  const step=Math.max(1,Math.floor(1048576/Math.max(1,w)));
+  for(let y0=0;y0<h;y0+=step){
+    const y1=Math.min(h,y0+step), n=(y1-y0)*w, rgb=new Uint8Array(n*3);
+    for(let i=0,q=y0*w*4;i<n*3;i+=3,q+=4){ rgb[i]=data[q]; rgb[i+1]=data[q+1]; rgb[i+2]=data[q+2]; }
+    const k=toGracol(rgb,n);
+    for(let y=y0;y<y1;y++){ const o=y*row; out[o]=0; out.set(k.subarray((y-y0)*w*4,(y-y0+1)*w*4),o+1); }
+  }
+  return out;
+}
+// how an image of those rows is marked in the PDF
+function sheetColourSpace(s,iccNum){
+  return s.cmyk?`/ColorSpace /DeviceCMYK /BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 4 `
+    :`/ColorSpace [/ICCBased ${iccNum} 0 R] /BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 `;
+}
 function iccObject(num){
   const icc=srgbIccProfile(), enc=new TextEncoder();
   const head=enc.encode(num+' 0 obj\n<< /N 3 /Length '+icc.length+' >>\nstream\n');
@@ -33381,7 +33414,8 @@ function lcmsLib(){
     // a PDF's k/K numbers, read and written as the Fiery's CMYK source
     const gIn=lcms.cmsCreateTransform(srgb,L.TYPE_RGB_8,gracol,L.TYPE_CMYK_8,R,BPC);
     const gOut=lcms.cmsCreateTransform(gracol,L.TYPE_CMYK_8,srgb,L.TYPE_RGB_8,R,BPC);
-    return {L,lcms,prof,srgb,lab,adobe,
+    return {L,lcms,prof,srgb,lab,adobe,gracol,
+      toGracol:(a,n)=>lcms.cmsDoTransform(gIn,a,n),
       cmykG:rgb=>[...lcms.cmsDoTransform(gIn,new Uint8Array(rgb),1)],
       rgbOfG:c=>[...lcms.cmsDoTransform(gOut,new Uint8Array(c),1)]};
   })().catch(e=>{ _lcms=null; throw e; });
@@ -33396,12 +33430,19 @@ const _printCms={}, printCmsReady={};
 function printCms(paper){
   paper=paper||printPaperKey();
   if(!_printCms[paper]) _printCms[paper]=(async()=>{
-    const {L,lcms,prof,srgb,lab,adobe}=await lcmsLib();
+    const {L,lcms,prof,srgb,lab,adobe,gracol,toGracol}=await lcmsLib();
     const out=await prof(PRINT_PROFILES[paper]);
     const meas=PRINT_MEASURED[paper]?await prof(PRINT_MEASURED[paper]):null;
     const P=L.INTENT_PERCEPTUAL, R=L.INTENT_RELATIVE_COLORIMETRIC, BPC=L.cmsFLAGS_BLACKPOINTCOMPENSATION;
     const T=(a,af,b,bf,i,f)=>lcms.cmsCreateTransform(a,af,b,bf,i,f);
     const toK={pdf:T(adobe,L.TYPE_RGB_8,out,L.TYPE_CMYK_8,P,BPC),img:T(srgb,L.TYPE_RGB_8,out,L.TYPE_CMYK_8,P,BPC)};
+    // A picture reaches the Fiery as GRACoL2013 CMYK (PRINT_CMYK_OUT), which it
+    // reads as its CMYK source: sRGB to GRACoL as the file is written, then
+    // GRACoL to the paper's ink. Not measured: the measured paper was read off
+    // RGB sent, so it holds for a PDF's own RGB only.
+    const g2o=T(gracol,L.TYPE_CMYK_8,out,L.TYPE_CMYK_8,R,BPC);
+    const viaG=src=>src==='img'&&PRINT_CMYK_OUT;
+    const toKrun=(src,a,n)=>viaG(src)?run(g2o,toGracol(a,n),n):run(toK[src],a,n);
     const kLab=T(out,L.TYPE_CMYK_8,lab,L.TYPE_Lab_16,R,0);
     const labRgb=T(lab,L.TYPE_Lab_16,srgb,L.TYPE_RGB_8,R,0);
     // the colour as the screen shows it: a browser draws every RGB as sRGB
@@ -33414,12 +33455,12 @@ function printCms(paper){
       if(!G){
         const inp=[]; for(let r=0;r<=255;r+=5)for(let g=0;g<=255;g+=5)for(let b=0;b<=255;b+=5) inp.push(r,g,b);
         const n=inp.length/3, a=new Uint8Array(inp);
-        G=vividGrid[src]={rgb:a,lab:run(kLab,run(toK[src],a,n),n),n};
+        G=vividGrid[src]={rgb:a,lab:run(kLab,toKrun(src,a,n),n),n};
       }
       return G;
     };
     const run=(t,a,n)=>lcms.cmsDoTransform(t,a,n);
-    const Lk=run(kLab,run(toK.pdf,new Uint8Array([0,0,0]),1),1)[0];     // paper black, 16-bit L
+    const Lk=run(kLab,toKrun('pdf',new Uint8Array([0,0,0]),1),1)[0];     // paper black, 16-bit L
     const lift=v=>Math.max(0,Math.min(65535,(v-Lk)*65535/(65535-Lk)));
     // how dark black ink alone prints at each strength, 0-255: what "it looks
     // like K 96%" is read against. The ink a colour takes (its K) says nothing
@@ -33442,14 +33483,14 @@ function printCms(paper){
       mLift=v=>Math.max(0,Math.min(65535,(v-mK)*65535/(mW-mK)));
     }
     const cms={paper,measured:!!meas,
-      ink:(rgb,src)=>[...run(toK[src],new Uint8Array(rgb),1)],        // 0-255 each
+      ink:(rgb,src)=>[...toKrun(src,new Uint8Array(rgb),1)],        // 0-255 each
       // the black-ink-only strength, %, that prints as dark as this colour
       looksK:(rgb,src)=>{
-        const v=run(kLab,run(toK[src],new Uint8Array(rgb),1),1)[0];
+        const v=run(kLab,toKrun(src,new Uint8Array(rgb),1),1)[0];
         let k=0; while(k<255&&kL[k+1]>v) k++;
         return Math.round(k/2.55);
       },
-      printL:(rgb,src)=>lift(run(kLab,run(toK[src],new Uint8Array(rgb),1),1)[0])/655.35,
+      printL:(rgb,src)=>lift(run(kLab,toKrun(src,new Uint8Array(rgb),1),1)[0])/655.35,
       // as shown on the screen and as printed, L*a*b*, and the printed one as
       // the nearest screen colour (no screen match: the paper as measured)
       screenLab:rgb=>lab16(run(scrLab,new Uint8Array(rgb),1)),
@@ -33462,17 +33503,17 @@ function printCms(paper){
           Math.max(0,Math.min(65535,Math.round((C*Math.sin(H)+128)*257)))]);
         return [...run(labRgb,q,1)];
       },
-      printLab:(rgb,src)=>lab16(run(kLab,run(toK[src],new Uint8Array(rgb),1),1)),
+      printLab:(rgb,src)=>lab16(run(kLab,toKrun(src,new Uint8Array(rgb),1),1)),
       // as this printer prints it (printHueShift), and as a screen colour
-      printLabC:(rgb,src)=>{ const v=run(kLab,run(toK[src],new Uint8Array(rgb),1),1); printHueFix16(v,0); return lab16(v); },
-      printRgb:(rgb,src)=>{ const v=run(kLab,run(toK[src],new Uint8Array(rgb),1),1); printHueFix16(v,0); return [...run(labRgb,v,1)]; },
+      printLabC:(rgb,src)=>{ const v=run(kLab,toKrun(src,new Uint8Array(rgb),1),1); printHueFix16(v,0); return lab16(v); },
+      printRgb:(rgb,src)=>{ const v=run(kLab,toKrun(src,new Uint8Array(rgb),1),1); printHueFix16(v,0); return [...run(labRgb,v,1)]; },
       // The input that prints at the shade the screen shows this colour, on
       // this printer: hue nearest the screen's, lightness within 3 of its
       // print, and at least 90% as colourful - of those within 1.5 degrees,
       // the most colourful.
       truer:(rgb,src)=>{
         const G=vividOf(src), s0=lab16(run(scrLab,new Uint8Array(rgb),1));
-        const p0=lab16(run(kLab,run(toK[src],new Uint8Array(rgb),1),1)), c0=Math.hypot(p0[1],p0[2]);
+        const p0=lab16(run(kLab,toKrun(src,new Uint8Array(rgb),1),1)), c0=Math.hypot(p0[1],p0[2]);
         const hs=Math.atan2(s0[2],s0[1]);
         let best=null;
         const one=new Uint16Array(3);
@@ -33495,7 +33536,7 @@ function printCms(paper){
       // Every RGB in steps of 5, through the paper once per source, kept.
       vivid:(rgb,src)=>{
         const G=vividOf(src);
-        const p0=lab16(run(kLab,run(toK[src],new Uint8Array(rgb),1),1));
+        const p0=lab16(run(kLab,toKrun(src,new Uint8Array(rgb),1),1));
         const h0=Math.atan2(p0[2],p0[1]), c0=Math.hypot(p0[1],p0[2]);
         let best=null, bc=c0;
         for(let i=0;i<G.n;i++){
@@ -33516,12 +33557,13 @@ function printCms(paper){
       // bright colour duller than they print; at 50, red and electric blue
       // were still taken down).
       proof:(rgb,n,src,g)=>{
-        const lb=mLab?run(mLab,src==='img'?run(s2a,rgb,n):rgb,n):run(kLab,run(toK[src],rgb,n),n);
+        const m=mLab&&!viaG(src);
+        const lb=m?run(mLab,src==='img'?run(s2a,rgb,n):rgb,n):run(kLab,toKrun(src,rgb,n),n);
         g=g>0?g:1;
         const T=19661;                               // L* 30, 16-bit
         for(let i=0;i<lb.length;i+=3){
-          if(!mLab) printHueFix16(lb,i);             // this printer's reds
-          const L1=mLab?mLift(lb[i]):lift(lb[i]);
+          if(!m) printHueFix16(lb,i);                // this printer's reds
+          const L1=m?mLift(lb[i]):lift(lb[i]);
           if(g===1||!(L1>0)||L1>=T){ lb[i]=L1; continue; }
           const L2=T*Math.pow(L1/T,g), k=Math.pow(L2/L1,0.75);
           lb[i]=L2;
@@ -35972,7 +36014,8 @@ async function imgPdfBytes(img){
   let see=false;
   for(let i=3;i<id.data.length;i+=4) if(id.data[i]<255){ see=true; break; }
   if(see) rgbaFillClear(id,4);
-  const rgb=await deflateBytes(rgbaToRawRgbScanlines(id));
+  const sl=await sheetScanlines(id);
+  const rgb=await deflateBytes(sl.rows);
   const msk=see?await deflateBytes(rgbaToAlphaScanlines(id)):null;
   const enc=new TextEncoder(), parts=[], off=[]; let pos=0;
   const push=u8=>{ parts.push(u8); pos+=u8.length; };
@@ -35990,8 +36033,8 @@ async function imgPdfBytes(img){
   obj(2,'<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
   obj(3,`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pw} ${ph}] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>`);
   obj(4,`<< /Length ${content.length} >>`,content);
-  obj(5,`<< /Type /XObject /Subtype /Image /Width ${W} /Height ${H} /ColorSpace [/ICCBased 6 0 R] /BitsPerComponent 8 `
-    +`/Interpolate true /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns ${W} >> `
+  obj(5,`<< /Type /XObject /Subtype /Image /Width ${W} /Height ${H} /Interpolate true `+sheetColourSpace(sl,6)
+    +`/BitsPerComponent 8 /Columns ${W} >> `
     +(msk?'/SMask 7 0 R ':'')+`/Length ${rgb.length} >>`,rgb);
   off[6]=pos; push(iccObject(6));
   if(msk) obj(7,`<< /Type /XObject /Subtype /Image /Width ${W} /Height ${H} /ColorSpace /DeviceGray /BitsPerComponent 8 `
@@ -39733,7 +39776,7 @@ const HELP=[
   {on:'sheet',t:'Show bounding box, cut lines, punch holes',k:'show hide bounding cut lines punch holes view',
    h:'Top left of the sheet: <b>Show bounding box</b>, <b>Show cut lines</b>, <b>Show punch holes</b>.',sel:'#gtShownBar'},
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
-  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte is measured off this printer (title says <b>measured</b>), its white shown as the screen\'s white; gloss still uses the Fiery\'s own profile.',sel:'#gtPpBtn'},
+  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte is measured off this printer (title says <b>measured</b>), its white shown as the screen\'s white; gloss still uses the Fiery\'s own profile. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. So pictures are previewed through GRACoL and the Fiery\'s profile, and <b>measured</b> holds for a PDF\'s own RGB colours.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
@@ -39767,7 +39810,7 @@ const HELP=[
   {on:'custom',t:'Rotate the sheet or open it full screen',k:'rotate turn full screen enlarge',h:'Under the sheet: <b>↺</b> / <b>↻</b> turn it, <b>⤢</b> opens it over the whole screen.',sel:'#pcNlZoom [data-pcz="big"]'},
   {on:'custom',t:'Show cut lines / reference line',k:'show cut lines reference line view',h:'Top left of the sheet: <b>Show cut lines</b>, <b>Show reference line</b>.',sel:'#pcShownBar'},
   {on:'custom',t:'Order ID, paper and GSM',k:'order id paper type gsm file name',h:'Top bar: <b>Order ID</b>, <b>Paper type</b>, <b>GSM</b> - they name the files.',sel:'#pcJobBar'},
-  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte is measured off this printer (title says <b>measured</b>), its white shown as the screen\'s white; gloss still uses the Fiery\'s own profile.',sel:'#ppOpenBtn'},
+  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte is measured off this printer (title says <b>measured</b>), its white shown as the screen\'s white; gloss still uses the Fiery\'s own profile. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. So pictures are previewed through GRACoL and the Fiery\'s profile, and <b>measured</b> holds for a PDF\'s own RGB colours.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Download and print',k:'download print front back pdf fiery',
    h:'Top bar → <b>Download &amp; Print front</b> / <b>back</b>. <b>⚠ to check</b> lists anything to fix first.',sel:'#printFrontBtn'},
@@ -52267,7 +52310,8 @@ async function gtBuildPdf(count,render,sources){
     const alpha=(clear||put.length)?rgbaToAlphaScanlines(imgData):null;
     // what the mask hides takes its neighbours' colour, so no black is blended in
     if(alpha) rgbaFillClear(imgData,4);
-    const deflated=await deflateBytes(rgbaToRawRgbScanlines(imgData));
+    const sl=await sheetScanlines(imgData);
+    const deflated=await deflateBytes(sl.rows);
     const packedA=alpha?await deflateBytes(alpha):null;
     const imgNum=alloc(), maskNum=alpha?alloc():0, contentNum=alloc(), pageNum=alloc();
     let cs='';
@@ -52361,11 +52405,11 @@ async function gtBuildPdf(count,render,sources){
       const d=o.draw(); if(!d) continue;
       const a=rgbaToAlphaScanlines(d);
       rgbaFillClear(d,4);
-      const rgb=await deflateBytes(rgbaToRawRgbScanlines(d)), msk=await deflateBytes(a);
+      const ls=await sheetScanlines(d);
+      const rgb=await deflateBytes(ls.rows), msk=await deflateBytes(a);
       const num=alloc(), mnum=alloc(), nm='Lw'+layers.length;
       mark(num); push(enc.encode(`${num} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${d.width} `
-        +`/Height ${d.height} /ColorSpace [/ICCBased ${iccNum} 0 R] /BitsPerComponent 8 /Filter /FlateDecode `
-        +`/DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns ${d.width} >> `
+        +`/Height ${d.height} `+sheetColourSpace(ls,iccNum)+`/BitsPerComponent 8 /Columns ${d.width} >> `
         +`/SMask ${mnum} 0 R /Length ${rgb.length} >>\nstream\n`));
       push(rgb); push(enc.encode('\nendstream\nendobj\n'));
       mark(mnum); push(enc.encode(`${mnum} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${d.width} `
@@ -52394,8 +52438,7 @@ async function gtBuildPdf(count,render,sources){
     mark(contentNum); push(enc.encode(`${contentNum} 0 obj\n<< /Length ${content.length} >>\nstream\n`));
     push(content); push(enc.encode('\nendstream\nendobj\n'));
     mark(imgNum); push(enc.encode(`${imgNum} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${imgData.width} `
-      +`/Height ${imgData.height} /ColorSpace [/ICCBased ${iccNum} 0 R] /BitsPerComponent 8 /Filter /FlateDecode `
-      +`/DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns ${imgData.width} >> `
+      +`/Height ${imgData.height} `+sheetColourSpace(sl,iccNum)+`/BitsPerComponent 8 /Columns ${imgData.width} >> `
       +(maskNum?`/SMask ${maskNum} 0 R `:'')
       +`/Length ${deflated.length} >>\nstream\n`));
     push(deflated); push(enc.encode('\nendstream\nendobj\n'));
