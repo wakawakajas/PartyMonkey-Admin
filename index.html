@@ -12110,12 +12110,12 @@ async function pdfCropFile(bytes,fr,trimFr,fileName){
 // placed as it is: a file the export cannot copy, and Invert colours, which
 // has to be done to pixels. At that resolution it still prints sharp, where
 // the old stand-in was the 300dpi sheet. null when even this cannot be done.
-async function pdfHiResBytes(bytes,invert){
+async function pdfHiResBytes(bytes,invert,dpi){
   if(!window.pdfjsLib) return null;
   const pdf=await pdfjsLib.getDocument({data:bytes.slice(0)}).promise;
   const page=await pdf.getPage(1);
   const b=page.getViewport({scale:1});
-  const scale=Math.min(1200/72,8000/Math.max(b.width,b.height));
+  const scale=Math.min((dpi||1200)/72,8000/Math.max(b.width,b.height));
   const vp=page.getViewport({scale});
   const c=document.createElement('canvas'); c.width=Math.round(vp.width); c.height=Math.round(vp.height);
   const ctx=c.getContext('2d');
@@ -33284,12 +33284,45 @@ async function sheetScanlines(imgData){
       const {toGracol}=await lcmsLib();
       // matched to the file on a measured paper (PRINT_MATCH)
       const mp=printMatchPaper(), mc=mp?await printCms(mp).catch(()=>null):null;
-      const to=mc&&mc.matchImg?(a,n)=>toGracol(mc.matchImg(a,n),n):toGracol;
+      const to0=mc&&mc.matchImg?(a,n)=>toGracol(mc.matchImg(a,n),n):toGracol;
+      // a PDF's neutral pixels as black ink only, as dark as they print
+      const kt=_sheetKOnly>0?await printKOnly(mp):null;
+      const to=kt?(a,n)=>{ const k=to0(a,n); for(let i=0,j=0;i<n;i++,j+=3){ if(a[j]===a[j+1]&&a[j]===a[j+2]){ const q=i*4; k[q]=k[q+1]=k[q+2]=0; k[q+3]=kt[a[j]]; } } return k; }:to0;
       return {cmyk:true,rows:rgbaToCmykScanlines(imgData,to)};
     }
     catch(e){ console.warn('CMYK conversion unavailable, writing sRGB',e); }
   }
   return {cmyk:false,rows:rgbaToRawRgbScanlines(imgData)};
+}
+// Black ink alone for each neutral grey 0-255, as dark as that grey prints
+// otherwise: on a measured paper the matched grey's print against black ink's
+// own (the paper's measured CMYK), else GRACoL's. Kept per paper.
+const _kOnly={};
+function printKOnly(paper){
+  const key=paper||'gracol';
+  if(!_kOnly[key]) _kOnly[key]=(async()=>{
+    const {L,lcms,lab,gracol,prof,toGracol}=await lcmsLib();
+    const R=L.INTENT_RELATIVE_COLORIMETRIC;
+    const g=new Uint8Array(256*3); for(let v=0;v<256;v++) g.set([v,v,v],v*3);
+    const ko=new Uint8Array(256*4); for(let k=0;k<256;k++) ko[k*4+3]=k;
+    let want, inkL;
+    const cms=paper?await printCms(paper).catch(()=>null):null;
+    const k5=paper&&PRINT_PDF5_ICC[paper]?await prof(PRINT_PDF5_ICC[paper]+PDF5_ICC_NAME).catch(()=>null):null;
+    if(cms&&cms.matched('img')&&k5){
+      want=[]; for(let v=0;v<256;v++) want.push(cms.matchedLab([v,v,v],'img')[0]);
+      const t=lcms.cmsCreateTransform(k5,L.TYPE_CMYK_8,lab,L.TYPE_Lab_16,R,0);
+      const l=lcms.cmsDoTransform(t,ko,256); inkL=[]; for(let k=0;k<256;k++) inkL.push(l[k*3]/655.35);
+    }else{
+      const t=lcms.cmsCreateTransform(gracol,L.TYPE_CMYK_8,lab,L.TYPE_Lab_16,R,0);
+      const lw=lcms.cmsDoTransform(t,toGracol(g,256),256), l=lcms.cmsDoTransform(t,ko,256);
+      want=[]; inkL=[]; for(let v=0;v<256;v++){ want.push(lw[v*3]/655.35); inkL.push(l[v*3]/655.35); }
+    }
+    const out=new Uint8Array(256);
+    for(let v=0;v<256;v++){ let best=0, bd=1e9; for(let k=0;k<256;k++){ const d=Math.abs(inkL[k]-want[v]); if(d<bd){ bd=d; best=k; } } out[v]=best; }
+    out[255]=0;
+    return out;
+  })().catch(e=>{ delete _kOnly[key]; throw e; });
+  return _kOnly[key];
 }
 // rows of CMYK with a leading filter byte, converted a slice at a time
 function rgbaToCmykScanlines(imgData,toGracol){
@@ -33437,6 +33470,26 @@ function printPaperKey(ctx){
 // the designer set them. Only on a measured paper - not Plain, not Sticker
 // (printMatchPaper). The preview and the colour check show the matched print.
 const PRINT_MATCH=true;
+// Every export CMYK only, the Ricoh Pro C5300S being a CMYK press: an RGB PDF
+// (Canva) was placed as it is and read by the Fiery's RGB source - its plain
+// colours as Adobe RGB, its pictures by their own profiles, a route measured
+// only in part. It is now drawn at 600 dpi and made CMYK the way a picture
+// is (sRGB, matched, GRACoL), so the whole sheet takes the one route measured
+// on 3 Nov and the preview is the same pixels; its neutral greys and black
+// go as black ink only (the Fiery printed them so: Print RGB gray using
+// black only, Text/Graphics), so its words stay crisp. A CMYK PDF stays the
+// designer's, any rg/RG in it made k/K the same way (pdfMatchColours).
+const PDF_AS_CMYK=true;
+let _sheetKOnly=0;                  // pdfExportCmyk: neutral pixels as black ink only
+async function pdfExportCmyk(bytes,ctx){
+  if(!PDF_AS_CMYK) return await pdfMatchColours(bytes,ctx);
+  const cm=await pdfCmykScan(bytes).catch(()=>false);
+  if(cm) return await pdfMatchColours(bytes,ctx);
+  const was=_printCtxNow; _printCtxNow=ctx||was; _sheetKOnly++;
+  try{ return await pdfHiResBytes(bytes,false,600)||bytes; }
+  catch(e){ return bytes; }
+  finally{ _sheetKOnly--; _printCtxNow=was; }
+}
 function printMatchPaper(ctx){
   if(!PRINT_MATCH) return null;
   const c=ctx||_printCtxNow||pcCtx();
@@ -33699,7 +33752,8 @@ function artSrc(o){
   // the file's bytes: a gift tag's are kept apart from its name (gtSideArtObjs)
   const bl=o.blob instanceof Blob?o.blob:f;
   if(o.img&&bl instanceof Blob){ _artFileOf.set(o.img,bl); if(o.gtCut) _artCutOf.set(o.img,o.gtCut); }   // printArtImg
-  return pdfIsCmyk(bl)?'pdfk':'pdf';
+  // an RGB PDF is made CMYK by this tool as a picture is (PDF_AS_CMYK)
+  return pdfIsCmyk(bl)?'pdfk':PDF_AS_CMYK?'img':'pdf';
 }
 // Whether a PDF is drawn in CMYK: more k/K (and four-number sc/scn) than
 // rg/RG (three-number) in its page and the forms it draws, or, drawing no
@@ -33712,8 +33766,15 @@ function pdfIsCmyk(f){
   const v=_pdfCmyk.get(f);
   if(v!==undefined) return v===true;
   _pdfCmyk.set(f,null);
-  const scan=(async()=>{
-    const bytes=new Uint8Array(await f.arrayBuffer());
+  const scan=(async()=>pdfCmykScan(new Uint8Array(await f.arrayBuffer())))().then(c=>{
+    _pdfCmyk.set(f,c);
+    if(c&&printPreviewOn){ pcRedraw(); printColourCheckSoon(); pcPopRender(); }
+  }).catch(()=>_pdfCmyk.set(f,false)).finally(()=>_pdfScans.delete(scan));
+  _pdfScans.add(scan);
+  return false;
+}
+async function pdfCmykScan(bytes){
+  {
     // each colour operator with the numbers before it: k/K, and sc/scn of
     // four, are CMYK; rg/RG, and sc/scn of three, RGB
     const re=/((?:-?(?:\d+\.?\d*|\.\d+)\s+)+)(k|K|rg|RG|scn|SCN|sc|SC)(?![A-Za-z])/g;
@@ -33735,12 +33796,7 @@ function pdfIsCmyk(f){
       }
     }
     return k>r||img;
-  })().then(c=>{
-    _pdfCmyk.set(f,c);
-    if(c&&printPreviewOn){ pcRedraw(); printColourCheckSoon(); pcPopRender(); }
-  }).catch(()=>_pdfCmyk.set(f,false)).finally(()=>_pdfScans.delete(scan));
-  _pdfScans.add(scan);
-  return false;
+  }
 }
 // A PDF's picture, drawn again so it prints, and previews, as its page does.
 // In the Print preview (printArtImg): a CMYK PDF drawn by pdf.js 5 through the
@@ -33873,7 +33929,7 @@ async function printArtExportReady(){
     const left=until-Date.now(); if(left<=0) break;
     // an RGB PDF's page is matched (pdfMatchColours), so its band is its own
     // numbers, matched with the sheet; unmatched, read as the Adobe RGB it is
-    if(!cm&&printMatchPaper()) continue;
+    if(!cm&&(PDF_AS_CMYK||printMatchPaper())) continue;
     await Promise.race([(cm?pdf5Draw(img,f,'export'):pdfRgbAsAdobe(img)).then(c=>{ e.c=c; }).catch(()=>{}),by(left)]);
   }
 }
@@ -34591,15 +34647,23 @@ async function pdfSwapColours(bytes,swaps){
   if(swaps.some(t=>!took.has(t))) return null;
   return f&&hits?new Uint8Array(await f.arrayBuffer()):null;
 }
-// A PDF with its own RGB (rg/RG, DeviceRGB, as Canva writes) sent as the
-// numbers that print as it on this paper (PRINT_MATCH): read through the
-// measured PDF RGB the Fiery's Adobe RGB reading and rendering included.
-// Its CMYK, greys, profile-tagged sc/scn and pictures go as they are. The
-// bytes as they were when nothing is matched or the page cannot be read.
+// A PDF's own RGB (rg/RG, DeviceRGB) made CMYK (k/K) the way the sheet's
+// pixels are - its sRGB matched on a measured paper, then GRACoL, a neutral
+// as black ink only (PDF_AS_CMYK; the CMYK PDFs pdfExportCmyk keeps). Off,
+// it is sent as the RGB numbers that print as it, read through the measured
+// PDF RGB. Its CMYK, greys, profile-tagged sc/scn and pictures go as they
+// are. The bytes as they were when the page cannot be read.
 async function pdfMatchColours(bytes,ctx){
-  const mp=printMatchPaper(ctx); if(!mp) return bytes;
-  const cms=await printCms(mp).catch(()=>null);
-  if(!cms||!cms.matchPdf) return bytes;
+  const mp=printMatchPaper(ctx);
+  const cms=mp?await printCms(mp).catch(()=>null):null;
+  if(!PDF_AS_CMYK&&!(cms&&cms.matchPdf)) return bytes;
+  const {cmykG}=await lcmsLib();
+  const kt=PDF_AS_CMYK?await printKOnly(cms&&cms.matched('img')?mp:null).catch(()=>null):null;
+  const conv=rgb=>{
+    if(!PDF_AS_CMYK) return cms.matchPdf(rgb);
+    if(kt&&rgb[0]===rgb[1]&&rgb[0]===rgb[2]) return [0,0,0,kt[rgb[0]]];
+    return cmykG(cms&&cms.matchImg?[...cms.matchImg(new Uint8Array(rgb),1)]:rgb);
+  };
   const N='(-?(?:\\d+\\.?\\d*|\\.\\d+))';
   const lead='(?<=^|[\\s\\[\\]()<>{}])(?<![\\d.]\\s+)';
   const re3=new RegExp(lead+N+'\\s+'+N+'\\s+'+N+'\\s+(rg|RG)(?![A-Za-z])','g');
@@ -34613,8 +34677,8 @@ async function pdfMatchColours(bytes,ctx){
     // drawing only: not inside (strings) or an inline picture (pdfSwapColours)
     s=pdfOutsideStrings(s,t=>t.replace(re3,(m,r,g,bl,op)=>{
       const k=[r,g,bl].map(u).join(',');
-      let to=memo.get(k); if(!to){ to=cms.matchPdf([r,g,bl].map(u)); memo.set(k,to); }
-      hit=true; return to.map(fmt).join(' ')+' '+op;
+      let to=memo.get(k); if(!to){ to=conv([r,g,bl].map(u)); memo.set(k,to); }
+      hit=true; return to.map(fmt).join(' ')+' '+(to.length===4?(op==='rg'?'k':'K'):op);
     }));
     if(!hit) return null;
     hits++;
@@ -36487,7 +36551,7 @@ async function printVectorSources(side){
     // sheet, where its pixels are swapped
     if(isPdf&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
     // its pixels are matched instead when it is inverted (pdfHiResBytes, sheetScanlines)
-    if(bytes&&isPdf&&!inv) bytes=await pdfMatchColours(bytes,'custom');
+    if(bytes&&isPdf&&!inv) bytes=await pdfExportCmyk(bytes,'custom');
     if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=!!bytes; }
     else if(!isPdf&&!inv&&o&&o.img&&imgFinerThanSheet(o.img,side))
       bytes=await Promise.resolve().then(()=>imgPdfBytes(swaps.length?swappedArtCanvas(o.img,swaps):o.img)).catch(()=>null);
@@ -53011,7 +53075,7 @@ async function gtVectorSources(side){
       // pixels are swapped
       if(bytes&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
       // its pixels are matched instead when it is inverted
-      if(bytes&&!inv) bytes=await pdfMatchColours(bytes,'gt');
+      if(bytes&&!inv) bytes=await pdfExportCmyk(bytes,'gt');
       if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=true; }
       if(bytes) out.set(key,{bytes,page:0,inverted});
     }catch(e){}
