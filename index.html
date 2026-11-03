@@ -13386,7 +13386,7 @@ function renderSide(side,canvas,maxDim,opts){
     // a PDF drawn as its page prints (printArtImg), its bleed made as the
     // export makes it (printBleedMode); a fill is made from the file's own pixels
     const bmP=printBleedMode(img,opts.forExport,bleedMode), fillB=bmP==='content'||bmP==='ai';
-    const pimg=fillB?img:printArtImg(img,opts.forExport);
+    const pimg=fillB?img:printArtImg(img,opts.forExport,opts);
     ctx.drawImage(grow?bleedArt(pimg,trimW,trimH,swapped?bY:bX,bmP,swapped?bX:bY,bleedTrimPx(),bleedMm)
       // the edge trim is part of making a bleed: with no bleed on this card, or
       // a page that brings its own, the picture prints whole as it always did
@@ -33638,8 +33638,10 @@ function artSrc(o){
   if(!o) return 'img';
   const f=o.file, nm=String((f&&f.name)||o.name||(o.source&&o.source.path)||'');
   if(!((f&&f.type==='application/pdf')||/\.pdf$/i.test(nm))) return 'img';
-  if(o.img&&f instanceof Blob) _artFileOf.set(o.img,f);     // printArtImg
-  return pdfIsCmyk(f)?'pdfk':'pdf';
+  // the file's bytes: a gift tag's are kept apart from its name (gtSideArtObjs)
+  const bl=o.blob instanceof Blob?o.blob:f;
+  if(o.img&&bl instanceof Blob){ _artFileOf.set(o.img,bl); if(o.gtCut) _artCutOf.set(o.img,o.gtCut); }   // printArtImg
+  return pdfIsCmyk(bl)?'pdfk':'pdf';
 }
 // Whether a PDF is drawn in CMYK: more k/K (and four-number sc/scn) than
 // rg/RG (three-number) in its page and the forms it draws, or, drawing no
@@ -33714,7 +33716,7 @@ const PDF5_URL='https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/';
 const PRINT_PDF5_ICC={matte:'profiles/pdf5-matte/',gloss:'profiles/pdf5-gloss/',export:'profiles/pdf5-gracol/'};
 const PDF5_ICC_NAME='CGATS001Compat-v2-micro.icc';
 let _pdf5=null;
-const _pdf5Workers={}, _artFileOf=new WeakMap(), _cmykPrinted=new WeakMap(), _artExport=new WeakMap();
+const _pdf5Workers={}, _artFileOf=new WeakMap(), _artCutOf=new WeakMap(), _cmykPrinted=new WeakMap(), _artExport=new WeakMap();
 const _pdfScans=new Set(), _artExportMade=[];
 function pdf5Lib(){
   // tried once: a failed load stays failed, and the sheet stays as before
@@ -33724,12 +33726,12 @@ function pdf5Lib(){
   });
   return _pdf5;
 }
-const printIsPdfFile=f=>!!f&&(f.type==='application/pdf'||/\.pdf$/i.test(String(f.name||'')));
-// a picture of a PDF (not a turned copy) whose colours were not changed
+// a picture of a PDF (not a turned copy) whose colours were not changed: its
+// file (only a PDF's picture is given one, by artSrc)
 function printArtPdf(img){
   if(!img||img._artOf) return null;
   const f=_artFileOf.get(img);
-  if(!printIsPdfFile(f)||swapsForIds(new Set([artImgId(img)])).length) return null;
+  if(!f||swapsForIds(new Set([artImgId(img)])).length) return null;
   return f;
 }
 // shown in the Print preview as it prints: a PDF there
@@ -33742,23 +33744,31 @@ function printArtUsable(img,forExport){
 }
 // What to draw for img: on an export, printArtExportImg's; in the preview its
 // CMYK as printed once that is drawn, else img - and the drawing is started,
-// the sheets drawn again when it is done
-function printArtImg(img,forExport){
+// the sheets drawn again when it is done. ro: the draw's options, told which
+// a CMYK PDF went in as (_pdfx as printed, _pdfk pdf.js 3's), for the
+// sheet's colours (printColourScreen)
+function printArtImg(img,forExport,ro){
   if(forExport) return printArtExportImg(img);
-  const u=printArtUsable(img,forExport); if(!u) return img;
+  const v=printArtPrinted(img);
+  if(ro&&printPreviewOn){
+    const f=img&&_artFileOf.get(img._artOf||img);
+    if(f&&_pdfCmyk.get(f)===true){
+      if(v){ ro._pdfx=1; (ro._pdfxIds||(ro._pdfxIds=new Set())).add(artImgId(img)); } else ro._pdfk=1;
+    }
+  }
+  return v||img;
+}
+function printArtPrinted(img){
+  const u=printArtUsable(img,false); if(!u) return null;
   let m=_cmykPrinted.get(img); if(!m){ m={}; _cmykPrinted.set(img,m); }
   const v=m[u.paper];
   if(v) return v;
   if(v===undefined){
     m[u.paper]=null;
-    pdf5Draw(img,u.f,u.paper).then(c=>{ m[u.paper]=c; if(printPreviewOn) pcRedraw(); })
+    pdf5Draw(img,u.f,u.paper).then(pdf5Picture).then(c=>{ m[u.paper]=c; if(printPreviewOn) pcRedraw(); })
       .catch(()=>{ m[u.paper]=false; });
   }
-  return img;
-}
-function printArtIsPrinted(img){
-  const u=printArtUsable(img,false), m=u&&_cmykPrinted.get(img);
-  return !!(m&&m[u.paper]);
+  return null;
 }
 // A PDF's bleed made from its page, as the export makes it: a Content-aware /
 // AI fill goes in as Extend - in the preview, and where an export draws the
@@ -33778,8 +33788,9 @@ function printArtExportImg(img){
 function printExportPixels(){
   const px=m=>m==='mirror'||m==='offset'||m==='scale';
   try{
-    if(pcCtx()==='gt') return px(gtSheet.bleedMode)||!!gtSheet.invertArt;
-    return px(bleedModeNow())||!!(state.bleed&&state.bleed.invert)
+    // either builder: Magic Create lends one without its page being up
+    let gt=false; try{ gt=px(gtSheet.bleedMode)||!!gtSheet.invertArt; }catch(e){}
+    return gt||px(bleedModeNow())||!!(state.bleed&&state.bleed.invert)
       ||(state.designs||[]).some(d=>d.look&&d.look.bleed&&(px(d.look.bleed.mode)||d.look.bleed.invert));
   }catch(e){ return true; }
 }
@@ -33788,7 +33799,9 @@ function printExportPixels(){
 // past which the export goes on with the pictures it has. Let go after.
 async function printArtExportReady(){
   const by=ms=>new Promise(r=>setTimeout(r,ms));
-  const arts=()=>{ const a=[]; ['front','back'].forEach(s=>{ try{ sideArtObjs(s).forEach(([,o])=>{ if(o&&o.img){ artSrc(o); a.push(o); } }); }catch(e){} }); return a; };
+  // both builders' designs: Magic Create lends one without its page being up
+  const arts=()=>{ const a=[]; ['front','back'].forEach(s=>[pcSideArtObjs,gtSideArtObjs].forEach(fn=>{
+    try{ fn(s).forEach(([,o])=>{ if(o&&o.img){ artSrc(o); a.push(o); } }); }catch(e){} })); return a; };
   arts();
   await Promise.race([Promise.allSettled([..._pdfScans]),by(20000)]);
   if(!printExportPixels()) return;
@@ -33820,10 +33833,23 @@ async function pdfRgbAsAdobe(img){
   c.naturalWidth=W; c.naturalHeight=H;
   return c;
 }
+// A drawing kept as a PNG-backed picture rather than a canvas: the browser
+// may let go of its pixels and read them again, so a gift tag order of many
+// CMYK PDFs does not hold a full-size canvas for each
+async function pdf5Picture(c){
+  const blob=await new Promise(r=>c.toBlob(r,'image/png'));
+  c.width=c.height=0;
+  if(!blob) throw new Error('drawing not kept');
+  const u=URL.createObjectURL(blob);
+  try{ const im=await loadImage(u); await im.decode().catch(()=>{}); return im; }
+  finally{ URL.revokeObjectURL(u); }
+}
 // the page drawn at the picture's own size, see-through where it was: one
 // pdf.js 5 worker to each profile, as the CMYK profile is read once a worker
 async function pdf5Draw(img,f,paper){
   const L=await pdf5Lib();
+  const cut=_artCutOf.get(img);
+  if(cut){ const lift=await gtCutLift(f,cut.cutSheet).catch(()=>null); if(lift&&lift.clean) f=lift.clean; }
   const worker=_pdf5Workers[paper]||(_pdf5Workers[paper]=new L.PDFWorker({name:'pigu-cmyk-'+paper}));
   const pdf=await L.getDocument({data:new Uint8Array(await f.arrayBuffer()),worker,
     useWorkerFetch:true,useWasm:true,wasmUrl:PDF5_URL+'wasm/',
@@ -34341,9 +34367,14 @@ function swapSheetPixels(imgData,rects){
   return live.length;
 }
 // A drawn sheet on screen: its swaps, and as the Fiery would print it when
-// the preview is on. ids: the pictures renderSide drew (opts._art). The sheet
-// is read as Adobe RGB where any of its artwork is a PDF, which is what it
-// mostly is then; sRGB otherwise.
+// the preview is on. ids: the pictures renderSide drew (opts._art). Each
+// design is read the way its own file reaches the Fiery, where it was drawn
+// (ro._rects: its box with its bleed, then its trim, so a neighbour's bleed
+// never takes a card's own colours): a picture as sRGB, a PDF's RGB as
+// Adobe RGB, its CMYK as drawn (pdfk, or pdfx as printed - printArtImg).
+// The rest of the sheet - its words, marks, paper - is the sheet's sRGB.
+// With no boxes noted the whole sheet goes the one way its artwork mostly
+// does, as before.
 function printColourScreen(canvas,ro,side){
   // the swaps are made as the sheet is drawn (renderSide, gtPutArt): here, the
   // print look - none while Hold to see original is held
@@ -34357,9 +34388,31 @@ function printColourScreen(canvas,ro,side){
     const n=canvas.width*canvas.height, d=id.data, rgb=new Uint8Array(n*3);
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ rgb[j]=d[i]; rgb[j+1]=d[i+1]; rgb[j+2]=d[i+2]; }
     const arts=sideArtObjs(side).filter(([,o])=>o&&o.img), srcs=arts.map(([,o])=>artSrc(o));
-    const ks=arts.filter((_,i)=>srcs[i]==='pdfk');
-    const src=ks.length?(ks.every(([,o])=>printArtIsPrinted(o.img))?'pdfx':'pdfk'):srcs.includes('pdf')?'pdf':'img';
-    const p=cms.proof(rgb,n,src,printProofGamma());
+    const g=printProofGamma(), W=canvas.width, H=canvas.height;
+    const rects=(ro&&ro._rects||[]).filter(R=>R&&R.id&&!R.placed);
+    let src;
+    if(rects.length) src='img';
+    else{
+      // its CMYK PDFs as drawn: every one as printed (printArtImg), or not
+      const ks=srcs.includes('pdfk'), x=ro&&ro._pdfx&&!ro._pdfk;
+      src=ks?(x?'pdfx':'pdfk'):srcs.includes('pdf')?'pdf':'img';
+    }
+    const p=cms.proof(rgb,n,src,g);
+    if(rects.length){
+      const srcOf=new Map(arts.map(([,o],i)=>[artImgId(o.img),srcs[i]]));
+      const own=R=>{ const s=srcOf.get(R.id)||'img'; return s==='pdfk'&&ro._pdfxIds&&ro._pdfxIds.has(R.id)?'pdfx':s; };
+      const redo=(B,s)=>{
+        const x0=Math.max(0,Math.floor(B.x0)), y0=Math.max(0,Math.floor(B.y0));
+        const x1=Math.min(W,Math.ceil(B.x1)), y1=Math.min(H,Math.ceil(B.y1));
+        const w=x1-x0, h=y1-y0; if(w<=0||h<=0) return;
+        const sub=new Uint8Array(w*h*3);
+        for(let y=0;y<h;y++) sub.set(rgb.subarray(((y0+y)*W+x0)*3,((y0+y)*W+x1)*3),y*w*3);
+        const q=cms.proof(sub,w*h,s,g);
+        for(let y=0;y<h;y++) p.set(q.subarray(y*w*3,(y+1)*w*3),((y0+y)*W+x0)*3);
+      };
+      rects.forEach(R=>{ const s=own(R); if(s!==src) redo(R,s); });
+      rects.forEach(R=>{ const s=own(R); if(s!==src&&R.t) redo(R.t,s); });
+    }
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ d[i]=p[j]; d[i+1]=p[j+1]; d[i+2]=p[j+2]; }
     printTunePixels(d);
   }
@@ -34465,6 +34518,10 @@ async function pdfSwapColours(bytes,swaps){
 // the artwork a side prints, as [key, design or final]
 function sideArtObjs(side){
   if(pcCtx()==='gt') return gtSideArtObjs(side);
+  return pcSideArtObjs(side);
+}
+// the Custom Print Template's, whichever page is up
+function pcSideArtObjs(side){
   const want=[];
   if(side==='front'&&usingPreset()) state.designs.forEach(d=>{
     if(d.img&&Number(d.qty)>0) want.push(['d:'+d.id,d]);
@@ -34497,6 +34554,10 @@ function gtSideArtObjs(side){
     if(!o){ o={img}; _gtArtObjs.set(img,o); }
     o.name=String(d.name||d.label||String(file).split('/').pop()||'Design');
     o.file={name:String(file),type:gtIsPdfFile(file)?'application/pdf':''};
+    // the PDF itself, for its colours (artSrc); a front is placed cleaned of
+    // its cut line (gtVectorSources), so it is drawn so too (pdf5Draw)
+    o.blob=gtIsPdfFile(file)&&gtAssets.get(file)||null;
+    o.gtCut=side==='back'?null:{cutSheet:!!d.cutSheet};
     out.push([key,o]);
   });
   return out;
@@ -46029,7 +46090,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // a PDF drawn as its page prints (printArtImg), its bleed made as the
   // export makes it (printBleedMode); a fill is made from the file's own pixels
   const gx=!gtPcRo||gtPcRo.forExport, bmP=printBleedMode(img,gx,gtSheet.bleedMode);
-  const pimg=bmP==='content'||bmP==='ai'?img:printArtImg(img,gx);
+  const pimg=bmP==='content'||bmP==='ai'?img:printArtImg(img,gx,gtPcRo);
   gtDrawArt(ctx,pimg,r.x,r.y,r.w,r.h,g,sc,bmP,turn?key+'@t'+turn:key,gap);
   // a pixel short of the trim, so the ring overlaps the placed page rather
   // than leaving a hairline of paper between them
@@ -47047,8 +47108,9 @@ function gtDraw(){
   // the print look (the swaps are already made, in gtRenderPage), and the check
   if(pcCtx()==='gt'){
     const gc=document.getElementById('gtCanvas'), gb=document.getElementById('gtCanvasBack');
-    try{ printColourScreen(gc,{_art:gc._pcRo&&gc._pcRo._art,_rects:null},main); }catch(e){}
-    if(both) try{ printColourScreen(gb,{_art:gb._pcRo&&gb._pcRo._art,_rects:null},'back'); }catch(e){}
+    const roOf=c=>{ const r=c._pcRo||{}; return {_art:r._art,_rects:r._rects||null,_pdfx:r._pdfx,_pdfk:r._pdfk,_pdfxIds:r._pdfxIds}; };
+    try{ printColourScreen(gc,roOf(gc),main); }catch(e){}
+    if(both) try{ printColourScreen(gb,roOf(gb),'back'); }catch(e){}
     printColourCheckSoon();
   }
   // on Both, the sheet being worked on is the one outlined
@@ -52517,7 +52579,7 @@ function mtxMul(m,n){
 }
 async function gtBuildPdf(count,render,sources){
   // every PDF's bleed pixels drawn as its page prints, let go once written
-  try{ await printArtExportReady(); return await gtBuildPdfNow(count,render,sources); }
+  try{ await gtHydrateWait(); await printArtExportReady(); return await gtBuildPdfNow(count,render,sources); }
   finally{ printArtExportDone(); }
 }
 async function gtBuildPdfNow(count,render,sources){
