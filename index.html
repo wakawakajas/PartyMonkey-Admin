@@ -41227,7 +41227,7 @@ const HELP=[
   {on:'sheet',t:'Same Design in Own Rows',k:'neat rows together band group keep designs same design own rows page',
    h:'Rearrange → Pack: tick <b>Same Design in Own Rows</b>. Each design gets rows of its own, one under another; a design with more than fits runs on to the next sheet. On each line you can then set <b>SHEET</b> (which sheet it starts on) or tick <b>Fill the gaps</b>.',find:'Same Design in Own Rows'},
   {on:'sheet',t:'Fill the gaps',k:'fill gaps space leftover room',
-   h:'With Same Design in Own Rows on: tick <b>Fill the gaps</b> on a line and its tags are nested into the room the other rows leave. Typing a SHEET turns it off.',find:'Fill the gaps'},
+   h:'With Same Design in Own Rows on: tick <b>Fill the gaps</b> on a line and its tags are nested into the room the other rows leave, biggest first, tried several ways to fit the most. Typing a SHEET turns it off.',find:'Fill the gaps'},
   {on:'sheet',t:'Put a line on a chosen sheet',k:'sheet page number start move',
    h:'With Same Design in Own Rows on: type the sheet number in the line\'s <b>SHEET</b> box.'},
   {on:'sheet',t:'Move tags to another sheet',k:'next sheet before page send move',
@@ -45721,20 +45721,42 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf,cutOf,lead){
     });
   }
   if(pg) pg.y=y;
-  // the gap-fillers: into the room round the bands, sheet by sheet, then sheets of their own
-  let rest=free;
-  pages.forEach(p=>{
-    if(!rest.length) return;
-    const bin=gtNestBin(W,H,'tl',p.cells,soft);
-    rest=rest.filter(it=>{
-      const e=2*(it.bl||0), ex=e+Math.max(0,gx-e), ey=e+Math.max(0,gy-e);
-      const alt=rotate&&Math.abs(it.sz.w-it.sz.h)>0.01?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
-      const pos=bin.add(Math.max(0.1,it.sz.w+ex),Math.max(0.1,it.sz.h+ey),alt,cutOfIt(it));
-      if(!pos) return true;
-      p.items.push({it,pos}); return false;
-    });
-  });
-  let out=pages.map(p=>({items:p.items}));
+  // the gap-fillers: into the room round the bands, sheet by sheet, then sheets of their own.
+  // Put in once, in the order's order and top-left first, they left room a
+  // tag would have gone in - the big ones went last, when only slivers were
+  // left. So the room is filled several ways (the order's order, then biggest
+  // first by height, area, width or longest side, each by every fit rule) and
+  // the way that leaves the least to go onto sheets of its own wins.
+  let out=pages.map(p=>({items:p.items})), rest=free;
+  if(free.length&&pages.length){
+    const boxOf=it=>{ const e=2*(it.bl||0), ex=e+Math.max(0,gx-e), ey=e+Math.max(0,gy-e);
+      return {w:Math.max(0.1,it.sz.w+ex),h:Math.max(0.1,it.sz.h+ey),
+        alt:rotate&&Math.abs(it.sz.w-it.sz.h)>0.01?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null}; };
+    const area=list=>list.reduce((t,it)=>t+it.sz.w*it.sz.h,0);
+    const sorts=[null,
+      (a,b)=>b.sz.h-a.sz.h||b.sz.w-a.sz.w||a.i-b.i,
+      (a,b)=>b.sz.w*b.sz.h-a.sz.w*a.sz.h||b.sz.h-a.sz.h||a.i-b.i,
+      (a,b)=>b.sz.w-a.sz.w||b.sz.h-a.sz.h||a.i-b.i,
+      (a,b)=>Math.max(b.sz.w,b.sz.h)-Math.max(a.sz.w,a.sz.h)||b.sz.h-a.sz.h||a.i-b.i];
+    let best=null;
+    sorts.forEach(cmp=>Object.keys(GT_NEST_SCORE).forEach(mode=>{
+      if(best&&!best.left.length) return;          // everything went in: nothing to beat
+      let left=cmp?free.slice().sort(cmp):free.slice();
+      const put=pages.map(p=>{
+        if(!left.length) return [];
+        const bin=gtNestBin(W,H,mode,p.cells,soft), got=[];
+        left=left.filter(it=>{ const bx=boxOf(it);
+          const pos=bin.add(bx.w,bx.h,bx.alt,cutOfIt(it));
+          if(!pos) return true;
+          got.push({it,pos}); return false; });
+        return got;
+      });
+      const l=area(left);
+      if(!best||l<best.l-1e-6) best={put,left,l};
+    }));
+    out=pages.map((p,n)=>({items:p.items.concat(best.put[n])}));
+    rest=best.left;
+  }
   if(rest.length){ const r=fill(rest); out=out.concat(r.pages); tooBig+=r.tooBig; }
   if(!out.length) out=[{items:[]}];
   let f=0; out[out.length-1].items.forEach(({it})=>{ f+=it.sz.w*it.sz.h; });
