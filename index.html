@@ -34221,6 +34221,7 @@ const printLookKeys=()=>[PRINT_WARM_KEY,PRINT_BACK_WARM_KEY,PRINT_HSL_KEY,PRINT_
 function printLookShared(){ const o={}; printLookKeys().forEach(k=>{ try{ const v=localStorage.getItem(k); if(v!==null) o[k]=v; }catch(e){} }); return o; }
 function printLookDraftOn(){
   try{ if(!_printLineLook||!mcWinItem) return false;
+    /* the shared print sheet laid in the builder is not the line's */ if(typeof mcLaidShared!=='undefined'&&mcLaidShared) return false;
     if(typeof pcCtx==='function'&&pcCtx()==='gt') return false; /* a gift tag sheet is shared */ const it=mcItem(mcWinItem); return !!it&&it.tile!=='giftTag'; }catch(e){ return false; }
 }
 function printLookSrc(){
@@ -60356,7 +60357,17 @@ async function mcLoadItems(){
     else el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not read this batch.</p>';
     return;
   }
-  mcItems=data||[];
+  // a line open in its window keeps the object its panel holds, untouched;
+  // the others take the fresh row into the object already held, as the
+  // realtime handler does - a replaced one was edited from a stale copy
+  if(mcWinItem){
+    const held=new Map(mcItems.map(x=>[String(x.id),x]));
+    mcItems=(data||[]).map(r=>{
+      const h=held.get(String(r.id)); if(!h) return r;
+      if(String(r.id)!==String(mcWinItem)) Object.assign(h,r);
+      return h;
+    });
+  }else mcItems=data||[];
   mcRenderItems();
   mcSyncBatchButtons();
 }
@@ -61482,7 +61493,7 @@ async function mcDeleteOrder(orderId){
 // quiet: the question has already been asked somewhere else — Create asks it
 // in its own words before opening a line that is ticked — so it is not asked
 // twice for the one tap.
-async function mcToggleDone(id,quiet){
+async function mcToggleDone(id,quiet,keepMarks){
   const it=mcItem(id); if(!it||!sb) return;
   if(mcBatch&&mcBatch.status!=='open'){
     showMsg(document.getElementById('mcBatchMsg'),'This batch is completed — re-open it first.',false);
@@ -61508,7 +61519,9 @@ async function mcToggleDone(id,quiet){
   // dealt with, and the tick and the marks would be telling two stories. Words
   // typed into the line's own window are the operator's work and are kept —
   // only the marks the summary and Copy File made are cleared.
-  if(!now){
+  // keepMarks: Create on a ticked line takes the tick only - a reprint keeps
+  // the line on its sheet with its design
+  if(!now&&!keepMarks){
     const si=it.sheet_item||{};
     const hand=si.vals&&Object.keys(si.vals).length;
     if(hand&&si.copied){
@@ -61526,7 +61539,7 @@ async function mcToggleDone(id,quiet){
       patch.tile=back; patch.sheet_item=it.sheet_item;
     }
   }
-  const before=(!now&&(wasTile==='sheetPrint'||wasTile==='giftTag'))?{...it,tile:wasTile,sheet_item:wasItem}:null;
+  const before=(!now&&!keepMarks&&(wasTile==='sheetPrint'||wasTile==='giftTag'))?{...it,tile:wasTile,sheet_item:wasItem}:null;
   mcRepaintRow(it);                                   // optimistic
   // asked back: a batch completed by somebody else refuses the write with no
   // error, and the tick looked saved until a reload
@@ -68377,7 +68390,7 @@ async function mcWinOpenRun(id){
       +'OK — take the tick off and open the builder.\n'
       +'Cancel — leave it as it is.\n\n'
       +'On a shared batch this may be somebody else\'s work.')) return;
-    await mcToggleDone(id,true);       // the question was just asked
+    await mcToggleDone(id,true,true);  // the question was just asked
     if(it.status) return;              // it did not save, and said so
   }
   if(mcBatch&&mcBatch.status!=='open'){
@@ -68442,8 +68455,10 @@ async function mcWinOpenRun(id){
     finalList:{front:state.finalList.front,back:state.finalList.back},finalSplit:state.finalSplit,
     template:typeof selectedTemplate!=='undefined'?selectedTemplate:null,
     search:(document.getElementById('templateSearch')||{}).value||''};
+  // a second Create on the line already open keeps its colour draft
+  const reopen=mcWinItem===id;
   mcWinItem=id; mcMarkCur();
-  printLookOpen(it);       // its own colours, a draft until Save to line
+  if(!reopen) printLookOpen(it);       // its own colours, a draft until Save to line
   // A line with no kind yet has no wire to empty the builder for it; opened
   // over a shared print sheet it was shown that sheet with no Save beside it.
   // Emptied here — after the operator's own place is written down above.
@@ -71683,8 +71698,10 @@ async function mcNoteBuilderStock(key,value){
     if(mcSaveChipMode()!=='line') return;
     const it=mcWinItem?mcItem(mcWinItem):null;
     if(!it||it[key]===value) return;
+    const was=it[key];
     it[key]=value;
-    await mcSave(it,{[key]:value});
+    // not saved: put back, so the next commit sees the difference and resends
+    if(!await mcSave(it,{[key]:value})) it[key]=was;
     mcRepaintRow(it);
     mcSyncBatchButtons();
     // and the panel's own copy, where it is on screen, so the two never
@@ -71824,7 +71841,9 @@ async function mcDownloadOne(id){
       return;
     }
     if(sheetSides.length){ for(const sd of sheetSides) await mcMarkExported(it,oneRun,sd,sheetSides); }
-    else await mcMarkExported(it,oneRun);
+    // a per-order line was marked side by side above; marking it whole ticked
+    // it done even where a side's mark had failed
+    else if(t.mode!=='per-order') await mcMarkExported(it,oneRun);
     mcRepaintRow(it);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
