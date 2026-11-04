@@ -13044,10 +13044,15 @@ function drawColourRecord(ctx,sc,side){
   const fitTo=(x)=>{ let fs=2.1; font(fs); const w=ctx.measureText(text).width/sc, room=p.w-x-1.5;
     if(w>room) fs=Math.max(1.25,fs*room/w); font(fs); return fs; };
   // where it was dragged to on the sheet, if it was
-  const pos=printRecordPos('custom');
+  // - kept for this paper size and template, and mirrored on the back as the
+  // cards are, so it stays in the same margin of the same card
+  const key=printRecordKey('custom');
+  const pos=printRecordPos(key);
   if(pos){
     const at=printRecordClamp(pos,p.w,p.h);
-    fitTo(at.x); recPut(ctx,sc,text,at.x,at.y,'custom');
+    fitTo(at.x);
+    if(side==='back'){ const wm=ctx.measureText(text).width/sc; recPut(ctx,sc,text,Math.max(0.5,p.w-at.x-wm),at.y,key,at,true); }
+    else recPut(ctx,sc,text,at.x,at.y,key,at);
     ctx.restore(); return;
   }
   const x=Math.max(2,minX+1.5), fs=fitTo(x);
@@ -13069,6 +13074,14 @@ function drawColourRecord(ctx,sc,side){
 }
 // Where the details line was dragged to, kept on this computer for each
 // builder (both sides take it); none is the place worked out for it
+// one place per builder, paper size and template (gift tag: cutting file):
+// one kept for all of them printed across a card of the next job's layout
+function printRecordKey(b){
+  try{
+    if(b==='gt') return 'gt|'+Math.round(gtSheet.paperW)+'x'+Math.round(gtSheet.paperH)+'|'+(gtSheet.layoutFile||'');
+    const p=paperMm(); return 'custom|'+Math.round(p.w)+'x'+Math.round(p.h)+'|'+(typeof selectedTemplate!=='undefined'&&selectedTemplate||'');
+  }catch(e){ return b; }
+}
 function printRecordPos(k){
   try{ const v=JSON.parse(localStorage.getItem('pigu.colourRecordPos.'+k)||'null');
     return v&&isFinite(v.x)&&isFinite(v.y)?v:null; }catch(e){ return null; }
@@ -13080,7 +13093,8 @@ function printRecordPosSet(k,v){
 const printRecordClamp=(v,w,h)=>({x:Math.max(0.5,Math.min(w-5,v.x)),y:Math.max(2,Math.min(h-0.5,v.y))});
 // The line written, and where it is on its canvas kept on the canvas, so a
 // press on it can pick it up (printRecordDrag). org: its place in mm.
-function recPut(ctx,sc,text,xMm,yMm,key,org){
+// mirror: drawn on the back at the front's place mirrored (org is the front's)
+function recPut(ctx,sc,text,xMm,yMm,key,org,mirror){
   ctx.fillText(text,xMm*sc,yMm*sc);
   try{
     const m=ctx.getTransform(), w=ctx.measureText(text).width, fsPx=parseFloat(ctx.font)||10;
@@ -13089,29 +13103,31 @@ function recPut(ctx,sc,text,xMm,yMm,key,org){
       .map(([a,b])=>[m.a*a+m.c*b+m.e,m.b*a+m.d*b+m.f]);
     const xs=pts.map(q=>q[0]), ys=pts.map(q=>q[1]);
     ctx.canvas._rec={key,x0:Math.min(...xs),x1:Math.max(...xs),y0:Math.min(...ys),y1:Math.max(...ys),
-      ppm:Math.hypot(m.a,m.b)*sc,org:org||{x:xMm,y:yMm}};
+      ppm:Math.hypot(m.a,m.b)*sc,org:org||{x:xMm,y:yMm},mirror:!!mirror};
   }catch(e){}
 }
 // Pressed on the details line on the sheet on screen: it moves with the
 // pointer and stays where it is let go, on the sheet and in the file. A
 // double-click puts it back where it is worked out to go.
 (function printRecordDrag(){
+  // the builders' own sheets only: a preview elsewhere is not where it is placed
+  const ON=new Set(['canvasFront','canvasBack','gtCanvas','gtCanvasBack']);
   const hitOf=(cv,e)=>{
-    const R=cv&&cv._rec; if(!R||!printRecordOn()) return null;
+    const R=cv&&ON.has(cv.id)&&cv._rec; if(!R||!printRecordOn()) return null;
     const r=cv.getBoundingClientRect(); if(!r.width) return null;
     const px=(e.clientX-r.left)/r.width*cv.width, py=(e.clientY-r.top)/r.height*cv.height, pad=6;
     return px>=R.x0-pad&&px<=R.x1+pad&&py>=R.y0-pad&&py<=R.y1+pad?R:null;
   };
-  const redraw=k=>{ try{ if(k==='gt') gtDraw(); else drawAll(); }catch(e){} };
+  const redraw=k=>{ try{ if(String(k).startsWith('gt')) gtDraw(); else drawAll(); }catch(e){} };
   document.addEventListener('pointerdown',e=>{
     const cv=e.target; if(!cv||cv.tagName!=='CANVAS') return;
     const R=hitOf(cv,e); if(!R) return;
     e.preventDefault(); e.stopImmediatePropagation();
     const r=cv.getBoundingClientRect(), k=r.width/cv.width;     // screen px per canvas px
-    const start={cx:e.clientX,cy:e.clientY,org:{...R.org},key:R.key,ppm:R.ppm};
+    const start={cx:e.clientX,cy:e.clientY,org:{...R.org},key:R.key,ppm:R.ppm,mirror:R.mirror};
     try{ cv.setPointerCapture(e.pointerId); }catch(err){}
     const mv=ev=>{
-      const dx=(ev.clientX-start.cx)/k/start.ppm, dy=(ev.clientY-start.cy)/k/start.ppm;
+      const dx=(ev.clientX-start.cx)/k/start.ppm*(start.mirror?-1:1), dy=(ev.clientY-start.cy)/k/start.ppm;
       printRecordPosSet(start.key,{x:start.org.x+dx,y:start.org.y+dy});
       redraw(start.key);
     };
@@ -13316,6 +13332,7 @@ function withLook(side,line,fn){
 }
 function renderSide(side,canvas,maxDim,opts){
   opts=opts||{};
+  if(canvas) canvas._rec=null;     // the details line's box is this drawing's, or none
   const p=paperMm();
   // `view` is the piece of the sheet to look at, in mm — the whole of it
   // normally, a window onto one placeholder when the sheet is zoomed. It keeps
@@ -17740,10 +17757,14 @@ let bleedAsked=null;
 let bleedCollect=false;
 function bleedCollecting(fn){ const w=bleedCollect; bleedCollect=true; try{ return fn(); }finally{ bleedCollect=w; } }
 function bleedJob(img,bx,by,mode){
-  let memo=bleedJobMemo.get(img);
-  if(!memo){ memo=new Map(); bleedJobMemo.set(img,memo); }
-  const k=mode+'|'+bx+'|'+by;
-  bleedWant(img,k);
+  // a PDF's export or preview picture is a new canvas each time it is made:
+  // its fill is kept against the PDF itself (and which picture it is of), so
+  // an AI fill is asked for once rather than for every export and paper
+  const own=(img&&img._fillOf)||img, sig=img&&img._fillSig?'|'+img._fillSig:'';
+  let memo=bleedJobMemo.get(own);
+  if(!memo){ memo=new Map(); bleedJobMemo.set(own,memo); }
+  const k=mode+'|'+bx+'|'+by+sig;
+  bleedWant(own,k);
   let job=memo.get(k);
   // an export asks again for a fill that failed before, rather than stopping
   // on the old failure until the page is reloaded - once: a fill that failed
@@ -17755,7 +17776,7 @@ function bleedJob(img,bx,by,mode){
   job={canvas:null,error:null,dropped:false};
   memo.set(k,job);
   job.promise=bleedJobChain=bleedJobChain.then(async()=>{
-    if(!bleedWanted(img,k)){ job.dropped=true; memo.delete(k); return; }
+    if(!bleedWanted(own,k)){ job.dropped=true; memo.delete(k); return; }
     try{
       job.canvas=await bleedFill(img,bx,by,mode,bleedFillMsg);
       bleedFillMsg('✓ Bleed filled'+(mode==='ai'?' by AI.':' from the artwork.'),true,true);
@@ -32382,14 +32403,15 @@ function applyPrintState(meta,name,whole,keepArt){
       }
       // a newer load has started since: this one's list is out of date
       if(artGen!==printArtGen) return;
-      state.designs=(keepLines||[]).concat(out);
+      // the lines as they are now (edited while the saved ones were read), then those
+      state.designs=(keepLines?(state.designs||[]):[]).concat(out);
       state.designsMissing=missing;
       renderDesignLines(); drawAll();
       if(missing.length) showMsg(msgEl,
         `Template loaded — ${missing.length} design(s) not reachable: ${escapeHtml(missing.join(', '))}. `
         +'Choose the NAS folder, or add them with Load design.',false);
     })();
-  }else if(single){
+  }else if(single&&!keepLines){       // adding a sheet keeps the lines that are on it
     state.designs=[];
     renderDesignLines();
     // the WIDTH/HEIGHT the template saved: loading the file fits it to the
@@ -33861,10 +33883,15 @@ function printPreviewShow(){ try{ return localStorage.getItem(PREVIEW_SHOW_KEY)=
 // everything else take this computer's. Gift tag lines are on shared sheets,
 // so they keep this computer's.
 var _printLineLook=null, _printLookOv=null;
+// whether the open line's colours were moved, and whether it had its own:
+// Save to line keeps them only then - otherwise it prints with this computer's
+// as they are on the day, not a copy of them frozen on the line
+var _printLineDirty=false, _printLineHad=false;
 const printLookKeys=()=>[PRINT_WARM_KEY,PRINT_BACK_WARM_KEY,PRINT_HSL_KEY,PRINT_BACK_BRIGHT_KEY];
 function printLookShared(){ const o={}; printLookKeys().forEach(k=>{ try{ const v=localStorage.getItem(k); if(v!==null) o[k]=v; }catch(e){} }); return o; }
 function printLookDraftOn(){
-  try{ if(!_printLineLook||!mcWinItem) return false; const it=mcItem(mcWinItem); return !!it&&it.tile!=='giftTag'; }catch(e){ return false; }
+  try{ if(!_printLineLook||!mcWinItem) return false;
+    if(typeof pcCtx==='function'&&pcCtx()==='gt') return false; /* a gift tag sheet is shared */ const it=mcItem(mcWinItem); return !!it&&it.tile!=='giftTag'; }catch(e){ return false; }
 }
 function printLookSrc(){
   if(_printLookOv===false) return null;
@@ -33873,14 +33900,17 @@ function printLookSrc(){
 }
 const printLookStore={
   getItem:k=>{ const S=printLookSrc(); if(S) return k in S?S[k]:null; return localStorage.getItem(k); },
-  setItem:(k,v)=>{ const S=printLookSrc(); if(S){ S[k]=String(v); return; } localStorage.setItem(k,v); },
-  removeItem:k=>{ const S=printLookSrc(); if(S){ delete S[k]; return; } localStorage.removeItem(k); }
+  setItem:(k,v)=>{ const S=printLookSrc(); if(S){ S[k]=String(v); if(S===_printLineLook) _printLineDirty=true; return; } localStorage.setItem(k,v); },
+  removeItem:k=>{ const S=printLookSrc(); if(S){ delete S[k]; if(S===_printLineLook) _printLineDirty=true; return; } localStorage.removeItem(k); }
 };
 // the line's colours for a window just opened on it, or none when it shuts
 function printLookOpen(it){
   const saved=it&&it.design&&it.design.printLook;
   _printLineLook=saved&&typeof saved==='object'?{...saved}:printLookShared();
+  _printLineHad=!!(saved&&typeof saved==='object'); _printLineDirty=false;
 }
+// what Save to line keeps: the line's colours when they were moved or it had its own
+const printLookToKeep=()=>printLookDraftOn()&&(_printLineDirty||_printLineHad)?{..._printLineLook}:null;
 const PRINT_WARM_KEY='pigu.printWarm';
 var _printOv=null;                // a test sheet's version: {warm, bright} in place of the kept
 // Printer warmth and Brightness are kept per side (4 Nov): the front in the
@@ -33896,11 +33926,15 @@ function printSideDo(side,fn){ const w=_printSideNow; _printSideNow=side||null; 
 // front's values. None of the three wrapped exports calls another, so the
 // queue cannot wait on itself.
 let _printSideQ=Promise.resolve();
-async function printSideDoAsync(side,fn){
+// look: the colours this export prints with (a line's own object, or false for
+// this computer's), set only once its turn has come - set before, an export
+// still running took them for the rest of its pages
+async function printSideDoAsync(side,fn,look){
   const prev=_printSideQ; let rel; _printSideQ=new Promise(r=>rel=r);
   await prev;
-  const w=_printSideNow; _printSideNow=side||null;
-  try{ return await fn(); }finally{ _printSideNow=w; rel(); }
+  const w=_printSideNow, lw=_printLookOv; _printSideNow=side||null;
+  if(look!==undefined) _printLookOv=look;
+  try{ return await fn(); }finally{ _printSideNow=w; _printLookOv=lw; rel(); }
 }
 function printWarmSet(side,v){ try{ printLookStore.setItem(side==='back'?PRINT_BACK_WARM_KEY:PRINT_WARM_KEY,String(v)); }catch(e){} }
 function printBrightSet(side,v){
@@ -34547,6 +34581,7 @@ function printArtUsable(img,forExport){
 function printArtImg(img,forExport,ro){
   if(forExport) return printArtExportImg(img);
   const v=(printPreviewShow()==='file'?null:printArtPrinted(img))||printArtRgbPrinted(img);
+  if(v&&typeof v==='object'&&!v._fillOf){ try{ v._fillOf=img; v._fillSig='p'; }catch(e){} }   // its fill kept (bleedJob)
   if(ro&&printPreviewOn){
     const f=img&&_artFileOf.get(img._artOf||img);
     if(f&&_pdfCmyk.get(f)===true){
@@ -34646,7 +34681,13 @@ async function printArtExportReady(){
     // an RGB PDF's page is matched (pdfMatchColours), so its band is its own
     // numbers, matched with the sheet; unmatched, read as the Adobe RGB it is
     if(!cm&&(PDF_AS_CMYK||printMatchPaper())) continue;
-    await Promise.race([(cm?pdf5Draw(img,f,'export'):pdfRgbAsAdobe(img)).then(c=>{ e.c=c; }).catch(()=>{}),by(left)]);
+    // a picture that comes after the wait is not taken: the fill pass went on
+    // without it, and one landing before the real pass printed a fill nobody waited for.
+    // Tagged with the PDF it is of (_fillOf), so its filled bleed is made once
+    // and kept, not made again - AI fill called again - for every export
+    let late=false;
+    await Promise.race([(cm?pdf5Draw(img,f,'export'):pdfRgbAsAdobe(img)).then(c=>{ if(late||!c) return; c._fillOf=img; c._fillSig='x'; e.c=c; }).catch(()=>{}),by(left)]);
+    late=true;
   }
 }
 // the export pictures let go once the file is written (gtBuildPdf)
@@ -35547,6 +35588,19 @@ async function pdfConvertCmyk(bytes,mp,warm){
   // design came out exactly as before whatever the sliders said.
   const lookK=!!look&&printLookShapeOn(printHsl());
   const w=lookK?0:(Number(warm)||0);
+  // Black ink alone stays black ink alone: its grey taken through the look
+  // (a grey stays a grey) and back to black ink at that share (kt) - through
+  // the colour path a K-only text or grey came out as four-colour black
+  const kMemo=new Map();
+  const kOnly=k=>{
+    let o=kMemo.get(k); if(o!==undefined) return o;
+    const g=fromGracol(new Uint8Array([0,0,0,k]),1);
+    const v=Math.round((g[0]+g[1]+g[2])/3);
+    const gl=printHslApply(new Uint8Array([v,v,v]),1);
+    const lv=Math.round((gl[0]+gl[1]+gl[2])/3);
+    o=kt?kt[lv]:Math.max(0,Math.min(255,Math.round(k*(255-lv)/Math.max(1,255-v))));
+    kMemo.set(k,o); return o;
+  };
   const cmykLook=(c,n)=>{
     const out=new Uint8Array(n*4), step=1<<20;
     for(let i0=0;i0<n;i0+=step){
@@ -35554,6 +35608,7 @@ async function pdfConvertCmyk(bytes,mp,warm){
       const rgb=fromGracol(c.subarray(i0*4,(i0+m)*4),m);
       out.set(toK(rgb,m),i0*4);
     }
+    for(let i=0;i<n*4;i+=4) if(!c[i]&&!c[i+1]&&!c[i+2]){ out[i]=out[i+1]=out[i+2]=0; out[i+3]=kOnly(c[i+3]); }
     return out;
   };
   const N='(-?(?:\\d+\\.?\\d*|\\.\\d+))';
@@ -35599,13 +35654,23 @@ async function pdfConvertCmyk(bytes,mp,warm){
   // a picture: its RGB (or grey) as CMYK, or null to leave it as it is
   const reimage=async(v,src,{isName})=>{
     const d=v.dict, R=x=>src.resolve(x);
-    if(R(d.get('ImageMask'))||d.get('Decode')!==undefined) return null;
+    if(R(d.get('ImageMask'))) return null;
+    // a Decode of [1 0 1 0 1 0 1 0] is an inverted (Adobe) CMYK picture, read
+    // the right way up below; any other Decode is left as it is
+    let inv=false;
+    if(d.get('Decode')!==undefined){
+      const a=R(d.get('Decode')), arr=Array.isArray(a)?a.map(x=>Number(R(x))):null;
+      if(arr&&arr.length===8&&arr.every((x,i)=>x===(i%2?0:1))) inv=true; else return null;
+    }
     if(Number(R(d.get('BitsPerComponent')))!==8) return null;
     const W=Number(R(d.get('Width'))), H=Number(R(d.get('Height')));
     if(!(W>0&&H>0)||W*H>40e6) return null;
     const cs=R(d.get('ColorSpace'));
     let n=0, icc=null;
-    if((w||lookK)&&isName(cs,'DeviceCMYK')){
+    // a CMYK picture tagged with its own profile is taken as its numbers too
+    const iccN=Array.isArray(cs)&&isName(R(cs[0]),'ICCBased')?Number((R(cs[1])||{}).dict&&R(R(cs[1]).dict.get('N'))):0;
+    if(inv&&!(isName(cs,'DeviceCMYK')||iccN===4)) return null;
+    if((w||lookK)&&(isName(cs,'DeviceCMYK')||iccN===4)){
       const f0=R(d.get('Filter')), fs0=f0==null?[]:Array.isArray(f0)?f0.map(R):[f0];
       let o=null;
       // a CMYK JPEG read as its ink numbers (it was left as it was, so not
@@ -35617,6 +35682,7 @@ async function pdfConvertCmyk(bytes,mp,warm){
         if(raw&&raw.length>=W*H*4) o=raw.slice(0,W*H*4);
       }
       if(!o) return null;
+      if(inv) for(let i=0;i<o.length;i++) o[i]=255-o[i];
       if(lookK) o=cmykLook(o,W*H);
       else for(let i=2;i<o.length;i+=4) o[i]=printWarmY(o[i],w);
       hits++;
@@ -37904,8 +37970,8 @@ function printVecTaker(forms,place){
 // buttons, Magic Create and anything added later come through here, so what a
 // PDF out of this tool is made of is decided in one place.
 // made with that side's Printer warmth and Brightness (printSideDo)
-async function renderSidePdfAll(side,pages,onPage,from){
-  return await printSideDoAsync(side,()=>renderSidePdfAllRun(side,pages,onPage,from));
+async function renderSidePdfAll(side,pages,onPage,from,look){
+  return await printSideDoAsync(side,()=>renderSidePdfAllRun(side,pages,onPage,from),look);
 }
 async function renderSidePdfAllRun(side,pages,onPage,from){
   const p=paperMm();
@@ -37985,6 +38051,17 @@ async function exportSide(side,msgId,print){
 async function cptExportWait(){
   for(let t=0;cptExportBusy&&t<2400;t++) await new Promise(r=>setTimeout(r,250));
 }
+// and the keyboard with it: undo, redo, duplicate, paste, delete and nudges
+// changed the sheet as surely as a click did, half way through the file
+document.addEventListener('keydown',e=>{
+  if(!cptExportBusy||currentScreen!=='tool-custom') return;
+  const t=e.target;
+  if(t&&(/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)||t.isContentEditable)&&!(document.getElementById('appScreen')||{contains:()=>false}).contains(t)) return;
+  if(e.ctrlKey||e.metaKey||e.key==='Delete'||e.key==='Backspace'||/^Arrow/.test(e.key)){ e.preventDefault(); e.stopImmediatePropagation(); }
+},true);
+document.addEventListener('paste',e=>{
+  if(cptExportBusy&&currentScreen==='tool-custom'){ e.preventDefault(); e.stopImmediatePropagation(); }
+},true);
 async function exportSideRun(side,out,print){
   // Whatever the name is built from is asked for before anything is rendered.
   // A file called 250820-01__Front.pdf tells the floor nothing, and by the
@@ -48270,6 +48347,7 @@ let gtPcRo=null;                    // the tags' boxes, while a page is drawn
 let gtPass=null;                    // 'art', 'words', or both (null): gtDrawTag
 function gtRenderPage(canvas,page,maxDim,forExport,view,vec,side){
   const S=gtSheet;
+  if(canvas) canvas._rec=null;     // the details line's box is this drawing's, or none
   const pcRo={_art:new Set(),_rects:[],swap:!!forExport||!printShowBefore,forExport:!!forExport}; canvas._pcRo=pcRo;
   const back=side==='back';
   // a placeholder where it stands on the side being drawn - the back moved by
@@ -48493,13 +48571,15 @@ function gtDrawColourRecord(ctx,sc,slots,side){
     return {x:lo,fs};
   };
   // where it was dragged to on the sheet, if it was (printRecordDrag)
-  const pos=printRecordPos('gt');
+  const key=printRecordKey('gt');
+  const pos=printRecordPos(key);
   if(pos){
     const at=printRecordClamp(pos,S.paperW,S.paperH);
     let fs=2.1; font(fs);
     const w=ctx.measureText(text).width/sc, room=S.paperW-at.x-1.5;
     if(w>room){ fs=Math.max(1.25,fs*room/w); font(fs); }
-    recPut(ctx,sc,text,at.x,at.y,'gt');
+    if(side==='back'){ const wm=ctx.measureText(text).width/sc; recPut(ctx,sc,text,Math.max(0.5,S.paperW-at.x-wm),at.y,key,at,true); }
+    else recPut(ctx,sc,text,at.x,at.y,key,at);
     ctx.restore(); return;
   }
   const above=minY-clear, below=maxY+clear+2.1;
@@ -54462,7 +54542,9 @@ async function gtFillBleeds(pages,plan,withBack){
   // A PDF placed with its bleed made from its page needs no fill: drawn with
   // the placing, it asks for none - an AI fill that failed (or ran minutes)
   // stopped an export that would never print it
-  const src=await gtVectorSources('front'), srcB=withBack?await gtVectorSources('back'):null;
+  let src=null, srcB=null;
+  try{ src=await gtVectorSources('front'); srcB=withBack?await gtVectorSources('back'):null; }
+  catch(e){ printArtExportRelease(); throw e; }      // the hold let go, as below
   const vecOf=s=>s&&s.size?gtVecTaker(s,[]):null;
   const asked=new Set(); bleedAsked=asked;
   try{
@@ -54579,7 +54661,8 @@ async function gtVectorSources(side){
 // its own shape first. The front takes each sheet's cut file on the same pass
 // (cuts, when given); the back has none — the blade follows the front.
 async function gtBuildSide(side,pages,plan,cuts){
-  return await printSideDoAsync(side,()=>gtBuildSideRun(side,pages,plan,cuts));
+  // a gift tag sheet is shared: this computer's colours, never a line's draft
+  return await printSideDoAsync(side,()=>gtBuildSideRun(side,pages,plan,cuts),false);
 }
 async function gtBuildSideRun(side,pages,plan,cuts){
   const S=gtSheet, back=side==='back';
@@ -69039,7 +69122,7 @@ function mcCustomWire(it){
     // it committed this line already.
     if(mcWinItem!==it.id) return;
     it.design=mcLineSnapshot();
-    if(printLookDraftOn()) it.design.printLook={..._printLineLook};   // its own colours, kept
+    { const lk=printLookToKeep(); if(lk){ it.design.printLook=lk; _printLineHad=true; _printLineDirty=false; } }   // its own colours, when it has any
     // and what the builder was set to, where the line has not been told
     // itself: paper and GSM are two thirds of the file name, and a line
     // missing them is a line whose PDF button stays greyed out with the
@@ -71153,8 +71236,9 @@ async function mcRenderLine(it,side){
   // no time to start reading a directory.
   const pcWas=pcMode, lineWas=pcLineNow, lookWas=_printLookOv;
   pcMode=mcPcOf(it); pcLineNow=it.id;
-  // the colours saved on the line, or this computer's - never an open draft
-  _printLookOv=(it.design&&it.design.printLook&&typeof it.design.printLook==='object')?{...it.design.printLook}:false;
+  // the colours saved on the line, or this computer's - never an open draft -
+  // handed to the export to take when its turn comes
+  const lineLook=(it.design&&it.design.printLook&&typeof it.design.printLook==='object')?{...it.design.printLook}:false;
   try{
     state.designsMissing=[];          // the last line's are not this one's
     applyPrintState(it.design);
@@ -71186,7 +71270,7 @@ async function mcRenderLine(it,side){
     // every sheet this line comes to, not the first one. A per-order sheet is
     // one page until the design list outgrows it — which is exactly what adding
     // extras does — and the pages past the first were being left off the PDF.
-    return await renderSidePdfAll(side,Math.max(1,sheetCount()));
+    return await renderSidePdfAll(side,Math.max(1,sheetCount()),undefined,undefined,lineLook);
   }finally{ pcMode=pcWas; pcLineNow=lineWas; _printLookOv=lookWas; }
 }
 // This line, on its own, now. A per-order tile has always made one file out of
@@ -71809,7 +71893,9 @@ function mcMergeSameKeyOf(it){
   // a back of several pages is drawn as its first page behind every card on a
   // merged sheet, so a line carrying one prints as its own file instead
   if(it.art&&Array.isArray(it.art.backSplit)&&it.art.backSplit.length>1) return '';
-  return [sig,n(it.paper_type),n(it.gsm),bkHow,String(bk)].join('|');
+  // and printed with the same colours: a line's own (design.printLook) is one sheet's
+  const lk=d.printLook&&typeof d.printLook==='object'?JSON.stringify(Object.keys(d.printLook).sort().map(k=>[k,d.printLook[k]])):'';
+  return [sig,n(it.paper_type),n(it.gsm),bkHow,String(bk),lk].join('|');
 }
 // The groups worth merging: two or more lines on one key. A line alone on its
 // key is left to come out as its own file, the way it always did.
@@ -71937,7 +72023,9 @@ async function mcMergeCustomBundle(e){
   try{
     if(e.side==='back'&&!(state.final.back&&state.final.back.img))
       throw new Error('the back artwork could not be loaded');
-    return await renderSidePdfAll(e.side||'front',pages);
+    // the lines merged share their colours (their merge key holds them)
+    const lk=e.set&&e.set[0]&&e.set[0].design&&e.set[0].design.printLook;
+    return await renderSidePdfAll(e.side||'front',pages,undefined,undefined,lk&&typeof lk==='object'?{...lk}:false);
   }
   finally{ pcMode=pcWas; }
 }
@@ -72319,7 +72407,7 @@ function mcGiftBundle(lines,mode,side,guest,fin){
   return mcGtTurn(()=>mcGtOnFinish(mode,fin,()=>mcGiftBundleRun(lines,mode,side,guest)));
 }
 async function mcGiftBundleRun(lines,mode,side,guest){
-  return await printSideDoAsync(side,()=>mcGiftBundleSide(lines,mode,side,guest));
+  return await printSideDoAsync(side,()=>mcGiftBundleSide(lines,mode,side,guest),false);
 }
 async function mcGiftBundleSide(lines,mode,side,guest){
   mcPendingCuts=null;
@@ -72419,8 +72507,11 @@ async function mcGiftBundleSide(lines,mode,side,guest){
     gtNoThaw();
     unMerge();
     gtOrder=keep; gtJobBack=jb; gtNestHand=hand; gtNestCache=null;
-    // back onto the sheet this started on, whatever the last page was cut to
-    if(wasShape&&gtSheet.layoutFile!==wasShape) await gtShowShape(wasShape);
+    // back onto the sheet this started on, whatever the last page was cut to -
+    // a grid sheet ('') too, and its boxes and placeholders with it
+    if(gtSheet.layoutFile!==wasShape){
+      try{ await gtShowShape(wasShape); gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw(); }catch(e){}
+    }
   }
 }
 
@@ -73243,7 +73334,7 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     // another line opened during the upload: the builder is no longer this one's
     if(mcWinItem!==it.id){ undoLine(); mcSaveChipSaid('Another line was opened — save this one again.',false); return; }
     it.design=mcLineSnapshot();
-    if(printLookDraftOn()) it.design.printLook={..._printLineLook};   // its own colours, kept
+    { const lk=printLookToKeep(); if(lk){ it.design.printLook=lk; _printLineHad=true; _printLineDirty=false; } }   // its own colours, when it has any
     it.paper_type=state.paperType||it.paper_type||'';
     it.gsm=state.gsm||it.gsm||'';
     const ok=await mcSave(it,{design:it.design,paper_type:it.paper_type,
