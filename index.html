@@ -42150,7 +42150,7 @@ const HELP=[
   {on:'sheet custom',t:'Colours on a Magic Create line',k:'magic create line colours test sheet use warmth brightness hue saturation save to line draft',h:'With a Magic Create line open, Printer warmth, Brightness, Hue/Saturation and a test sheet\'s <b>Use</b> change <b>that line only</b>, and only the side on show (<b>Front</b> or <b>Back</b>): each side keeps its own (Print preview\'s title says <b>this line only</b>). <b>Save to line</b> keeps them on the line and its file prints with them; close the line without saving and they are thrown away. Lines with none saved, shared sheets and gift tag lines print with this computer\'s colours.'},
   {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is the side on show only too: each side keeps its own. A PDF design is made exactly as the export makes it (its own CMYK, greys as black ink), so the number picked prints the same in the real file.'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
-   h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
+   h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them. A front or back picture that cannot be read stops it, by name, rather than printing a blank tag; a sheet whose cut file cannot be made is named in the result.',sel:'#gtPrintBtn'},
   {on:'sheet',t:'Saved sheets',k:'save keep later open job',h:'Left panel → <b>Saved sheets</b>: keep this sheet for later, or open one.',find:'Saved sheets'},
 
   // design editor
@@ -43126,6 +43126,22 @@ function gtBackUnread(){
     if(bk&&!(bk.img&&bk.img.naturalWidth)) bad.add(bk.file.split('/').pop()||bk.file); });
   return [...bad];
 }
+// the same for the front: a picture not read printed as a blank tag and its
+// line was marked done. A design with no file (words only) is not asked for.
+// Stickers of a broken-up sheet and words-cut copies are not on the order
+// itself, so gtHydrateWait does not draw them: they are drawn here first.
+async function gtFrontUnread(){
+  await gtHydrateWait();
+  const want=new Map();
+  gtQueue().forEach(l=>{ const d=gtDesign(l.designId); if(d&&d.file) want.set(d.id,d); });
+  await gtPool([...want.keys()].filter(id=>!gtImgs.has(id)&&!gtImgFailed.has(id)),4,gtImgLoad);
+  const bad=new Set();
+  want.forEach(d=>{ const img=gtImgs.get(d.id);
+    if(!(img&&img.naturalWidth)) bad.add(d.file.split('/').pop()||d.file); });
+  return [...bad];
+}
+const gtFrontUnreadMsg=bad=>'the picture '+bad.join(', ')+' could not be read - '
+  +'upload it again or take its line off, nothing was printed.';
 const gtBackUnreadMsg=bad=>'the back picture '+bad.join(', ')+' could not be read — '
   +'upload it again or take it off, nothing was printed.';
 // Shown on Festive and Custom only. A sticker page never stays on the back.
@@ -49187,14 +49203,22 @@ document.getElementById('gtZoomInBtn').addEventListener('click',()=>gtZoomBy(1.4
 function gtTurnTo(side){
   if(side===gtSheetSide) return;
   gtSheetSide=side; gtLock=null; gtHeld=null;
-  if(gtZoomOn&&gtZoomAt) gtZoomAt={x:gtSheet.paperW-gtZoomAt.x,y:gtZoomAt.y};
+  gtZoomFlip(side);
+}
+// the zoomed point across to the side now on screen: the back stands mirrored
+// and moved by its own margin shift (gtRenderPage), as gtZoomSlotTo puts it
+function gtZoomFlip(side){
+  if(!gtZoomOn||!gtZoomAt) return;
+  const dx=Number(gtSheet.backDx)||0, dy=(Number(gtSheet.backDy)||0)*(side==='back'?1:-1);
+  gtZoomAt={x:gtSheet.paperW-gtZoomAt.x+dx,y:gtZoomAt.y+dy};
 }
 // the window onto one side: the side being worked on owns the zoom, the other
 // shows the same tags from behind
 function gtViewFor(side){
   const V=gtView();
   if(!V||side===gtSheetSide) return V;
-  return {x:gtSheet.paperW-V.x-V.w,y:V.y,w:V.w,h:V.h};
+  const dx=Number(gtSheet.backDx)||0, dy=(Number(gtSheet.backDy)||0)*(side==='back'?1:-1);
+  return {x:gtSheet.paperW-V.x-V.w+dx,y:V.y+dy,w:V.w,h:V.h};
 }
 // the side drawn on the main canvas: the front on Both, the back under it
 const gtMainSide=()=>gtShowSide==='both'&&gtBackOn()?'front':gtSheetSide;
@@ -49238,7 +49262,7 @@ document.getElementById('gtOrderList').addEventListener('focusin',e=>{
     const f=d&&gtLineFieldsOf(d,l).find(x=>x.id===fid);
     if(f&&gtSideOf(f)!==gtSheetSide){
       gtSheetSide=gtSideOf(f); gtLock=null;
-      if(gtZoomOn&&gtZoomAt) gtZoomAt={x:gtSheet.paperW-gtZoomAt.x,y:gtZoomAt.y};
+      gtZoomFlip(gtSheetSide);
     }
   }
   // a quantity being typed or stepped (its - / + buttons), a line's SHEET, a
@@ -49415,7 +49439,7 @@ function gtSetSlotEdit(on){
   // the cut lines are the front's; they are moved with the front on screen
   if(gtSlotEdit&&gtSheetSide==='back'){
     gtSheetSide='front'; gtLock=null;
-    if(gtZoomOn&&gtZoomAt) gtZoomAt={x:gtSheet.paperW-gtZoomAt.x,y:gtZoomAt.y};
+    gtZoomFlip('front');
   }
   if(!gtSlotEdit){ gtSelSlot=null; gtSelSet.clear(); }
   gtSetSlotEditChrome();
@@ -55023,7 +55047,8 @@ async function gtFillBleeds(pages,plan,withBack){
   try{
     for(let i=0;i<pages;i++){
       const at=plan&&plan[i];
-      if(at&&at.shape&&at.shape!==gtSheet.layoutFile) await gtShowShape(at.shape);
+      // a grid sheet ('') too: drawn on the last die's paper otherwise
+      if(at&&at.shape!==gtSheet.layoutFile) await gtShowShape(at.shape);
       const c=document.createElement('canvas');
       bleedCollecting(()=>{
         gtRenderPage(c,i,300,true,null,vecOf(src));
@@ -55521,6 +55546,8 @@ async function gtExport(print){
     // the way the Custom Print Template pairs them. None, and the front goes
     // out alone under the name it always had.
     const unread=gtBackUnread();
+    const unFront=await gtFrontUnread();
+    if(unFront.length){ showMsg(out,'Stopped - '+gtFrontUnreadMsg(unFront),false); return; }
     if(unread.length){ showMsg(out,'Stopped — '+gtBackUnreadMsg(unread),false); return; }
     const noDots=gtSheet.pltOn!==false?gtDotsMissingMsg():'';
     if(noDots){ showMsg(out,'Stopped — '+noDots,false); return; }
@@ -55588,10 +55615,13 @@ async function gtExport(print){
     // laid on the bed, the camera finds its dots, and that sheet is cut. A
     // single file holding several pages would have to be split at the machine.
     const cut=cuts.filter(Boolean);
+    // a sheet whose cut file could not be made is said, not left out quietly
+    const noCut=cuts.map((x,i)=>x?0:i+1).filter(Boolean);
     const sv=cut.length?await gtSavePlts(cut,true):null;
     showMsg(out,`✓ ${filename}${backName?' + '+backName:''} — ${pages} sheet(s)`
       +(sv&&sv.skipped?' · cut files not saved (preview closed)':sv?` · ${sv.names.join(', ')} ${sv.all?'on '+escapeHtml(sv.drive):sv.drive?'(some on '+escapeHtml(sv.drive)+', the rest in Downloads)':'in Downloads — no thumb drive'}`:'')
-      +(placed?` · ${placed} tag(s) went in as their own PDF, colours untouched`:''),true);
+      +(placed?` · ${placed} tag(s) went in as their own PDF, colours untouched`:'')
+      +(noCut.length?` - NO cut file for sheet ${noCut.join(', ')} (it could not be made) - open the cut file preview to save it`:''),!noCut.length);
     if(print) await fieryQueue(session,dir,backName?[filename,backName]:[filename],ans,['gtExportMsg']);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
@@ -72953,6 +72983,9 @@ async function mcGiftBundleSide(lines,mode,side,guest){
     // a back picture that would not read stops both sides, as gtExport does
     const unread=gtBackUnread();
     if(unread.length&&(back||gtSheetHasBack())) throw new Error(gtBackUnreadMsg(unread));
+    // and a front picture that would not read, which printed a blank tag
+    const unFront=await gtFrontUnread();
+    if(unFront.length) throw new Error(gtFrontUnreadMsg(unFront));
     const plan=typeof gtPagePlan==='function'?gtPagePlan():[];
     held=await gtFillBleeds(pages,plan,back);
     const sources=await gtVectorSources(back?'back':undefined);
@@ -72973,12 +73006,17 @@ async function mcGiftBundleSide(lines,mode,side,guest){
       // size is read after the swap: another die is often another paper.
       const at=plan[i];
       // one that will not load is not drawn on the last one's paper and cuts
-      if(at&&at.shape&&at.shape!==gtSheet.layoutFile&&!await gtShowShape(at.shape))
+      // a grid sheet ('') too, as gtBuildSideRun
+      if(at&&at.shape!==gtSheet.layoutFile&&!await gtShowShape(at.shape))
         throw new Error('the cutting file "'+gtShapeLabel(at.shape)+'" (sheet '+(i+1)+') could not be loaded — nothing was saved.');
       if(cuts){
         const a=at||{slots:gtSheet.slots,queue:gtQueue(),start:i*gtSheet.slots.length};
         const name=gtPltSheetName(a,i);
-        try{ cuts.push({text:gtPltSheet(a),name,...gtPltLook()}); }catch(e){ cuts.push(null); }
+        // a sheet with no cut file is printed with nothing to cut it by: stopped
+        // and named, so the batch lists it as failed rather than marking it done
+        try{ cuts.push({text:gtPltSheet(a),name,...gtPltLook()}); }
+        catch(e){ throw new Error('the cut file for sheet '+(i+1)+' could not be made ('
+          +((e&&e.message)||'unknown error')+') - nothing was saved.'); }
       }
       const px=Math.min(6000,Math.round(Math.max(gtSheet.paperW,gtSheet.paperH)/25.4*300));
       const c=document.createElement('canvas');
