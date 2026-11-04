@@ -59087,8 +59087,9 @@ async function mcDropOneOffs(batchId){
     // the row stops pointing at the file first and the file goes second: the
     // other way round, a refused update left a line naming a deleted picture
     let upd=null;
-    try{ upd=await sb.from('magic_items').update({sheet_item:si}).eq('id',r.id); }catch(e){ continue; }
-    if(upd&&upd.error) continue;
+    try{ upd=await sb.from('magic_items').update({sheet_item:si}).eq('id',r.id).select('id'); }catch(e){ continue; }
+    // no row back is a refused write too (the batch already completed)
+    if(!upd||upd.error||!(upd.data&&upd.data.length)) continue;
     if(one&&one.path){ try{ await sb.storage.from(PHOTO_BUCKET).remove([one.path]); }catch(e){} }
     const it=(typeof mcItem==='function')?mcItem(r.id):null;
     if(it&&it.sheet_item) it.sheet_item.oneOff=null;
@@ -60018,6 +60019,9 @@ async function mcAddLineTo(orderId){
 async function mcCopyLine(id,btn){
   const it=mcItem(id); if(!it) return;
   const out=document.getElementById('mcBatchMsg');
+  // the row is redrawn mid-copy with a live button: a second tap copied the
+  // same file twice into the same folder
+  if(mcCopyingIds.has(it.id)){ showMsg(out,'Still copying that one.',true); return; }
   const free=btn?mcBtnBusy(btn,'Copying…'):()=>{};
   try{
   if(!mcBatch||mcBatch.status!=='open'){
@@ -60090,8 +60094,9 @@ async function mcOkOrder(orderId){
   const now=new Date().toISOString();
   const ids=lines.map(i=>i.id);
   for(let i=0;i<ids.length;i+=MC_CHUNK){
-    const {error}=await sb.from('magic_items')
-      .update({status:'done',acted_by:mcMyId,acted_at:now}).in('id',ids.slice(i,i+MC_CHUNK));
+    let {data:upd,error}=await sb.from('magic_items')
+      .update({status:'done',acted_by:mcMyId,acted_at:now}).in('id',ids.slice(i,i+MC_CHUNK)).select('id');
+    if(!error&&!(upd&&upd.length)) error={message:'the batch is no longer open - it was completed or deleted'};
     if(error){
       await mcLoadItems();                     // whatever went through, went through
       showMsg(out,'Could not save that: '+error.message,false);
@@ -60122,8 +60127,9 @@ async function mcOkSku(sku){
   const now=new Date().toISOString();
   const ids=lines.map(i=>i.id);
   for(let i=0;i<ids.length;i+=MC_CHUNK){
-    const {error}=await sb.from('magic_items')
-      .update({status:'done',acted_by:mcMyId,acted_at:now}).in('id',ids.slice(i,i+MC_CHUNK));
+    let {data:upd,error}=await sb.from('magic_items')
+      .update({status:'done',acted_by:mcMyId,acted_at:now}).in('id',ids.slice(i,i+MC_CHUNK)).select('id');
+    if(!error&&!(upd&&upd.length)) error={message:'the batch is no longer open - it was completed or deleted'};
     if(error){
       await mcLoadItems();                     // whatever went through, went through
       mcRenderItems(); mcRenderSummary();
@@ -60533,7 +60539,10 @@ async function mcToggleDone(id,quiet){
   }
   const before=(!now&&(wasTile==='sheetPrint'||wasTile==='giftTag'))?{...it,tile:wasTile,sheet_item:wasItem}:null;
   mcRepaintRow(it);                                   // optimistic
-  const {error}=await sb.from('magic_items').update(patch).eq('id',id);
+  // asked back: a batch completed by somebody else refuses the write with no
+  // error, and the tick looked saved until a reload
+  let {data:upd,error}=await sb.from('magic_items').update(patch).eq('id',id).select('id');
+  if(!error&&!(upd&&upd.length)) error={message:'that line is no longer on an open batch - it was completed or deleted'};
   if(error){
     it.status=was; it.tile=wasTile; it.sheet_item=wasItem;
     it.acted_by=wasBy; it.acted_at=wasAt;             // who ticked it, too
@@ -63009,7 +63018,11 @@ function mcRenderSummary(){
     const toPrint=!on&&!!tool&&tool!=='gift'&&!mcIsGtDest(routed)
       &&routed!=='skip'&&routed!=='copy'&&routed!=='placeCard';
     const tplR=toPrint?mcTemplateFor([r]):null;
-    const tplOn=on&&on.on!=='gift'?mcTemplateById(selectedTemplate):null;
+    // on the builder's sheet it is the open template; marked on the lines only
+    // (the builder emptied or on another template) it is the one the line says
+    const tplOn=!on||on.on==='gift'?null:on.line?mcTemplateById(selectedTemplate)
+      :mcTemplateById((((mcItems.find(i=>mcRowKey(i)===String(r.sku)&&i.tile==='sheetPrint'
+        &&i.sheet_item&&i.sheet_item.template)||{}).sheet_item)||{}).template);
     const shot=r.img
       ? `<img class="mc-sum-shot" src="${escapeHtml(r.img)}" alt="" loading="lazy"
            referrerpolicy="no-referrer"/>`
@@ -63036,6 +63049,8 @@ function mcRenderSummary(){
             tool==='both'?' · and a print design':''}</span>`
         : toPrint
           ? `<span class="mc-sum-name">${tplR?'Template: '+escapeHtml(tplR.name)
+              :mcTemplateById(selectedTemplate)?'No template set - Add asks to use '
+                +escapeHtml(mcTemplateById(selectedTemplate).name)+' (open now)'
               :'No template set - Add will ask which'}</span>`
           : '');
     // Add takes the SKU's own PNG where there is one. Choose is for the rest —
@@ -64061,7 +64076,8 @@ function mcRenderMade(){
 }
 function mcOpenMade(note,ok,mode){
   mcMadeMode=mode==='gift'?'gift':'print';
-  mcMadePage=0;
+  // the gift side opens on the page the tool holds, whose die is the one loaded
+  mcMadePage=mcMadeMode==='gift'&&typeof gtPage==='number'?gtPage:0;
   document.getElementById('mcMadeMsg').innerHTML='';
   document.getElementById('mcMadeSheet').classList.add('open');
   const gift=mcMadeMode==='gift';
@@ -64108,8 +64124,17 @@ document.getElementById('mcMadeBig').addEventListener('click',()=>{
   }
   openEnlarge('front',mcMadePage,true);
 });
-document.getElementById('mcMadePrev').addEventListener('click',()=>{mcMadePage--;mcRenderMade();});
-document.getElementById('mcMadeNext').addEventListener('click',()=>{mcMadePage++;mcRenderMade();});
+// a gift tag page of another shape is drawn on its own die: gtRenderPage lays
+// a page on the slots of the cut file loaded now, so the tool goes there first
+async function mcMadeGo(p){
+  mcMadePage=p;
+  if(mcMadeMode==='gift'&&typeof gtGoPage==='function'){
+    try{ await gtGoPage(p); }catch(e){}
+  }
+  mcRenderMade();
+}
+document.getElementById('mcMadePrev').addEventListener('click',()=>mcMadeGo(mcMadePage-1));
+document.getElementById('mcMadeNext').addEventListener('click',()=>mcMadeGo(mcMadePage+1));
 document.getElementById('mcMadeSave').addEventListener('click',async()=>{
   const out=document.getElementById('mcMadeMsg');
   try{
@@ -64654,7 +64679,8 @@ const mcRouteFromCells=(c,i)=>{
     // column in an older sheet is dropped: copies no longer go into a folder.
     copy_path:dest==='copy'?mcCopyPathClean(c.copy_path):'',
     copy_to:'',
-    sort_order:Number.isFinite(Number(c.sort_order))?Number(c.sort_order):i,
+    // a whole number: the column is an integer, and one 2.5 refused the import
+    sort_order:Number.isFinite(Number(c.sort_order))?Math.round(Number(c.sort_order)):i,
     remarks:String(c.remarks==null?'':c.remarks).slice(0,500)};
 };
 document.getElementById('mcRouteExport').addEventListener('click',async()=>{
@@ -66604,13 +66630,24 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
     // not save stops the removal, so the sheet and the lines still agree
     const its=mcItems.filter(i=>mcRowKey(i)===String(sku)&&!mcMergedKey(i)
       &&(i.tile==='sheetPrint'||i.tile==='giftTag'));
+    if(its.length&&mcBatch&&mcBatch.status!=='open'){
+      showMsg(document.getElementById('mcSummaryMsg'),'This batch is completed - re-open it to change it.',false);
+      return;
+    }
     const nOff=await mcUnmarkLines(sku);
     if(nOff<its.length){
       showMsg(document.getElementById('mcSummaryMsg'),
         `${escapeHtml(String(sku))} was not taken off — its lines did not save.`,false);
       return;
     }
-    const gone=mcRemoveSku(sku); if(!gone) return;
+    // nothing laid in the builder (reloaded): the lines were the only place it
+    // was, and they have just let it go - the row says so rather than nothing
+    const gone=mcRemoveSku(sku);
+    if(!gone){
+      mcRenderSummary();
+      showMsg(document.getElementById('mcSummaryMsg'),`Took ${escapeHtml(String(sku))} off the sheet.`,true);
+      return;
+    }
     if(gone==='gift'){
       if(typeof gtRenderOrder==='function'){ gtRenderOrder(); gtDraw(); }
       mcRenderSummary();
@@ -68346,14 +68383,17 @@ function mcCustomWire(it){
     // the line's own artwork belongs on it too, not just whatever Create had
     // matched before the switch. Without this the line's design vanished the
     // moment its wrong auto-guess was corrected.
-    if(!pc){
+    // Added after the line's artwork is applied, not before: on a line never
+    // saved mcApplyArt clears the design list, and the card just added went
+    // with it. A picture uploaded onto the line itself still wins.
+    mcWinArtLoad=mcApplyArt(it,()=>mcWinItem===it.id);
+    await mcWinArtLoad;
+    if(!pc&&mcWinItem===it.id&&!(it.art||{}).front){
       let pick=null,sku='';
       for(const n of mcNamesOf(it)){ const p=designFileForSku(n); if(p){ pick=p; sku=n; break; } }
       if(pick) await mcAddPickedDesign(it,pick,sku,
         {reset:true,msg:document.getElementById('mcWinMsg'),live:()=>mcWinItem===it.id});
     }
-    mcWinArtLoad=mcApplyArt(it,()=>mcWinItem===it.id);
-    await mcWinArtLoad;
     mcLinePreview();
   });
   // a line that already has a layout puts it back the moment it is opened
@@ -69725,8 +69765,9 @@ function mcGiftWire(it){
     if(on&&d) await gtSetBuild(d);
     drawSplit();
     if(!mcGtPick) return;
+    const undo=mcUndoOf(it,['sheet_item','status','acted_by','acted_at']);   // put back if the save does not land
     it.sheet_item=collect();
-    if(await mcSave(it,{sheet_item:it.sheet_item,...mcDonePatch(it,true)})){
+    if(await mcSave(it,{sheet_item:it.sheet_item,...mcDonePatch(it,true)})||(undo(),false)){
       mcRepaintRow(it);
       if(typeof mcRenderSummary==='function') mcRenderSummary();
       showMsg(msg,on?'Broken up - each sticker nests on its own.':'One block - the sheet prints as it is drawn.',true);
@@ -69746,8 +69787,9 @@ function mcGiftWire(it){
       showMsg(msg,`Added ${n} more — ${total} in all. Pick a design and save it.`,true);
       return;
     }
+    const undo=mcUndoOf(it,['sheet_item','status','acted_by','acted_at']);   // put back if the save does not land
     it.sheet_item=collect();
-    if(await mcSave(it,{sheet_item:it.sheet_item,...mcDonePatch(it,true)})){
+    if(await mcSave(it,{sheet_item:it.sheet_item,...mcDonePatch(it,true)})||(undo(),false)){
       mcRepaintRow(it);
       if(typeof mcRenderSummary==='function') mcRenderSummary();
       showMsg(msg,`Added ${n} more — ${total} in all, ${total-(Number(it.qty)||0)} over the order.`,true);
@@ -69756,11 +69798,12 @@ function mcGiftWire(it){
   document.getElementById('mcGtSaveBtn').addEventListener('click',async()=>{
     const msg=document.getElementById('mcWinMsg');
     if(!mcGtPick){ showMsg(msg,'Search for a design and pick one first.',false); return; }
+    const undo=mcUndoOf(it,['sheet_item','status','acted_by','acted_at']);   // put back if the save does not land
     it.sheet_item=collect();
     mcCutCommit();               // Save to line saves the cut line on screen too
     // a one-off is nobody's file but this session's, so the line takes a copy
     await mcGtKeepOneOffOn(it,it.sheet_item);
-    if(await mcSave(it,{sheet_item:it.sheet_item,...mcDonePatch(it,true)})){
+    if(await mcSave(it,{sheet_item:it.sheet_item,...mcDonePatch(it,true)})||(undo(),false)){
       showMsg(msg,'✓ On the sheet',true);
       mcRepaintRow(it);
       mcWinToBubble();          // the same as the print side: saved is done with
@@ -69772,9 +69815,10 @@ function mcGiftWire(it){
   document.getElementById('mcGtFullBtn').addEventListener('click',async()=>{
     const msg=document.getElementById('mcWinMsg');
     if(!mcGtPick){ showMsg(msg,'Search for a design and pick one first.',false); return; }
+    const undo=mcUndoOf(it,['sheet_item','status','acted_by','acted_at']);   // put back if the save does not land
     it.sheet_item=collect();
     await mcGtKeepOneOffOn(it,it.sheet_item);
-    if(!await mcSave(it,{sheet_item:it.sheet_item})) return;
+    if(!await mcSave(it,{sheet_item:it.sheet_item})){ undo(); return; }
     mcRepaintRow(it);
     await mcGtOpenFull(it.sheet_item.page||mcLinePage(it),it.sheet_item.finish);
   });
@@ -70059,7 +70103,9 @@ function mcGtOwnForBatch(home){
     // and print every name again. Only a row for one order is made its own;
     // for several, each order's names go on that order's line (mcGtListShared).
     if(lines.length>1&&gtNamesOf(row)){ mcGtListShared.add(row.id); continue; }
-    if(lines.length) out.push({row,lines});
+    // claimed by this row: a second row of the same SKU (another design) took
+    // the same lines, and the last design written over the first on every one
+    if(lines.length){ out.push({row,lines}); lines.forEach(it=>lent.add(String(it.id))); }
   }
   return out;
 }
@@ -70638,6 +70684,9 @@ async function mcDownloadOne(id){
     // and so is a gift tag sheet out on loan
     if(mcWinItem===it.id&&t.mode==='per-order') await mcCommit();
     if(t.mode!=='per-order'&&mcGtHome) await mcGtWriteBack(mcGtLentRows(),mcGtHome);
+    // the sides a shared sheet wrote, marked one by one as Download All marks
+    // them: unmarked, a back that failed there still read as never downloaded
+    let sheetSides=[];
     await mcBorrowBuilder(async()=>{
       if(t.mode!=='per-order'){
         // the tag side has to know which page this design is on before it can
@@ -70646,6 +70695,7 @@ async function mcDownloadOne(id){
         const b=((typeof t.bundles==='function'&&t.bundles([it]))||[])[0];
         if(!b) throw new Error('there is no sheet for this line');
         const sides=typeof t.sides==='function'?await t.sides(b):[null];
+        sheetSides=sides.filter(Boolean);
         const names=[];
         for(const side of sides){
           const name=mcOneName(it,side?mcSideName(b.name,side):b.name);
@@ -70674,7 +70724,8 @@ async function mcDownloadOne(id){
         +'nothing of it is in that file, and it is left not downloaded.',false);
       return;
     }
-    await mcMarkExported(it,oneRun);
+    if(sheetSides.length){ for(const sd of sheetSides) await mcMarkExported(it,oneRun,sd,sheetSides); }
+    else await mcMarkExported(it,oneRun);
     mcRepaintRow(it);
   }catch(err){
     showMsg(out,'Export failed: '+((err&&err.message)||'unknown error'),false);
@@ -72573,15 +72624,18 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
       // switch they were parked elsewhere, this saw none of them, and wrote the
       // whole loan off the batch as if every tag had been taken off.
       // the summary's own rows for batch SKUs first, so they are lent and saved too
-      mcGtAdoptOwnRows(mcGtHome);
+      // the loan this save is for, held: leaving the screen mid-save ends the
+      // loan (mcGtHome = null) and the save threw after the lines had saved
+      const home=mcGtHome;
+      mcGtAdoptOwnRows(home);
       const lent=mcGtLentRows();
       mcCutCommit();             // Save to line saves the cut line on screen too
-      const saved=await mcGtWriteBack(lent,mcGtHome,true);
+      const saved=await mcGtWriteBack(lent,home,true);
       const want=mcGtWriteTried;
       // and what is lent is now what is on the batch, so a tag taken off after
       // this is measured against this rather than against what was lent - the
       // batch's lines only, not a row that has not become one
-      mcGtHome.ids=lent.filter(mcGtLent).map(l=>String(l.id).slice(3));
+      if(home&&mcGtHome===home) home.ids=lent.filter(mcGtLent).map(l=>String(l.id).slice(3));
       if(mcOnBatch()) mcRenderItems();
       mcSumAfterGtSave();
       mcSyncBatchButtons();
