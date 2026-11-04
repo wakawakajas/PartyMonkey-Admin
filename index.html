@@ -13381,7 +13381,9 @@ function renderSide(side,canvas,maxDim,opts){
         // CMYK file's card printed one green and its bleed band another.
         // a picture placed at its own resolution keeps its fill: its pixels are
         // the picture's own, made CMYK with it - only a PDF's fill is its page
-        const fillHere=(bleedMode==='content'||bleedMode==='ai')&&!(opts.vec.pdf&&opts.vec.pdf(key));
+        // and a PDF whose fill is made from its export picture (printBleedMode)
+        const fillHere=(bleedMode==='content'||bleedMode==='ai')
+          &&(!(opts.vec.pdf&&opts.vec.pdf(key))||printFillPixelsOk(img));
         const whole=!fillHere&&(bleedMode==='extend'||bleedMode==='content'||bleedMode==='ai'
           ||(bleedMode==='mirror'&&bX+ix<=wMm-ix*2&&bY+iy<=hMm-iy*2)
           ||(bleedMode==='offset'&&gtArtOpaque(img)))
@@ -13484,8 +13486,9 @@ function renderSide(side,canvas,maxDim,opts){
     // the bleed along the picture's own axes, which a quarter turn swaps
     // a PDF drawn as its page prints (printArtImg), its bleed made as the
     // export makes it (printBleedMode); a fill is made from the file's own pixels
-    const bmP=printBleedMode(img,opts.forExport,bleedMode), fillB=bmP==='content'||bmP==='ai';
-    const pimg=fillB?img:printArtImg(img,opts.forExport,opts);
+    const bmP=printBleedMode(img,opts.forExport,bleedMode);
+    // a fill too: from the page as it prints, so the band and the card agree
+    const pimg=printArtImg(img,opts.forExport,opts);
     ctx.drawImage(grow?bleedArt(pimg,trimW,trimH,swapped?bY:bX,bmP,swapped?bX:bY,bleedTrimPx(),bleedMm)
       // the edge trim is part of making a bleed: with no bleed on this card, or
       // a page that brings its own, the picture prints whole as it always did
@@ -34338,8 +34341,23 @@ function printArtPrinted(img){
 // AI fill goes in as Extend - in the preview, and where an export draws the
 // page as pixels (Invert colours), from its export picture (renderSide,
 // gtPutArt); no fill is asked for it
+// Since 4 Nov a PDF keeps its Content-aware / AI fill: it is made from the PDF's
+// export picture (printArtExportImg - its page as it prints, ~1 dE from the
+// placed page), so the band meets the page in one colour. Extend only where
+// that picture could not be made. In the preview it is filled from the
+// preview's own drawing of the page (printArtImg). Before, the fill shown on
+// the sheet went to print as Extend, and a card's swoosh came out cut square.
 const printBleedMode=(img,forExport,mode)=>
-  (mode==='content'||mode==='ai')&&(forExport?!!printArtPdf(img):printArtPreviewPdf(img,false))?'extend':mode;
+  (mode==='content'||mode==='ai')&&forExport&&!printFillPixelsOk(img)?'extend':mode;
+// whether an export can make a filled bleed from this picture's pixels and
+// have it print as the page does: not a PDF; an RGB PDF whose numbers are
+// matched with the sheet (the band is matched with it - printArtExportReady
+// makes it no picture for that reason); or a PDF whose export picture is made
+function printFillPixelsOk(img){
+  const f=printArtPdf(img); if(!f) return true;
+  if(printArtExportImg(img)!==img) return true;
+  try{ return _pdfCmyk.get(f)===false&&!!(PDF_AS_CMYK||printMatchPaper()); }catch(e){ return false; }
+}
 // the picture an export draws for a PDF's pixels, once made, else img
 function printArtExportImg(img){
   if(!printArtPdf(img)) return img;
@@ -34350,7 +34368,7 @@ function printArtExportImg(img){
 // Offset or Stretch bleed (which round a page too deep, see-through or with a
 // gap is pixels), or Invert colours (the page itself drawn)
 function printExportPixels(){
-  const px=m=>m==='mirror'||m==='offset'||m==='scale';
+  const px=m=>m==='mirror'||m==='offset'||m==='scale'||m==='content'||m==='ai';
   try{
     // either builder: Magic Create lends one without its page being up
     let gt=false; try{ gt=px(gtSheet.bleedMode)||!!gtSheet.invertArt; }catch(e){}
@@ -34384,7 +34402,13 @@ async function printArtExportReady(){
   }
 }
 // the export pictures let go once the file is written (gtBuildPdf)
-function printArtExportDone(){ _artExportMade.splice(0).forEach(img=>_artExport.delete(img)); }
+// held (printArtExportHold) from the fill pass to the last side built: a fill is
+// made from the export picture, and one let go after the front was the back's
+// picture made again - a fill it had none of, printed as Extend
+let _artExportKeep=0;
+function printArtExportDone(){ if(_artExportKeep) return; _artExportMade.splice(0).forEach(img=>_artExport.delete(img)); }
+function printArtExportHold(){ _artExportKeep++; }
+function printArtExportRelease(){ if(_artExportKeep>0) _artExportKeep--; printArtExportDone(); }
 // an RGB PDF's numbers, as the Adobe RGB the Fiery reads them as, in sRGB
 async function pdfRgbAsAdobe(img){
   const {L,lcms,srgb,adobe}=await lcmsLib();
@@ -37593,6 +37617,8 @@ async function renderSidePdfAll(side,pages,onPage,from){
     // A PDF placed with its bleed made from its page needs no fill: drawn
     // with the placing, it asks for none - an AI fill that failed (or ran
     // minutes) stopped an export that would never print it
+    // the PDFs' export pictures first: their fills are made from them
+    await printArtExportReady();
     const asked=bleedAsked=new Set();
     try{
       for(let i=0;i<pages;i++) renderSide(side,document.createElement('canvas'),160,
@@ -41330,7 +41356,7 @@ const HELP=[
   {on:'sheet',t:'Edge margin',k:'edge margin border',
    h:'Rearrange → Spacing → <b>Edge</b>: the margin round the sheet.',find:'Edge'},
   {on:'sheet',t:'Bleed for the whole order',k:'bleed add all sides style offset stretch mirror extend content-aware ai fill',
-   h:'Right panel → <b>Cut &amp; print</b> → <b>Bleed</b>: <b>Add bleed to all sides</b>, the bleed in mm, and how it is made - Offset, Stretch, Mirror, Extend edges, Content-aware or AI fill. On a PDF, the printed file makes the bleed from the PDF\'s own edges (Content-aware and AI fill print as Extend there, after any Trim edge), so the bleed prints the same colour as the tag.',tab:'#gtNl [data-nltab="cut"]',find:'Add bleed to all sides'},
+   h:'Right panel → <b>Cut &amp; print</b> → <b>Bleed</b>: <b>Add bleed to all sides</b>, the bleed in mm, and how it is made - Offset, Stretch, Mirror, Extend edges, Content-aware or AI fill. On a PDF, Content-aware and AI fill print filled (and show so in Print preview), made from the PDF as it prints so the bleed matches the tag; the other styles are made from the PDF\'s own edges.',tab:'#gtNl [data-nltab="cut"]',find:'Add bleed to all sides'},
   {on:'sheet',t:'Invert colours',k:'invert negative colours',
    h:'Right panel → <b>Cut &amp; print</b> → <b>Invert colours</b>.',tab:'#gtNl [data-nltab="cut"]',find:'Invert colours'},
   {on:'sheet',t:'Registration dots',k:'dots registration cutter four corner',
@@ -41406,7 +41432,7 @@ const HELP=[
   {on:'custom',t:'Crop or remove the background',k:'crop background bg',
    h:'Artwork → <b>✂ Crop / BG…</b>.',tab:'#pcNlTabs [data-pctab="art"]',find:'Crop / BG'},
   {on:'custom',t:'Bleed',k:'bleed add all sides offset stretch mirror extend content-aware ai fill',
-   h:'Artwork → <b>Bleed</b>: <b>Add bleed to all sides</b>, mm, and the style (Offset, Stretch, Mirror, Extend edges, Content-aware, AI fill). On a PDF, the printed file makes the bleed from the PDF\'s own edges (Content-aware and AI fill print as Extend there, after any Trim edge), so the bleed prints the same colour as the card.',tab:'#pcNlTabs [data-pctab="art"]',find:'Add bleed to all sides'},
+   h:'Artwork → <b>Bleed</b>: <b>Add bleed to all sides</b>, mm, and the style (Offset, Stretch, Mirror, Extend edges, Content-aware, AI fill). On a PDF, Content-aware and AI fill print filled (and show so in Print preview), made from the PDF as it prints so the bleed matches the card; the other styles are made from the PDF\'s own edges.',tab:'#pcNlTabs [data-pctab="art"]',find:'Add bleed to all sides'},
   {on:'custom',t:'Fix a client file',k:'client file fix print ready',
    h:'Artwork → <b>⚡ Make print-ready</b>: wrong size, low resolution or no bleed, fixed in one go.',tab:'#pcNlTabs [data-pctab="art"]',find:'Make print-ready'},
   {on:'custom',t:'Invert colours',k:'invert negative',
@@ -47283,7 +47309,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // placed (sharp), with the bleed made from pixels round it
   // a picture placed at its own resolution keeps its Content-aware / AI fill
   let own=!!(vec&&b>0&&!stretchWhole&&['extend','offset','mirror','content','ai'].includes(bm)
-    &&!((bm==='content'||bm==='ai')&&!(vec.pdf&&vec.pdf(key)))
+    &&!((bm==='content'||bm==='ai')&&(!(vec.pdf&&vec.pdf(key))||printFillPixelsOk(img)))
     &&!(bm==='offset'&&!gtArtOpaque(img))
     &&!(bm==='mirror'&&(b+gap.x+ix>r.w-ix*2||b+gap.y+iy>r.h-iy*2
       // a plain tag's mirrored bleed stays pixels, as before: turned over,
@@ -47348,7 +47374,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // a PDF drawn as its page prints (printArtImg), its bleed made as the
   // export makes it (printBleedMode); a fill is made from the file's own pixels
   const gx=!gtPcRo||gtPcRo.forExport, bmP=printBleedMode(img,gx,gtSheet.bleedMode);
-  const pimg=bmP==='content'||bmP==='ai'?img:printArtImg(img,gx,gtPcRo);
+  const pimg=printArtImg(img,gx,gtPcRo);
   gtDrawArt(ctx,pimg,r.x,r.y,r.w,r.h,g,sc,bmP,turn?key+'@t'+turn:key,gap);
   // a pixel short of the trim, so the ring overlaps the placed page rather
   // than leaving a hairline of paper between them
@@ -54045,8 +54071,13 @@ async function gtBuildPdfNow(count,render,sources){
 // this screen's export and by Magic Create's alike.
 const gtBleedFilled=()=>gtSheet.bleedMode==='content'||gtSheet.bleedMode==='ai'
   ||(gtOrder||[]).some(l=>{ const m=gtLineBleedMode(l); return m==='content'||m==='ai'; });
+// Answers true where it held the export pictures (printArtExportHold): the
+// caller lets them go once its last side is built (printArtExportRelease).
 async function gtFillBleeds(pages,plan,withBack){
-  if(!gtBleedFilled()) return;
+  if(!gtBleedFilled()) return false;
+  // the PDFs' export pictures first: their fills are made from them, and kept
+  // until the caller has built every side
+  await printArtExportReady(); printArtExportHold();
   // held until every fill has landed: a redraw of the screen in between asks
   // with no export running, and would drop this export's other fills
   // A PDF placed with its bleed made from its page needs no fill: drawn with
@@ -54066,7 +54097,9 @@ async function gtFillBleeds(pages,plan,withBack){
       c.width=c.height=0;
     }
     await bleedJobsSettled(asked);
-  }finally{ bleedAsked=null; }
+  }catch(e){ printArtExportRelease(); throw e; }   // the caller never hears it held
+  finally{ bleedAsked=null; }
+  return true;
 }
 // ---------- which tags are placed rather than drawn ----------
 // A design is only lifted out of the render where the sheet can promise its
@@ -54522,7 +54555,7 @@ async function gtExport(print){
   gtExportBusy=true; btn.disabled=true; pbtn.disabled=true;
   const S=gtSheet;
   const wasShape=S.layoutFile, wasPage=gtPage;
-  let swapped=false;
+  let swapped=false, held=false;
   try{
     // counted and planned with every shape's own placeholders, as the cuts are
     try{ await gtShapesInHand(); await gtSetsReady(); gtDraw(); }catch(e){}
@@ -54581,7 +54614,7 @@ async function gtExport(print){
     // to ask for its fills, and the export waits for them all
     if(gtBleedFilled()){
       showMsg(out,'Filling the bleed…',true);
-      await gtFillBleeds(pages,plan,twoSided);
+      held=await gtFillBleeds(pages,plan,twoSided);
       showMsg(out,`Rendering ${pages} sheet(s) at print resolution…`,true);
     }
     const front=await gtBuildSide('front',pages,plan,S.pltOn!==false?cuts:null);
@@ -54620,6 +54653,7 @@ async function gtExport(print){
     // put back on every path out, failed render included
     if(swapped) await gtExportRestore(wasShape,wasPage);
     if(gtNoFrozen!=null){ gtNoThaw(); try{ gtQrSync(); gtDraw(); }catch(e){} }
+    if(held) printArtExportRelease();
     gtExportBusy=false; btn.disabled=false; pbtn.disabled=false;
   }
 }
@@ -71698,7 +71732,7 @@ async function mcGiftBundleRun(lines,mode,side,guest){
   // the tags these lines were saved with moved by hand print where they were put
   gtNestHand=mcGtHandFrom(lines); gtNestCache=null;
   const wasShape=gtSheet.layoutFile;
-  let unMerge=()=>{};
+  let unMerge=()=>{}, held=false;
   try{
     // a Festive + Custom sheet: the other page's designs lent to this one
     unMerge=await mcGtMergeOpen(lines,guest);
@@ -71723,7 +71757,7 @@ async function mcGiftBundleRun(lines,mode,side,guest){
     const unread=gtBackUnread();
     if(unread.length&&(back||gtSheetHasBack())) throw new Error(gtBackUnreadMsg(unread));
     const plan=typeof gtPagePlan==='function'?gtPagePlan():[];
-    await gtFillBleeds(pages,plan,back);
+    held=await gtFillBleeds(pages,plan,back);
     const sources=await gtVectorSources(back?'back':undefined);
     // the cut file for each sheet, taken on the same pass as its picture, as
     // the gift tag screen's own export takes it — when the page wants one.
@@ -71768,6 +71802,7 @@ async function mcGiftBundleRun(lines,mode,side,guest){
     mcPendingQr=(!back&&(gtSheet.qrOn||cuts))?{mode:gtMode,base:gtQrNumber(0),next:gtQrNumber(pages)}:null;
     return bytes;
   }finally{
+    if(held) printArtExportRelease();
     gtNoThaw();
     unMerge();
     gtOrder=keep; gtJobBack=jb; gtNestHand=hand; gtNestCache=null;
