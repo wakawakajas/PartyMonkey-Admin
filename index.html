@@ -33852,6 +33852,35 @@ const PDF_AS_CMYK=true;
 // Acrobat show it. The colours to check are listed either way.
 const PREVIEW_SHOW_KEY='pigu.previewShow';
 function printPreviewShow(){ try{ return localStorage.getItem(PREVIEW_SHOW_KEY)==='print'?'print':'file'; }catch(e){ return 'file'; } }
+// A Magic Create line's own colours (4 Nov): opened, the line takes its saved
+// Printer warmth, Brightness and Hue/Saturation - or this computer's, where it
+// has none - as a draft (_printLineLook). What is moved or Used from a test
+// sheet goes on the draft only; Save to line keeps it on the line
+// (design.printLook) and closing without saving throws it away. The line's
+// own file prints with them (_printLookOv, mcRenderLine); a shared sheet and
+// everything else take this computer's. Gift tag lines are on shared sheets,
+// so they keep this computer's.
+var _printLineLook=null, _printLookOv=null;
+const printLookKeys=()=>[PRINT_WARM_KEY,PRINT_BACK_WARM_KEY,PRINT_HSL_KEY,PRINT_BACK_BRIGHT_KEY];
+function printLookShared(){ const o={}; printLookKeys().forEach(k=>{ try{ const v=localStorage.getItem(k); if(v!==null) o[k]=v; }catch(e){} }); return o; }
+function printLookDraftOn(){
+  try{ if(!_printLineLook||!mcWinItem) return false; const it=mcItem(mcWinItem); return !!it&&it.tile!=='giftTag'; }catch(e){ return false; }
+}
+function printLookSrc(){
+  if(_printLookOv===false) return null;
+  if(_printLookOv) return _printLookOv;
+  return printLookDraftOn()?_printLineLook:null;
+}
+const printLookStore={
+  getItem:k=>{ const S=printLookSrc(); if(S) return k in S?S[k]:null; return localStorage.getItem(k); },
+  setItem:(k,v)=>{ const S=printLookSrc(); if(S){ S[k]=String(v); return; } localStorage.setItem(k,v); },
+  removeItem:k=>{ const S=printLookSrc(); if(S){ delete S[k]; return; } localStorage.removeItem(k); }
+};
+// the line's colours for a window just opened on it, or none when it shuts
+function printLookOpen(it){
+  const saved=it&&it.design&&it.design.printLook;
+  _printLineLook=saved&&typeof saved==='object'?{...saved}:printLookShared();
+}
 const PRINT_WARM_KEY='pigu.printWarm';
 var _printOv=null;                // a test sheet's version: {warm, bright} in place of the kept
 // Printer warmth and Brightness are kept per side (4 Nov): the front in the
@@ -33873,12 +33902,12 @@ async function printSideDoAsync(side,fn){
   const w=_printSideNow; _printSideNow=side||null;
   try{ return await fn(); }finally{ _printSideNow=w; rel(); }
 }
-function printWarmSet(side,v){ try{ localStorage.setItem(side==='back'?PRINT_BACK_WARM_KEY:PRINT_WARM_KEY,String(v)); }catch(e){} }
+function printWarmSet(side,v){ try{ printLookStore.setItem(side==='back'?PRINT_BACK_WARM_KEY:PRINT_WARM_KEY,String(v)); }catch(e){} }
 function printBrightSet(side,v){
-  if(side==='back'){ try{ localStorage.setItem(PRINT_BACK_BRIGHT_KEY,String(v)); }catch(e){} return; }
-  let all={}; try{ all=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){}
+  if(side==='back'){ try{ printLookStore.setItem(PRINT_BACK_BRIGHT_KEY,String(v)); }catch(e){} return; }
+  let all={}; try{ all=JSON.parse(printLookStore.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){}
   all.bright={b:v};
-  try{ localStorage.setItem(PRINT_HSL_KEY,JSON.stringify(all)); }catch(e){}
+  try{ printLookStore.setItem(PRINT_HSL_KEY,JSON.stringify(all)); }catch(e){}
 }
 function printSideInit(){
   try{
@@ -33892,7 +33921,7 @@ function printSideInit(){
 }
 function printWarm(){
   if(_printOv&&_printOv.warm!=null) return _printOv.warm;
-  try{ const v=Number(localStorage.getItem(_printSideNow==='back'?PRINT_BACK_WARM_KEY:PRINT_WARM_KEY)); if(isFinite(v)) return Math.max(-50,Math.min(50,Math.round(v))); }catch(e){}
+  try{ const v=Number(printLookStore.getItem(_printSideNow==='back'?PRINT_BACK_WARM_KEY:PRINT_WARM_KEY)); if(isFinite(v)) return Math.max(-50,Math.min(50,Math.round(v))); }catch(e){}
   return 0;
 }
 const printWarmY=(y,w)=>Math.max(0,Math.min(255,Math.round(y*(1+w/100))));
@@ -33911,12 +33940,12 @@ const PRINT_HSL_KEY='pigu.printHsl';
 const PRINT_HSL_BANDS=[['master','Master',null],['red','Reds',0],['yellow','Yellows',60],['green','Greens',120],['cyan','Cyans',180],['blue','Blues',240],['magenta','Magentas',300]];
 function printHsl(){
   const out={};
-  let v={}; try{ v=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){}
+  let v={}; try{ v=JSON.parse(printLookStore.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){}
   const cl=(x,a,b)=>Math.max(a,Math.min(b,Math.round(Number(x)||0)));
   PRINT_HSL_BANDS.forEach(([k])=>{ const b=v[k]||{}; out[k]={h:cl(b.h,-180,180),s:cl(b.s,-100,100),l:cl(b.l,-100,100)}; });
   // Brightness, the whole print's: one figure, whichever range is picked
   let bb=v.bright&&v.bright.b;
-  if(_printSideNow==='back'){ try{ bb=Number(localStorage.getItem(PRINT_BACK_BRIGHT_KEY)); }catch(e){} }
+  if(_printSideNow==='back'){ try{ bb=Number(printLookStore.getItem(PRINT_BACK_BRIGHT_KEY)); }catch(e){} }
   out.bright=cl(_printOv&&_printOv.bright!=null?_printOv.bright:bb,-100,100);
   out.warm=printWarm();
   return out;
@@ -35839,7 +35868,7 @@ function pcPopRender(){
   if(ae&&ae.matches&&ae.matches('#pcPop input[type="number"],#pcPop input[type="color"]')) return;
   const paper=printPaperKey(), cms=printCmsReady[paper];
   const body=document.getElementById('pcPopBody');
-  document.getElementById('pcPopTitle').textContent=`Print preview · Fiery ${PRINT_PAPER_NAMES[paper]}${printPreviewShow()==='file'?' · file colours':cms&&cms.measured?' · measured':''}`;
+  document.getElementById('pcPopTitle').textContent=`Print preview · Fiery ${PRINT_PAPER_NAMES[paper]}${printPreviewShow()==='file'?' · file colours':cms&&cms.measured?' · measured':''}${printLookDraftOn()?' · this line only (Save to line keeps it)':''}`;
   const has=s=>sideArtObjs(s).some(([,o])=>o&&o.img);
   // a side with no art left is not the one shown, or its sliders went on
   // moving values nothing prints
@@ -36218,9 +36247,9 @@ document.addEventListener('input',e=>{
   const v=Math.max(-lim,Math.min(lim,Math.round(Number(el.value)||0)));
   if(band==='bright') printBrightSet(pcPopSide,v);   // the side on show only
   else{
-    let all={}; try{ all=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(err){}
+    let all={}; try{ all=JSON.parse(printLookStore.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(err){}
     all[band]={...(all[band]||{}),[k]:v};
-    try{ localStorage.setItem(PRINT_HSL_KEY,JSON.stringify(all)); }catch(err){}
+    try{ printLookStore.setItem(PRINT_HSL_KEY,JSON.stringify(all)); }catch(err){}
   }
   document.querySelectorAll(`#pcHsl [data-hsl-k="${k}"],#pcHsl [data-hsl-n="${k}"]`).forEach(x=>{ if(x!==el) x.value=v; });
   pcSlideSoon();
@@ -36233,7 +36262,7 @@ document.addEventListener('click',e=>{
   if(!e.target||e.target.id!=='pcHslReset') return;
   // the other side's Brightness is not this Reset's
   const front=printSideDo('front',()=>printHsl().bright);
-  try{ localStorage.removeItem(PRINT_HSL_KEY); }catch(err){}
+  try{ printLookStore.removeItem(PRINT_HSL_KEY); }catch(err){}
   if(pcPopSide==='back'){ printBrightSet('front',front); printBrightSet('back',0); }
   pcHslShow(); if(printPreviewShow()!=='file') pcRedraw();
 });
@@ -41568,6 +41597,7 @@ const HELP=[
   {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower - every colour moves, blues and darks too, white and greys stay; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, darks and strong colours as much as the rest, white kept paper; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'custom',t:'Print Edited Color Details',k:'colour record print settings crop mark warmth brightness hue saturation swaps record',h:'<b>Print preview</b> -> tick <b>Print Edited Color Details</b> (beside Hold to see original). Every sheet (Custom Template and gift tag) then prints one small grey line in the margin beside the top-left crop mark: which side it is, the paper, <b>Front</b> and <b>Back</b> Printer warmth (W) and Brightness (B), Hue/Saturation, this side\'s colour swaps and the date and time. It shows on the sheet on screen too: <b>drag it</b> to wherever you want it on the sheet (it stays there, on both sides and in the file); <b>double-click</b> it to put it back beside the crop mark. Untick it to print without.'},
+  {on:'sheet custom',t:'Colours on a Magic Create line',k:'magic create line colours test sheet use warmth brightness hue saturation save to line draft',h:'With a Magic Create line open, Printer warmth, Brightness, Hue/Saturation and a test sheet\'s <b>Use</b> change <b>that line only</b> (Print preview\'s title says <b>this line only</b>). <b>Save to line</b> keeps them on the line and its file prints with them; close the line without saving and they are thrown away. Lines with none saved, shared sheets and gift tag lines print with this computer\'s colours.'},
   {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is shared by both sides.'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
@@ -67843,6 +67873,7 @@ async function mcWinOpenRun(id){
     template:typeof selectedTemplate!=='undefined'?selectedTemplate:null,
     search:(document.getElementById('templateSearch')||{}).value||''};
   mcWinItem=id; mcMarkCur();
+  printLookOpen(it);       // its own colours, a draft until Save to line
   // A line with no kind yet has no wire to empty the builder for it; opened
   // over a shared print sheet it was shown that sheet with no Save beside it.
   // Emptied here — after the operator's own place is written down above.
@@ -67952,6 +67983,7 @@ function mcWinCloseRun(){
     if(!ok&&!confirm('This line\'s layout did not save.\n\nOK — close it anyway and lose the changes.\nCancel — keep it open and try again.')) return;
     mcWinEl.classList.remove('open');
     mcWinItem=null; mcMarkCur();
+    _printLineLook=null;     // a draft not saved goes with the window
     mcWiredLine=null;
     mcWinMin=false;
     mcBubbleSync();
@@ -68297,7 +68329,10 @@ async function mcCommit(){
   // another line was opened while the pictures uploaded: the builder is its
   // now, and snapshotted here gave its layout, paper and weight to this one
   if(mcWinItem!==it.id) return true;
+  // the colours stay as last saved: only Save to line keeps a new choice
+  const lookWas=it.design&&it.design.printLook;
   it.design=mcLineSnapshot();
+  if(lookWas) it.design.printLook=lookWas;
   // and the paper and weight the builder was left on: changed there and then
   // closed, the export went on naming and printing the line's old figure
   const patch={design:it.design,...(kept||{})};
@@ -68991,6 +69026,7 @@ function mcCustomWire(it){
     // it committed this line already.
     if(mcWinItem!==it.id) return;
     it.design=mcLineSnapshot();
+    if(printLookDraftOn()) it.design.printLook={..._printLineLook};   // its own colours, kept
     // and what the builder was set to, where the line has not been told
     // itself: paper and GSM are two thirds of the file name, and a line
     // missing them is a line whose PDF button stays greyed out with the
@@ -70990,8 +71026,10 @@ async function mcBorrowBuilder(fn){
   // builder's geometry: forced to load fresh rather than trusted
   mcLaidTemplate=null;
   mcBorrowing++;
+  const lookWas=_printLookOv; _printLookOv=false;   // this computer's colours, unless a line's own
   try{ return await fn(); }
   finally{
+    _printLookOv=lookWas;
     mcBorrowing--;
     if(pcMode!==keep.pcWas) pcSetMode(keep.pcWas);
     await pcBuilderRestore(keep);
@@ -71102,8 +71140,10 @@ async function mcRenderLine(it,side){
   // sitting on Custom Template — came out as empty boxes. Set outright rather
   // than through pcSetMode: that rescans the designs folder, and an export is
   // no time to start reading a directory.
-  const pcWas=pcMode, lineWas=pcLineNow;
+  const pcWas=pcMode, lineWas=pcLineNow, lookWas=_printLookOv;
   pcMode=mcPcOf(it); pcLineNow=it.id;
+  // the colours saved on the line, or this computer's - never an open draft
+  _printLookOv=(it.design&&it.design.printLook&&typeof it.design.printLook==='object')?{...it.design.printLook}:false;
   try{
     state.designsMissing=[];          // the last line's are not this one's
     applyPrintState(it.design);
@@ -71136,7 +71176,7 @@ async function mcRenderLine(it,side){
     // one page until the design list outgrows it — which is exactly what adding
     // extras does — and the pages past the first were being left off the PDF.
     return await renderSidePdfAll(side,Math.max(1,sheetCount()));
-  }finally{ pcMode=pcWas; pcLineNow=lineWas; }
+  }finally{ pcMode=pcWas; pcLineNow=lineWas; _printLookOv=lookWas; }
 }
 // This line, on its own, now. A per-order tile has always made one file out of
 // one line; a sheet tile is given one line and lays a sheet with only that on
@@ -73192,6 +73232,7 @@ document.getElementById('mcSaveChip').addEventListener('click',async()=>{
     // another line opened during the upload: the builder is no longer this one's
     if(mcWinItem!==it.id){ undoLine(); mcSaveChipSaid('Another line was opened — save this one again.',false); return; }
     it.design=mcLineSnapshot();
+    if(printLookDraftOn()) it.design.printLook={..._printLineLook};   // its own colours, kept
     it.paper_type=state.paperType||it.paper_type||'';
     it.gsm=state.gsm||it.gsm||'';
     const ok=await mcSave(it,{design:it.design,paper_type:it.paper_type,
