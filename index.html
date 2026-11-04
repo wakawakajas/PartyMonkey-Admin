@@ -33723,14 +33723,24 @@ function wholeArtSet(on){
 // Illustrator's exports use, so the whole file is CMYK: a PDF's own page is
 // placed as it is beside it. Converted with LittleCMS, relative colorimetric
 // with black point compensation (as Illustrator and Photoshop convert). Off,
-// or with LittleCMS not loading, the pixels go as sRGB-tagged RGB as before.
+// the pixels go as sRGB-tagged RGB as before.
 const PRINT_CMYK_OUT=true;
+// Every export is CMYK only: a conversion that fails stops the export with
+// this (shown as its error), never sends sRGB or the RGB file in its place.
+// noCmyk marks it, so a step that falls back on failure lets it through.
+function cmykFail(e,what){
+  if(e&&e.noCmyk) return e;
+  const x=new Error((what||'The colours')+' could not be made CMYK ('+((e&&e.message)||e||'unknown')
+    +') - nothing was sent as RGB. Reload Pigu and try again.');
+  x.noCmyk=true; return x;
+}
+const cmykOrNull=e=>{ if(e&&e.noCmyk) throw e; return null; };
 async function sheetScanlines(imgData){
   if(PRINT_CMYK_OUT){
     try{
       return {cmyk:true,rows:rgbaToCmykScanlines(imgData,await sheetToCmyk())};
     }
-    catch(e){ console.warn('CMYK conversion unavailable, writing sRGB',e); }
+    catch(e){ throw cmykFail(e,'The sheet'); }
   }
   return {cmyk:false,rows:rgbaToRawRgbScanlines(imgData)};
 }
@@ -33860,7 +33870,7 @@ async function sheetPacked(imgData,rings){
       });
       return {cmyk:true,packed};
     }
-    catch(e){ console.warn('CMYK conversion unavailable, writing sRGB',e); }
+    catch(e){ throw cmykFail(e,'The sheet'); }
   }
   return {cmyk:false,packed:await deflateBytes(rgbaToRawRgbScanlines(imgData))};
 }
@@ -34279,7 +34289,14 @@ function printLookDraftOn(){
     /* the shared print sheet laid in the builder is not the line's */ if(typeof mcLaidShared!=='undefined'&&mcLaidShared) return false;
     if(typeof pcCtx==='function'&&pcCtx()==='gt') return false; /* a gift tag sheet is shared */ const it=mcItem(mcWinItem); return !!it&&it.tile!=='giftTag'; }catch(e){ return false; }
 }
+// the sliders' own view (_printLookUi): the open line's draft or this
+// computer's, never the colours an export or a test sheet version is printing
+// with at that moment (_printLookOv, _printOv) - a slider moved mid-export read
+// the export's and wrote them into this computer's or the line's
+var _printLookUi=0;
+function printLookUiDo(side,fn){ _printLookUi++; try{ return printSideDo(side,fn); }finally{ _printLookUi--; } }
 function printLookSrc(){
+  if(_printLookUi) return printLookDraftOn()?_printLineLook:null;
   if(_printLookOv===false) return null;
   if(_printLookOv) return _printLookOv;
   return printLookDraftOn()?_printLineLook:null;
@@ -34320,6 +34337,10 @@ let _printSideQ=Promise.resolve();
 // this computer's), set only once its turn has come - set before, an export
 // still running took them for the rest of its pages
 async function printSideDoAsync(side,fn,look){
+  // on loan to Magic Create (mcBorrowBuilder): this computer's colours unless
+  // a line's own are given - decided now, set only when its turn comes, never
+  // over an export or test sheet still running
+  if(look===undefined&&mcBorrowing) look=false;
   const prev=_printSideQ; let rel; _printSideQ=new Promise(r=>rel=r);
   await prev;
   const w=_printSideNow, lw=_printLookOv; _printSideNow=side||null;
@@ -34344,7 +34365,7 @@ function printSideInit(){
   }catch(e){}
 }
 function printWarm(){
-  if(_printOv&&_printOv.warm!=null) return _printOv.warm;
+  if(_printOv&&_printOv.warm!=null&&!_printLookUi) return _printOv.warm;
   try{ const v=Number(printLookStore.getItem(_printSideNow==='back'?PRINT_BACK_WARM_KEY:PRINT_WARM_KEY)); if(isFinite(v)) return Math.max(-50,Math.min(50,Math.round(v))); }catch(e){}
   return 0;
 }
@@ -34385,7 +34406,7 @@ function printHsl(){
   // Brightness, the whole print's: one figure, whichever range is picked
   let bb=_printSideNow==='back'?0:v.bright&&v.bright.b;
   if(_printSideNow==='back'){ try{ bb=Number(printLookStore.getItem(PRINT_BACK_BRIGHT_KEY)); }catch(e){} }
-  out.bright=cl(_printOv&&_printOv.bright!=null?_printOv.bright:bb,-100,100);
+  out.bright=cl(_printOv&&!_printLookUi&&_printOv.bright!=null?_printOv.bright:bb,-100,100);
   out.warm=printWarm();
   return out;
 }
@@ -34490,7 +34511,7 @@ function printHslLut(){
   // lost the black ink alone it prints with)
   const grey=new Uint8Array(256);
   for(let v=0;v<256;v++) grey[v]=Math.round(printHslOne(v/255,v/255,v/255,s)[0]*255);
-  if(_printOv) return {N,lut,grey};                  // a test sheet's version: not kept
+  if(_printOv&&!_printLookUi) return {N,lut,grey};  // a test sheet's version: not kept
   _hslLut={N,lut,grey}; _hslLutKey=key;
   return _hslLut;
 }
@@ -34538,10 +34559,19 @@ async function pdfExportCmyk(bytes,ctx){
 async function pdfExportCmykNow(bytes,ctx){
   if(!PDF_AS_CMYK) return await pdfMatchColours(bytes,ctx);
   const cm=await pdfCmykScan(bytes).catch(()=>false);
-  if(cm) return await pdfConvertCmyk(bytes,printMatchPaper(ctx),printWarm());
+  // a CMYK page that cannot be rewritten is drawn and made CMYK below, as an
+  // RGB one is - never sent with its RGB as it came
+  if(cm){
+    try{ return await pdfConvertCmyk(bytes,printMatchPaper(ctx),printWarm(),true); }
+    catch(e){ if(e&&e.noCmyk) throw e; console.warn('CMYK PDF drawn as pixels',e); }
+  }
   const was=_printCtxNow; _printCtxNow=ctx||was; _sheetKOnly++;
-  try{ return await pdfHiResBytes(bytes,false,_pdfTestScale?_pdfTestScale.dpi:600)||bytes; }
-  catch(e){ return bytes; }
+  try{
+    const out=await pdfHiResBytes(bytes,false,_pdfTestScale?_pdfTestScale.dpi:600);
+    if(!out) throw new Error('the page could not be drawn');
+    return out;
+  }
+  catch(e){ throw cmykFail(e,'A PDF'); }
   finally{ _sheetKOnly--; _printCtxNow=was; }
 }
 function printMatchPaper(ctx){
@@ -35759,7 +35789,8 @@ function printColourScreen(canvas,ro,side){
 }
 // the sheet's pixels (RGBA, W x H) as printed, in place
 // proofed with that side's Printer warmth and Brightness
-function pcProofPixels(d,W,H,ro,side,cms){ return printSideDo(side,()=>pcProofPixelsRun(d,W,H,ro,side,cms)); }
+// with the sliders' values, not those of an export running at the time
+function pcProofPixels(d,W,H,ro,side,cms){ return printLookUiDo(side,()=>pcProofPixelsRun(d,W,H,ro,side,cms)); }
 function pcProofPixelsRun(d,W,H,ro,side,cms){
   {
     const n=W*H, rgb=new Uint8Array(n*3);
@@ -36064,7 +36095,9 @@ async function cmykLookParts(mp,warm){
   };
   return {cms,kt,toK0,toK,look,lookK,w,kOnly,cmykLook};
 }
-async function pdfConvertCmyk(bytes,mp,warm){
+// strict (an export): a page that cannot be read and rewritten throws rather
+// than come back as it was, its RGB unconverted; the preview shows the file
+async function pdfConvertCmyk(bytes,mp,warm,strict){
   const {L,lcms,srgb,cmykG,toGracol,fromGracol}=await lcmsLib();
   const {cms,kt,toK0,toK,look,lookK,w,kOnly,cmykLook}=await cmykLookParts(mp,warm);
   const N='(-?(?:\\d+\\.?\\d*|\\.\\d+))';
@@ -36075,9 +36108,12 @@ async function pdfConvertCmyk(bytes,mp,warm){
   const u=v=>Math.round(Math.min(1,Math.max(0,Number(v)))*255);
   const fmt=v=>(Math.round(v/255*1e4)/1e4).toString();
   const memo=new Map();
+  // through the look first, as a picture's pixels are (sheetToCmyk): a grey
+  // still a grey goes as black ink alone
   const conv=rgb=>{
-    if(kt&&rgb[0]===rgb[1]&&rgb[0]===rgb[2]) return [0,0,0,kt[rgb[0]]];
-    return [...toK(new Uint8Array(rgb),1)];
+    const a=look?printHslApply(new Uint8Array(rgb),1):new Uint8Array(rgb);
+    if(kt&&a[0]===a[1]&&a[0]===a[2]) return [0,0,0,kt[a[0]]];
+    return [...toK0(a,1)];
   };
   let hits=0;
   const recolor=data=>{
@@ -36098,8 +36134,10 @@ async function pdfConvertCmyk(bytes,mp,warm){
       let to=memo.get(key); if(!to){ to=conv([r,g,bl].map(u)); memo.set(key,to); }
       hit=true; return to.map(fmt).join(' ')+' '+(op==='rg'?'k':'K');
     }).replace(re1,(m,v,op)=>{
-      // a grey of a CMYK design is that share of black ink
-      hit=true; return '0 0 0 '+(Math.round((1-Math.min(1,Math.max(0,Number(v))))*1e4)/1e4)+' '+(op==='g'?'k':'K');
+      // a grey of a CMYK design is that share of black ink - with Brightness or
+      // Hue/Saturation moved, through the look as its k greys are (kOnly)
+      const k0=1-Math.min(1,Math.max(0,Number(v)));
+      hit=true; return '0 0 0 '+(lookK?fmt(kOnly(Math.round(k0*255))):(Math.round(k0*1e4)/1e4).toString())+' '+(op==='g'?'k':'K');
     }));
     if(!hit) return null;
     hits++;
@@ -36176,7 +36214,8 @@ async function pdfConvertCmyk(bytes,mp,warm){
     }
     const out=new Uint8Array(W*H*4);
     if(n===1){
-      for(let i=0;i<W*H;i++) out[i*4+3]=255-px[i];
+      // black ink alone, through the look as the page's k greys are
+      for(let i=0;i<W*H;i++) out[i*4+3]=lookK?kOnly(255-px[i]):255-px[i];
       return {cs:'DeviceCMYK',data:out};
     }
     // tagged: through its own profile to sRGB first, as the Fiery read it
@@ -36196,10 +36235,11 @@ async function pdfConvertCmyk(bytes,mp,warm){
     hits++;
     return {cs:'DeviceCMYK',data:out};
   };
-  try{
-    const f=await pdfPageFile(bytes,0,'artwork.pdf',null,{recolor,reimage});
-    return f&&hits?new Uint8Array(await f.arrayBuffer()):bytes;
-  }catch(e){ return bytes; }
+  let f=null;
+  try{ f=await pdfPageFile(bytes,0,'artwork.pdf',null,{recolor,reimage}); }
+  catch(e){ if(strict) throw e; return bytes; }
+  if(!f){ if(strict) throw new Error('its page could not be read'); return bytes; }
+  return hits?new Uint8Array(await f.arrayBuffer()):bytes;
 }
 // pdfConvertCmyk's output for the preview: made once per file and paper
 const _pdfConverted=new WeakMap();
@@ -36409,7 +36449,7 @@ function pcPopRender(){
   seg.querySelectorAll('[data-pc-side]').forEach(b=>b.classList.toggle('btn-primary',b.dataset.pcSide===pcPopSide));
   pcTuneShow();
   document.querySelectorAll('#pcPopShow [data-pc-show]').forEach(x=>x.classList.toggle('btn-primary',x.dataset.pcShow===printPreviewShow()));
-  { const w=printSideDo(pcPopSide,printWarm);
+  { const w=printLookUiDo(pcPopSide,printWarm);
     ['pcPrintWarm','pcPrintWarmNum'].forEach(id=>{ const el=document.getElementById(id); if(el&&document.activeElement!==el) el.value=w; }); }
   pcHslShow(); testSheetShow();
   { const rb=document.getElementById('pcRecordOn'); if(rb) rb.checked=printRecordOn(); }
@@ -36761,7 +36801,7 @@ document.addEventListener('click',e=>{
 // Hue/Saturation: the range picked, its three values shown, kept as moved
 function pcHslShow(){
   const sel=document.getElementById('pcHslBand'); if(!sel) return;
-  const s=printSideDo(pcPopSide,printHsl), e={...(s[sel.value]||{h:0,s:0,l:0}),b:s.bright};
+  const s=printLookUiDo(pcPopSide,printHsl), e={...(s[sel.value]||{h:0,s:0,l:0}),b:s.bright};
   document.querySelectorAll('#pcHsl [data-hsl-k],#pcHsl [data-hsl-n]').forEach(el=>{
     if(document.activeElement===el) return;
     el.value=e[el.dataset.hslK||el.dataset.hslN];
@@ -36773,6 +36813,7 @@ document.addEventListener('input',e=>{
   if(el.value===''||el.value==='-') return;            // still being typed
   const band=k==='b'?'bright':document.getElementById('pcHslBand').value, lim=k==='h'?180:100;
   const v=Math.max(-lim,Math.min(lim,Math.round(Number(el.value)||0)));
+  printLookUiDo(pcPopSide,()=>{
   if(band==='bright') printBrightSet(pcPopSide,v);   // the side on show only
   else{
     // the side on show only: the back keeps its own ranges, the front its own
@@ -36781,6 +36822,7 @@ document.addEventListener('input',e=>{
     all[band]={...(all[band]||{}),[k]:v};
     try{ printLookStore.setItem(pcPopSide==='back'?PRINT_BACK_HSL_KEY:PRINT_HSL_KEY,JSON.stringify(all)); }catch(err){}
   }
+  });
   document.querySelectorAll(`#pcHsl [data-hsl-k="${k}"],#pcHsl [data-hsl-n="${k}"]`).forEach(x=>{ if(x!==el) x.value=v; });
   pcSlideSoon();
 });
@@ -36791,11 +36833,13 @@ document.addEventListener('change',e=>{
 document.addEventListener('click',e=>{
   if(!e.target||e.target.id!=='pcHslReset') return;
   // the side on show only: the other side's ranges and Brightness stay
+  printLookUiDo(pcPopSide,()=>{
   if(pcPopSide==='back'){ try{ printLookStore.setItem(PRINT_BACK_HSL_KEY,'{}'); }catch(err){} printBrightSet('back',0); }
   else{
     printHslFreezeBack();
     try{ printLookStore.removeItem(PRINT_HSL_KEY); }catch(err){}
   }
+  });
   pcHslShow(); if(printPreviewShow()!=='file') pcRedraw();
 });
 let _pcSlideT=0;
@@ -36838,7 +36882,7 @@ const TEST_SHEET_KEY='pigu.testSheet';
 const TEST_STEPS={fine:{b:4,w:5},medium:{b:8,w:10},coarse:{b:14,w:16}};
 // the versions, numbered from 1: {n,b,w} - Brightness and Printer warmth
 function testSheetVersions(mode,count,step){
-  const S=TEST_STEPS[step]||TEST_STEPS.medium, b0=printSideDo(pcPopSide,()=>printHsl().bright), w0=printSideDo(pcPopSide,printWarm);
+  const S=TEST_STEPS[step]||TEST_STEPS.medium, b0=printLookUiDo(pcPopSide,()=>printHsl().bright), w0=printLookUiDo(pcPopSide,printWarm);
   const cb=v=>Math.max(-100,Math.min(100,Math.round(v))), cw=v=>Math.max(-50,Math.min(50,Math.round(v)));
   const out=[], seen=new Set();
   const add=(b,w)=>{ b=cb(b); w=cw(w); const k=b+'|'+w; if(seen.has(k)) return; seen.add(k); out.push({n:out.length+1,b,w}); };
@@ -36954,7 +36998,7 @@ async function testSheetPdf(mode,count,step){
   g.fillStyle='#fff'; g.fillRect(0,0,W,H);
   g.fillStyle='#000'; g.textBaseline='top';
   g.font=`600 ${px(3.6)}px "IBM Plex Sans",system-ui,sans-serif`;
-  const now=new Date(), b0=printSideDo(side0,()=>printHsl().bright), w0=printSideDo(side0,printWarm);
+  const now=new Date(), b0=printLookUiDo(side0,()=>printHsl().bright), w0=printLookUiDo(side0,printWarm);
   g.fillText(`Pigu test sheet - ${PRINT_PAPER_NAMES[printPaperKey()]||''} - ${now.toLocaleDateString()} ${now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`
     +` - now: Brightness ${b0}, Printer warmth ${w0}`,px(M),px(3));
   g.font=`400 ${px(2.8)}px "IBM Plex Sans",system-ui,sans-serif`;
@@ -37052,7 +37096,7 @@ function testSheetKept(){ try{ return JSON.parse(localStorage.getItem(TEST_SHEET
 function testSheetUse(num,side){
   const t=testSheetKept(), v=t&&t.list.find(x=>x.n===num);
   if(!v) return false;
-  printWarmSet(side,v.w); printBrightSet(side,v.b);
+  printLookUiDo(side,()=>{ printWarmSet(side,v.w); printBrightSet(side,v.b); });
   return v;
 }
 function testSheetShow(){
@@ -37106,7 +37150,7 @@ document.addEventListener('change',e=>{
 // a typed figure past the ends, or left empty, is shown as what is kept
 document.addEventListener('change',e=>{
   if(!e.target||e.target.id!=='pcPrintWarmNum') return;
-  const v=printSideDo(pcPopSide,printWarm); e.target.value=v; const s=document.getElementById('pcPrintWarm'); if(s) s.value=v;
+  const v=printLookUiDo(pcPopSide,printWarm); e.target.value=v; const s=document.getElementById('pcPrintWarm'); if(s) s.value=v;
 });
 // the screen tune: every sheet on screen again, its sliders kept together. By colour's two
 // sliders hold the family picked by its dot.
@@ -38470,9 +38514,10 @@ async function printVectorSources(side){
     if(isPdf&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
     // its pixels are matched instead when it is inverted (pdfHiResBytes, sheetScanlines)
     if(bytes&&isPdf&&!inv) bytes=await pdfExportCmyk(bytes,'custom');
-    if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=!!bytes; }
+    // its neutral pixels as black ink alone, as pdfExportCmykNow draws a page
+    if(bytes&&inv){ _sheetKOnly++; try{ bytes=await pdfHiResBytes(bytes,true).catch(cmykOrNull); }finally{ _sheetKOnly--; } inverted=!!bytes; }
     else if(!isPdf&&!inv&&o&&o.img&&imgFinerThanSheet(o.img,side))
-      bytes=await Promise.resolve().then(()=>swaps.length?imgPdfBytes(swappedArtCanvas(o.img,swaps),true):imgPdfBytes(o.img)).catch(()=>null);
+      bytes=await Promise.resolve().then(()=>swaps.length?imgPdfBytes(swappedArtCanvas(o.img,swaps),true):imgPdfBytes(o.img)).catch(cmykOrNull);
     if(bytes) out.set(key,{bytes,page:0,inverted,pdf:isPdf});
   }
   return out;
@@ -42217,7 +42262,7 @@ const HELP=[
   {on:'sheet',t:'Show bounding box, cut lines, punch holes',k:'show hide bounding cut lines punch holes view',
    h:'Top left of the sheet: <b>Show bounding box</b>, <b>Show cut lines</b>, <b>Show punch holes</b>.',sel:'#gtShownBar'},
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
-  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower - every colour moves, blues and darks too, white and greys stay; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, darks and strong colours as much as the rest, white kept paper; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
+  {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower - every colour moves, blues and darks too, white and greys stay; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, darks and strong colours as much as the rest, white kept paper; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Should anything fail to convert, the export stops with a message - nothing goes to the printer as RGB. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'custom',t:'Print Edited Color Details',k:'colour record print settings crop mark warmth brightness hue saturation swaps record',h:'<b>Print preview</b> -> tick <b>Print Edited Color Details</b> (beside Hold to see original). Every sheet (Custom Template and gift tag) then prints one small grey line in the margin beside the top-left crop mark: which side it is, the paper, <b>Front</b> and <b>Back</b> Printer warmth (W) and Brightness (B), Hue/Saturation, this side\'s colour swaps and the date and time. It shows on the sheet on screen too: <b>drag it</b> to wherever you want it on the sheet (it stays there, on both sides and in the file); <b>double-click</b> it to put it back beside the crop mark. Untick it to print without.'},
   {on:'sheet custom',t:'Colours on a Magic Create line',k:'magic create line colours test sheet use warmth brightness hue saturation save to line draft',h:'With a Magic Create line open, Printer warmth, Brightness, Hue/Saturation and a test sheet\'s <b>Use</b> change <b>that line only</b>, and only the side on show (<b>Front</b> or <b>Back</b>): each side keeps its own (Print preview\'s title says <b>this line only</b>). <b>Save to line</b> keeps them on the line and its file prints with them; close the line without saving and they are thrown away. Lines with none saved, shared sheets and gift tag lines print with this computer\'s colours.'},
@@ -42254,7 +42299,7 @@ const HELP=[
   {on:'custom',t:'Rotate the sheet or open it full screen',k:'rotate turn full screen enlarge',h:'Under the sheet: <b>↺</b> / <b>↻</b> turn it (on Original / Actual size the artwork is fitted again to the turn), <b>⤢</b> opens it over the whole screen.',sel:'#pcNlZoom [data-pcz="big"]'},
   {on:'custom',t:'Show cut lines / reference line',k:'show cut lines reference line view',h:'Top left of the sheet: <b>Show cut lines</b>, <b>Show reference line</b>.',sel:'#pcShownBar'},
   {on:'custom',t:'Order ID, paper and GSM',k:'order id paper type gsm file name',h:'Top bar: <b>Order ID</b>, <b>Paper type</b>, <b>GSM</b> - they name the files.',sel:'#pcJobBar'},
-  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower - every colour moves, blues and darks too, white and greys stay; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, darks and strong colours as much as the rest, white kept paper; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#ppOpenBtn'},
+  {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower - every colour moves, blues and darks too, white and greys stay; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, darks and strong colours as much as the rest, white kept paper; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Should anything fail to convert, the export stops with a message - nothing goes to the printer as RGB. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Download and print',k:'download print front back pdf fiery',
    h:'Top bar → <b>Download &amp; Print front</b> / <b>back</b>. <b>⚠ to check</b> lists anything to fix first.',sel:'#printFrontBtn'},
@@ -54920,7 +54965,10 @@ async function gtBuildPdfNow(count,render,sources){
     catch(e){
       // a file this copier cannot read is drawn by the PDF reader instead, at
       // about 1200 dpi, and placed as that - still sharp, never the 300dpi sheet
-      try{ const hi=await pdfHiResBytes(src.bytes,false); if(hi) em=await pdfLift.embedPage(hi,0,alloc); }catch(e2){ em=null; }
+      // a PDF's neutral pixels as black ink alone, as pdfExportCmykNow draws one
+      if(src.pdf) _sheetKOnly++;
+      try{ const hi=await pdfHiResBytes(src.bytes,false); if(hi) em=await pdfLift.embedPage(hi,0,alloc); }catch(e2){ cmykOrNull(e2); em=null; }
+      finally{ if(src.pdf) _sheetKOnly--; }
     }
     if(!em) continue;               // unreadable either way: drawn as pixels, as it always was
     em.objs.forEach(o=>{ mark(o.num); o.parts.forEach(push); });
@@ -55207,7 +55255,7 @@ async function gtVectorSources(side){
       // tag goes in at every pixel it has, the way a PDF does
       const img=side==='back'?null:gtImgs.get(d.id), dpi=img?gtDesignDpi(d):null;
       if(!inv&&img&&dpi&&dpi>PRINT_SHEET_DPI*1.05){
-        try{ const bytes=swaps.length?await imgPdfBytes(swappedArtCanvas(img,swaps),true):await imgPdfBytes(img); if(bytes) out.set(key,{bytes,page:0,pdf:false}); }catch(e){}
+        try{ const bytes=swaps.length?await imgPdfBytes(swappedArtCanvas(img,swaps),true):await imgPdfBytes(img); if(bytes) out.set(key,{bytes,page:0,pdf:false}); }catch(e){ cmykOrNull(e); }
       }
       continue;
     }
@@ -55222,9 +55270,10 @@ async function gtVectorSources(side){
       if(bytes&&swaps.length) bytes=await pdfSwapColours(bytes,swaps).catch(()=>null);
       // its pixels are matched instead when it is inverted
       if(bytes&&!inv) bytes=await pdfExportCmyk(bytes,'gt');
-      if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=true; }
+      // its neutral pixels as black ink alone, as pdfExportCmykNow draws a page
+      if(bytes&&inv){ _sheetKOnly++; try{ bytes=await pdfHiResBytes(bytes,true).catch(cmykOrNull); }finally{ _sheetKOnly--; } inverted=true; }
       if(bytes) out.set(key,{bytes,page:0,inverted,pdf:true});
-    }catch(e){}
+    }catch(e){ cmykOrNull(e); }
   }
   return out;
 }
@@ -71724,11 +71773,11 @@ async function mcBorrowBuilder(fn){
   // whatever a window or plan left in mcLaidTemplate is not known to be this
   // builder's geometry: forced to load fresh rather than trusted
   mcLaidTemplate=null;
+  // this computer's colours, unless a line's own: each export takes them in
+  // its turn (printSideDoAsync), not set here over one already running
   mcBorrowing++;
-  const lookWas=_printLookOv; _printLookOv=false;   // this computer's colours, unless a line's own
   try{ return await fn(); }
   finally{
-    _printLookOv=lookWas;
     mcBorrowing--;
     if(pcMode!==keep.pcWas) pcSetMode(keep.pcWas);
     await pcBuilderRestore(keep);
@@ -71835,7 +71884,7 @@ async function mcRenderLine(it,side){
   // sitting on Custom Template — came out as empty boxes. Set outright rather
   // than through pcSetMode: that rescans the designs folder, and an export is
   // no time to start reading a directory.
-  const pcWas=pcMode, lineWas=pcLineNow, lookWas=_printLookOv;
+  const pcWas=pcMode, lineWas=pcLineNow;
   pcMode=mcPcOf(it); pcLineNow=it.id;
   // the colours saved on the line, or this computer's - never an open draft -
   // handed to the export to take when its turn comes
@@ -71872,7 +71921,7 @@ async function mcRenderLine(it,side){
     // one page until the design list outgrows it — which is exactly what adding
     // extras does — and the pages past the first were being left off the PDF.
     return await renderSidePdfAll(side,Math.max(1,sheetCount()),undefined,undefined,lineLook);
-  }finally{ pcMode=pcWas; pcLineNow=lineWas; _printLookOv=lookWas; }
+  }finally{ pcMode=pcWas; pcLineNow=lineWas; }
 }
 // This line, on its own, now. A per-order tile has always made one file out of
 // one line; a sheet tile is given one line and lays a sheet with only that on
