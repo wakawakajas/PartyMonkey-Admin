@@ -13568,7 +13568,10 @@ function renderSide(side,canvas,maxDim,opts){
               // band's box sat off the card by the nudge and a strip of the band at
               // the cut went out matched to the paper, a darker line
               const sx=(shift&&shift.xMm)||0, sy=(shift&&shift.yMm)||0;
-              const o=box(mx-sx-effW/2,my-sy-effH/2,effW,effH);
+              // no further than this card draws (its clip): past it, a neighbour's
+              // trim the holes below do not reach would be re-inked
+              const o0=box(mx-sx-effW/2,my-sy-effH/2,effW,effH), cb=box(clip.x,clip.y,clip.w,clip.h);
+              const o=[Math.max(o0[0],cb[0]),Math.max(o0[1],cb[1]),Math.min(o0[2],cb[2]),Math.min(o0[3],cb[3])];
               // nothing kept out: the band is drawn over the page's edge on purpose
               // (no hairline of paper between), and that overlap printed matched,
               // a darker line just inside the cut. Every pixel this art leaves on
@@ -13763,7 +13766,21 @@ function renderSide(side,canvas,maxDim,opts){
     const rb=canvas._rec; if(!rb) canvas._rec=was;
     // dragged onto a CMYK PDF card, kept out of its band: made CMYK there, the
     // details took the picture's ink and were lost in the card
-    if(rb&&opts.forExport&&opts._cmykRings) opts._cmykRings.forEach(r=>(r.h||(r.h=[])).push([rb.x0-2,rb.y0-2,rb.x1+2,rb.y1+2]));
+    // only its letters: its box skipped too, the band round them printed
+    // matched to the paper, a box of another colour behind the words
+    if(rb&&opts.forExport&&opts._cmykRings&&opts._cmykRings.length){
+      const X0=Math.floor(rb.x0)-3, Y0=Math.floor(rb.y0)-3, W=Math.ceil(rb.x1)+3-X0, H=Math.ceil(rb.y1)+3-Y0;
+      if(W>0&&H>0&&W*H<4e7){
+        const mc=document.createElement('canvas'); mc.width=W; mc.height=H;
+        const mx2=mc.getContext('2d',{willReadFrequently:true}), T=ctx.getTransform();
+        mx2.setTransform(T.a,T.b,T.c,T.d,T.e-X0,T.f-Y0);
+        drawColourRecord(mx2,sc,side);
+        const d=mx2.getImageData(0,0,W,H).data, mask=new Uint8Array(W*H);
+        for(let q=0;q<W*H;q++) mask[q]=d[q*4+3]?1:0;
+        mc.width=mc.height=0;
+        opts._cmykRings.forEach(r=>(r.h||(r.h=[])).push([X0,Y0,X0+W,Y0+H,mask]));
+      }
+    }
   } }catch(e){}
 
   if(!opts.forExport && state.showCut){
@@ -33814,14 +33831,15 @@ async function sheetRingConv(imgData,rings){
     const ox0=Math.max(0,Math.floor(r.o[0])), oy0=Math.max(0,Math.floor(r.o[1])), ox1=Math.min(w,Math.ceil(r.o[2])), oy1=Math.min(hh,Math.ceil(r.o[3]));
     const ix0=Math.ceil(r.i[0]), iy0=Math.ceil(r.i[1]), ix1=Math.floor(r.i[2]), iy1=Math.floor(r.i[3]);
     const lut=r.f?luts.get(r.f):null;
-    const hs=(r.h||[]).map(b=>[Math.floor(b[0]),Math.floor(b[1]),Math.ceil(b[2]),Math.ceil(b[3])]);
+    // other cards' trims (whole), and the colour details' own letters (mask)
+    const hs=(r.h||[]).map(b=>[Math.floor(b[0]),Math.floor(b[1]),Math.ceil(b[2]),Math.ceil(b[3]),b[4]||null]);
     const xs=[], ys=[], rgb=[];
     for(let y=oy0;y<oy1;y++){
       const inRow=y>=iy0&&y<iy1;
       for(let x=ox0;x<ox1;x++){
         if(inRow&&x>=ix0&&x<ix1){ x=ix1-1; continue; }
         const q=(y*w+x)*4; if(!data[q+3]) continue;      // see-through: the placed page shows there
-        if(hs.length&&hs.some(b=>x>=b[0]&&x<b[2]&&y>=b[1]&&y<b[3])) continue;   // another card's own
+        if(hs.length&&hs.some(b=>x>=b[0]&&x<b[2]&&y>=b[1]&&y<b[3]&&(!b[4]||b[4][(y-b[1])*(b[2]-b[0])+(x-b[0])]))) continue;   // another card's own
         xs.push(x); ys.push(y); rgb.push(data[q],data[q+1],data[q+2]);
       }
     }
@@ -33924,8 +33942,10 @@ async function sheetRingConv(imgData,rings){
 const _pdfOwnLut=new Map();
 function pdfOwnCmykLut(f,pic){
   if(!f||!pic) return Promise.resolve(null);
-  if(!_pdfOwnLut.has(f)){ while(_pdfOwnLut.size>=4) _pdfOwnLut.delete(_pdfOwnLut.keys().next().value);
-  _pdfOwnLut.set(f,(async()=>{
+  // least recently used goes first: a hit moves to the back
+  if(_pdfOwnLut.has(f)){ const p=_pdfOwnLut.get(f); _pdfOwnLut.delete(f); _pdfOwnLut.set(f,p); return p; }
+  { while(_pdfOwnLut.size>=4) _pdfOwnLut.delete(_pdfOwnLut.keys().next().value);
+  const p=(async()=>{
     const bytes=new Uint8Array(await f.arrayBuffer());
     let best=null, failed=false;
     await pdfPageFile(bytes,0,'own.pdf',null,{reimage:async(v,src,{isName})=>{
@@ -33998,8 +34018,11 @@ function pdfOwnCmykLut(f,pic){
       best={W:W2,H:H2,c:cmykShrink(best.c,best.W,best.H,W2,H2)}; }
     look.img=best;
     return look;
-  })().catch(()=>{ _pdfOwnLut.delete(f); return null; })); }
-  return _pdfOwnLut.get(f);
+  })().catch(()=>{
+    // a failed read is kept a minute (the rest of this export), then tried again
+    setTimeout(()=>{ if(_pdfOwnLut.get(f)===p) _pdfOwnLut.delete(f); },60000);
+    return null; });
+  _pdfOwnLut.set(f,p); return p; }
 }
 // deflate of what fill() puts, a piece at a time, read as it is made
 async function deflateChunks(fill){
