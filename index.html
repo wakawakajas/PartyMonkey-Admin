@@ -58530,7 +58530,11 @@ async function mcAskStock(why,want,cancelLabel){
   sheet.classList.add('open');
   if(first) setTimeout(()=>first.focus(),0);
   return new Promise(res=>{
+    // answered once: a take still saving when a newer ask opened the sheet
+    // closed that newer one and cleared its handlers when it finished
+    let settled=false, taking=false;
     const done=v=>{
+      if(settled) return; settled=true;
       if(mcStockOpenDone===done) mcStockOpenDone=null;
       sheet.classList.remove('open');
       MC_STOCK_PARTS.forEach(([,,picksId])=>{
@@ -58545,7 +58549,14 @@ async function mcAskStock(why,want,cancelLabel){
     // A value typed here goes onto the shared list first. It is said out loud
     // when that write does not land, because the job would otherwise look
     // answered and be cleared the next time the list is read.
+    // one at a time: a chip's auto-submit and Enter / Use together put a new
+    // paper on the shared list twice
     const take=async()=>{
+      if(taking||settled) return;
+      taking=true;
+      try{ await takeRun(); }finally{ taking=false; }
+    };
+    const takeRun=async()=>{
       const out={},typed=[];
       for(const [kind,,,boxId,word] of MC_STOCK_PARTS){
         if(!need[kind]) continue;
@@ -59000,8 +59011,10 @@ function mcRenderBatches(){
     return;
   }
   el.innerHTML=rows.map(b=>{
+    // null is a count that did not come back (mcRefreshBatches), not none
+    const unknown=mcCounts[b.id]===null;
     const m=mcCounts[b.id]||{total:0,done:0};
-    const meta=b.status==='completed'
+    const meta=unknown&&b.status!=='completed'?'Lines not counted - could not read them':b.status==='completed'
       ? `Completed ${new Date(b.completed_at||b.created_at).toLocaleDateString()} · `
         +`deleted ${mcDaysLeftWord(b.completed_at)}`
       : (m.total?`${m.done} of ${m.total} done`:'No lines on it');
@@ -59113,7 +59126,7 @@ async function mcDeleteBatch(id){
   if(mcBusy){ showMsg(out,'An export is running — wait for it to finish.',false); return; }
   const m=mcCounts[id]||{total:0,done:0};
   if(!confirm(`Delete ${b.title}?\n\n`
-    +(m.total?`All ${m.total} line${m.total===1?'':'s'} go`:'The whole batch goes')
+    +(mcCounts[id]===null?'Its lines could not be counted just now - every line on it goes':m.total?`All ${m.total} line${m.total===1?'':'s'} go`:'The whole batch goes')
     +', with the artwork uploaded to them. Nobody else on the team will see it '
     +'again either.\n\nThis cannot be undone.')) return;
   let paths=[];
@@ -67306,15 +67319,26 @@ async function mcPrintOpenFull(it){
 // its own layout laid over by that sheet as it lands
 let mcPrintOpening=false;
 let mcWinOpeningId='';
+// what the open left running behind it (the sheet beside the line being laid
+// or lent, mcSplitFollow): held as part of the open, or another line's Create
+// committed and rebound the window while a gift tag loan was still landing
+let mcWinFollowing=null;
 async function mcWinOpen(id){
   if(mcPrintOpening) return;
   // two taps on Create ran the tile, finish and stock questions twice — and a
   // tap on another line's Create meanwhile ran a second open beside the first,
   // both committing the line being left and uploading its files twice
   if(mcWinOpeningId) return;
-  mcWinOpeningId=id;
-  try{ return await mcWinOpenRun(id); }
-  finally{ if(mcWinOpeningId===id) mcWinOpeningId=''; }
+  mcWinOpeningId=id; mcWinFollowing=null;
+  let f=null;
+  try{ const r=await mcWinOpenRun(id); f=mcWinFollowing; return r; }
+  finally{
+    mcWinFollowing=null;
+    const free=()=>{ if(mcWinOpeningId===id) mcWinOpeningId=''; };
+    // never held for good: a follow that hangs lets go after 20 s
+    if(f) Promise.race([Promise.all(f.map(p=>Promise.resolve(p).catch(()=>{}))),new Promise(r=>setTimeout(r,20000))]).then(free);
+    else free();
+  }
 }
 async function mcWinOpenRun(id){
   // a line still being closed has not handed the builder back yet; opening
@@ -67449,6 +67473,7 @@ async function mcWinOpenRun(id){
   // and the builder's Save is asked about once the builder is the one in front:
   // asked only as the panel was drawn, it was asked of the screen being left
   const following=mcSplitFollow(it);
+  mcWinFollowing=[following];
   hold();
   following.finally(()=>{
     if(mcWinItem!==id) return;
@@ -67463,10 +67488,10 @@ async function mcWinOpenRun(id){
   // Routing already says where this SKU goes, so being asked again on every
   // line is the same answer given two hundred times. A line that has not been
   // told what it is takes the answer the shop already wrote down.
-  if(!it.tile) mcAutoTile(it).then(()=>{
+  if(!it.tile) mcWinFollowing.push(mcAutoTile(it).then(()=>{
     if(mcWinItem!==id) return;
     mcWinRender();
-    mcSplitFollow(it).finally(()=>{
+    return mcSplitFollow(it).finally(()=>{
       if(mcWinItem!==id) return;
       hold();
       if(typeof mcBuilderSaveSync==='function') mcBuilderSaveSync();
@@ -67475,7 +67500,7 @@ async function mcWinOpenRun(id){
       // paper on it and no obvious reason why its PDF button is grey.
       mcAskStockFor(it);
     });
-  });
+  }));
   // and what both gift tag libraries are called, so the design picker can say
   // "it is on the other page" instead of "no design matches"
   if(!Object.keys(mcGtNames).length&&typeof mcGtIndex==='function') mcGtIndex().catch(()=>{});
@@ -67986,9 +68011,12 @@ function mcWireStockRow(it){
   [['mcPaperSel','paper_type'],['mcGsmSel','gsm']].forEach(([id,key])=>{
     const el=document.getElementById(id); if(!el) return;
     el.addEventListener('change',async()=>{
+      const was=it[key];
       it[key]=el.value;
       state[key==='paper_type'?'paperType':'gsm']=el.value;
-      await mcSave(it,{[key]:el.value});
+      // not saved: the line keeps its old value, so the builder's differs and
+      // the next commit sends it again (it was taken as sent and never retried)
+      if(!await mcSave(it,{[key]:el.value})) it[key]=was;
       mcRepaintRow(it);
     });
   });
@@ -68729,6 +68757,9 @@ async function mcUseArt(it,pairs){
   const msg=document.getElementById('mcWinMsg');
   const info=side=>document.getElementById('mcInfo-'+side);
   pairs.forEach(([side])=>{ const i=info(side); if(i) i.textContent='Loading…'; });
+  // a picture uploaded onto a side replaces its Multiple Design pages too: left,
+  // they went on printing, and the next commit put their first page back over it
+  const listWas={front:(state.finalList||{}).front,back:(state.finalList||{}).back}, splitWas=state.finalSplit;
   try{
     const got=await Promise.all(pairs.map(async([side,f])=>{
       const dataURL=await fileToImageData(f);
@@ -68737,17 +68768,21 @@ async function mcUseArt(it,pairs){
       // upload keeps it — the export places the real thing where it can
       state.final[side]={data:dataURL,img,name:f.name,file:f};
       fitArtToCard(side);
+      if(state.finalList) state.finalList[side]=[];
       return {side,f,dataURL,img};
     }));
+    if(state.finalList&&!(state.finalList.front||[]).length&&!(state.finalList.back||[]).length) state.finalSplit=false;
     refreshSlots(); refreshArtInputs(); drawAll();
     const paths=await Promise.all(got.map(g=>mcPutArt(it,g.side,g.f,g.dataURL,g.img)));
     const art=Object.assign({},it.art);
     const replaced=got.map(g=>art[g.side]).filter(Boolean);
-    got.forEach((g,k)=>{ state.final[g.side].mcPath=paths[k]; art[g.side]=paths[k]; });
+    got.forEach((g,k)=>{ state.final[g.side].mcPath=paths[k]; art[g.side]=paths[k]; delete art[g.side+'Split']; });
     const undoArt=mcUndoOf(it,['art']);
     it.art=art;
     if(!await mcSave(it,{art:it.art})){
       undoArt();
+      if(state.finalList){ state.finalList.front=listWas.front||[]; state.finalList.back=listWas.back||[]; }
+      state.finalSplit=splitWas;
       got.forEach(g=>{ state.final[g.side].mcPath=''; });
       // the file just filed is not on the line: taken back out of the bucket
       try{ await sb.storage.from(PHOTO_BUCKET).remove(paths); }catch(e){}
