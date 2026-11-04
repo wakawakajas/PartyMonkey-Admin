@@ -13009,8 +13009,9 @@ function printRecordOn(){ try{ return localStorage.getItem(PRINT_RECORD_KEY)==='
 function printColourRecord(side,ctx){
   const sg=v=>(v>0?'+':v<0?'\u2212':'')+Math.abs(v);
   const f=printSideDo('front',printHsl), b=printSideDo('back',printHsl);
-  const bands=PRINT_HSL_BANDS.filter(([k])=>f[k].h||f[k].s||f[k].l)
-    .map(([k,name])=>name+[['H',f[k].h],['S',f[k].s],['L',f[k].l]].filter(([,v])=>v).map(([l,v])=>' '+l+sg(v)).join(''));
+  const bandsOf=s=>PRINT_HSL_BANDS.filter(([k])=>s[k].h||s[k].s||s[k].l)
+    .map(([k,name])=>name+[['H',s[k].h],['S',s[k].s],['L',s[k].l]].filter(([,v])=>v).map(([l,v])=>' '+l+sg(v)).join('')).join(', ')||'none';
+  const fb=bandsOf(f), bb=bandsOf(b);
   let swaps=[];
   try{
     const arts=ctx==='gt'?gtSideArtObjs(side):sideArtObjs(side);
@@ -13022,7 +13023,7 @@ function printColourRecord(side,ctx){
   return [side==='back'?'BACK':'FRONT',
     (ctx==='gt'?(String(gtFinish||'')+' '):'')+(PRINT_PAPER_NAMES[printPaperKey(ctx)]||'')+(printMatchPaper(ctx)?' matched':''),
     `Front W${sg(f.warm)} B${sg(f.bright)}`,`Back W${sg(b.warm)} B${sg(b.bright)}`,
-    'Hue/Sat '+(bands.length?bands.join(', '):'none'),
+    ...(fb===bb?['Hue/Sat '+fb]:['Front Hue/Sat '+fb,'Back Hue/Sat '+bb]),
     swaps.length?'Swaps '+swaps.length+': '+swaps.slice(0,6).join(' ')+(swaps.length>6?' ...':''):'',
     now.toLocaleDateString([],{day:'numeric',month:'short'})+' '+now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})]
     .filter(Boolean).join('  \u00b7  ');
@@ -34173,7 +34174,7 @@ var _printLineLook=null, _printLookOv=null;
 // Save to line keeps them only then - otherwise it prints with this computer's
 // as they are on the day, not a copy of them frozen on the line
 var _printLineDirty=false, _printLineHad=false;
-const printLookKeys=()=>[PRINT_WARM_KEY,PRINT_BACK_WARM_KEY,PRINT_HSL_KEY,PRINT_BACK_BRIGHT_KEY];
+const printLookKeys=()=>[PRINT_WARM_KEY,PRINT_BACK_WARM_KEY,PRINT_HSL_KEY,PRINT_BACK_BRIGHT_KEY,PRINT_BACK_HSL_KEY];
 function printLookShared(){ const o={}; printLookKeys().forEach(k=>{ try{ const v=localStorage.getItem(k); if(v!==null) o[k]=v; }catch(e){} }); return o; }
 function printLookDraftOn(){
   try{ if(!_printLineLook||!mcWinItem) return false;
@@ -34261,14 +34262,24 @@ const printWarmY=(y,w)=>Math.max(0,Math.min(255,Math.round(y*(1+w/100))));
 // whenever it is moved, then read per pixel by trilinear lookup, so a sheet
 // costs no more than a table read a pixel; all at 0, nothing is done.
 const PRINT_HSL_KEY='pigu.printHsl';
+// The back's Hue/Saturation ranges, its own (4 Nov): moving them on one side
+// changed the other. Until the back is moved it takes the front's (old lines
+// and this computer's kept one set for both); Brightness has its own key.
+const PRINT_BACK_HSL_KEY='pigu.printHsl.back';
+function printHslBands(side){
+  let v=null;
+  if(side==='back'){ try{ const t=printLookStore.getItem(PRINT_BACK_HSL_KEY); if(t!==null) v=JSON.parse(t)||{}; }catch(e){} }
+  if(!v){ try{ v=JSON.parse(printLookStore.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){ v={}; } if(side==='back'){ v={...v}; delete v.bright; } }
+  return v;
+}
 const PRINT_HSL_BANDS=[['master','Master',null],['red','Reds',0],['yellow','Yellows',60],['green','Greens',120],['cyan','Cyans',180],['blue','Blues',240],['magenta','Magentas',300]];
 function printHsl(){
   const out={};
-  let v={}; try{ v=JSON.parse(printLookStore.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){}
+  const v=printHslBands(_printSideNow==='back'?'back':'front');
   const cl=(x,a,b)=>Math.max(a,Math.min(b,Math.round(Number(x)||0)));
   PRINT_HSL_BANDS.forEach(([k])=>{ const b=v[k]||{}; out[k]={h:cl(b.h,-180,180),s:cl(b.s,-100,100),l:cl(b.l,-100,100)}; });
   // Brightness, the whole print's: one figure, whichever range is picked
-  let bb=v.bright&&v.bright.b;
+  let bb=_printSideNow==='back'?0:v.bright&&v.bright.b;
   if(_printSideNow==='back'){ try{ bb=Number(printLookStore.getItem(PRINT_BACK_BRIGHT_KEY)); }catch(e){} }
   out.bright=cl(_printOv&&_printOv.bright!=null?_printOv.bright:bb,-100,100);
   out.warm=printWarm();
@@ -36660,9 +36671,10 @@ document.addEventListener('input',e=>{
   const v=Math.max(-lim,Math.min(lim,Math.round(Number(el.value)||0)));
   if(band==='bright') printBrightSet(pcPopSide,v);   // the side on show only
   else{
-    let all={}; try{ all=JSON.parse(printLookStore.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(err){}
+    // the side on show only: the back keeps its own ranges, the front its own
+    const all=printHslBands(pcPopSide);
     all[band]={...(all[band]||{}),[k]:v};
-    try{ printLookStore.setItem(PRINT_HSL_KEY,JSON.stringify(all)); }catch(err){}
+    try{ printLookStore.setItem(pcPopSide==='back'?PRINT_BACK_HSL_KEY:PRINT_HSL_KEY,JSON.stringify(all)); }catch(err){}
   }
   document.querySelectorAll(`#pcHsl [data-hsl-k="${k}"],#pcHsl [data-hsl-n="${k}"]`).forEach(x=>{ if(x!==el) x.value=v; });
   pcSlideSoon();
@@ -36673,10 +36685,14 @@ document.addEventListener('change',e=>{
 });
 document.addEventListener('click',e=>{
   if(!e.target||e.target.id!=='pcHslReset') return;
-  // the other side's Brightness is not this Reset's
-  const front=printSideDo('front',()=>printHsl().bright);
-  try{ printLookStore.removeItem(PRINT_HSL_KEY); }catch(err){}
-  if(pcPopSide==='back'){ printBrightSet('front',front); printBrightSet('back',0); }
+  // the side on show only: the other side's ranges and Brightness stay
+  if(pcPopSide==='back'){ try{ printLookStore.setItem(PRINT_BACK_HSL_KEY,'{}'); }catch(err){} printBrightSet('back',0); }
+  else{
+    // the back still following the front's ranges keeps them as its own
+    const bk=printHslBands('back');
+    try{ if(printLookStore.getItem(PRINT_BACK_HSL_KEY)===null) printLookStore.setItem(PRINT_BACK_HSL_KEY,JSON.stringify(bk)); }catch(err){}
+    try{ printLookStore.removeItem(PRINT_HSL_KEY); }catch(err){}
+  }
   pcHslShow(); if(printPreviewShow()!=='file') pcRedraw();
 });
 let _pcSlideT=0;
@@ -42083,7 +42099,7 @@ const HELP=[
   {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower - every colour moves, blues and darks too, white and greys stay; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, darks and strong colours as much as the rest, white kept paper; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'custom',t:'Print Edited Color Details',k:'colour record print settings crop mark warmth brightness hue saturation swaps record',h:'<b>Print preview</b> -> tick <b>Print Edited Color Details</b> (beside Hold to see original). Every sheet (Custom Template and gift tag) then prints one small grey line in the margin beside the top-left crop mark: which side it is, the paper, <b>Front</b> and <b>Back</b> Printer warmth (W) and Brightness (B), Hue/Saturation, this side\'s colour swaps and the date and time. It shows on the sheet on screen too: <b>drag it</b> to wherever you want it on the sheet (it stays there, on both sides and in the file); <b>double-click</b> it to put it back beside the crop mark. Untick it to print without.'},
-  {on:'sheet custom',t:'Colours on a Magic Create line',k:'magic create line colours test sheet use warmth brightness hue saturation save to line draft',h:'With a Magic Create line open, Printer warmth, Brightness, Hue/Saturation and a test sheet\'s <b>Use</b> change <b>that line only</b> (Print preview\'s title says <b>this line only</b>). <b>Save to line</b> keeps them on the line and its file prints with them; close the line without saving and they are thrown away. Lines with none saved, shared sheets and gift tag lines print with this computer\'s colours.'},
+  {on:'sheet custom',t:'Colours on a Magic Create line',k:'magic create line colours test sheet use warmth brightness hue saturation save to line draft',h:'With a Magic Create line open, Printer warmth, Brightness, Hue/Saturation and a test sheet\'s <b>Use</b> change <b>that line only</b>, and only the side on show (<b>Front</b> or <b>Back</b>): each side keeps its own (Print preview\'s title says <b>this line only</b>). <b>Save to line</b> keeps them on the line and its file prints with them; close the line without saving and they are thrown away. Lines with none saved, shared sheets and gift tag lines print with this computer\'s colours.'},
   {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is shared by both sides. A PDF design is made exactly as the export makes it (its own CMYK, greys as black ink), so the number picked prints the same in the real file.'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
