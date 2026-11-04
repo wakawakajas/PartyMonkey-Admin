@@ -13555,7 +13555,7 @@ function renderSide(side,canvas,maxDim,opts){
         // so the export makes it CMYK as the page is made - GRACoL and the look,
         // not matched to the paper. Matched, the band came out other numbers
         // than the card it runs on from (30 points more cyan on a Canva card).
-        if(fillHere&&ringOnly!=='whole'&&opts.forExport){
+        if(fillHere&&ringOnly===true&&opts.forExport){
           try{
             const f=printArtPdf(img);
             if(f&&_pdfCmyk.get(f)===true){
@@ -13577,7 +13577,9 @@ function renderSide(side,canvas,maxDim,opts){
               // and the artwork's own box, so the band can be held to the picture's
               // colour where the cut actually falls on it
               const ab=box(mx-sx-wMm/2,my-sy-hMm/2,wMm,hMm);
-              (opts._cmykRings||(opts._cmykRings=[])).push({o,i,a:ab,rot:rotDeg||0,f,pic:printArtExportImg(img)});
+              // the cards beside it that its bleed reaches into: their own, never re-inked
+              const hb=holes.map(q=>box(q.x,q.y,q.w,q.h));
+              (opts._cmykRings||(opts._cmykRings=[])).push({o,i,a:ab,h:hb,rot:rotDeg||0,f,pic:printArtExportImg(img)});
             }
           }catch(e){}
         }
@@ -33765,12 +33767,13 @@ async function sheetPacked(imgData,rings){
   if(PRINT_CMYK_OUT){
     try{
       const conv=cmykRowsConv(imgData,await sheetToCmyk()), w=imgData.width, h=imgData.height;
-      const ring=rings&&rings.length?await sheetRingConv(imgData,rings):null;
+      // the band failing falls back to the page's own conversion, never the page to sRGB
+      let ring=rings&&rings.length?await sheetRingConv(imgData,rings).catch(e=>{ console.warn('CMYK band skipped',e); return null; }):null;
       const step=Math.max(1,Math.floor(1048576/Math.max(1,w)));
       const packed=await deflateChunks(async put=>{
         for(let y0=0;y0<h;y0+=step){
           const y1=Math.min(h,y0+step), out=conv(y0,y1);
-          if(ring) ring(out,y0,y1);
+          if(ring){ try{ ring(out,y0,y1); }catch(e){ console.warn('CMYK band skipped',e); ring=null; } }
           await put(out);
           await new Promise(r=>setTimeout(r));
         }
@@ -33804,12 +33807,14 @@ async function sheetRingConv(imgData,rings){
     const ox0=Math.max(0,Math.floor(r.o[0])), oy0=Math.max(0,Math.floor(r.o[1])), ox1=Math.min(w,Math.ceil(r.o[2])), oy1=Math.min(hh,Math.ceil(r.o[3]));
     const ix0=Math.ceil(r.i[0]), iy0=Math.ceil(r.i[1]), ix1=Math.floor(r.i[2]), iy1=Math.floor(r.i[3]);
     const lut=r.f?luts.get(r.f):null;
+    const hs=(r.h||[]).map(b=>[Math.floor(b[0]),Math.floor(b[1]),Math.ceil(b[2]),Math.ceil(b[3])]);
     const xs=[], ys=[], rgb=[];
     for(let y=oy0;y<oy1;y++){
       const inRow=y>=iy0&&y<iy1;
       for(let x=ox0;x<ox1;x++){
         if(inRow&&x>=ix0&&x<ix1){ x=ix1-1; continue; }
         const q=(y*w+x)*4; if(!data[q+3]) continue;      // see-through: the placed page shows there
+        if(hs.length&&hs.some(b=>x>=b[0]&&x<b[2]&&y>=b[1]&&y<b[3])) continue;   // another card's own
         xs.push(x); ys.push(y); rgb.push(data[q],data[q+1],data[q+2]);
       }
     }
@@ -33907,13 +33912,15 @@ async function sheetRingConv(imgData,rings){
 // page is one CMYK picture (a Canva or Photoshop card), each pixel of the page
 // as drawn (pic, the export's own drawing) paired with the picture's CMYK there,
 // gathered by colour (5 bits a channel). Answers (r,g,b)=>CMYK or null; null
-// where the page is not one picture. Kept per file.
-const _pdfOwnLut=new WeakMap();
+// where the page is not one picture. Kept for the last few files only (each
+// holds its picture's CMYK), and a failed read is not kept.
+const _pdfOwnLut=new Map();
 function pdfOwnCmykLut(f,pic){
   if(!f||!pic) return Promise.resolve(null);
-  if(!_pdfOwnLut.has(f)) _pdfOwnLut.set(f,(async()=>{
+  if(!_pdfOwnLut.has(f)){ while(_pdfOwnLut.size>=4) _pdfOwnLut.delete(_pdfOwnLut.keys().next().value);
+  _pdfOwnLut.set(f,(async()=>{
     const bytes=new Uint8Array(await f.arrayBuffer());
-    let best=null;
+    let best=null, failed=false;
     await pdfPageFile(bytes,0,'own.pdf',null,{reimage:async(v,src,{isName})=>{
       try{
         const d=v.dict, R=x=>src.resolve(x), cs=R(d.get('ColorSpace'));
@@ -33932,10 +33939,10 @@ function pdfOwnCmykLut(f,pic){
         const c=new Uint8Array(px.buffer,px.byteOffset,W*H*4).slice();
         if(inv) for(let i=0;i<c.length;i++) c[i]=255-c[i];
         best={W,H,c};
-      }catch(e){}
+      }catch(e){ failed=true; }
       return null;
     }});
-    if(!best) return null;
+    if(!best){ if(failed) throw new Error('picture not read'); return null; }
     const pw=pic.naturalWidth||pic.width, ph=pic.naturalHeight||pic.height;
     if(!(pw>0&&ph>0)) return null;
     const cv=document.createElement('canvas'); cv.width=pw; cv.height=ph;
@@ -33977,9 +33984,14 @@ function pdfOwnCmykLut(f,pic){
       }
       memo.set(key,v); return v;
     };
-    look.img=best;            // the page picture itself, for the band's edges (sheetRingConv)
+    // the page picture itself, for the band's edges (sheetRingConv): no finer
+    // than a card prints, so a huge Photoshop file is not held whole
+    const cap=3000;
+    if(Math.max(best.W,best.H)>cap){ const k=cap/Math.max(best.W,best.H), W2=Math.max(1,Math.round(best.W*k)), H2=Math.max(1,Math.round(best.H*k));
+      best={W:W2,H:H2,c:cmykShrink(best.c,best.W,best.H,W2,H2)}; }
+    look.img=best;
     return look;
-  })().catch(()=>null));
+  })().catch(()=>{ _pdfOwnLut.delete(f); return null; })); }
   return _pdfOwnLut.get(f);
 }
 // deflate of what fill() puts, a piece at a time, read as it is made
