@@ -11285,6 +11285,7 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
     </span>
     <button type="button" class="btn-outline btn-sm" id="pcHold"
       title="Hold to see the sheets as uploaded - the file's own colours, no print look and no changes; let go to see them as they print">Hold to see original</button>
+    <label class="click-tog" style="font-size:12px;margin:0;" title="Prints one small grey line on every sheet: front and back Printer warmth and Brightness, Hue/Saturation, the paper and the colour swaps. Drag it on the sheet to where you want it; double-click it to put it back"><input type="checkbox" id="pcRecordOn"/>Print Edited Color Details</label>
   </div>
   <!-- the press's drift taken out by eye: the yellow toner of every export,
        not the preview (printWarm) -->
@@ -11323,7 +11324,6 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
         style="width:58px;padding:3px 6px;font-size:12px;text-align:right;"/></label>
   </div>
   <!-- Test sheet: this design in many numbered versions, one sheet (testSheetPdf) -->
-  <label class="click-tog" style="margin-top:10px;font-size:12px;" title="One small grey line beside the top-left crop mark: front and back Printer warmth and Brightness, Hue/Saturation, the paper and this side's colour swaps"><input type="checkbox" id="pcRecordOn"/>Print colour record beside the crop mark</label>
   <div id="pcTest" style="margin-top:10px;padding:8px;border:1px solid var(--border);border-radius:10px;font-size:12px;"
     title="This design in numbered versions on one sheet, each printed as an export prints it. Print it, then type the number that matches and press Use.">
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
@@ -13036,33 +13036,102 @@ function drawColourRecord(ctx,sc,side){
   // clear of the crop marks, so the line never crosses a tick the cut is read by
   const off=marks?state.refMark.offsetMm+state.refMark.lenMm+0.8:2;
   const text=printColourRecord(side);
-  // 6 pt, made smaller to fit the width there is (never under 3.5 pt)
-  let fs=2.1;
-  const x=Math.max(2,minX+1.5), room=p.w-x-2;
   ctx.save();
   const font=s=>{ ctx.font=`${s*sc}px Arial, sans-serif`; };
-  font(fs);
-  const wMm=ctx.measureText(text).width/sc;
-  if(wMm>room) fs=Math.max(1.25,fs*room/wMm);
-  font(fs);
   ctx.fillStyle='#808080';          // a grey: black ink only
   ctx.textBaseline='alphabetic';
+  // 6 pt, made smaller to fit the width there is (never under 3.5 pt)
+  const fitTo=(x)=>{ let fs=2.1; font(fs); const w=ctx.measureText(text).width/sc, room=p.w-x-1.5;
+    if(w>room) fs=Math.max(1.25,fs*room/w); font(fs); return fs; };
+  // where it was dragged to on the sheet, if it was
+  const pos=printRecordPos('custom');
+  if(pos){
+    const at=printRecordClamp(pos,p.w,p.h);
+    fitTo(at.x); recPut(ctx,sc,text,at.x,at.y,'custom');
+    ctx.restore(); return;
+  }
+  const x=Math.max(2,minX+1.5), fs=fitTo(x);
   // above the top crop marks; else below the bottom ones; else up the left
   // margin beside the left marks; and only on a sheet with no margin at all,
   // just above the cards
   const above=minY-off, below=maxY+off+fs;
-  if(above-fs>=0.5) ctx.fillText(text,x*sc,above*sc);
-  else if(below<=p.h-0.5) ctx.fillText(text,x*sc,below*sc);
+  if(above-fs>=0.5) recPut(ctx,sc,text,x,above,'custom');
+  else if(below<=p.h-0.5) recPut(ctx,sc,text,x,below,'custom');
   else if(minX-off-fs>=0.5){
     let fv=2.1; font(fv);
     const hv=ctx.measureText(text).width/sc, roomV=p.h-4;
     if(hv>roomV){ fv=Math.max(1.25,fv*roomV/hv); font(fv); }
     ctx.translate((minX-off)*sc,(p.h-2)*sc); ctx.rotate(-Math.PI/2);
-    ctx.fillText(text,0,0);
+    recPut(ctx,sc,text,0,0,'custom',{x:minX-off,y:p.h-2});
   }
-  else ctx.fillText(text,x*sc,Math.max(fs+0.3,minY-0.6)*sc);
+  else recPut(ctx,sc,text,x,Math.max(fs+0.3,minY-0.6),'custom');
   ctx.restore();
 }
+// Where the details line was dragged to, kept on this computer for each
+// builder (both sides take it); none is the place worked out for it
+function printRecordPos(k){
+  try{ const v=JSON.parse(localStorage.getItem('pigu.colourRecordPos.'+k)||'null');
+    return v&&isFinite(v.x)&&isFinite(v.y)?v:null; }catch(e){ return null; }
+}
+function printRecordPosSet(k,v){
+  try{ if(v) localStorage.setItem('pigu.colourRecordPos.'+k,JSON.stringify({x:Math.round(v.x*10)/10,y:Math.round(v.y*10)/10}));
+    else localStorage.removeItem('pigu.colourRecordPos.'+k); }catch(e){}
+}
+const printRecordClamp=(v,w,h)=>({x:Math.max(0.5,Math.min(w-5,v.x)),y:Math.max(2,Math.min(h-0.5,v.y))});
+// The line written, and where it is on its canvas kept on the canvas, so a
+// press on it can pick it up (printRecordDrag). org: its place in mm.
+function recPut(ctx,sc,text,xMm,yMm,key,org){
+  ctx.fillText(text,xMm*sc,yMm*sc);
+  try{
+    const m=ctx.getTransform(), w=ctx.measureText(text).width, fsPx=parseFloat(ctx.font)||10;
+    const x=xMm*sc, y=yMm*sc;
+    const pts=[[x,y-fsPx],[x+w,y-fsPx],[x+w,y+fsPx*0.35],[x,y+fsPx*0.35]]
+      .map(([a,b])=>[m.a*a+m.c*b+m.e,m.b*a+m.d*b+m.f]);
+    const xs=pts.map(q=>q[0]), ys=pts.map(q=>q[1]);
+    ctx.canvas._rec={key,x0:Math.min(...xs),x1:Math.max(...xs),y0:Math.min(...ys),y1:Math.max(...ys),
+      ppm:Math.hypot(m.a,m.b)*sc,org:org||{x:xMm,y:yMm}};
+  }catch(e){}
+}
+// Pressed on the details line on the sheet on screen: it moves with the
+// pointer and stays where it is let go, on the sheet and in the file. A
+// double-click puts it back where it is worked out to go.
+(function printRecordDrag(){
+  const hitOf=(cv,e)=>{
+    const R=cv&&cv._rec; if(!R||!printRecordOn()) return null;
+    const r=cv.getBoundingClientRect(); if(!r.width) return null;
+    const px=(e.clientX-r.left)/r.width*cv.width, py=(e.clientY-r.top)/r.height*cv.height, pad=6;
+    return px>=R.x0-pad&&px<=R.x1+pad&&py>=R.y0-pad&&py<=R.y1+pad?R:null;
+  };
+  const redraw=k=>{ try{ if(k==='gt') gtDraw(); else drawAll(); }catch(e){} };
+  document.addEventListener('pointerdown',e=>{
+    const cv=e.target; if(!cv||cv.tagName!=='CANVAS') return;
+    const R=hitOf(cv,e); if(!R) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    const r=cv.getBoundingClientRect(), k=r.width/cv.width;     // screen px per canvas px
+    const start={cx:e.clientX,cy:e.clientY,org:{...R.org},key:R.key,ppm:R.ppm};
+    try{ cv.setPointerCapture(e.pointerId); }catch(err){}
+    const mv=ev=>{
+      const dx=(ev.clientX-start.cx)/k/start.ppm, dy=(ev.clientY-start.cy)/k/start.ppm;
+      printRecordPosSet(start.key,{x:start.org.x+dx,y:start.org.y+dy});
+      redraw(start.key);
+    };
+    const up=()=>{ cv.removeEventListener('pointermove',mv); cv.removeEventListener('pointerup',up); cv.removeEventListener('pointercancel',up); };
+    cv.addEventListener('pointermove',mv); cv.addEventListener('pointerup',up); cv.addEventListener('pointercancel',up);
+  },true);
+  document.addEventListener('dblclick',e=>{
+    const cv=e.target; if(!cv||cv.tagName!=='CANVAS') return;
+    const R=hitOf(cv,e); if(!R) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    printRecordPosSet(R.key,null); redraw(R.key);
+  },true);
+  // a move cursor over it, so it can be seen to be picked up
+  document.addEventListener('pointermove',e=>{
+    const cv=e.target; if(!cv||cv.tagName!=='CANVAS') return;
+    const on=!!hitOf(cv,e);
+    if(on&&cv.style.cursor!=='move'){ cv._recCur=cv.style.cursor; cv.style.cursor='move'; }
+    else if(!on&&cv.style.cursor==='move'&&cv._recCur!==undefined){ cv.style.cursor=cv._recCur; cv._recCur=undefined; }
+  },{passive:true});
+})();
 
 // fold line: a dashed tick at the midpoint of each placeholder edge, same
 // offset/length as the cutting reference marks and the same outer-edge-only
@@ -13288,8 +13357,6 @@ function renderSide(side,canvas,maxDim,opts){
   // bottom layer: auto-generated cutting reference marks, fixed to the placeholder
   // grid (not rotated) — printed both in preview and in the exported PDF
   drawCutMarks(ctx,sc,side);
-  // and, when asked for, the colour record beside the top-left crop mark
-  try{ if(printRecordOn()) drawColourRecord(ctx,sc,side); }catch(e){}
 
   // artwork into the placeholders, expanded by bleed on all sides but kept
   // centred, rotated in 90° steps around each tile's own centre — the footprint
@@ -13636,6 +13703,9 @@ function renderSide(side,canvas,maxDim,opts){
 
   // fold line sits above the artwork (unlike the reference marks below it)
   drawFoldLines(ctx,sc,side);
+  // and, when asked for, the edited colour details - above the artwork, so
+  // dragged onto a card it is still seen and printed
+  try{ if(printRecordOn()) drawColourRecord(ctx,sc,side); }catch(e){}
 
   if(!opts.forExport && state.showCut){
     ctx.save();
@@ -41497,7 +41567,7 @@ const HELP=[
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
   {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower - every colour moves, blues and darks too, white and greys stay; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, darks and strong colours as much as the rest, white kept paper; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
-  {on:'custom',t:'Colour record on the print',k:'colour record print settings crop mark warmth brightness hue saturation swaps record',h:'<b>Print preview</b> -> tick <b>Print colour record beside the crop mark</b>. Every sheet (Custom Template and gift tag) then prints one small grey line in the margin beside the top-left crop mark: which side it is, the paper, <b>Front</b> and <b>Back</b> Printer warmth (W) and Brightness (B), Hue/Saturation, this side\'s colour swaps and the date and time. It shows on the sheet on screen too. Untick it to print without.'},
+  {on:'custom',t:'Print Edited Color Details',k:'colour record print settings crop mark warmth brightness hue saturation swaps record',h:'<b>Print preview</b> -> tick <b>Print Edited Color Details</b> (beside Hold to see original). Every sheet (Custom Template and gift tag) then prints one small grey line in the margin beside the top-left crop mark: which side it is, the paper, <b>Front</b> and <b>Back</b> Printer warmth (W) and Brightness (B), Hue/Saturation, this side\'s colour swaps and the date and time. It shows on the sheet on screen too: <b>drag it</b> to wherever you want it on the sheet (it stays there, on both sides and in the file); <b>double-click</b> it to put it back beside the crop mark. Untick it to print without.'},
   {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is shared by both sides.'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
@@ -48392,15 +48462,25 @@ function gtDrawColourRecord(ctx,sc,slots,side){
     font(fs);
     return {x:lo,fs};
   };
+  // where it was dragged to on the sheet, if it was (printRecordDrag)
+  const pos=printRecordPos('gt');
+  if(pos){
+    const at=printRecordClamp(pos,S.paperW,S.paperH);
+    let fs=2.1; font(fs);
+    const w=ctx.measureText(text).width/sc, room=S.paperW-at.x-1.5;
+    if(w>room){ fs=Math.max(1.25,fs*room/w); font(fs); }
+    recPut(ctx,sc,text,at.x,at.y,'gt');
+    ctx.restore(); return;
+  }
   const above=minY-clear, below=maxY+clear+2.1;
-  if(above-2.1>=0.5){ const f=fit(x0,x1,above,2.1); ctx.fillText(text,f.x*sc,above*sc); }
-  else if(below<=S.paperH-0.5){ const f=fit(x0,x1,below,2.1); ctx.fillText(text,f.x*sc,below*sc); }
+  if(above-2.1>=0.5){ const f=fit(x0,x1,above,2.1); recPut(ctx,sc,text,f.x,above,'gt'); }
+  else if(below<=S.paperH-0.5){ const f=fit(x0,x1,below,2.1); recPut(ctx,sc,text,f.x,below,'gt'); }
   else if(minX-clear-2.1>=0.5){
     let fv=2.1; font(fv);
     const hv=ctx.measureText(text).width/sc, room=S.paperH-24;
     if(hv>room){ fv=Math.max(1.25,fv*room/hv); font(fv); }
     ctx.translate((minX-clear)*sc,(S.paperH-12)*sc); ctx.rotate(-Math.PI/2);
-    ctx.fillText(text,0,0);
+    recPut(ctx,sc,text,0,0,'gt',{x:minX-clear,y:S.paperH-12});
   }
   ctx.restore();
 }
