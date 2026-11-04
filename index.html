@@ -13559,7 +13559,7 @@ function renderSide(side,canvas,maxDim,opts){
               const m=ctx.getTransform(), P=(x,y)=>[m.a*x*sc+m.c*y*sc+m.e,m.b*x*sc+m.d*y*sc+m.f];
               const box=(x,y,w,h)=>{ const a=P(x,y), b=P(x+w,y+h); return [Math.min(a[0],b[0]),Math.min(a[1],b[1]),Math.max(a[0],b[0]),Math.max(a[1],b[1])]; };
               const o=box(mx-effW/2,my-effH/2,effW,effH), i=box(mx-trimW/2,my-trimH/2,trimW,trimH);
-              (opts._cmykRings||(opts._cmykRings=[])).push({o,i});
+              (opts._cmykRings||(opts._cmykRings=[])).push({o,i,f,pic:printArtExportImg(img)});
             }
           }catch(e){}
         }
@@ -33717,16 +33717,24 @@ async function sheetPacked(imgData,rings){
 }
 // The band pixels of a slice made again: GRACoL with the print look on top
 // (as pdfConvertCmyk gives the page it runs from), a grey as black ink alone
+// The band is made as the card is: the band's colours first given the PDF's
+// own ink numbers (pdfOwnCmykLut: each colour of the page as drawn, back to the
+// CMYK the designer set for it), then the print look added as a change, as
+// pdfConvertCmyk adds it to the page. Made CMYK again from its screen colours
+// (GRACoL), strong purples and blues lost their strength and black was made
+// again another way: the band printed about 10 points of magenta off the card.
 async function sheetRingConv(imgData,rings){
   const {toGracol}=await lcmsLib();
-  const T=printHslLut();
-  const kt=await printKOnly(null).catch(()=>null);
+  const kg=await printKOnly(null).catch(()=>null);
+  const P=await cmykLookParts(printMatchPaper(),printWarm());
+  const luts=new Map();
+  for(const r of rings) if(r.f&&!luts.has(r.f)) luts.set(r.f,await pdfOwnCmykLut(r.f,r.pic).catch(()=>null));
   const w=imgData.width, data=imgData.data, row=1+w*4;
   const R=rings.map(r=>({ox0:Math.max(0,Math.floor(r.o[0])),oy0:Math.max(0,Math.floor(r.o[1])),ox1:Math.min(w,Math.ceil(r.o[2])),oy1:Math.ceil(r.o[3]),
-    ix0:Math.ceil(r.i[0]),iy0:Math.ceil(r.i[1]),ix1:Math.floor(r.i[2]),iy1:Math.floor(r.i[3])}));
+    ix0:Math.ceil(r.i[0]),iy0:Math.ceil(r.i[1]),ix1:Math.floor(r.i[2]),iy1:Math.floor(r.i[3]),lut:r.f?luts.get(r.f):null}));
   return (out,y0,y1)=>{
-    const pos=[], rgb=[];
     for(const r of R){
+      const pos=[], rgb=[];
       for(let y=Math.max(y0,r.oy0);y<Math.min(y1,r.oy1);y++){
         const inRow=y>=r.iy0&&y<r.iy1;
         for(let x=r.ox0;x<r.ox1;x++){
@@ -33734,15 +33742,104 @@ async function sheetRingConv(imgData,rings){
           const q=(y*w+x)*4; pos.push((y-y0)*row+1+x*4); rgb.push(data[q],data[q+1],data[q+2]);
         }
       }
-    }
-    if(!pos.length) return;
-    const n=pos.length, a=Uint8Array.from(rgb), l=T?printHslApplyT(T,a,n):a, k=toGracol(l,n);
-    for(let j=0;j<n;j++){
-      const p=pos[j];
-      if(kt&&a[j*3]===a[j*3+1]&&a[j*3]===a[j*3+2]){ out[p]=out[p+1]=out[p+2]=0; out[p+3]=kt[l[j*3]]; continue; }
-      out[p]=k[j*4]; out[p+1]=k[j*4+1]; out[p+2]=k[j*4+2]; out[p+3]=k[j*4+3];
+      if(!pos.length) continue;
+      const n=pos.length, a=Uint8Array.from(rgb);
+      // the designer's CMYK for each colour: the PDF's own, or GRACoL where it has none
+      const base=new Uint8Array(n*4), miss=[];
+      for(let j=0;j<n;j++){
+        const v=r.lut&&r.lut(a[j*3],a[j*3+1],a[j*3+2]);
+        if(v){ base.set(v,j*4); continue; }
+        if(kg&&a[j*3]===a[j*3+1]&&a[j*3]===a[j*3+2]){ base[j*4+3]=kg[a[j*3]]; continue; }
+        miss.push(j);
+      }
+      if(miss.length){
+        const m=new Uint8Array(miss.length*3); miss.forEach((j,t)=>m.set(a.subarray(j*3,j*3+3),t*3));
+        const k=toGracol(m,miss.length); miss.forEach((j,t)=>base.set(k.subarray(t*4,t*4+4),j*4));
+      }
+      // and the look on top, exactly as the page took it
+      let k=base;
+      if(P.lookK) k=P.cmykLook(base,n);
+      else if(P.w){ k=base.slice(); for(let q=2;q<k.length;q+=4) k[q]=printWarmY(k[q],P.w); }
+      for(let j=0;j<n;j++){ const p=pos[j]; out[p]=k[j*4]; out[p+1]=k[j*4+1]; out[p+2]=k[j*4+2]; out[p+3]=k[j*4+3]; }
     }
   };
+}
+// A CMYK PDF's own ink numbers for each colour its page is drawn in: where the
+// page is one CMYK picture (a Canva or Photoshop card), each pixel of the page
+// as drawn (pic, the export's own drawing) paired with the picture's CMYK there,
+// gathered by colour (5 bits a channel). Answers (r,g,b)=>CMYK or null; null
+// where the page is not one picture. Kept per file.
+const _pdfOwnLut=new WeakMap();
+function pdfOwnCmykLut(f,pic){
+  if(!f||!pic) return Promise.resolve(null);
+  if(!_pdfOwnLut.has(f)) _pdfOwnLut.set(f,(async()=>{
+    const bytes=new Uint8Array(await f.arrayBuffer());
+    let best=null;
+    await pdfPageFile(bytes,0,'own.pdf',null,{reimage:async(v,src,{isName})=>{
+      try{
+        const d=v.dict, R=x=>src.resolve(x), cs=R(d.get('ColorSpace'));
+        const iccN=Array.isArray(cs)&&isName(R(cs[0]),'ICCBased')?Number(R(R(cs[1]).dict.get('N'))):0;
+        if(!(isName(cs,'DeviceCMYK')||iccN===4)||Number(R(d.get('BitsPerComponent')))!==8) return null;
+        const W=Number(R(d.get('Width'))), H=Number(R(d.get('Height')));
+        if(!(W>0&&H>0)||W*H>40e6||(best&&best.W*best.H>=W*H)) return null;
+        const dec=d.get('Decode')!==undefined?R(d.get('Decode')):null;
+        const inv=Array.isArray(dec)&&dec.length===8&&dec.map(x=>Number(R(x))).every((x,i)=>x===(i%2?0:1));
+        if(dec&&!inv) return null;
+        const f0=R(d.get('Filter')), fs=f0==null?[]:Array.isArray(f0)?f0.map(R):[f0];
+        let px=null;
+        if(fs.length===1&&isName(fs[0],'DCTDecode')) px=await cmykJpegDecode(v.raw,W,H);
+        else if(fs.every(x=>isName(x,'FlateDecode'))) px=await src.streamData(v,inflateBytes);
+        if(!px||px.length<W*H*4) return null;
+        const c=new Uint8Array(px.buffer,px.byteOffset,W*H*4).slice();
+        if(inv) for(let i=0;i<c.length;i++) c[i]=255-c[i];
+        best={W,H,c};
+      }catch(e){}
+      return null;
+    }});
+    if(!best) return null;
+    const pw=pic.naturalWidth||pic.width, ph=pic.naturalHeight||pic.height;
+    if(!(pw>0&&ph>0)) return null;
+    const cv=document.createElement('canvas'); cv.width=pw; cv.height=ph;
+    const g=cv.getContext('2d',{willReadFrequently:true}); g.drawImage(pic,0,0);
+    const pd=g.getImageData(0,0,pw,ph).data; cv.width=cv.height=0;
+    const sum=new Uint32Array(32768*4), cnt=new Uint32Array(32768), sq=new Float64Array(32768);
+    for(let y=0;y<best.H;y++){
+      const Y=Math.min(ph-1,Math.floor((y+0.5)*ph/best.H));
+      for(let x=0;x<best.W;x++){
+        const X=Math.min(pw-1,Math.floor((x+0.5)*pw/best.W)), q=(Y*pw+X)*4, s=(y*best.W+x)*4;
+        const cell=((pd[q]>>3)<<10)|((pd[q+1]>>3)<<5)|(pd[q+2]>>3);
+        cnt[cell]++; sum[cell*4]+=best.c[s]; sum[cell*4+1]+=best.c[s+1]; sum[cell*4+2]+=best.c[s+2]; sum[cell*4+3]+=best.c[s+3];
+        sq[cell]+=best.c[s]*best.c[s]+best.c[s+1]*best.c[s+1]+best.c[s+2]*best.c[s+2]+best.c[s+3]*best.c[s+3];
+      }
+    }
+    const at=cell=>cnt[cell]?[0,1,2,3].map(i=>Math.round(sum[cell*4+i]/cnt[cell])):null;
+    // the picture is the page (stretched to it or not) only if one colour as
+    // drawn is one set of ink numbers: a picture that is only part of a page
+    // pairs each drawn colour with many, and is not used
+    { let vs=0, vn=0;
+      for(let cell=0;cell<32768;cell++){ const n=cnt[cell]; if(n<4) continue;
+        let m2=0; for(let t=0;t<4;t++){ const mu=sum[cell*4+t]/n; m2+=mu*mu; }
+        vs+=Math.max(0,sq[cell]/n-m2)*n; vn+=n; }
+      if(!vn||Math.sqrt(vs/vn/4)>42) return null; }   // ~34 paired right, ~50 paired wrong
+    const memo=new Map();
+    return (r,gg,b)=>{
+      const R0=r>>3, G0=gg>>3, B0=b>>3, key=(R0<<10)|(G0<<5)|B0;
+      if(memo.has(key)) return memo.get(key);
+      let v=at(key);
+      // a colour the page has not got exactly: the nearest it has, a step or two off
+      for(let d=1;!v&&d<=2;d++){
+        let bestN=0, acc=[0,0,0,0];
+        for(let i=-d;i<=d;i++) for(let j=-d;j<=d;j++) for(let k=-d;k<=d;k++){
+          const R1=R0+i, G1=G0+j, B1=B0+k; if(R1<0||G1<0||B1<0||R1>31||G1>31||B1>31) continue;
+          const c=(R1<<10)|(G1<<5)|B1; if(!cnt[c]) continue;
+          for(let t=0;t<4;t++) acc[t]+=sum[c*4+t]; bestN+=cnt[c];
+        }
+        if(bestN) v=acc.map(t=>Math.round(t/bestN));
+      }
+      memo.set(key,v); return v;
+    };
+  })().catch(()=>null));
+  return _pdfOwnLut.get(f);
 }
 // deflate of what fill() puts, a piece at a time, read as it is made
 async function deflateChunks(fill){
