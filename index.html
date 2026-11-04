@@ -41227,7 +41227,7 @@ const HELP=[
   {on:'sheet',t:'Same Design in Own Rows',k:'neat rows together band group keep designs same design own rows page',
    h:'Rearrange → Pack: tick <b>Same Design in Own Rows</b>. Each design gets rows of its own, one under another; a design with more than fits runs on to the next sheet. On each line you can then set <b>SHEET</b> (which sheet it starts on) or tick <b>Fill the gaps</b>.',find:'Same Design in Own Rows'},
   {on:'sheet',t:'Fill the gaps',k:'fill gaps space leftover room',
-   h:'With Same Design in Own Rows on: tick <b>Fill the gaps</b> on a line and its tags are nested into the room the other rows leave, biggest first, tried several ways to fit the most. Typing a SHEET turns it off.',find:'Fill the gaps'},
+   h:'With Same Design in Own Rows on: tick <b>Fill the gaps</b> on a line and its tags are nested into the room the other rows leave, biggest first, tried several ways to fit the most. With <b>Fit with Cutline Shape</b> on they nest into the curves between the rows by their own cut lines. Typing a SHEET turns it off.',find:'Fill the gaps'},
   {on:'sheet',t:'Put a line on a chosen sheet',k:'sheet page number start move',
    h:'With Same Design in Own Rows on: type the sheet number in the line\'s <b>SHEET</b> box.'},
   {on:'sheet',t:'Move tags to another sheet',k:'next sheet before page send move',
@@ -45193,7 +45193,11 @@ function gtNestTurns(it,rotate,step,fine){
   for(let a=step;a<360;a+=step) out.push(a);
   return out;
 }
-function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks,rotate,step,soft){
+// seed: sheets already part filled, each a list of the shapes on it -
+// {poly (or null for its box), w, h, x, y, bl}, x y its top-left as placed -
+// taken ground before anything is nested; the answer's first pages are those
+// sheets, holding only what was put on them here (Fill the gaps).
+function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks,rotate,step,soft,seed){
   step=step||90; soft=soft||deadline;
   const cell=GT_NEST_CELL, gap=Math.max(0,gx,gy);
   const masks=new Map();
@@ -45204,6 +45208,8 @@ function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks,rotate,st
   };
   let ringMax=0;
   items.forEach(it=>{ ringMax=Math.max(ringMax,maskOf(it).ring); });
+  const seedMask=sh=>maskOf({key:'seed|'+(sh.key||'')+'|'+sh.w+'|'+sh.h+'|'+(sh.bl||0),poly:sh.poly,sz:{w:sh.w,h:sh.h},bl:sh.bl});
+  (seed||[]).forEach(list=>list.forEach(sh=>{ ringMax=Math.max(ringMax,seedMask(sh).ring); }));
   const Wc=Math.ceil(availW/cell)+2*ringMax, Hc=Math.ceil(availH/cell)+2*ringMax;
   const WW=Math.ceil(Wc/32)+2;
   const pages=[]; let tooBig=0, tick=0;
@@ -45256,6 +45262,16 @@ function gtNestRealPack(items,availW,availH,gx,gy,scan,deadline,blocks,rotate,st
       for(let k=0;k<bits.length;k++) pg.occ[base+k]|=bits[k];
     });
   };
+  // the sheets already part filled: what is on them is taken ground
+  (seed||[]).forEach(list=>{
+    const pg=newPage(); pages.push(pg);
+    list.forEach(sh=>{
+      const m=seedMask(sh);
+      const cx=Math.min(Wc-m.mw,Math.max(0,Math.round((sh.x+m.x0)/cell)-m.ring+ringMax));
+      const cy=Math.min(Hc-m.mh,Math.max(0,Math.round((sh.y+m.y0)/cell)-m.ring+ringMax));
+      if(cx>=0&&cy>=0) put(pg,m,cx,cy);
+    });
+  });
   try{
     // the earlier place wins, the one turned least on a tie
     const before=(a,b)=>scan==='col'?(a.cx<b.cx||(a.cx===b.cx&&a.cy<b.cy)):(a.cy<b.cy||(a.cy===b.cy&&a.cx<b.cx));
@@ -45757,7 +45773,51 @@ function gtNestNeatPack(all,W,H,gx,gy,blocks,rotate,fill,realOf,cutOf,lead){
     out=pages.map((p,n)=>({items:p.items.concat(best.put[n])}));
     rest=best.left;
   }
-  if(rest.length){ const r=fill(rest); out=out.concat(r.pages); tooBig+=r.tooBig; }
+  let extra=null;
+  if(rest.length){ extra=fill(rest); }
+  // With Fit with Cutline Shape on, the rows are nested by their outlines but
+  // the gap-fillers went in by their boxes, round the rows' boxes - a round
+  // tag never went into the curve between two others. Each sheet is started
+  // with the rows' own outlines taken, and the gap-fillers nested round them
+  // by theirs; kept where it leaves fewer sheets, or less on sheets of its own.
+  if(realOf&&free.length&&pages.length&&typeof gtNestRealPack==='function'){
+    const shapeOf=({it,pos})=>{
+      const rl=realOf(it), poly=rl&&rl.poly||(cutOf&&cutOf(it.line.designId))||null;
+      if(pos.bw>0){
+        const deg=Number(pos.deg)||0;
+        const t=deg?gtNestTurned({sz:it.sz,poly,key:''},deg):{sz:it.sz,poly};
+        return {poly:poly?t.poly:null,w:t.sz.w,h:t.sz.h,x:pos.x,y:pos.y,bl:it.bl||0,key:it.line.designId+'|'+deg};
+      }
+      const t=pos.rot?gtNestTurned({sz:it.sz,poly,key:''},90):{sz:it.sz,poly};
+      return {poly:poly?t.poly:null,w:t.sz.w,h:t.sz.h,x:pos.x+(it.bl||0),y:pos.y+(it.bl||0),bl:it.bl||0,key:it.line.designId+'|'+(pos.rot?90:0)};
+    };
+    const seed=pages.map(p=>p.items.map(shapeOf));
+    const ritems=free.map(it=>({i:it.i,sz:it.sz,bl:it.bl||0,key:it.line.designId+'|'+(it.bl||0),
+      poly:(cutOf&&cutOf(it.line.designId))||null,src:it}))
+      .sort((a,b)=>b.sz.w*b.sz.h-a.sz.w*a.sz.h||a.i-b.i);
+    const by=new Map(ritems.map(r=>[r,r.src]));
+    let r=null;
+    const deadline=Date.now()+900;
+    for(const scan of ['row','col']){
+      let x=null;
+      try{ x=gtNestRealPack(ritems,W-gx,H-gy,gx,gy,scan,deadline,blocks,rotate,90,deadline,seed); }catch(e){ x=null; }
+      if(x&&(!r||x.pages.length<r.pages.length)) r=x;
+      if(r&&r.pages.length<=pages.length) break;   // all of it went round the rows: nothing to beat
+    }
+    if(r&&!r.tooBig){
+      const boxN=pages.length+(extra?extra.pages.length:0);
+      const onOwn=list=>list.reduce((t,p)=>t+p.items.reduce((u,{it})=>u+it.sz.w*it.sz.h,0),0);
+      const realOwn=r.pages.slice(pages.length), boxOwn=extra?extra.pages:[];
+      const realN=Math.max(pages.length,r.pages.length);
+      if(realN<boxN||(realN===boxN&&onOwn(realOwn)<onOwn(boxOwn)-1e-6)){
+        const back=list=>list.map(({it,pos})=>({it:by.get(it)||it,pos}));
+        out=pages.map((p,n)=>({items:p.items.concat(back(r.pages[n]?r.pages[n].items:[]))}));
+        out=out.concat(realOwn.map(p=>({items:back(p.items)})));
+        extra=null; usedReal=true;
+      }
+    }
+  }
+  if(extra){ out=out.concat(extra.pages); tooBig+=extra.tooBig; }
   if(!out.length) out=[{items:[]}];
   let f=0; out[out.length-1].items.forEach(({it})=>{ f+=it.sz.w*it.sz.h; });
   // the sheet each tag was given (a SHEET, or sent there), 0 on: kept to by a sheet held by hand
