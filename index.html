@@ -11323,6 +11323,7 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
         style="width:58px;padding:3px 6px;font-size:12px;text-align:right;"/></label>
   </div>
   <!-- Test sheet: this design in many numbered versions, one sheet (testSheetPdf) -->
+  <label class="click-tog" style="margin-top:10px;font-size:12px;" title="One small grey line beside the top-left crop mark: front and back Printer warmth and Brightness, Hue/Saturation, the paper and this side's colour swaps"><input type="checkbox" id="pcRecordOn"/>Print colour record beside the crop mark</label>
   <div id="pcTest" style="margin-top:10px;padding:8px;border:1px solid var(--border);border-radius:10px;font-size:12px;"
     title="This design in numbered versions on one sheet, each printed as an export prints it. Print it, then type the number that matches and press Use.">
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
@@ -12996,6 +12997,70 @@ function drawCutMarks(ctx,sc,side){
   ctx.restore();
 }
 
+// The colour record: every colour change this sheet is printed with, in one
+// small grey line in the margin beside the top-left crop mark - both sides'
+// Printer warmth and Brightness, Hue/Saturation, the paper it is matched to
+// and this side's colour swaps - so a print can be matched to its settings.
+// On when Print preview's "Print colour record" is ticked (this computer).
+const PRINT_RECORD_KEY='pigu.colourRecord';
+function printRecordOn(){ try{ return localStorage.getItem(PRINT_RECORD_KEY)==='1'; }catch(e){ return false; } }
+function printColourRecord(side){
+  const sg=v=>(v>0?'+':v<0?'\u2212':'')+Math.abs(v);
+  const f=printSideDo('front',printHsl), b=printSideDo('back',printHsl);
+  const bands=PRINT_HSL_BANDS.filter(([k])=>f[k].h||f[k].s||f[k].l)
+    .map(([k,name])=>name+[['H',f[k].h],['S',f[k].s],['L',f[k].l]].filter(([,v])=>v).map(([l,v])=>' '+l+sg(v)).join(''));
+  let swaps=[];
+  try{
+    const ids=new Set(sideArtObjs(side).filter(([,o])=>o&&o.img).map(([,o])=>artImgId(o.img)));
+    const hx=c=>'#'+c.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('').toUpperCase();
+    swaps=swapsForIds(ids).map(s=>hx(s.from)+'>'+hx(s.to));
+  }catch(e){}
+  const now=new Date();
+  return [side==='back'?'BACK':'FRONT',
+    (PRINT_PAPER_NAMES[printPaperKey()]||'')+(printMatchPaper()?' matched':''),
+    `Front W${sg(f.warm)} B${sg(f.bright)}`,`Back W${sg(b.warm)} B${sg(b.bright)}`,
+    'Hue/Sat '+(bands.length?bands.join(', '):'none'),
+    swaps.length?'Swaps '+swaps.length+': '+swaps.slice(0,6).join(' ')+(swaps.length>6?' ...':''):'',
+    now.toLocaleDateString([],{day:'numeric',month:'short'})+' '+now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})]
+    .filter(Boolean).join('  \u00b7  ');
+}
+function drawColourRecord(ctx,sc,side){
+  if(!state.placeholders.length) return;
+  const p=paperMm(), phs=state.placeholders.map(ph=>phOnSide(ph,side));
+  const minX=Math.min(...phs.map(ph=>ph.xMm)), minY=Math.min(...phs.map(ph=>ph.yMm));
+  const maxY=Math.max(...phs.map(ph=>ph.yMm+ph.hMm));
+  const marks=!!(state.refMark&&state.refMark.enabled);
+  // clear of the crop marks, so the line never crosses a tick the cut is read by
+  const off=marks?state.refMark.offsetMm+state.refMark.lenMm+0.8:2;
+  const text=printColourRecord(side);
+  // 6 pt, made smaller to fit the width there is (never under 3.5 pt)
+  let fs=2.1;
+  const x=Math.max(2,minX+1.5), room=p.w-x-2;
+  ctx.save();
+  const font=s=>{ ctx.font=`${s*sc}px Arial, sans-serif`; };
+  font(fs);
+  const wMm=ctx.measureText(text).width/sc;
+  if(wMm>room) fs=Math.max(1.25,fs*room/wMm);
+  font(fs);
+  ctx.fillStyle='#808080';          // a grey: black ink only
+  ctx.textBaseline='alphabetic';
+  // above the top crop marks; else below the bottom ones; else up the left
+  // margin beside the left marks; and only on a sheet with no margin at all,
+  // just above the cards
+  const above=minY-off, below=maxY+off+fs;
+  if(above-fs>=0.5) ctx.fillText(text,x*sc,above*sc);
+  else if(below<=p.h-0.5) ctx.fillText(text,x*sc,below*sc);
+  else if(minX-off-fs>=0.5){
+    let fv=2.1; font(fv);
+    const hv=ctx.measureText(text).width/sc, roomV=p.h-4;
+    if(hv>roomV){ fv=Math.max(1.25,fv*roomV/hv); font(fv); }
+    ctx.translate((minX-off)*sc,(p.h-2)*sc); ctx.rotate(-Math.PI/2);
+    ctx.fillText(text,0,0);
+  }
+  else ctx.fillText(text,x*sc,Math.max(fs+0.3,minY-0.6)*sc);
+  ctx.restore();
+}
+
 // fold line: a dashed tick at the midpoint of each placeholder edge, same
 // offset/length as the cutting reference marks and the same outer-edge-only
 // rule (skips edges shared with a neighboring card) — drawn above the
@@ -13220,6 +13285,8 @@ function renderSide(side,canvas,maxDim,opts){
   // bottom layer: auto-generated cutting reference marks, fixed to the placeholder
   // grid (not rotated) — printed both in preview and in the exported PDF
   drawCutMarks(ctx,sc,side);
+  // and, when asked for, the colour record beside the top-left crop mark
+  try{ if(printRecordOn()) drawColourRecord(ctx,sc,side); }catch(e){}
 
   // artwork into the placeholders, expanded by bleed on all sides but kept
   // centred, rotated in 90° steps around each tile's own centre — the footprint
@@ -33782,6 +33849,30 @@ function printHsl(){
   return out;
 }
 const printHslOn=s=>!!s.bright||!!s.warm||PRINT_HSL_BANDS.some(([k])=>s[k].h||s[k].s||s[k].l);
+// Brightness or Hue/Saturation moved (Printer warmth aside): a CMYK design's own
+// CMYK then goes through the look too (pdfConvertCmyk), not only warmth
+const printLookShapeOn=s=>!!s.bright||PRINT_HSL_BANDS.some(([k])=>s[k].h||s[k].s||s[k].l);
+// A CMYK JPEG read as its ink numbers (pdf.js's own decoder, loaded the first
+// time one is needed): the browser decodes one only to RGB
+let _cmykJpegLib=null;
+function cmykJpegLib(){
+  if(!_cmykJpegLib) _cmykJpegLib=new Promise((res,rej)=>{
+    if(window.pdfjsImageDecoders) return res(window.pdfjsImageDecoders);
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/image_decoders/pdf.image_decoders.min.js';
+    s.onload=()=>window.pdfjsImageDecoders?res(window.pdfjsImageDecoders):rej(new Error('JPEG decoder did not load'));
+    s.onerror=()=>rej(new Error('JPEG decoder did not load'));
+    document.head.appendChild(s);
+  }).catch(e=>{ _cmykJpegLib=null; throw e; });
+  return _cmykJpegLib;
+}
+// its C, M, Y, K 0-255 (255 full ink), or null when it is not a 4-channel JPEG
+async function cmykJpegDecode(raw,W,H){
+  const lib=await cmykJpegLib();
+  const j=new lib.JpegImage(); j.parse(raw);
+  if(j.width!==W||j.height!==H||j.numComponents!==4) return null;
+  return j.getData({width:W,height:H,forceRGB:false,isSourcePDF:true});
+}
 printSideInit();                 // the back's own values, from the front's the first time
 // one colour through the settings, 0-1 each
 function printHslOne(r,g,b,s){
@@ -33941,7 +34032,8 @@ function lcmsLib(){
     return {L,lcms,prof,srgb,lab,adobe,gracol,
       toGracol:(a,n)=>lcms.cmsDoTransform(gIn,a,n),
       cmykG:rgb=>[...lcms.cmsDoTransform(gIn,new Uint8Array(rgb),1)],
-      rgbOfG:c=>[...lcms.cmsDoTransform(gOut,new Uint8Array(c),1)]};
+      rgbOfG:c=>[...lcms.cmsDoTransform(gOut,new Uint8Array(c),1)],
+      fromGracol:(a,n)=>lcms.cmsDoTransform(gOut,a,n)};
   })().catch(e=>{ _lcms=null; throw e; });
   return _lcms;
 }
@@ -34182,10 +34274,13 @@ function printCms(paper){
           // the export does; a CMYK PDF's own CMYK takes Printer warmth as
           // yellow toner, below
           const kx=x||q||src==='pdfk'||src==='pdfx';
-          if(!kx) rgb=printHslApply(rgb,n);
+          // with Brightness or Hue/Saturation moved a CMYK PDF goes through the
+          // look as well (pdfConvertCmyk), its warmth in it
+          const kLook=kx&&printLookShapeOn(printHsl());
+          if(!kx||kLook) rgb=printHslApply(rgb,n);
           const la=x?relToAbs(run(scrLab,rgb,n)):p?run(pLabA,mImg&&mm?mImg(rgb,n):rgb,n):q?run(kLabPA,rgb,n)
             :m&&mLabA?run(mLabA,src==='img'?run(s2a,rgb,n):src==='pdf'&&mPdf&&mm?mPdf(rgb,n):rgb,n):run(kLabA,toKrun(src,rgb,n),n);
-          const w0=kx?printWarm():0;
+          const w0=kx&&!kLook?printWarm():0;
           if(w0){
             const k=toGracol(rgb,n), k2=k.slice(); for(let i=2;i<k2.length;i+=4) k2[i]=printWarmY(k2[i],w0);
             const a1=run(g2lab,k,n), a2=run(g2lab,k2,n);
@@ -35336,15 +35431,29 @@ async function pdfMatchColours(bytes,ctx){
 // warm: Printer warmth for an export (the preview passes none)
 async function pdfConvertCmyk(bytes,mp,warm){
   const cms=mp?await printCms(mp).catch(()=>null):null;
-  const {L,lcms,srgb,cmykG,toGracol}=await lcmsLib();
+  const {L,lcms,srgb,cmykG,toGracol,fromGracol}=await lcmsLib();
   const kt=await printKOnly(cms&&cms.matched('img')?mp:null).catch(()=>null);
   const toK0=(a,n)=>toGracol(cms&&cms.matchImg?cms.matchImg(a,n):a,n);
-  const w=Number(warm)||0;
   // its RGB, as a picture's: through the print look (Hue/Saturation,
   // Brightness, Printer warmth) for an export; its own CMYK takes Printer
   // warmth as yellow toner (w), below
   const look=warm!==undefined&&warm!==null&&printHslLut();
   const toK=look?(a,n)=>toK0(printHslApply(a,n),n):toK0;
+  // ...unless Brightness or Hue/Saturation has been moved: then its own CMYK
+  // goes through the look as well, read as GRACoL prints it and made CMYK again
+  // as a picture is (warmth in it, in Lab). Left as the designer's, a CMYK
+  // design came out exactly as before whatever the sliders said.
+  const lookK=!!look&&printLookShapeOn(printHsl());
+  const w=lookK?0:(Number(warm)||0);
+  const cmykLook=(c,n)=>{
+    const out=new Uint8Array(n*4), step=1<<20;
+    for(let i0=0;i0<n;i0+=step){
+      const m=Math.min(step,n-i0);
+      const rgb=fromGracol(c.subarray(i0*4,(i0+m)*4),m);
+      out.set(toK(rgb,m),i0*4);
+    }
+    return out;
+  };
   const N='(-?(?:\\d+\\.?\\d*|\\.\\d+))';
   const lead='(?<=^|[\\s\\[\\]()<>{}])(?<![\\d.]\\s+)';
   const re3=new RegExp(lead+N+'\\s+'+N+'\\s+'+N+'\\s+(rg|RG)(?![A-Za-z])','g');
@@ -35362,6 +35471,12 @@ async function pdfConvertCmyk(bytes,mp,warm){
     let s=''; for(let i=0;i<data.length;i+=8192) s+=String.fromCharCode.apply(null,data.subarray(i,i+8192));
     let hit=false;
     s=pdfOutsideStrings(s,t=>t.replace(re4,(m,c,mg,y,k,op)=>{
+      if(lookK){
+        const key='k'+[c,mg,y,k].join(',');
+        let to=memo.get(key);
+        if(!to){ to=[...cmykLook(new Uint8Array([c,mg,y,k].map(u)),1)]; memo.set(key,to); }
+        hit=true; return to.map(fmt).join(' ')+' '+op;
+      }
       // the designer's own CMYK, its yellow by Printer warmth only
       if(!w) return m;
       hit=true; return [c,mg,Math.max(0,Math.min(1,Number(y)*(1+w/100))),k].map(v=>(Math.round(Number(v)*1e4)/1e4).toString()).join(' ')+' '+op;
@@ -35388,12 +35503,20 @@ async function pdfConvertCmyk(bytes,mp,warm){
     if(!(W>0&&H>0)||W*H>40e6) return null;
     const cs=R(d.get('ColorSpace'));
     let n=0, icc=null;
-    if(w&&isName(cs,'DeviceCMYK')){
+    if((w||lookK)&&isName(cs,'DeviceCMYK')){
       const f0=R(d.get('Filter')), fs0=f0==null?[]:Array.isArray(f0)?f0.map(R):[f0];
-      if(fs0.some(x=>!isName(x,'FlateDecode'))) return null;      // a CMYK JPEG: not read as its numbers here
-      const raw=await src.streamData(v,inflateBytes);
-      if(!raw||raw.length<W*H*4) return null;
-      const o=raw.slice(0,W*H*4); for(let i=2;i<o.length;i+=4) o[i]=printWarmY(o[i],w);
+      let o=null;
+      // a CMYK JPEG read as its ink numbers (it was left as it was, so not
+      // even Printer warmth reached a Canva / Illustrator CMYK picture)
+      if(fs0.length===1&&isName(fs0[0],'DCTDecode')){
+        try{ const px=await cmykJpegDecode(v.raw,W,H); if(px&&px.length>=W*H*4) o=new Uint8Array(px.buffer,px.byteOffset,W*H*4).slice(); }catch(e){ o=null; }
+      }else if(fs0.every(x=>isName(x,'FlateDecode'))){
+        const raw=await src.streamData(v,inflateBytes);
+        if(raw&&raw.length>=W*H*4) o=raw.slice(0,W*H*4);
+      }
+      if(!o) return null;
+      if(lookK) o=cmykLook(o,W*H);
+      else for(let i=2;i<o.length;i+=4) o[i]=printWarmY(o[i],w);
       hits++;
       return {cs:'DeviceCMYK',data:o};
     }
@@ -35659,6 +35782,7 @@ function pcPopRender(){
   { const w=printSideDo(pcPopSide,printWarm);
     ['pcPrintWarm','pcPrintWarmNum'].forEach(id=>{ const el=document.getElementById(id); if(el&&document.activeElement!==el) el.value=w; }); }
   pcHslShow(); testSheetShow();
+  { const rb=document.getElementById('pcRecordOn'); if(rb) rb.checked=printRecordOn(); }
   if(!cms){
     body.innerHTML='<p class="hint">Loading the paper\'s colours…</p>';
     printCms(paper).then(()=>{ pcPopRender(); pcRedraw(); }).catch(e=>{
@@ -36270,6 +36394,12 @@ document.addEventListener('input',e=>{
   printWarmSet(pcPopSide,v);                       // the side on show only
   const other=document.getElementById(e.target.id==='pcPrintWarm'?'pcPrintWarmNum':'pcPrintWarm'); if(other) other.value=v;
   pcSlideSoon();
+});
+// Print colour record: kept on this computer, and the sheets drawn again
+document.addEventListener('change',e=>{
+  if(!e.target||e.target.id!=='pcRecordOn') return;
+  try{ localStorage.setItem(PRINT_RECORD_KEY,e.target.checked?'1':'0'); }catch(err){}
+  pcRedraw();
 });
 // a typed figure past the ends, or left empty, is shown as what is kept
 document.addEventListener('change',e=>{
@@ -41364,6 +41494,7 @@ const HELP=[
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
   {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower - every colour moves, blues and darks too, white and greys stay; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, darks and strong colours as much as the rest, white kept paper; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
+  {on:'custom',t:'Colour record on the print',k:'colour record print settings crop mark warmth brightness hue saturation swaps record',h:'<b>Print preview</b> -> tick <b>Print colour record beside the crop mark</b>. Every sheet then prints one small grey line in the margin beside the top-left crop mark: which side it is, the paper, <b>Front</b> and <b>Back</b> Printer warmth (W) and Brightness (B), Hue/Saturation, this side\'s colour swaps and the date and time. It shows on the sheet on screen too. Untick it to print without.'},
   {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is shared by both sides.'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
