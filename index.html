@@ -33702,9 +33702,35 @@ const PREVIEW_SHOW_KEY='pigu.previewShow';
 function printPreviewShow(){ try{ return localStorage.getItem(PREVIEW_SHOW_KEY)==='print'?'print':'file'; }catch(e){ return 'file'; } }
 const PRINT_WARM_KEY='pigu.printWarm';
 var _printOv=null;                // a test sheet's version: {warm, bright} in place of the kept
+// Printer warmth and Brightness are kept per side (4 Nov): the front in the
+// keys they always had, the back in its own, so a test sheet's number used for
+// one side leaves the other alone. _printSideNow is the side being made
+// (renderSidePdfAll, gtBuildSide, mcGiftBundleRun) or proofed (pcProofPixels);
+// none is the front. The back starts from the front's values (printSideInit).
+const PRINT_BACK_WARM_KEY='pigu.printWarm.back', PRINT_BACK_BRIGHT_KEY='pigu.printBright.back';
+var _printSideNow=null;
+function printSideDo(side,fn){ const w=_printSideNow; _printSideNow=side||null; try{ return fn(); }finally{ _printSideNow=w; } }
+async function printSideDoAsync(side,fn){ const w=_printSideNow; _printSideNow=side||null; try{ return await fn(); }finally{ _printSideNow=w; } }
+function printWarmSet(side,v){ try{ localStorage.setItem(side==='back'?PRINT_BACK_WARM_KEY:PRINT_WARM_KEY,String(v)); }catch(e){} }
+function printBrightSet(side,v){
+  if(side==='back'){ try{ localStorage.setItem(PRINT_BACK_BRIGHT_KEY,String(v)); }catch(e){} return; }
+  let all={}; try{ all=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){}
+  all.bright={b:v};
+  try{ localStorage.setItem(PRINT_HSL_KEY,JSON.stringify(all)); }catch(e){}
+}
+function printSideInit(){
+  try{
+    if(localStorage.getItem(PRINT_BACK_WARM_KEY)===null)
+      localStorage.setItem(PRINT_BACK_WARM_KEY,localStorage.getItem(PRINT_WARM_KEY)||'0');
+    if(localStorage.getItem(PRINT_BACK_BRIGHT_KEY)===null){
+      let v={}; try{ v=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){}
+      localStorage.setItem(PRINT_BACK_BRIGHT_KEY,String((v.bright&&Number(v.bright.b))||0));
+    }
+  }catch(e){}
+}
 function printWarm(){
   if(_printOv&&_printOv.warm!=null) return _printOv.warm;
-  try{ const v=Number(localStorage.getItem(PRINT_WARM_KEY)); if(isFinite(v)) return Math.max(-50,Math.min(50,Math.round(v))); }catch(e){}
+  try{ const v=Number(localStorage.getItem(_printSideNow==='back'?PRINT_BACK_WARM_KEY:PRINT_WARM_KEY)); if(isFinite(v)) return Math.max(-50,Math.min(50,Math.round(v))); }catch(e){}
   return 0;
 }
 const printWarmY=(y,w)=>Math.max(0,Math.min(255,Math.round(y*(1+w/100))));
@@ -33727,11 +33753,14 @@ function printHsl(){
   const cl=(x,a,b)=>Math.max(a,Math.min(b,Math.round(Number(x)||0)));
   PRINT_HSL_BANDS.forEach(([k])=>{ const b=v[k]||{}; out[k]={h:cl(b.h,-180,180),s:cl(b.s,-100,100),l:cl(b.l,-100,100)}; });
   // Brightness, the whole print's: one figure, whichever range is picked
-  out.bright=cl(_printOv&&_printOv.bright!=null?_printOv.bright:v.bright&&v.bright.b,-100,100);
+  let bb=v.bright&&v.bright.b;
+  if(_printSideNow==='back'){ try{ bb=Number(localStorage.getItem(PRINT_BACK_BRIGHT_KEY)); }catch(e){} }
+  out.bright=cl(_printOv&&_printOv.bright!=null?_printOv.bright:bb,-100,100);
   out.warm=printWarm();
   return out;
 }
 const printHslOn=s=>!!s.bright||!!s.warm||PRINT_HSL_BANDS.some(([k])=>s[k].h||s[k].s||s[k].l);
+printSideInit();                 // the back's own values, from the front's the first time
 // one colour through the settings, 0-1 each
 function printHslOne(r,g,b,s){
   const mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn;
@@ -34991,7 +35020,7 @@ function swapSheetPixels(imgData,rects){
 // and exactly again a moment after the slider stops (pcSlideSoon).
 let _pcFast=false, _pcFastLut=new Map();
 function proofFast(cms,rgb,n,src,g){
-  const N=25, key=src+'|'+g;
+  const N=25, key=src+'|'+g+'|'+(_printSideNow==='back'?'b':'f');   // each side its own look
   let lut=_pcFastLut.get(key);
   if(!lut){
     const grid=new Uint8Array(N*N*N*3);
@@ -35048,7 +35077,9 @@ function printColourScreen(canvas,ro,side){
   ctx.putImageData(id,0,0);
 }
 // the sheet's pixels (RGBA, W x H) as printed, in place
-function pcProofPixels(d,W,H,ro,side,cms){
+// proofed with that side's Printer warmth and Brightness
+function pcProofPixels(d,W,H,ro,side,cms){ return printSideDo(side,()=>pcProofPixelsRun(d,W,H,ro,side,cms)); }
+function pcProofPixelsRun(d,W,H,ro,side,cms){
   {
     const n=W*H, rgb=new Uint8Array(n*3);
     for(let i=0,j=0;i<d.length;i+=4,j+=3){ rgb[j]=d[i]; rgb[j+1]=d[i+1]; rgb[j+2]=d[i+2]; }
@@ -35596,7 +35627,7 @@ function pcPopRender(){
   seg.querySelectorAll('[data-pc-side]').forEach(b=>b.classList.toggle('btn-primary',b.dataset.pcSide===pcPopSide));
   pcTuneShow();
   document.querySelectorAll('#pcPopShow [data-pc-show]').forEach(x=>x.classList.toggle('btn-primary',x.dataset.pcShow===printPreviewShow()));
-  { const w=printWarm();
+  { const w=printSideDo(pcPopSide,printWarm);
     ['pcPrintWarm','pcPrintWarmNum'].forEach(id=>{ const el=document.getElementById(id); if(el&&document.activeElement!==el) el.value=w; }); }
   pcHslShow(); testSheetShow();
   if(!cms){
@@ -35947,7 +35978,7 @@ document.addEventListener('click',e=>{
 // Hue/Saturation: the range picked, its three values shown, kept as moved
 function pcHslShow(){
   const sel=document.getElementById('pcHslBand'); if(!sel) return;
-  const s=printHsl(), e={...(s[sel.value]||{h:0,s:0,l:0}),b:s.bright};
+  const s=printSideDo(pcPopSide,printHsl), e={...(s[sel.value]||{h:0,s:0,l:0}),b:s.bright};
   document.querySelectorAll('#pcHsl [data-hsl-k],#pcHsl [data-hsl-n]').forEach(el=>{
     if(document.activeElement===el) return;
     el.value=e[el.dataset.hslK||el.dataset.hslN];
@@ -35959,9 +35990,12 @@ document.addEventListener('input',e=>{
   if(el.value===''||el.value==='-') return;            // still being typed
   const band=k==='b'?'bright':document.getElementById('pcHslBand').value, lim=k==='h'?180:100;
   const v=Math.max(-lim,Math.min(lim,Math.round(Number(el.value)||0)));
-  let all={}; try{ all=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(err){}
-  all[band]={...(all[band]||{}),[k]:v};
-  try{ localStorage.setItem(PRINT_HSL_KEY,JSON.stringify(all)); }catch(err){}
+  if(band==='bright') printBrightSet(pcPopSide,v);   // the side on show only
+  else{
+    let all={}; try{ all=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(err){}
+    all[band]={...(all[band]||{}),[k]:v};
+    try{ localStorage.setItem(PRINT_HSL_KEY,JSON.stringify(all)); }catch(err){}
+  }
   document.querySelectorAll(`#pcHsl [data-hsl-k="${k}"],#pcHsl [data-hsl-n="${k}"]`).forEach(x=>{ if(x!==el) x.value=v; });
   pcSlideSoon();
 });
@@ -35971,7 +36005,10 @@ document.addEventListener('change',e=>{
 });
 document.addEventListener('click',e=>{
   if(!e.target||e.target.id!=='pcHslReset') return;
+  // the other side's Brightness is not this Reset's
+  const front=printHsl().bright;
   try{ localStorage.removeItem(PRINT_HSL_KEY); }catch(err){}
+  if(pcPopSide==='back'){ printBrightSet('front',front); printBrightSet('back',0); }
   pcHslShow(); if(printPreviewShow()!=='file') pcRedraw();
 });
 let _pcSlideT=0;
@@ -36014,7 +36051,7 @@ const TEST_SHEET_KEY='pigu.testSheet';
 const TEST_STEPS={fine:{b:4,w:5},medium:{b:8,w:10},coarse:{b:14,w:16}};
 // the versions, numbered from 1: {n,b,w} - Brightness and Printer warmth
 function testSheetVersions(mode,count,step){
-  const S=TEST_STEPS[step]||TEST_STEPS.medium, b0=printHsl().bright, w0=printWarm();
+  const S=TEST_STEPS[step]||TEST_STEPS.medium, b0=printSideDo(pcPopSide,()=>printHsl().bright), w0=printSideDo(pcPopSide,printWarm);
   const cb=v=>Math.max(-100,Math.min(100,Math.round(v))), cw=v=>Math.max(-50,Math.min(50,Math.round(v)));
   const out=[], seen=new Set();
   const add=(b,w)=>{ b=cb(b); w=cw(w); const k=b+'|'+w; if(seen.has(k)) return; seen.add(k); out.push({n:out.length+1,b,w}); };
@@ -36093,7 +36130,7 @@ async function testSheetPdf(mode,count,step){
   g.fillStyle='#fff'; g.fillRect(0,0,W,H);
   g.fillStyle='#000'; g.textBaseline='top';
   g.font=`600 ${px(3.6)}px "IBM Plex Sans",system-ui,sans-serif`;
-  const now=new Date(), b0=printHsl().bright, w0=printWarm();
+  const now=new Date(), b0=printSideDo(pcPopSide,()=>printHsl().bright), w0=printSideDo(pcPopSide,printWarm);
   g.fillText(`Pigu test sheet - ${PRINT_PAPER_NAMES[printPaperKey()]||''} - ${now.toLocaleDateString()} ${now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`
     +` - now: Brightness ${b0}, Printer warmth ${w0}`,px(M),px(3));
   g.font=`400 ${px(2.8)}px "IBM Plex Sans",system-ui,sans-serif`;
@@ -36154,13 +36191,11 @@ async function testSheetPdf(mode,count,step){
 }
 function testSheetKept(){ try{ return JSON.parse(localStorage.getItem(TEST_SHEET_KEY)||'null'); }catch(e){ return null; } }
 // a number from the sheet taken for the job: its Brightness and Printer warmth
-function testSheetUse(num){
+// - for the side on show only (pcPopSide): the other side keeps its own
+function testSheetUse(num,side){
   const t=testSheetKept(), v=t&&t.list.find(x=>x.n===num);
   if(!v) return false;
-  try{ localStorage.setItem(PRINT_WARM_KEY,String(v.w)); }catch(e){}
-  let all={}; try{ all=JSON.parse(localStorage.getItem(PRINT_HSL_KEY)||'{}')||{}; }catch(e){}
-  all.bright={b:v.b};
-  try{ localStorage.setItem(PRINT_HSL_KEY,JSON.stringify(all)); }catch(e){}
+  printWarmSet(side,v.w); printBrightSet(side,v.b);
   return v;
 }
 function testSheetShow(){
@@ -36173,8 +36208,8 @@ document.addEventListener('click',async e=>{
   const msg=document.getElementById('pcTestMsg');
   if(b.id==='pcTestUse'){
     const num=Math.round(Number(document.getElementById('pcTestNum').value));
-    const v=testSheetUse(num);
-    msg.textContent=v?`#${v.n} taken: Brightness ${v.b}, Printer warmth ${v.w}. The export prints with them.`
+    const v=testSheetUse(num,pcPopSide);
+    msg.textContent=v?`#${v.n} taken for the ${pcPopSide==='back'?'back':'front'}: Brightness ${v.b}, Printer warmth ${v.w}. The export prints that side with them.`
       :(testSheetKept()?`No #${num} on the last sheet.`:'Make a test sheet first.');
     if(v){ pcPopRender(); pcRedraw(); }
     return;
@@ -36196,14 +36231,14 @@ document.addEventListener('input',e=>{
   if(!e.target||(e.target.id!=='pcPrintWarm'&&e.target.id!=='pcPrintWarmNum')) return;
   if(e.target.value===''||e.target.value==='-') return;   // still being typed
   const v=Math.max(-50,Math.min(50,Math.round(Number(e.target.value)||0)));
-  try{ localStorage.setItem(PRINT_WARM_KEY,String(v)); }catch(err){}
+  printWarmSet(pcPopSide,v);                       // the side on show only
   const other=document.getElementById(e.target.id==='pcPrintWarm'?'pcPrintWarmNum':'pcPrintWarm'); if(other) other.value=v;
   pcSlideSoon();
 });
 // a typed figure past the ends, or left empty, is shown as what is kept
 document.addEventListener('change',e=>{
   if(!e.target||e.target.id!=='pcPrintWarmNum') return;
-  const v=printWarm(); e.target.value=v; const s=document.getElementById('pcPrintWarm'); if(s) s.value=v;
+  const v=printSideDo(pcPopSide,printWarm); e.target.value=v; const s=document.getElementById('pcPrintWarm'); if(s) s.value=v;
 });
 // the screen tune: every sheet on screen again, its sliders kept together. By colour's two
 // sliders hold the family picked by its dot.
@@ -37600,7 +37635,11 @@ function printVecTaker(forms,place){
 // sheet a single download asks for, which is this with a count of one. Both
 // buttons, Magic Create and anything added later come through here, so what a
 // PDF out of this tool is made of is decided in one place.
+// made with that side's Printer warmth and Brightness (printSideDo)
 async function renderSidePdfAll(side,pages,onPage,from){
+  return await printSideDoAsync(side,()=>renderSidePdfAllRun(side,pages,onPage,from));
+}
+async function renderSidePdfAllRun(side,pages,onPage,from){
   const p=paperMm();
   // print-quality resolution (300dpi), uncapped except for a safety ceiling
   // against runaway canvas sizes on very large custom sheets
@@ -41277,6 +41316,7 @@ const HELP=[
   {on:'sheet',t:'Paper: Matte, Gloss, Sticker',k:'stock paper finish matte gloss sticker',h:'Top bar → <b>Stock</b>.',sel:'#gtFinishSeg'},
   {on:'sheet',t:'Print preview',k:'preview fiery colours check',h:'Top bar → <b>🖨 Print preview</b>: the sheet as the Fiery prints it on this stock. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower - every colour moves, blues and darks too, white and greys stay; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, darks and strong colours as much as the rest, white kept paper; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#gtPpBtn'},
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
+  {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is shared by both sides.'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
   {on:'sheet',t:'Saved sheets',k:'save keep later open job',h:'Left panel → <b>Saved sheets</b>: keep this sheet for later, or open one.',find:'Saved sheets'},
@@ -54198,6 +54238,9 @@ async function gtVectorSources(side){
 // its own shape first. The front takes each sheet's cut file on the same pass
 // (cuts, when given); the back has none — the blade follows the front.
 async function gtBuildSide(side,pages,plan,cuts){
+  return await printSideDoAsync(side,()=>gtBuildSideRun(side,pages,plan,cuts));
+}
+async function gtBuildSideRun(side,pages,plan,cuts){
   const S=gtSheet, back=side==='back';
   const sources=await gtVectorSources(side);
   let placed=0;
@@ -71806,6 +71849,9 @@ function mcGiftBundle(lines,mode,side,guest,fin){
   return mcGtTurn(()=>mcGtOnFinish(mode,fin,()=>mcGiftBundleRun(lines,mode,side,guest)));
 }
 async function mcGiftBundleRun(lines,mode,side,guest){
+  return await printSideDoAsync(side,()=>mcGiftBundleSide(lines,mode,side,guest));
+}
+async function mcGiftBundleSide(lines,mode,side,guest){
   mcPendingCuts=null;
   const back=side==='back';
   if(typeof gtBuildPdf!=='function') throw new Error('the gift tag tool has not loaded');
