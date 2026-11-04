@@ -32196,6 +32196,10 @@ function applyPrintState(meta,name,whole,keepArt){
   // pictures arrive on it.
   const designs=Array.isArray(meta.designs)?meta.designs:null;
   const single=meta.design&&meta.design.path?meta.design:null;
+  // Add saved sheet: the lines on the sheet now, kept as they are and the
+  // saved designs read in after them. Reloaded from their paths, the uploads,
+  // the pages picked from a PDF and their looks had no path and were dropped.
+  const keepLines=Array.isArray(meta._keepLines)?meta._keepLines:null;
   // a step back names no artwork: the load in flight is still this sheet's,
   // and starting a new generation here dropped it half way
   if(!namesArt&&!keepArt) return;
@@ -32206,7 +32210,7 @@ function applyPrintState(meta,name,whole,keepArt){
   state.designsMissing=[];
   if(designs&&designs.length){
     // the last template's list is not this one's while this one's is read
-    state.designs=[]; renderDesignLines(); drawAll();
+    state.designs=keepLines?keepLines.slice():[]; renderDesignLines(); drawAll();
     printArtLoading=(async()=>{
       const out=[], missing=[];
       await designBleedLoad();
@@ -32225,12 +32229,13 @@ function applyPrintState(meta,name,whole,keepArt){
           // its side, whatever the design has been remembered as since
           if(d.rotate!==undefined){ line.rotate=designRotOf(d); if(line.rotate) line.bleedTouched=true; }
           if(d.mcLine) line.mcLine=d.mcLine;
+          if(d.sku) line.sku=d.sku;
           out.push(line);
         }catch(e){ missing.push(d.name||d.path); }
       }
       // a newer load has started since: this one's list is out of date
       if(artGen!==printArtGen) return;
-      state.designs=out;
+      state.designs=(keepLines||[]).concat(out);
       state.designsMissing=missing;
       renderDesignLines(); drawAll();
       if(missing.length) showMsg(msgEl,
@@ -32257,7 +32262,7 @@ function applyPrintState(meta,name,whole,keepArt){
         showMsg(msgEl,`Template loaded — its design (${single.name||single.path}) isn't reachable. Choose the NAS folder or use Load design.`,false);
       }
     })();
-  }else if(designs||whole){
+  }else if((designs||whole)&&!keepLines){
     state.designs=[];               // saved with an empty list, and meant it
     renderDesignLines(); drawAll();
   }
@@ -35595,6 +35600,7 @@ function printColourPanel(side){
 
 // ---- the Print preview pop-up: small, beside the sheets ----
 let pcPopSide='front', printShowBefore=false;
+let pcPopSideAuto=null;     // the side pcPopRender left for want of art
 let pcPopArt=null;                  // one design's id when a side has several, or all
 var pcLastDrawn={front:null,back:null};   // var: drawAll may run before this line has
 // A placeholder clicked on the sheet while the pop-up is open: the design in it
@@ -35619,7 +35625,7 @@ function pcPopPickPh(ph){
 const pcAdjOpen=new Set();          // colours whose sliders are showing
 function pcPopFollow(side){
   if(pcCtx()!=='custom'||pcPopSide===side||!sideArtObjs(side).some(([,o])=>o&&o.img)) return;
-  pcPopSide=side; pcPopArt=null; pcPopRender();
+  pcPopSide=side; pcPopSideAuto=null; pcPopArt=null; pcPopRender();
 }
 const pcPopEl=()=>document.getElementById('pcPop');
 const pcPopIsOpen=()=>{ const p=pcPopEl(); return !!p&&!p.hidden; };
@@ -35634,7 +35640,10 @@ function pcPopRender(){
   const has=s=>sideArtObjs(s).some(([,o])=>o&&o.img);
   // a side with no art left is not the one shown, or its sliders went on
   // moving values nothing prints
-  if(!has(pcPopSide)&&has(pcPopSide==='back'?'front':'back')){ pcPopSide=pcPopSide==='back'?'front':'back'; pcPopArt=null; }
+  // and back to it once its art is there again (a picture reloading, a line
+  // being laid), unless a side has been picked since
+  if(pcPopSideAuto&&pcPopSideAuto!==pcPopSide&&has(pcPopSideAuto)){ pcPopSide=pcPopSideAuto; pcPopArt=null; pcPopSideAuto=null; }
+  else if(!has(pcPopSide)&&has(pcPopSide==='back'?'front':'back')){ pcPopSideAuto=pcPopSide; pcPopSide=pcPopSide==='back'?'front':'back'; pcPopArt=null; }
   const seg=document.getElementById('pcPopSides');
   seg.style.display=has('front')&&has('back')?'':'none';
   seg.querySelectorAll('[data-pc-side]').forEach(b=>b.classList.toggle('btn-primary',b.dataset.pcSide===pcPopSide));
@@ -35921,7 +35930,7 @@ function printColourClick(e){
   const host=e.target.closest('[id^="printColour"],#pcPop'); if(!host) return;
   const b=e.target.closest('button'); if(!b) return;
   if(b.dataset.pcOpen){ pcPopOpen(b.dataset.pcOpen); return; }
-  if(b.dataset.pcSide){ pcPopSide=b.dataset.pcSide; pcPopArt=null; pcPopRender(); return; }
+  if(b.dataset.pcSide){ pcPopSide=b.dataset.pcSide; pcPopSideAuto=null; pcPopArt=null; pcPopRender(); return; }
   if(b.dataset.pcAdjtog){ const k=b.dataset.pcAdjtog; pcAdjOpen.has(k)?pcAdjOpen.delete(k):pcAdjOpen.add(k); pcPopRender(); return; }
   const side=host.id==='pcPop'?pcPopSide:host.dataset.side, only=host.id==='pcPop'?pcPopArt:null;
   const from=b.dataset.pcSwap||b.dataset.pcIgnore||b.dataset.pcUndo; if(!from) return;
@@ -36122,6 +36131,9 @@ function testSheetArt(){
   return (sw.length&&swappedArtCanvas(img,sw))||img;
 }
 async function testSheetPdf(mode,count,step){
+  // the side it is made for, read once: the panel may follow the builder to
+  // the other side while the versions are being made
+  const side0=pcPopSide;
   const art=testSheetArt(); if(!art) throw new Error('No artwork on this side');
   const {list,cols:fixedCols}=testSheetVersions(mode,count,step);
   const p=paperMm(), DPI=200, px=mm=>Math.round(mm/25.4*DPI);
@@ -36143,7 +36155,7 @@ async function testSheetPdf(mode,count,step){
   g.fillStyle='#fff'; g.fillRect(0,0,W,H);
   g.fillStyle='#000'; g.textBaseline='top';
   g.font=`600 ${px(3.6)}px "IBM Plex Sans",system-ui,sans-serif`;
-  const now=new Date(), b0=printSideDo(pcPopSide,()=>printHsl().bright), w0=printSideDo(pcPopSide,printWarm);
+  const now=new Date(), b0=printSideDo(side0,()=>printHsl().bright), w0=printSideDo(side0,printWarm);
   g.fillText(`Pigu test sheet - ${PRINT_PAPER_NAMES[printPaperKey()]||''} - ${now.toLocaleDateString()} ${now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}`
     +` - now: Brightness ${b0}, Printer warmth ${w0}`,px(M),px(3));
   g.font=`400 ${px(2.8)}px "IBM Plex Sans",system-ui,sans-serif`;
@@ -36200,8 +36212,8 @@ async function testSheetPdf(mode,count,step){
   const out=new Uint8Array(pos); let o=0;
   parts.forEach(u=>{ out.set(u,o); o+=u.length; });
   // and the side it was made for, which is the side its Use sets
-  try{ localStorage.setItem(TEST_SHEET_KEY,JSON.stringify({made:now.toISOString(),paper:printPaperKey(),side:pcPopSide,list})); }catch(e){}
-  return {bytes:out,count:list.length};
+  try{ localStorage.setItem(TEST_SHEET_KEY,JSON.stringify({made:now.toISOString(),paper:printPaperKey(),side:side0,list})); }catch(e){}
+  return {bytes:out,count:list.length,side:side0};
 }
 function testSheetKept(){ try{ return JSON.parse(localStorage.getItem(TEST_SHEET_KEY)||'null'); }catch(e){ return null; } }
 // a number from the sheet taken for the job: its Brightness and Printer warmth
@@ -36235,8 +36247,8 @@ document.addEventListener('click',async e=>{
   const count=Math.max(2,Math.min(80,Math.round(Number(document.getElementById('pcTestCount').value)||50)));
   b.disabled=true; msg.textContent='Making the test sheet…';
   try{
-    const {bytes,count:n}=await testSheetPdf(mode,count,step);
-    const name=`Test sheet ${(state.orderId||'').trim()||'design'} ${pcPopSide} ${n} versions.pdf`.replace(/[\\/:*?"<>|]+/g,'-');
+    const {bytes,count:n,side:made}=await testSheetPdf(mode,count,step);
+    const name=`Test sheet ${(state.orderId||'').trim()||'design'} ${made} ${n} versions.pdf`.replace(/[\\/:*?"<>|]+/g,'-');
     downloadBlob(new Blob([bytes],{type:'application/pdf'}),name);
     msg.textContent=`${n} versions saved (${name}). Print it on this paper, then type the best number and press Use.`;
   }catch(err){ msg.textContent='Test sheet not made - '+((err&&err.message)||err); }
@@ -54581,6 +54593,12 @@ document.getElementById('gtFinishSeg').addEventListener('click',async e=>{
   // (mcGtOnFinish): the swap back undid the click and the buttons said Sticker
   // over the Matte sheet
   try{ for(let t=0;mcGtSwapping>0&&t<6000;t++) await new Promise(r=>setTimeout(r,100)); }catch(err){}
+  // nor while an export or a Magic Create job has the sheet: the paper swapped
+  // under it, and the rest of the file came out on the other paper's sheet
+  if(gtExportBusy){
+    showMsg(document.getElementById('gtExportMsg'),'A file is being made - change the paper once it is done.',false);
+    return;
+  }
   const was=gtFinish;
   gtFinish=b.dataset.gtFinish;
   document.querySelectorAll('#gtFinishSeg [data-gt-finish]')
@@ -54791,6 +54809,8 @@ function undoKeep(key){
   try{ if(mcGtSwapping>0) return; }catch(e){}
   // an export borrows the builder sheet by sheet; what it lays out is not a step
   try{ if(mcBusy) return; }catch(e){}
+  // nor a gift tag export or a Magic Create proof laying out its own sheets
+  try{ if(key==='gift'&&gtExportBusy) return; }catch(e){}
   undoCtxOk(key);
   let s='';
   try{ s=JSON.stringify(def.snap()); }catch(e){ return; }
@@ -59144,16 +59164,41 @@ function mcRollHoldStop(){
 // A one-time gift tag design lives as long as its batch is being worked and no
 // longer: never in the designs folder, and gone from storage and from its lines
 // when the batch is completed. (Deleting the batch takes it with the artwork.)
+// Two steps: the lines let go of their one-offs now (while the batch can still
+// be written to), and the files go only once the batch is completed (finish).
+// A Complete that is refused puts the lines back (undo), with their files still
+// there - the files went first and a failed Complete left lines with no design.
 async function mcDropOneOffs(batchId){
-  if(!sb||!batchId) return;
+  const dropped=[];
+  const res={finish:async()=>{
+    for(const {one} of dropped){
+      if(one&&one.path){ try{ await sb.storage.from(PHOTO_BUCKET).remove([one.path]); }catch(e){} }
+      // and out of this session's library, where it was put back for the sheet
+      if(typeof gtLib!=='undefined'&&one&&one.id){
+        const d=gtLib.designs.find(x=>x.id===one.id&&x.adhoc);
+        if(d){
+          gtLib.designs=gtLib.designs.filter(x=>x!==d);
+          if(typeof gtAssets!=='undefined') gtAssets.delete(d.file);
+          if(typeof gtImgs!=='undefined') gtImgs.delete(d.id);
+        }
+      }
+    }
+  },undo:async()=>{
+    for(const {r,one} of dropped){
+      try{ await sb.from('magic_items').update({sheet_item:r.sheet_item}).eq('id',r.id); }catch(e){}
+      const it=(typeof mcItem==='function')?mcItem(r.id):null;
+      if(it&&it.sheet_item) it.sheet_item.oneOff=one;
+    }
+  }};
+  if(!sb||!batchId) return res;
   let rows=[];
   try{
     const {data,error}=await sb.from('magic_items').select('id,sheet_item').eq('batch_id',batchId);
     // a read that failed is not a batch with nothing to drop
-    if(error) return;
+    if(error) return res;
     rows=(data||[]).filter(r=>r.sheet_item&&r.sheet_item.oneOff);
-  }catch(e){ return; }
-  if(!rows.length) return;
+  }catch(e){ return res; }
+  if(!rows.length) return res;
   for(const r of rows){
     const one=r.sheet_item.oneOff;
     const si={...r.sheet_item,oneOff:null};
@@ -59163,19 +59208,11 @@ async function mcDropOneOffs(batchId){
     try{ upd=await sb.from('magic_items').update({sheet_item:si}).eq('id',r.id).select('id'); }catch(e){ continue; }
     // no row back is a refused write too (the batch already completed)
     if(!upd||upd.error||!(upd.data&&upd.data.length)) continue;
-    if(one&&one.path){ try{ await sb.storage.from(PHOTO_BUCKET).remove([one.path]); }catch(e){} }
+    dropped.push({r,one});
     const it=(typeof mcItem==='function')?mcItem(r.id):null;
     if(it&&it.sheet_item) it.sheet_item.oneOff=null;
-    // and out of this session's library, where it was put back for the sheet
-    if(typeof gtLib!=='undefined'&&one&&one.id){
-      const d=gtLib.designs.find(x=>x.id===one.id&&x.adhoc);
-      if(d){
-        gtLib.designs=gtLib.designs.filter(x=>x!==d);
-        if(typeof gtAssets!=='undefined') gtAssets.delete(d.file);
-        if(typeof gtImgs!=='undefined') gtImgs.delete(d.id);
-      }
-    }
   }
+  return res;
 }
 // The batch, its lines, and the artwork uploaded to them. The rows go on the
 // cascade, but a deleted row is not a deleted file — the paths are read first
@@ -59768,22 +59805,25 @@ async function mcShareLoad(){
   // left as it is, so one reopened shares again.
   const {data:st,error:serr}=await sb.from('magic_batches').select('id,status').in('id',mcShareIds);
   if(seq!==mcShareSeq) return;
+  // read from a copy: trimmed in place, the next Share / Stop wrote the trimmed
+  // list down and a re-opened batch never shared again
+  let ids=mcShareIds.slice();
   if(!serr&&st){
     const open=new Set(st.filter(r=>r.status==='open').map(r=>String(r.id)));
-    mcShareIds=mcShareIds.filter(id=>open.has(String(id)));
-    if(!mcShareIds.length) return;
+    ids=ids.filter(id=>open.has(String(id)));
+    if(!ids.length) return;
   }
   // only the lines that are on a sheet: the rest of another batch is nothing
   // to do with this one's paper, and reading two hundred rows to lay out four
   // is a wait for nothing
   const {data,error}=await mcPagedSelect((a,b)=>sb.from('magic_items').select('*')
-    .in('batch_id',mcShareIds).not('tile','is',null)
+    .in('batch_id',ids).not('tile','is',null)
     .order('sort_order',{ascending:true}).order('id',{ascending:true}).range(a,b));
   if(seq!==mcShareSeq) return;
   // a batch finished and swept three days later is not an error, it is simply
   // not there any more — dropped for now rather than complained about, and not
   // written down, so a connection that came back does not find it un-shared
-  if(error){ mcShareIds=[]; return; }
+  if(error) return;
   mcShared=(data||[]).filter(i=>String(i.batch_id)!==String(mcBatch&&mcBatch.id));
 }
 // Written even when it is empty: "share with nobody" is somebody's decision
@@ -66896,11 +66936,13 @@ document.getElementById('mcCompleteBtn').addEventListener('click',async()=>{
   if(mcWinItem){ showMsg(out,'The open line was not closed, so the batch was not completed.',false); return; }
   // one-offs go before the status flips: once it is completed the table refuses
   // writes to its lines, and the update that clears them would match nothing
-  await mcDropOneOffs(mcBatch.id);
+  const drop=await mcDropOneOffs(mcBatch.id);
   const at=new Date().toISOString();
-  const {error}=await sb.from('magic_batches')
-    .update({status:'completed',completed_at:at,completed_by:mcMyId}).eq('id',mcBatch.id);
-  if(error){ showMsg(out,'Could not complete it: '+error.message,false); return; }
+  let {data:done,error}=await sb.from('magic_batches')
+    .update({status:'completed',completed_at:at,completed_by:mcMyId}).eq('id',mcBatch.id).select('id');
+  if(!error&&!(done&&done.length)) error={message:'the batch was not changed - it may be completed or deleted already'};
+  if(error){ await drop.undo(); showMsg(out,'Could not complete it: '+error.message,false); return; }
+  await drop.finish();
   mcBatch.status='completed'; mcBatch.completed_at=at;
   mcSyncBatchButtons();
   showMsg(out,'✓ Completed — it is in the Completed tab now.',true);
@@ -67389,25 +67431,34 @@ let mcWinOpeningId='';
 // or lent, mcSplitFollow): held as part of the open, or another line's Create
 // committed and rebound the window while a gift tag loan was still landing
 let mcWinFollowing=null, mcWinFollowWait=null;
+// settled when the open in progress lets go; the Create waiting for it
+let mcWinFreed=null, mcWinFreedRes=null, mcWinWantId='';
 async function mcWinOpen(id){
   if(mcPrintOpening) return;
   // two taps on Create ran the tile, finish and stock questions twice — and a
   // tap on another line's Create meanwhile ran a second open beside the first,
   // both committing the line being left and uploading its files twice
+  if(mcWinOpeningId===id) return;
   if(mcWinOpeningId){
-    // the last line's sheet is still being laid or lent: this Create waits for
-    // it rather than doing nothing (a new line's window never opened)
-    if(!mcWinFollowWait||mcWinOpeningId===id) return;
+    // another line is still opening, or its sheet still being laid or lent:
+    // this Create waits its turn rather than doing nothing. The last one
+    // tapped is the one that opens; taps in between are let go.
+    mcWinWantId=id;
     showMsg(document.getElementById('mcBatchMsg'),'Opening it once the last line\'s sheet is ready…',true);
-    await mcWinFollowWait;
-    if(mcWinOpeningId) return;
+    while(mcWinOpeningId){
+      await (mcWinFreed||Promise.resolve());
+      if(mcWinWantId!==id) return;
+    }
+    mcWinWantId='';
+    if(mcPrintOpening) return;
   }
   mcWinOpeningId=id; mcWinFollowing=null; mcWinFollowWait=null;
+  mcWinFreed=new Promise(r=>{ mcWinFreedRes=r; });
   let f=null;
   try{ const r=await mcWinOpenRun(id); f=mcWinFollowing; return r; }
   finally{
     mcWinFollowing=null;
-    const free=()=>{ if(mcWinOpeningId===id) mcWinOpeningId=''; };
+    const free=()=>{ if(mcWinOpeningId===id){ mcWinOpeningId=''; const r=mcWinFreedRes; mcWinFreedRes=null; if(r) r(); } };
     // never held for good: a follow that hangs lets go after 20 s
     if(f) mcWinFollowWait=Promise.race([Promise.all(f.map(p=>Promise.resolve(p).catch(()=>{}))),new Promise(r=>setTimeout(r,20000))]).then(()=>{ mcWinFollowWait=null; free(); });
     else free();
@@ -68833,6 +68884,8 @@ async function mcUseArt(it,pairs){
   // a picture uploaded onto a side replaces its Multiple Design pages too: left,
   // they went on printing, and the next commit put their first page back over it
   const listWas={front:(state.finalList||{}).front,back:(state.finalList||{}).back}, splitWas=state.finalSplit;
+  // and the sides as they were, for a picture that does not get onto the line
+  const sideWas={}; pairs.forEach(([side])=>{ sideWas[side]={final:state.final[side],art:state.art&&state.art[side]?{...state.art[side]}:state.art&&state.art[side]}; });
   try{
     const got=await Promise.all(pairs.map(async([side,f])=>{
       const dataURL=await fileToImageData(f);
@@ -68879,6 +68932,11 @@ async function mcUseArt(it,pairs){
     // upload left the builder without them, and the next commit saved that
     if(state.finalList){ state.finalList.front=listWas.front||[]; state.finalList.back=listWas.back||[]; }
     state.finalSplit=splitWas;
+    Object.keys(sideWas).forEach(side=>{
+      state.final[side]=sideWas[side].final;
+      if(state.art&&sideWas[side].art!==undefined) state.art[side]=sideWas[side].art;
+    });
+    try{ refreshSlots(); refreshArtInputs(); drawAll(); }catch(e){}
     pairs.forEach(([side])=>{ const i=info(side); if(i) i.textContent='No file'; });
     if(msg) showMsg(msg,'Could not use that file: '+((err&&err.message)||'unknown error'),false);
   }
@@ -70244,7 +70302,10 @@ function mcGtAdoptOwnRows(home){
     const over=Math.max(0,Math.round(Number(row.qty)||0)-share.reduce((a,b)=>a+b,0));
     const rows=lines.map((it,i)=>{
       it.sheet_item={...(it.sheet_item||{}),designId:row.designId,qty:share[i]+(i===0?over:0),
-        vals:{...(row.vals||{})},extra:(row.extra||[]).map(f=>({...f})),bleed:row.bleed&&row.bleed.on?{...row.bleed}:undefined,
+        vals:{...(row.vals||{})},extra:(row.extra||[]).map(f=>({...f})),
+        // the row's bleed (its kind and trim) and its own back picture: built
+        // field by field, the back was left off and the line printed another
+        bleed:gtLineBleedKept(row).bleed,back:typeof row.back==='string'?row.back:undefined,
         split:typeof row.split==='boolean'?row.split:undefined,
         shape:row.shape||((it.sheet_item||{}).shape)||'',page:home.page,finish:home.finish};
       if(!home.ids.includes(it.id)) home.ids.push(it.id);
@@ -70788,6 +70849,9 @@ async function mcDownloadOne(id){
   let dir=null;
   try{ dir=await exportFolderReady(true); if(typeof gtThumbReady==='function') await gtThumbReady(true).catch(()=>null); }       // first, while the tap is still ours
   catch(e){ mcBusy=false; mcSyncBatchButtons(); throw e; }
+  // the background sheet count lets go of the builder first: two borrows at once
+  // rendered a file on the count's sheet and lost the operator's own
+  try{ await mcPlanCountYield(); }catch(e){}
   showMsg(out,'Rendering at print resolution…',true);
   try{
     mcBundleSkipped=new Set();
@@ -70948,6 +71012,9 @@ async function mcDownloadAll(){
   let dir=null;
   try{ dir=await exportFolderReady(true); if(typeof gtThumbReady==='function') await gtThumbReady(true).catch(()=>null); }   // first, while the tap is still ours
   catch(e){ mcBusy=false; mcSyncBatchButtons(); throw e; }
+  // the background sheet count lets go of the builder first: two borrows at once
+  // rendered a file on the count's sheet and lost the operator's own
+  try{ await mcPlanCountYield(); }catch(e){}
   const guard=e=>{ e.preventDefault(); e.returnValue=''; };
   window.addEventListener('beforeunload',guard);
   let files=0,bundles=0;
@@ -71875,6 +71942,9 @@ async function mcGiftPreviewRun(lines,mode,canvas,dim,page,side,guest){
     // turning to another shape's page changed the sheet's cut file; the
     // operator's gift tag screen is put back on the one it was on
     try{ if(gtSheet.layoutFile!==wasShape&&typeof gtShowShape==='function') await gtShowShape(wasShape); }catch(e){}
+    // and its boxes and placeholders with it, as gtExportRestore does: left, the
+    // layout fields showed the last proofed shape's and an edit wrote them here
+    try{ gtWriteSheetInputs(); gtSyncShapeSlots(); gtRenderSlots(); gtDraw(); }catch(e){}
   }
 }
 // side: 'back' builds the back of the sheet (gtBuildSide's), anything else the
@@ -72169,7 +72239,7 @@ const PJ_KINDS={
         // the layout stays as it is and the saved sheet's designs are added to
         // it: a sheet being added to on screen is one somebody has set up
         const here=PJ_KINDS.print.snap().data;
-        applyPrintState({...here,designs:(here.designs||[]).concat(meta.designs||[])},undefined,false,true);
+        applyPrintState({...here,designs:meta.designs||[],_keepLines:(state.designs||[]).slice()},undefined,false,true);
       }else{
         applyPrintState(meta);
         if(meta.template&&typeof setSelectedTemplate==='function')
