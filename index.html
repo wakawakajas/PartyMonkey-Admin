@@ -13548,6 +13548,21 @@ function renderSide(side,canvas,maxDim,opts){
         ringOnly=opts.vec.take(key,
           {x:mx-trimW/2, y:my-trimH/2, w:trimW, h:trimH, rot:rotDeg},
           reach((wMm-ph.wMm)/2, (hMm-ph.hMm)/2), vclip, whole);
+        // A CMYK PDF's filled band (pixels round its placed page): written down,
+        // so the export makes it CMYK as the page is made - GRACoL and the look,
+        // not matched to the paper. Matched, the band came out other numbers
+        // than the card it runs on from (30 points more cyan on a Canva card).
+        if(fillHere&&ringOnly!=='whole'&&opts.forExport){
+          try{
+            const f=printArtPdf(img);
+            if(f&&_pdfCmyk.get(f)===true){
+              const m=ctx.getTransform(), P=(x,y)=>[m.a*x*sc+m.c*y*sc+m.e,m.b*x*sc+m.d*y*sc+m.f];
+              const box=(x,y,w,h)=>{ const a=P(x,y), b=P(x+w,y+h); return [Math.min(a[0],b[0]),Math.min(a[1],b[1]),Math.max(a[0],b[0]),Math.max(a[1],b[1])]; };
+              const o=box(mx-effW/2,my-effH/2,effW,effH), i=box(mx-trimW/2,my-trimH/2,trimW,trimH);
+              (opts._cmykRings||(opts._cmykRings=[])).push({o,i});
+            }
+          }catch(e){}
+        }
         if(ringOnly==='whole'){
           // nothing drawn here; the cutting marks under the card and its
           // bleed are taken off the sheet, as the art covers them on screen
@@ -33678,14 +33693,19 @@ function cmykRowsConv(imgData,to){
 // slice at a time and fed to the packer as it is made, so a page never has
 // its whole CMYK held beside its pixels (an SRA3 page is 80 MB of each),
 // and the page gets a moment between slices rather than freezing.
-async function sheetPacked(imgData){
+// rings: the filled bands round CMYK PDFs ({o,i} outer and inner boxes in
+// pixels), made CMYK as those pages are (GRACoL and the look, not matched)
+async function sheetPacked(imgData,rings){
   if(PRINT_CMYK_OUT){
     try{
       const conv=cmykRowsConv(imgData,await sheetToCmyk()), w=imgData.width, h=imgData.height;
+      const ring=rings&&rings.length?await sheetRingConv(imgData,rings):null;
       const step=Math.max(1,Math.floor(1048576/Math.max(1,w)));
       const packed=await deflateChunks(async put=>{
         for(let y0=0;y0<h;y0+=step){
-          await put(conv(y0,Math.min(h,y0+step)));
+          const y1=Math.min(h,y0+step), out=conv(y0,y1);
+          if(ring) ring(out,y0,y1);
+          await put(out);
           await new Promise(r=>setTimeout(r));
         }
       });
@@ -33694,6 +33714,35 @@ async function sheetPacked(imgData){
     catch(e){ console.warn('CMYK conversion unavailable, writing sRGB',e); }
   }
   return {cmyk:false,packed:await deflateBytes(rgbaToRawRgbScanlines(imgData))};
+}
+// The band pixels of a slice made again: GRACoL with the print look on top
+// (as pdfConvertCmyk gives the page it runs from), a grey as black ink alone
+async function sheetRingConv(imgData,rings){
+  const {toGracol}=await lcmsLib();
+  const T=printHslLut();
+  const kt=await printKOnly(null).catch(()=>null);
+  const w=imgData.width, data=imgData.data, row=1+w*4;
+  const R=rings.map(r=>({ox0:Math.max(0,Math.floor(r.o[0])),oy0:Math.max(0,Math.floor(r.o[1])),ox1:Math.min(w,Math.ceil(r.o[2])),oy1:Math.ceil(r.o[3]),
+    ix0:Math.ceil(r.i[0]),iy0:Math.ceil(r.i[1]),ix1:Math.floor(r.i[2]),iy1:Math.floor(r.i[3])}));
+  return (out,y0,y1)=>{
+    const pos=[], rgb=[];
+    for(const r of R){
+      for(let y=Math.max(y0,r.oy0);y<Math.min(y1,r.oy1);y++){
+        const inRow=y>=r.iy0&&y<r.iy1;
+        for(let x=r.ox0;x<r.ox1;x++){
+          if(inRow&&x>=r.ix0&&x<r.ix1){ x=r.ix1-1; continue; }
+          const q=(y*w+x)*4; pos.push((y-y0)*row+1+x*4); rgb.push(data[q],data[q+1],data[q+2]);
+        }
+      }
+    }
+    if(!pos.length) return;
+    const n=pos.length, a=Uint8Array.from(rgb), l=T?printHslApplyT(T,a,n):a, k=toGracol(l,n);
+    for(let j=0;j<n;j++){
+      const p=pos[j];
+      if(kt&&a[j*3]===a[j*3+1]&&a[j*3]===a[j*3+2]){ out[p]=out[p+1]=out[p+2]=0; out[p+3]=kt[l[j*3]]; continue; }
+      out[p]=k[j*4]; out[p+1]=k[j*4+1]; out[p+2]=k[j*4+2]; out[p+3]=k[j*4+3];
+    }
+  };
 }
 // deflate of what fill() puts, a piece at a time, read as it is made
 async function deflateChunks(fill){
@@ -33900,8 +33949,10 @@ function printLookSrc(){
 }
 const printLookStore={
   getItem:k=>{ const S=printLookSrc(); if(S) return k in S?S[k]:null; return localStorage.getItem(k); },
-  setItem:(k,v)=>{ const S=printLookSrc(); if(S){ S[k]=String(v); if(S===_printLineLook) _printLineDirty=true; return; } localStorage.setItem(k,v); },
-  removeItem:k=>{ const S=printLookSrc(); if(S){ delete S[k]; if(S===_printLineLook) _printLineDirty=true; return; } localStorage.removeItem(k); }
+  // a slider or Use goes to the open line's draft or to this computer -
+  // never into the colours an export is printing with (_printLookOv)
+  setItem:(k,v)=>{ if(printLookDraftOn()){ _printLineLook[k]=String(v); _printLineDirty=true; return; } localStorage.setItem(k,v); },
+  removeItem:k=>{ if(printLookDraftOn()){ delete _printLineLook[k]; _printLineDirty=true; return; } localStorage.removeItem(k); }
 };
 // the line's colours for a window just opened on it, or none when it shuts
 function printLookOpen(it){
@@ -33910,7 +33961,9 @@ function printLookOpen(it){
   _printLineHad=!!(saved&&typeof saved==='object'); _printLineDirty=false;
 }
 // what Save to line keeps: the line's colours when they were moved or it had its own
-const printLookToKeep=()=>printLookDraftOn()&&(_printLineDirty||_printLineHad)?{..._printLineLook}:null;
+// (whichever screen it is saved from: from the gift tag screen the draft is not
+// in use, and a line's own colours were dropped by the save)
+const printLookToKeep=()=>_printLineLook&&(_printLineDirty||_printLineHad)?{..._printLineLook}:null;
 const PRINT_WARM_KEY='pigu.printWarm';
 var _printOv=null;                // a test sheet's version: {warm, bright} in place of the kept
 // Printer warmth and Brightness are kept per side (4 Nov): the front in the
@@ -34504,7 +34557,21 @@ async function pdfCmykScan(bytes){
       }
       return null;
     };
-    await pdfPageFile(bytes,0,'scan.pdf',null,{recolor:count});
+    // and its pictures' colour spaces, read off the page's own objects: a
+    // file whose objects are packed in a compressed stream (Canva's) has no
+    // /DeviceCMYK to find in its bytes, and a CMYK Canva card was taken for an
+    // RGB one - its page and its bleed band then drawn two different ways
+    let pics=0;
+    const look=async(v,src,{isName})=>{
+      try{
+        const R=x=>src.resolve(x), cs=R(v.dict.get('ColorSpace'));
+        if(isName(cs,'DeviceCMYK')) pics++;
+        else if(Array.isArray(cs)&&isName(R(cs[0]),'ICCBased')&&Number(R(R(cs[1]).dict.get('N')))===4) pics++;
+      }catch(e){}
+      return null;
+    };
+    await pdfPageFile(bytes,0,'scan.pdf',null,{recolor:count,reimage:look});
+    if(!k&&!r&&pics) return true;
     let img=false;
     if(!k&&!r){
       for(let i=0;i<bytes.length&&!img;i+=1<<20){
@@ -34581,7 +34648,9 @@ function printArtUsable(img,forExport){
 function printArtImg(img,forExport,ro){
   if(forExport) return printArtExportImg(img);
   const v=(printPreviewShow()==='file'?null:printArtPrinted(img))||printArtRgbPrinted(img);
-  if(v&&typeof v==='object'&&!v._fillOf){ try{ v._fillOf=img; v._fillSig='p'; }catch(e){} }   // its fill kept (bleedJob)
+  // its fill kept (bleedJob) for this paper and this view: the fill is the picture
+  // with its band, drawn in its place, so one paper's could not stand for another's
+  if(v&&typeof v==='object'&&!v._fillOf){ try{ v._fillOf=img; v._fillSig='p|'+printPaperKey()+'|'+printPreviewShow(); }catch(e){} }
   if(ro&&printPreviewOn){
     const f=img&&_artFileOf.get(img._artOf||img);
     if(f&&_pdfCmyk.get(f)===true){
@@ -35598,7 +35667,9 @@ async function pdfConvertCmyk(bytes,mp,warm){
     const v=Math.round((g[0]+g[1]+g[2])/3);
     const gl=printHslApply(new Uint8Array([v,v,v]),1);
     const lv=Math.round((gl[0]+gl[1]+gl[2])/3);
-    o=kt?kt[lv]:Math.max(0,Math.min(255,Math.round(k*(255-lv)/Math.max(1,255-v))));
+    // as a change on the designer's black, as the colours are: 100% black stays
+    // 100% unless the look itself moves greys
+    o=Math.max(0,Math.min(255,kt?Math.round(k+kt[lv]-kt[v]):Math.round(k*(255-lv)/Math.max(1,255-v))));
     kMemo.set(k,o); return o;
   };
   // The look is added to the designer's CMYK as the change it makes, not by
@@ -36552,7 +36623,9 @@ document.addEventListener('click',async e=>{
   const count=Math.max(2,Math.min(80,Math.round(Number(document.getElementById('pcTestCount').value)||50)));
   b.disabled=true; msg.textContent='Making the test sheet…';
   try{
-    const {bytes,count:n,side:made}=await testSheetPdf(mode,count,step);
+    // in the export queue: its versions' colours are set for the whole sheet
+    // (_printOv), and an export running beside it took them
+    const {bytes,count:n,side:made}=await printSideDoAsync(pcPopSide,()=>testSheetPdf(mode,count,step));
     const name=`Test sheet ${(state.orderId||'').trim()||'design'} ${made} ${n} versions.pdf`.replace(/[\\/:*?"<>|]+/g,'-');
     downloadBlob(new Blob([bytes],{type:'application/pdf'}),name);
     msg.textContent=`${n} versions saved (${name}). Print it on this paper, then type the best number and press Use.`;
@@ -37977,8 +38050,11 @@ function printVecTaker(forms,place){
 // PDF out of this tool is made of is decided in one place.
 // made with that side's Printer warmth and Brightness (printSideDo)
 async function renderSidePdfAll(side,pages,onPage,from,look){
-  return await printSideDoAsync(side,()=>renderSidePdfAllRun(side,pages,onPage,from),look);
+  return await printSideDoAsync(side,()=>printCtxDo('custom',()=>renderSidePdfAllRun(side,pages,onPage,from)),look);
 }
+// the builder a file is made for, for all of it - its PDFs are made CMYK
+// before gtBuildPdf names it, and were matched to the paper of the screen on show
+async function printCtxDo(ctx,fn){ const w=_printCtxNow; _printCtxNow=ctx; try{ return await fn(); }finally{ _printCtxNow=w; } }
 async function renderSidePdfAllRun(side,pages,onPage,from){
   const p=paperMm();
   // print-quality resolution (300dpi), uncapped except for a safety ceiling
@@ -38020,7 +38096,7 @@ async function renderSidePdfAllRun(side,pages,onPage,from){
     // is a batch that runs the tab out of memory before it finishes. Handed
     // straight on, the canvas is released as soon as the page is packed.
     setTimeout(()=>{ c.width=c.height=0; },0);
-    return {imgData,wMm:p.w,hMm:p.h,place,clear:!!vec,over:words};
+    return {imgData,wMm:p.w,hMm:p.h,place,clear:!!vec,over:words,rings:ro._cmykRings};
   },sources,'custom');
 }
 async function renderSidePdf(side,page){
@@ -38066,7 +38142,10 @@ document.addEventListener('keydown',e=>{
   if(e.ctrlKey||e.metaKey||e.key==='Delete'||e.key==='Backspace'||/^Arrow/.test(e.key)){ e.preventDefault(); e.stopImmediatePropagation(); }
 },true);
 document.addEventListener('paste',e=>{
-  if(cptExportBusy&&currentScreen==='tool-custom'){ e.preventDefault(); e.stopImmediatePropagation(); }
+  if(!cptExportBusy||currentScreen!=='tool-custom') return;
+  const scr=document.getElementById('appScreen');
+  if(scr&&e.target&&!scr.contains(e.target)) return;      // the Fiery dialog and the like
+  e.preventDefault(); e.stopImmediatePropagation();
 },true);
 async function exportSideRun(side,out,print){
   // Whatever the name is built from is asked for before anything is rendered.
@@ -54366,7 +54445,7 @@ async function gtBuildPdfNow(count,render,sources){
   }
   const kids=[];
   for(let i=0;i<count;i++){
-    const {imgData,wMm,hMm,place,clear,over,ink}=await render(i,forms);
+    const {imgData,wMm,hMm,place,clear,over,ink,rings}=await render(i,forms);
     const W=mmToPt(wMm).toFixed(2), H=mmToPt(hMm).toFixed(2);
     const put=(place||[]).map(p=>({em:forms.get(p.key),r:p.rect,c:p.clip,e:p.ext,t:p.turn})).filter(u=>u.em);
     // A render made without paper under it has to let what is beneath show
@@ -54377,7 +54456,7 @@ async function gtBuildPdfNow(count,render,sources){
     const alpha=(clear||put.length)?rgbaToAlphaScanlines(imgData):null;
     // what the mask hides takes its neighbours' colour, so no black is blended in
     if(alpha) rgbaFillClear(imgData,4);
-    const sl=await sheetPacked(imgData), deflated=sl.packed;
+    const sl=await sheetPacked(imgData,rings), deflated=sl.packed;
     const packedA=alpha?await deflateBytes(alpha):null;
     const imgNum=alloc(), maskNum=alpha?alloc():0, contentNum=alloc(), pageNum=alloc();
     let cs='';
@@ -54668,7 +54747,7 @@ async function gtVectorSources(side){
 // (cuts, when given); the back has none — the blade follows the front.
 async function gtBuildSide(side,pages,plan,cuts){
   // a gift tag sheet is shared: this computer's colours, never a line's draft
-  return await printSideDoAsync(side,()=>gtBuildSideRun(side,pages,plan,cuts),false);
+  return await printSideDoAsync(side,()=>printCtxDo('gt',()=>gtBuildSideRun(side,pages,plan,cuts)),false);
 }
 async function gtBuildSideRun(side,pages,plan,cuts){
   const S=gtSheet, back=side==='back';
@@ -64632,9 +64711,12 @@ function mcOpenMade(note,ok,mode){
 function mcMadeShut(){
   document.getElementById('mcMadeSheet').classList.remove('open');
   // the gift tag screen back on the page it was on before the pop-up turned it
-  if(mcMadeMode==='gift'&&mcMadeGtWas!=null&&typeof gtGoPage==='function'&&!gtExportBusy&&gtPage!==mcMadeGtWas)
-    gtGoPage(mcMadeGtWas).catch(()=>{});
-  mcMadeGtWas=null;
+  // - once a page turn still under way has landed, or it landed after this
+  const was=mcMadeGtWas; mcMadeGtWas=null;
+  if(mcMadeMode==='gift'&&was!=null&&typeof gtGoPage==='function')(async()=>{
+    for(let t=0;mcMadeTurning&&t<200;t++) await new Promise(r=>setTimeout(r,50));
+    if(!gtExportBusy&&gtPage!==was) await gtGoPage(was);
+  })().catch(()=>{});
   mcRenderSummary();
 }
 let mcMadeGtWas=null;
@@ -67861,7 +67943,6 @@ async function mcWinOpen(id){
   // tapped, so a line waiting behind it lets go); once it is only its sheet
   // still landing, the tap opens it again as it always did
   if(mcWinOpeningId===id&&!mcWinFollowWait){ mcWinWantId=id; return; }
-  if(mcWinOpeningId===id){ mcWinWantId=id; return mcWinOpenRun(id); }   // its window back, now
   if(mcWinOpeningId){
     // another line is still opening, or its sheet still being laid or lent:
     // this Create waits its turn rather than doing nothing. The last one
@@ -69337,9 +69418,12 @@ async function mcUseArt(it,pairs){
     it.art=art;
     if(!await mcSave(it,{art:it.art})){
       undoArt();
-      if(state.finalList){ state.finalList.front=listWas.front||[]; state.finalList.back=listWas.back||[]; }
-      state.finalSplit=splitWas;
-      got.forEach(g=>{ state.final[g.side].mcPath=''; });
+      // the builder put back only while it is still this line's
+      if(mcWinItem===it.id){
+        if(state.finalList){ state.finalList.front=listWas.front||[]; state.finalList.back=listWas.back||[]; }
+        state.finalSplit=splitWas;
+        got.forEach(g=>{ state.final[g.side].mcPath=''; });
+      }
       // the file just filed is not on the line: taken back out of the bucket
       try{ await sb.storage.from(PHOTO_BUCKET).remove(paths); }catch(e){}
       throw new Error('the line did not save — '+(mcLastSaveError||'no connection'));
@@ -72413,7 +72497,7 @@ function mcGiftBundle(lines,mode,side,guest,fin){
   return mcGtTurn(()=>mcGtOnFinish(mode,fin,()=>mcGiftBundleRun(lines,mode,side,guest)));
 }
 async function mcGiftBundleRun(lines,mode,side,guest){
-  return await printSideDoAsync(side,()=>mcGiftBundleSide(lines,mode,side,guest),false);
+  return await printSideDoAsync(side,()=>printCtxDo('gt',()=>mcGiftBundleSide(lines,mode,side,guest)),false);
 }
 async function mcGiftBundleSide(lines,mode,side,guest){
   mcPendingCuts=null;
