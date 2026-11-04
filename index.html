@@ -64512,6 +64512,7 @@ function mcOpenMade(note,ok,mode){
   mcMadeMode=mode==='gift'?'gift':'print';
   // the gift side opens on the page the tool holds, whose die is the one loaded
   mcMadePage=mcMadeMode==='gift'&&typeof gtPage==='number'?gtPage:0;
+  mcMadeGtWas=mcMadeMode==='gift'&&typeof gtPage==='number'?gtPage:null;
   document.getElementById('mcMadeMsg').innerHTML='';
   document.getElementById('mcMadeSheet').classList.add('open');
   const gift=mcMadeMode==='gift';
@@ -64541,8 +64542,13 @@ function mcOpenMade(note,ok,mode){
 // It is drawn again on the way out.
 function mcMadeShut(){
   document.getElementById('mcMadeSheet').classList.remove('open');
+  // the gift tag screen back on the page it was on before the pop-up turned it
+  if(mcMadeMode==='gift'&&mcMadeGtWas!=null&&typeof gtGoPage==='function'&&!gtExportBusy&&gtPage!==mcMadeGtWas)
+    gtGoPage(mcMadeGtWas).catch(()=>{});
+  mcMadeGtWas=null;
   mcRenderSummary();
 }
+let mcMadeGtWas=null;
 document.getElementById('mcMadeClose').addEventListener('click',mcMadeShut);
 document.getElementById('mcMadeSheet').addEventListener('click',e=>{
   if(e.target.id==='mcMadeSheet') mcMadeShut();
@@ -64564,6 +64570,9 @@ document.getElementById('mcMadeBig').addEventListener('click',()=>{
 let mcMadeTurning=false;
 async function mcMadeGo(p){
   if(mcMadeTurning) return;
+  // not while a gift tag file is being made on that sheet: the die swapped under it
+  if(mcMadeMode==='gift'&&typeof gtExportBusy!=='undefined'&&gtExportBusy){
+    showMsg(document.getElementById('mcMadeMsg'),'A gift tag file is being made - turn the page once it is done.',false); return; }
   mcMadeTurning=true;
   try{
     mcMadePage=p;
@@ -67759,7 +67768,11 @@ async function mcWinOpen(id){
   // two taps on Create ran the tile, finish and stock questions twice — and a
   // tap on another line's Create meanwhile ran a second open beside the first,
   // both committing the line being left and uploading its files twice
-  if(mcWinOpeningId===id) return;
+  // this line already opening: the tap is that open's (and is the last one
+  // tapped, so a line waiting behind it lets go); once it is only its sheet
+  // still landing, the tap opens it again as it always did
+  if(mcWinOpeningId===id&&!mcWinFollowWait){ mcWinWantId=id; return; }
+  if(mcWinOpeningId===id){ mcWinWantId=id; return mcWinOpenRun(id); }   // its window back, now
   if(mcWinOpeningId){
     // another line is still opening, or its sheet still being laid or lent:
     // this Create waits its turn rather than doing nothing. The last one
@@ -69257,7 +69270,10 @@ async function mcUseArt(it,pairs){
     if(msg) showMsg(msg,'✓ Artwork saved to this line',true);
   }catch(err){
     // the pages it was to replace are put back: a file that would not read or
-    // upload left the builder without them, and the next commit saved that
+    // upload left the builder without them, and the next commit saved that -
+    // only while the builder is still this line's (another opened meanwhile has
+    // its own pictures there now)
+    if(mcWinItem===it.id){
     if(state.finalList){ state.finalList.front=listWas.front||[]; state.finalList.back=listWas.back||[]; }
     state.finalSplit=splitWas;
     Object.keys(sideWas).forEach(side=>{
@@ -69265,6 +69281,7 @@ async function mcUseArt(it,pairs){
       if(state.art&&sideWas[side].art!==undefined) state.art[side]=sideWas[side].art;
     });
     try{ refreshSlots(); refreshArtInputs(); drawAll(); }catch(e){}
+    }
     pairs.forEach(([side])=>{ const i=info(side); if(i) i.textContent='No file'; });
     if(msg) showMsg(msg,'Could not use that file: '+((err&&err.message)||'unknown error'),false);
   }
@@ -71072,16 +71089,10 @@ async function mcMarkExported(it,run,side,sides){
     si.dl=dl; it.sheet_item=si; patch.sheet_item=si;
   }
   // and it is done once every side it has is out, not at the first of them
-  // within a run, only the sides this run made count: a back stamped before the
-  // line was unticked to redo it ticked it done when this run's back then failed
-  if(run&&(side==='front'||side==='back')){
-    if(!run.sides) run.sides=new Map();
-    let made=run.sides.get(it.id); if(!made) run.sides.set(it.id,made=new Set());
-    made.add(side);
-  }
+  // (any side's mark counts, whichever press made it: counting only this
+  // run's left a line downloaded one side per press never ticked)
   const whole=!(side==='front'||side==='back')
-    ||(Array.isArray(sides)&&sides.length?sides:mcSides(it)).every(sd=>run&&run.sides
-      ?run.sides.get(it.id).has(sd):mcSideDl(it,sd));
+    ||(Array.isArray(sides)&&sides.length?sides:mcSides(it)).every(sd=>mcSideDl(it,sd));
   const ok=await mcSave(it,{...patch,...(whole?mcDonePatch(it,true):{})});
   if(!ok){
     undo();
@@ -71274,9 +71285,9 @@ async function mcExportPlan(){
   // of the shared pool. The per-order files are not: one line, one customer,
   // one PDF — those stay this batch's own, and a shared batch writes its own
   // when its turn comes.
-  // another batch's lines that are done are printed already (that batch's run,
-  // or this one's before): put on this sheet again, they printed twice
-  const pool=ready.concat(mcShared.filter(x=>mcReady(x)&&!x.status));
+  // (every lent line on a sheet is ticked done the moment it is put there, so
+  // a sheet built of the not-done ones left the other batch's tags off it)
+  const pool=mcPool().filter(mcReady);
   const plan=[];
   for(const [key,tile] of Object.entries(MC_TILES)){
     const lines=(tile.mode==='per-order'?ready:pool).filter(i=>i.tile===key);
