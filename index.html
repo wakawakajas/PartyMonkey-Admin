@@ -2127,6 +2127,7 @@ body.lt .tile-grid:not(#homeScreen .tile-grid) .tile-shop{grid-column:span 2;fle
 .slide-out-fwd { animation:screen-out-left  .34s cubic-bezier(.22,.61,.36,1) forwards; }
 .slide-out-back{ animation:screen-out-right .34s cubic-bezier(.22,.61,.36,1) forwards; }
 .screen-leaving{pointer-events:none;}
+#appScreen.cpt-exporting{pointer-events:none;cursor:progress;}
 /* The travelling screen is briefly off to one side, and without a clip the page
    gains a horizontal scrollbar for a quarter of a second. That clip belongs on
    html, which propagates it to the viewport: the same rule on body instead
@@ -17592,6 +17593,12 @@ const bleedWanted=(img,k)=>{ const s=bleedJobWanted.get(img); return !!(s&&s.has
 // drawn small first; null the rest of the time. Only these can stop it — a
 // fill that failed for a figure since typed over is not this export's.
 let bleedAsked=null;
+// and only while the export's own sheets are being drawn: a fill finishing
+// redraws the screen, whose sheets (the other side, preview pictures) were
+// added to the export's set, and it waited on - or failed for - a fill it
+// would never print
+let bleedCollect=false;
+function bleedCollecting(fn){ const w=bleedCollect; bleedCollect=true; try{ return fn(); }finally{ bleedCollect=w; } }
 function bleedJob(img,bx,by,mode){
   let memo=bleedJobMemo.get(img);
   if(!memo){ memo=new Map(); bleedJobMemo.set(img,memo); }
@@ -17602,8 +17609,8 @@ function bleedJob(img,bx,by,mode){
   // on the old failure until the page is reloaded - once: a fill that failed
   // in this export redrew the sheets, which asked for it again, and the
   // export never finished
-  if(job&&job.error&&bleedAsked&&!bleedAsked.has(job)){ memo.delete(k); job=null; }
-  if(job&&!job.dropped){ if(bleedAsked) bleedAsked.add(job); return job; }
+  if(job&&job.error&&bleedAsked&&bleedCollect&&!bleedAsked.has(job)){ memo.delete(k); job=null; }
+  if(job&&!job.dropped){ if(bleedAsked&&bleedCollect) bleedAsked.add(job); return job; }
   if(!bleedAsked&&memo.size>=4) for(const [key,j] of memo) if(j.canvas||j.dropped) memo.delete(key);
   job={canvas:null,error:null,dropped:false};
   memo.set(k,job);
@@ -17624,7 +17631,7 @@ function bleedJob(img,bx,by,mode){
   });
   bleedJobPending.add(job.promise);
   job.promise.finally(()=>bleedJobPending.delete(job.promise));
-  if(bleedAsked) bleedAsked.add(job);
+  if(bleedAsked&&bleedCollect) bleedAsked.add(job);
   return job;
 }
 // every fill asked for so far, finished — and a failed one stops the export
@@ -37689,8 +37696,10 @@ async function renderSidePdfAllRun(side,pages,onPage,from){
     await printArtExportReady();
     const asked=bleedAsked=new Set();
     try{
-      for(let i=0;i<pages;i++) renderSide(side,document.createElement('canvas'),160,
-        {forExport:true,page:(from||0)+i,vec:sources.size?printVecTaker(sources,[]):null});
+      bleedCollecting(()=>{
+        for(let i=0;i<pages;i++) renderSide(side,document.createElement('canvas'),160,
+          {forExport:true,page:(from||0)+i,vec:sources.size?printVecTaker(sources,[]):null});
+      });
       await bleedJobsSettled(asked);
     }finally{ bleedAsked=null; }
   }
@@ -37731,8 +37740,18 @@ async function exportSide(side,msgId,print){
   if(cptExportBusy){ showMsg(out,'An export is already running — wait for it to finish.',false); return; }
   if(side==='front'&&!pcFontsOkToPrint()) return;   // Place Card names in a missing font
   cptExportBusy=true; cptExportBtnsOff(true);
+  // the sheet is drawn page by page from what the builder holds, so nothing on
+  // it is changed until the file is done: an edit made, or a Magic Create line
+  // laid in, mid-way put its layout on the later pages
+  const scr=document.getElementById('appScreen');
+  if(scr) scr.classList.add('cpt-exporting');
+  try{ if(document.activeElement&&scr&&scr.contains(document.activeElement)) document.activeElement.blur(); }catch(e){}
   try{ await exportSideRun(side,out,print); }
-  finally{ cptExportBusy=false; cptExportBtnsOff(false); }
+  finally{ cptExportBusy=false; cptExportBtnsOff(false); if(scr) scr.classList.remove('cpt-exporting'); }
+}
+// Magic Create waits for that export before it lays anything into the builder
+async function cptExportWait(){
+  for(let t=0;cptExportBusy&&t<2400;t++) await new Promise(r=>setTimeout(r,250));
 }
 async function exportSideRun(side,out,print){
   // Whatever the name is built from is asked for before anything is rendered.
@@ -46633,7 +46652,7 @@ async function gtShapesInHand(){
   const was=gtSheet.layoutFile;
   for(const g of gtShapeGroups())
     if(g.shape&&g.shape!==was&&!gtShapeSlots.has(g.shape)) await gtShowShape(g.shape);
-  if(was&&gtSheet.layoutFile!==was) await gtShowShape(was);
+  if(gtSheet.layoutFile!==was) await gtShowShape(was);
   // and a nested sheet's real packing, not the stand-in
   await gtNestSettle();
 }
@@ -46643,7 +46662,15 @@ async function gtShowShape(path){
   gtPickOnly(null);                    // what was picked belongs to the shape left
   // the shape being left keeps its placeholders and its paper — not while the
   // layout in hand is another file's (a step back still reading it in)
-  if(gtSheet.layoutFile&&gtLayoutFrom===gtSheet.layoutFile)
+  // A sheet laid by the grid (no cutting file) is kept too, under '': it had no
+  // way back, so an export or proof that turned to a line's own die left the
+  // screen on that die and the grid's paper and placeholders were lost
+  if(!gtSheet.layoutFile)
+    gtShapeSlots.set('',{slots:gtSheet.slots,layout:null,
+      paperW:gtSheet.paperW,paperH:gtSheet.paperH,
+      layoutW:gtSheet.layoutW,layoutH:gtSheet.layoutH,
+      layoutX:gtSheet.layoutX,layoutY:gtSheet.layoutY});
+  else if(gtLayoutFrom===gtSheet.layoutFile)
     gtShapeSlots.set(gtSheet.layoutFile,{slots:gtSheet.slots,layout:gtLayout,
       paperW:gtSheet.paperW,paperH:gtSheet.paperH,
       layoutW:gtSheet.layoutW,layoutH:gtSheet.layoutH,
@@ -54160,9 +54187,11 @@ async function gtFillBleeds(pages,plan,withBack){
       const at=plan&&plan[i];
       if(at&&at.shape&&at.shape!==gtSheet.layoutFile) await gtShowShape(at.shape);
       const c=document.createElement('canvas');
-      gtRenderPage(c,i,300,true,null,vecOf(src));
-      // and the back's pictures, whose bleed is filled the same way
-      if(withBack) gtRenderPage(c,i,300,true,null,vecOf(srcB),'back');
+      bleedCollecting(()=>{
+        gtRenderPage(c,i,300,true,null,vecOf(src));
+        // and the back's pictures, whose bleed is filled the same way
+        if(withBack) gtRenderPage(c,i,300,true,null,vecOf(srcB),'back');
+      });
       c.width=c.height=0;
     }
     await bleedJobsSettled(asked);
@@ -60211,7 +60240,11 @@ async function mcOkOrder(orderId){
       .update({status:'done',acted_by:mcMyId,acted_at:now}).in('id',ids.slice(i,i+MC_CHUNK)).select('id');
     if(!error&&!(upd&&upd.length)) error={message:'the batch is no longer open - it was completed or deleted'};
     if(error){
-      await mcLoadItems();                     // whatever went through, went through
+      // what went through, set here rather than read back: a reload swapped
+      // every line object out from under an open line's window
+      const okIds=new Set(ids.slice(0,i));
+      lines.forEach(it=>{ if(okIds.has(it.id)){ it.status='done'; it.acted_by=mcMyId; it.acted_at=now; } });
+      mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
       showMsg(out,'Could not save that: '+error.message,false);
       return;
     }
@@ -60244,8 +60277,10 @@ async function mcOkSku(sku){
       .update({status:'done',acted_by:mcMyId,acted_at:now}).in('id',ids.slice(i,i+MC_CHUNK)).select('id');
     if(!error&&!(upd&&upd.length)) error={message:'the batch is no longer open - it was completed or deleted'};
     if(error){
-      await mcLoadItems();                     // whatever went through, went through
-      mcRenderItems(); mcRenderSummary();
+      // what went through, set here (a reload swapped the open line's object)
+      const okIds=new Set(ids.slice(0,i));
+      lines.forEach(it=>{ if(okIds.has(it.id)){ it.status='done'; it.acted_by=mcMyId; it.acted_at=now; } });
+      mcRenderItems(); mcSyncBatchButtons(); mcRenderSummary();
       showMsg(out,'Could not save that: '+error.message,false);
       return;
     }
@@ -60572,7 +60607,10 @@ async function mcDeleteOrder(orderId){
   for(let i=0;i<ids.length;i+=MC_CHUNK){
     const {error}=await sb.from('magic_items').delete().in('id',ids.slice(i,i+MC_CHUNK));
     if(error){
-      await mcLoadItems();                     // whatever went, went; read it back
+      // the slices before this one went; taken out here rather than by a reload,
+      // which swapped every line object out from under an open line's window
+      const doneIds=new Set(ids.slice(0,i));
+      mcItems=mcItems.filter(x=>!doneIds.has(x.id));
       // the slices that had already gone are off the sheets too, or their cards
       // stayed on a sheet for lines that no longer exist
       const still=new Set(mcItems.map(i=>i.id));
@@ -65174,7 +65212,7 @@ async function mcGtShapesInHand(){
     if(!(gtSheet.nestOn&&!gtLayout)) for(const g of gtShapeGroups())
       if(g.shape&&g.shape!==was&&!gtShapeSlots.has(g.shape)&&!await gtShowShape(g.shape))
         throw new Error('the cutting file "'+gtShapeLabel(g.shape)+'" could not be loaded — nothing was saved.');
-  }finally{ if(was&&gtSheet.layoutFile!==was) await gtShowShape(was); }
+  }finally{ if(gtSheet.layoutFile!==was) await gtShowShape(was); }   // a grid sheet ('') too
   // and a nested sheet's real packing, not the stand-in
   if(typeof gtNestSettle==='function') await gtNestSettle();
 }
@@ -67465,6 +67503,7 @@ async function mcWinOpen(id){
   }
 }
 async function mcWinOpenRun(id){
+  await cptExportWait();          // the builder's own export finishes first
   // a line still being closed has not handed the builder back yet; opening
   // another now captured a half-restored builder as the operator's own work
   if(mcWinClosing) await mcWinClosing.catch(()=>{});
@@ -70692,6 +70731,7 @@ async function pcOpenMode(m){
   if(keep) await pcBuilderRestore(keep).catch(()=>{});
 }
 async function mcBorrowBuilder(fn){
+  await cptExportWait();          // the builder's own export finishes first
   const keep=pcBuilderKeep();
   // whatever a window or plan left in mcLaidTemplate is not known to be this
   // builder's geometry: forced to load fresh rather than trusted
@@ -70725,14 +70765,32 @@ async function mcMarkExported(it,run,side,sides){
   if(!again) it.export_count=Math.max(0,Math.round(Number(it.export_count)||0))+1;
   const patch={exported_at:it.exported_at,export_count:it.export_count};
   if(side==='front'||side==='back'){
-    const si={...(it.sheet_item||{})};
+    // another batch's line is not kept up to date here (realtime follows this
+    // batch only): its sheet_item is read fresh, or the mark wrote back the copy
+    // read at plan time and undid that batch's own change since
+    let base=it.sheet_item||{};
+    if(sb&&mcBatch&&it.batch_id&&String(it.batch_id)!==String(mcBatch.id)){
+      try{
+        const {data}=await sb.from('magic_items').select('sheet_item').eq('id',it.id).maybeSingle();
+        if(data&&data.sheet_item) base=data.sheet_item;
+      }catch(e){}
+    }
+    const si={...base};
     const dl={...(si.dl||{})}, had=dl[side]||{};
     dl[side]={at:it.exported_at,n:Math.max(0,Math.round(Number(had.n)||0))+1};
     si.dl=dl; it.sheet_item=si; patch.sheet_item=si;
   }
   // and it is done once every side it has is out, not at the first of them
+  // within a run, only the sides this run made count: a back stamped before the
+  // line was unticked to redo it ticked it done when this run's back then failed
+  if(run&&(side==='front'||side==='back')){
+    if(!run.sides) run.sides=new Map();
+    let made=run.sides.get(it.id); if(!made) run.sides.set(it.id,made=new Set());
+    made.add(side);
+  }
   const whole=!(side==='front'||side==='back')
-    ||(Array.isArray(sides)&&sides.length?sides:mcSides(it)).every(sd=>mcSideDl(it,sd));
+    ||(Array.isArray(sides)&&sides.length?sides:mcSides(it)).every(sd=>run&&run.sides
+      ?run.sides.get(it.id).has(sd):mcSideDl(it,sd));
   const ok=await mcSave(it,{...patch,...(whole?mcDonePatch(it,true):{})});
   if(!ok){
     undo();
@@ -70923,7 +70981,9 @@ async function mcExportPlan(){
   // of the shared pool. The per-order files are not: one line, one customer,
   // one PDF — those stay this batch's own, and a shared batch writes its own
   // when its turn comes.
-  const pool=mcPool().filter(mcReady);
+  // another batch's lines that are done are printed already (that batch's run,
+  // or this one's before): put on this sheet again, they printed twice
+  const pool=ready.concat(mcShared.filter(x=>mcReady(x)&&!x.status));
   const plan=[];
   for(const [key,tile] of Object.entries(MC_TILES)){
     const lines=(tile.mode==='per-order'?ready:pool).filter(i=>i.tile===key);
@@ -71814,7 +71874,9 @@ function mcGtTurn(job){
     }
     return run();
   })();
-  return go.finally(()=>{ mcGtPending--; release(); });
+  // the next turn goes once the one before this has finished too: a turn that
+  // gave up waiting let the next one run beside a job still going
+  return go.finally(()=>{ mcGtPending--; prev.then(release,release); });
 }
 // A batch's sheet is its paper's sheet: Matte, Gloss and Sticker each keep
 // their own layout - nesting and its turns, cut line, placeholders, back
