@@ -36850,22 +36850,36 @@ async function testSheetArtKind(){
   const all=sideArtObjs(pcPopSide).filter(([,o])=>o&&o.img);
   const pick=pcPopArt?all.find(([,o])=>artImgId(o.img)===pcPopArt):all[0];
   if(!pick) return {art:null,kind:'img'};
-  const img=pick[1].img, f=printArtPdf(img);
-  const swapped=swapsForIds(new Set([artImgId(img)])).length>0;
-  if(!f) return {art:testSheetArt(),kind:'img'};
-  const cm=_pdfCmyk.get(f);
-  if(cm!==true&&cm!==false) return {art:testSheetArt(),kind:'img'};
+  const side=pcPopSide, gt=pcCtx()==='gt', [key,o]=pick, img=o.img;
+  // a PDF by its file, as the export tells (printVectorSources, gtVectorSources),
+  // its colours swapped or not
+  let src=await artPdfBytes(o).catch(()=>null);
+  if(!src) return {art:testSheetArt(),kind:'img'};
+  // a gift tag's front is placed cleaned of its cut line (gtVectorSources)
+  if(gt&&o.gtCut&&o.blob){
+    const lift=await gtCutLift(o.blob,!!o.gtCut.cutSheet).catch(()=>null);
+    if(lift&&lift.clean) src=new Uint8Array(await lift.clean.arrayBuffer());
+  }
+  // swapped in its own drawing, before any inverting; one that cannot be read
+  // that way the export leaves to the sheet, its pixels swapped
+  const sw=swapsForIds(new Set([artImgId(img)]));
+  if(sw.length) src=await pdfSwapColours(src,sw).catch(()=>null);
+  if(!src) return {art:testSheetArt(),kind:'img'};
+  const inv=gt?side!=='back'&&!!gtSheet.invertArt
+    :!!withLook(side,key.startsWith('d:')?o:null,()=>!!(state.bleed&&state.bleed.invert));
   // a PDF goes on the sheet as its export puts it: its own page, made CMYK by
   // the export's own conversion once per version (testSheetPdf)
-  return {art:img,kind:'vec',o:pick[1],swapped};
+  return {art:img,kind:'vec',o,src,inv};
 }
 async function testSheetPdf(mode,count,step){
   // the side it is made for, read once: the panel may follow the builder to
   // the other side while the versions are being made
   const side0=pcPopSide;
-  const {art,kind,o:artO}=await testSheetArtKind(); if(!art) throw new Error('No artwork on this side');
+  const {art,kind,src,inv}=await testSheetArtKind(); if(!art) throw new Error('No artwork on this side');
   const {list,cols:fixedCols}=testSheetVersions(mode,count,step);
-  const p=paperMm(), DPI=200, px=mm=>Math.round(mm/25.4*DPI);
+  // a gift tag prints on the gift tag page's paper, not the Custom Template's
+  const ctx=pcCtx()==='gt'?'gt':'custom';
+  const p=ctx==='gt'?{w:gtSheet.paperW,h:gtSheet.paperH}:paperMm(), DPI=200, px=mm=>Math.round(mm/25.4*DPI);
   const W=px(p.w), H=px(p.h);
   const aw=art.naturalWidth||art.width, ah=art.naturalHeight||art.height, a=aw/ah;
   // the biggest versions that fit, each with its number under it
@@ -36908,16 +36922,19 @@ async function testSheetPdf(mode,count,step){
   // and placed as the export places it. The number picked then prints in
   // the real export exactly as it did here.
   if(kind==='vec'){
-    let src=await artPdfBytes(artO);
-    if(src&&artO.img){ const sw=swapsForIds(new Set([artImgId(artO.img)])); if(sw.length) src=await pdfSwapColours(src,sw).catch(()=>null); }
     if(!src) throw new Error('the PDF could not be read');
-    const ctx=pcCtx()==='gt'?'gt':'custom', forms=new Map();
+    const forms=new Map();
     // each copy no finer than 300 dpi at the size it prints here: full-size
     // copies made a 50-version sheet near 80 MB. The colours are the same.
     const maxPx=Math.ceil(Math.max(cwMm,chMm)/25.4*300);
     for(const {v} of cells){
       _printOv={warm:v.w,bright:v.b}; _pdfTestScale={maxPx,dpi:300};
-      try{ forms.set('v'+v.n,{bytes:await pdfExportCmykNow(src,ctx),page:0,pdf:true}); }
+      // inverted, its pixels are matched instead (pdfHiResBytes), as the export does
+      try{
+        const b=inv?await printCtxDo(ctx,()=>pdfHiResBytes(src,true,300)):await pdfExportCmykNow(src,ctx);
+        if(!b) throw new Error('the PDF could not be drawn');
+        forms.set('v'+v.n,{bytes:b,page:0,inverted:inv,pdf:true});
+      }
       finally{ _printOv=null; _pdfTestScale=null; }
     }
     const place=cells.map(({v,mm})=>({key:'v'+v.n,rect:{x:mm.x,y:mm.y,w:mm.w,h:mm.h,rot:0},clip:{x:mm.x,y:mm.y,w:mm.w,h:mm.h}}));
@@ -38306,7 +38323,8 @@ exportDirGet().then(exportFolderLbl);
 // only the path it came from, which the folder can still be asked for.
 async function artPdfBytes(o){
   if(!o) return null;
-  let file=o.file||null;
+  // a gift tag's bytes are kept apart from its name (gtSideArtObjs)
+  let file=(o.blob instanceof Blob&&o.blob)||o.file||null;
   if(!file&&o.source&&o.source.dir==='loadDesignDir'&&o.source.path)
     file=await loadDesignFileByPath(o.source.path).catch(()=>null);
   if(!file) return null;
@@ -42147,7 +42165,7 @@ const HELP=[
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'custom',t:'Print Edited Color Details',k:'colour record print settings crop mark warmth brightness hue saturation swaps record',h:'<b>Print preview</b> -> tick <b>Print Edited Color Details</b> (beside Hold to see original). Every sheet (Custom Template and gift tag) then prints one small grey line in the margin beside the top-left crop mark: which side it is, the paper, <b>Front</b> and <b>Back</b> Printer warmth (W) and Brightness (B), Hue/Saturation, this side\'s colour swaps and the date and time. It shows on the sheet on screen too: <b>drag it</b> to wherever you want it on the sheet (it stays there, on both sides and in the file); <b>double-click</b> it to put it back beside the crop mark. Untick it to print without.'},
   {on:'sheet custom',t:'Colours on a Magic Create line',k:'magic create line colours test sheet use warmth brightness hue saturation save to line draft',h:'With a Magic Create line open, Printer warmth, Brightness, Hue/Saturation and a test sheet\'s <b>Use</b> change <b>that line only</b>, and only the side on show (<b>Front</b> or <b>Back</b>): each side keeps its own (Print preview\'s title says <b>this line only</b>). <b>Save to line</b> keeps them on the line and its file prints with them; close the line without saving and they are thrown away. Lines with none saved, shared sheets and gift tag lines print with this computer\'s colours.'},
-  {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is the side on show only too: each side keeps its own. A PDF design is made exactly as the export makes it (its own CMYK, greys as black ink), so the number picked prints the same in the real file.'},
+  {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is the side on show only too: each side keeps its own. A PDF design is made exactly as the export makes it (its own CMYK, greys as black ink, its changed colours and Invert colours too), so the number picked prints the same in the real file. On the gift tag page the sheet is the gift tag paper, and a PDF tag goes on without its cut line.'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
   {on:'sheet',t:'Saved sheets',k:'save keep later open job',h:'Left panel → <b>Saved sheets</b>: keep this sheet for later, or open one.',find:'Saved sheets'},
