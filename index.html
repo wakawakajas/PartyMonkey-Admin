@@ -33710,7 +33710,17 @@ var _printOv=null;                // a test sheet's version: {warm, bright} in p
 const PRINT_BACK_WARM_KEY='pigu.printWarm.back', PRINT_BACK_BRIGHT_KEY='pigu.printBright.back';
 var _printSideNow=null;
 function printSideDo(side,fn){ const w=_printSideNow; _printSideNow=side||null; try{ return fn(); }finally{ _printSideNow=w; } }
-async function printSideDoAsync(side,fn){ const w=_printSideNow; _printSideNow=side||null; try{ return await fn(); }finally{ _printSideNow=w; } }
+// one side's export at a time: _printSideNow is one global, and a Custom
+// front run while a gift tag back was mid-way gave the rest of the back the
+// front's values. None of the three wrapped exports calls another, so the
+// queue cannot wait on itself.
+let _printSideQ=Promise.resolve();
+async function printSideDoAsync(side,fn){
+  const prev=_printSideQ; let rel; _printSideQ=new Promise(r=>rel=r);
+  await prev;
+  const w=_printSideNow; _printSideNow=side||null;
+  try{ return await fn(); }finally{ _printSideNow=w; rel(); }
+}
 function printWarmSet(side,v){ try{ localStorage.setItem(side==='back'?PRINT_BACK_WARM_KEY:PRINT_WARM_KEY,String(v)); }catch(e){} }
 function printBrightSet(side,v){
   if(side==='back'){ try{ localStorage.setItem(PRINT_BACK_BRIGHT_KEY,String(v)); }catch(e){} return; }
@@ -35622,6 +35632,9 @@ function pcPopRender(){
   const body=document.getElementById('pcPopBody');
   document.getElementById('pcPopTitle').textContent=`Print preview · Fiery ${PRINT_PAPER_NAMES[paper]}${printPreviewShow()==='file'?' · file colours':cms&&cms.measured?' · measured':''}`;
   const has=s=>sideArtObjs(s).some(([,o])=>o&&o.img);
+  // a side with no art left is not the one shown, or its sliders went on
+  // moving values nothing prints
+  if(!has(pcPopSide)&&has(pcPopSide==='back'?'front':'back')){ pcPopSide=pcPopSide==='back'?'front':'back'; pcPopArt=null; }
   const seg=document.getElementById('pcPopSides');
   seg.style.display=has('front')&&has('back')?'':'none';
   seg.querySelectorAll('[data-pc-side]').forEach(b=>b.classList.toggle('btn-primary',b.dataset.pcSide===pcPopSide));
@@ -36006,7 +36019,7 @@ document.addEventListener('change',e=>{
 document.addEventListener('click',e=>{
   if(!e.target||e.target.id!=='pcHslReset') return;
   // the other side's Brightness is not this Reset's
-  const front=printHsl().bright;
+  const front=printSideDo('front',()=>printHsl().bright);
   try{ localStorage.removeItem(PRINT_HSL_KEY); }catch(err){}
   if(pcPopSide==='back'){ printBrightSet('front',front); printBrightSet('back',0); }
   pcHslShow(); if(printPreviewShow()!=='file') pcRedraw();
@@ -36186,7 +36199,8 @@ async function testSheetPdf(mode,count,step){
   push(enc.encode(x+`trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`));
   const out=new Uint8Array(pos); let o=0;
   parts.forEach(u=>{ out.set(u,o); o+=u.length; });
-  try{ localStorage.setItem(TEST_SHEET_KEY,JSON.stringify({made:now.toISOString(),paper:printPaperKey(),list})); }catch(e){}
+  // and the side it was made for, which is the side its Use sets
+  try{ localStorage.setItem(TEST_SHEET_KEY,JSON.stringify({made:now.toISOString(),paper:printPaperKey(),side:pcPopSide,list})); }catch(e){}
   return {bytes:out,count:list.length};
 }
 function testSheetKept(){ try{ return JSON.parse(localStorage.getItem(TEST_SHEET_KEY)||'null'); }catch(e){ return null; } }
@@ -36208,8 +36222,11 @@ document.addEventListener('click',async e=>{
   const msg=document.getElementById('pcTestMsg');
   if(b.id==='pcTestUse'){
     const num=Math.round(Number(document.getElementById('pcTestNum').value));
-    const v=testSheetUse(num,pcPopSide);
-    msg.textContent=v?`#${v.n} taken for the ${pcPopSide==='back'?'back':'front'}: Brightness ${v.b}, Printer warmth ${v.w}. The export prints that side with them.`
+    // the side the sheet was made for, not whichever is on show now: the panel
+    // follows the builder's Front/Back on its own
+    const kept=testSheetKept(), sd=(kept&&kept.side)||pcPopSide;
+    const v=testSheetUse(num,sd);
+    msg.textContent=v?`#${v.n} taken for the ${sd==='back'?'back':'front'}: Brightness ${v.b}, Printer warmth ${v.w}. The export prints that side with them.`
       :(testSheetKept()?`No #${num} on the last sheet.`:'Make a test sheet first.');
     if(v){ pcPopRender(); pcRedraw(); }
     return;
@@ -64182,12 +64199,18 @@ document.getElementById('mcMadeBig').addEventListener('click',()=>{
 });
 // a gift tag page of another shape is drawn on its own die: gtRenderPage lays
 // a page on the slots of the cut file loaded now, so the tool goes there first
+// one page turn at a time: two quick taps loaded two dies into the tool at once
+let mcMadeTurning=false;
 async function mcMadeGo(p){
-  mcMadePage=p;
-  if(mcMadeMode==='gift'&&typeof gtGoPage==='function'){
-    try{ await gtGoPage(p); }catch(e){}
-  }
-  mcRenderMade();
+  if(mcMadeTurning) return;
+  mcMadeTurning=true;
+  try{
+    mcMadePage=p;
+    if(mcMadeMode==='gift'&&typeof gtGoPage==='function'){
+      try{ await gtGoPage(p); }catch(e){}
+    }
+    mcRenderMade();
+  }finally{ mcMadeTurning=false; }
 }
 document.getElementById('mcMadePrev').addEventListener('click',()=>mcMadeGo(mcMadePage-1));
 document.getElementById('mcMadeNext').addEventListener('click',()=>mcMadeGo(mcMadePage+1));
@@ -66701,7 +66724,7 @@ document.getElementById('mcSummaryBody').addEventListener('click',async e=>{
     const gone=mcRemoveSku(sku);
     if(!gone){
       mcRenderSummary();
-      showMsg(document.getElementById('mcSummaryMsg'),`Took ${escapeHtml(String(sku))} off the sheet.`,true);
+      if(its.length) showMsg(document.getElementById('mcSummaryMsg'),`Took ${escapeHtml(String(sku))} off the sheet.`,true);
       return;
     }
     if(gone==='gift'){
@@ -67365,21 +67388,28 @@ let mcWinOpeningId='';
 // what the open left running behind it (the sheet beside the line being laid
 // or lent, mcSplitFollow): held as part of the open, or another line's Create
 // committed and rebound the window while a gift tag loan was still landing
-let mcWinFollowing=null;
+let mcWinFollowing=null, mcWinFollowWait=null;
 async function mcWinOpen(id){
   if(mcPrintOpening) return;
   // two taps on Create ran the tile, finish and stock questions twice — and a
   // tap on another line's Create meanwhile ran a second open beside the first,
   // both committing the line being left and uploading its files twice
-  if(mcWinOpeningId) return;
-  mcWinOpeningId=id; mcWinFollowing=null;
+  if(mcWinOpeningId){
+    // the last line's sheet is still being laid or lent: this Create waits for
+    // it rather than doing nothing (a new line's window never opened)
+    if(!mcWinFollowWait||mcWinOpeningId===id) return;
+    showMsg(document.getElementById('mcBatchMsg'),'Opening it once the last line\'s sheet is ready…',true);
+    await mcWinFollowWait;
+    if(mcWinOpeningId) return;
+  }
+  mcWinOpeningId=id; mcWinFollowing=null; mcWinFollowWait=null;
   let f=null;
   try{ const r=await mcWinOpenRun(id); f=mcWinFollowing; return r; }
   finally{
     mcWinFollowing=null;
     const free=()=>{ if(mcWinOpeningId===id) mcWinOpeningId=''; };
     // never held for good: a follow that hangs lets go after 20 s
-    if(f) Promise.race([Promise.all(f.map(p=>Promise.resolve(p).catch(()=>{}))),new Promise(r=>setTimeout(r,20000))]).then(free);
+    if(f) mcWinFollowWait=Promise.race([Promise.all(f.map(p=>Promise.resolve(p).catch(()=>{}))),new Promise(r=>setTimeout(r,20000))]).then(()=>{ mcWinFollowWait=null; free(); });
     else free();
   }
 }
@@ -68845,6 +68875,10 @@ async function mcUseArt(it,pairs){
     if(typeof mcLinePreview==='function') mcLinePreview();
     if(msg) showMsg(msg,'✓ Artwork saved to this line',true);
   }catch(err){
+    // the pages it was to replace are put back: a file that would not read or
+    // upload left the builder without them, and the next commit saved that
+    if(state.finalList){ state.finalList.front=listWas.front||[]; state.finalList.back=listWas.back||[]; }
+    state.finalSplit=splitWas;
     pairs.forEach(([side])=>{ const i=info(side); if(i) i.textContent='No file'; });
     if(msg) showMsg(msg,'Could not use that file: '+((err&&err.message)||'unknown error'),false);
   }
