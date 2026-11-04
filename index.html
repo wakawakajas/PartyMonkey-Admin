@@ -12858,7 +12858,9 @@ function artOrder(){
     if(gx<=E&&oy>=Math.min(w.hMm,c.hMm)*0.8) return 1+oy;            // either side
     return 0;
   };
-  const grown=new Map(cards.map(c=>[c,{id:c.id,label:c.label,
+  // the card's own turn goes with it: without it a turned card's art printed
+  // unturned and squashed into the turned box while its words turned
+  const grown=new Map(cards.map(c=>[c,{id:c.id,label:c.label,rot:c.rot,
     xMm:c.xMm,yMm:c.yMm,r:c.xMm+c.wMm,b:c.yMm+c.hMm}]));
   words.forEach(w=>{
     let best=null,score=0;
@@ -12875,7 +12877,7 @@ function artOrder(){
     g.r=Math.max(g.r,w.xMm+w.wMm); g.b=Math.max(g.b,w.yMm+w.hMm);
   });
   return fillOrder([...grown.values()].map(g=>
-    ({id:g.id,label:g.label,xMm:g.xMm,yMm:g.yMm,wMm:g.r-g.xMm,hMm:g.b-g.yMm,card:true})));
+    ({id:g.id,label:g.label,rot:g.rot,xMm:g.xMm,yMm:g.yMm,wMm:g.r-g.xMm,hMm:g.b-g.yMm,card:true})));
 }
 const artPerSheet=()=>artOrder().length;
 // one entry per physical card, in the order the lines are listed. The same
@@ -12964,7 +12966,9 @@ function drawCutMarks(ctx,sc,side){
   if(!state.refMark.enabled || state.placeholders.length===0) return;
   const off=state.refMark.offsetMm, len=state.refMark.lenMm;
   const EPS=0.01;
-  const phs=state.placeholders.map(ph=>phOnSide(ph,side));
+  // a Place Card card and its words half are one card, as the fold ticks
+  // read them: the fold between them is not a cut
+  const phs=foldCards(side);
   const minX=Math.min(...phs.map(ph=>ph.xMm));
   const maxX=Math.max(...phs.map(ph=>ph.xMm+ph.wMm));
   const minY=Math.min(...phs.map(ph=>ph.yMm));
@@ -16578,11 +16582,20 @@ document.getElementById('swapOrientBtn').addEventListener('click',()=>{
     if(!isNaN(v)){ state.shift[side][axis]=toMm(v,state.paper.unit); drawAll(); }
   });
 });
+// Original and Actual size hold the artwork's footprint for the way it was
+// turned; a quarter turn left it there and stretched the turned picture into
+// it, so it is fitted again (Actual size: its own size, the other way round).
+// Card size fills the card either way.
+function sheetRotate(s,by){
+  state.rotate[s]=((state.rotate[s]||0)+by+360)%360;
+  if(state.artFit!=='card'){ fitArtToCard(s); refreshArtInputs(); }
+  drawAll();
+}
 document.querySelectorAll('[data-rotate-left]').forEach(b=>{
-  b.addEventListener('click',()=>{const s=b.dataset.rotateLeft;state.rotate[s]=((state.rotate[s]||0)-90+360)%360;drawAll();});
+  b.addEventListener('click',()=>sheetRotate(b.dataset.rotateLeft,-90));
 });
 document.querySelectorAll('[data-rotate-right]').forEach(b=>{
-  b.addEventListener('click',()=>{const s=b.dataset.rotateRight;state.rotate[s]=((state.rotate[s]||0)+90)%360;drawAll();});
+  b.addEventListener('click',()=>sheetRotate(b.dataset.rotateRight,90));
 });
 document.getElementById('cutToggle').addEventListener('change',e=>{state.showCut=e.target.checked;drawAll();});
 document.querySelectorAll('#cutColorSeg button').forEach(b=>{
@@ -32127,6 +32140,16 @@ async function refreshTemplateList(){
   templateRows.forEach(r=>{ r._ambiguous=seen[r.name]>1; });
   if(templateRows.some(r=>r._ambiguous)) await loadTemplateOwners();
   renderTemplateList();
+  return true;
+}
+// Another computer may have saved, renamed or deleted a template since the
+// list was read, so a save or a batch reads it again first. A read that fails
+// keeps the list already in hand rather than leaving none.
+async function freshTemplateRows(){
+  const had=templateRows;
+  let ok=false;
+  try{ ok=await refreshTemplateList(); }catch(e){}
+  if(!ok&&had.length){ templateRows=had; try{ renderTemplateList(); }catch(e){} }
 }
 let myTemplateOwner=null, templateOwners={};
 // the same directory the request screen uses, so a shared template can say
@@ -32244,6 +32267,13 @@ async function saveTemplate(){
   if(!session){showMsg(msgEl,'Sign in first.',false);return;}
   const name=document.getElementById('templateName').value.trim();
   if(!name){showMsg(msgEl,'Enter a template name first.',false);return;}
+  // the folder clash and the row to overwrite are read off the list as it is
+  // now; the button is held while it is read so a second press waits
+  {
+    const b0=document.getElementById('saveTemplateBtn');
+    b0.disabled=true;
+    try{ await freshTemplateRows(); }finally{ b0.disabled=false; }
+  }
   // One folder, one template. A list here was how a batch found two templates
   // and printed on whichever was read first — so it is refused rather than cut
   // down, and the folders left over are told so they can have templates of
@@ -32304,15 +32334,22 @@ async function saveTemplate(){
     // yours by that name, not anybody's — saving overwrites your own copy and
     // never touches a colleague's, so somebody else's "A6 postcard" must not
     // make this look like an existing one
-    const mine=sameRow?open:templateRows.find(r=>r.name===name&&r.user_id===session.user.id);
+    let mine=sameRow?open:templateRows.find(r=>r.name===name&&r.user_id===session.user.id);
     const stamp=new Date().toISOString();
     let error;
     if(mine){
       // overwrite your own row of that name by id — no unique-key upsert, so
       // this keeps working whichever shape the (user_id,name[,kind]) key is in
-      ({error}=await sb.from('templates')
-        .update({name,data:meta,kind:'print',updated_at:stamp}).eq('id',mine.id));
-    }else{
+      // the row is asked back: an update matching nothing (deleted on the other
+      // computer) or refused says no error, and read as saved with nothing
+      // written. Gone, it is saved as a new row; refused, the insert meets the
+      // name key and says so.
+      let upd;
+      ({data:upd,error}=await sb.from('templates')
+        .update({name,data:meta,kind:'print',updated_at:stamp}).eq('id',mine.id).select('id'));
+      if(!error&&!(upd&&upd.length)) mine=null;
+    }
+    if(!mine){
       ({error}=await sb.from('templates').insert(
         {user_id:session.user.id,name,kind:'print',data:meta,updated_at:stamp,
          sort_order:templateRows.length}));
@@ -32683,6 +32720,14 @@ async function pcRefreshTemplateList(){
   pcTemplateRows.forEach(r=>{ r._ambiguous=seen[r.name]>1; });
   if(pcTemplateRows.some(r=>r._ambiguous)) await loadTemplateOwners();
   pcRenderTemplateList();
+  return true;
+}
+// as freshTemplateRows, for the Place Card list
+async function pcFreshTemplateRows(){
+  const had=pcTemplateRows;
+  let ok=false;
+  try{ ok=await pcRefreshTemplateList(); }catch(e){}
+  if(!ok&&had.length){ pcTemplateRows=had; try{ pcRenderTemplateList(); }catch(e){} }
 }
 function pcRenderTemplateList(){
   const el=document.getElementById('pcTemplateList'); if(!el) return;
@@ -32720,6 +32765,12 @@ async function pcSaveTemplate(){
   if(!name){showMsg(msg,'Enter a template name first.',false);return;}
   if(name===PC_LIB_NAME){showMsg(msg,'That name is kept for the design library — pick another.',false);return;}
   if(pcKindReady===false){ msg.innerHTML=pcKindMissingHtml; return; }
+  // read again first, as Custom Template's Save does
+  {
+    const b0=document.getElementById('pcSaveTemplateBtn');
+    b0.disabled=true;
+    try{ await pcFreshTemplateRows(); }finally{ b0.disabled=false; }
+  }
   if(printArtLoading){ showMsg(msg,'The template\'s designs are still loading — Save again once they are on the sheet.',false); return; }
   const btn=document.getElementById('pcSaveTemplateBtn');
   btn.disabled=true;btn.textContent='Saving…';
@@ -32743,13 +32794,17 @@ async function pcSaveTemplate(){
       paperType:state.paperType,gsm:state.gsm};
     const open=pcTemplateById(pcSelectedTemplate);
     const sameRow=open&&open.user_id===session.user.id&&open.name===name;
-    const mine=sameRow?open:pcTemplateRows.find(r=>r.name===name&&r.user_id===session.user.id);
+    let mine=sameRow?open:pcTemplateRows.find(r=>r.name===name&&r.user_id===session.user.id);
     const stamp=new Date().toISOString();
     let error;
     if(mine){
-      ({error}=await sb.from('templates')
-        .update({name,data:meta,kind:'place-card',updated_at:stamp}).eq('id',mine.id));
-    }else{
+      // asked back, as in saveTemplate: no row is not saved
+      let upd;
+      ({data:upd,error}=await sb.from('templates')
+        .update({name,data:meta,kind:'place-card',updated_at:stamp}).eq('id',mine.id).select('id'));
+      if(!error&&!(upd&&upd.length)) mine=null;
+    }
+    if(!mine){
       ({error}=await sb.from('templates').insert(
         {user_id:session.user.id,name,kind:'place-card',data:meta,updated_at:stamp,
          sort_order:pcTemplateRows.length}));
@@ -42177,7 +42232,7 @@ const HELP=[
   {on:'custom',t:'Put artwork on the cards',k:'artwork design upload front back preset single',
    h:'Right panel → <b>Artwork</b>: <b>Preset</b> design lines (search, qty, bleed, turn), or <b>Single artwork</b> with Front / Back <b>Upload</b>.',find:'Artwork'},
   {on:'custom',t:'Cut lines and marks',k:'cut marks crop registration bleed',h:'Right panel → <b>Cut &amp; marks</b>.',find:'Cut & marks'},
-  {on:'custom',t:'Rotate the sheet or open it full screen',k:'rotate turn full screen enlarge',h:'Under the sheet: <b>↺</b> / <b>↻</b> turn it, <b>⤢</b> opens it over the whole screen.',sel:'#pcNlZoom [data-pcz="big"]'},
+  {on:'custom',t:'Rotate the sheet or open it full screen',k:'rotate turn full screen enlarge',h:'Under the sheet: <b>↺</b> / <b>↻</b> turn it (on Original / Actual size the artwork is fitted again to the turn), <b>⤢</b> opens it over the whole screen.',sel:'#pcNlZoom [data-pcz="big"]'},
   {on:'custom',t:'Show cut lines / reference line',k:'show cut lines reference line view',h:'Top left of the sheet: <b>Show cut lines</b>, <b>Show reference line</b>.',sel:'#pcShownBar'},
   {on:'custom',t:'Order ID, paper and GSM',k:'order id paper type gsm file name',h:'Top bar: <b>Order ID</b>, <b>Paper type</b>, <b>GSM</b> - they name the files.',sel:'#pcJobBar'},
   {on:'custom',t:'Print preview',k:'preview fiery colours',h:'Top bar → <b>🖨 Print preview</b>. Matte and gloss are measured off this printer (title says <b>measured</b>), their white shown as the screen\'s white: what the sheet shows is what prints, no print needed to compare. On matte and gloss the colours are <b>matched automatically</b>: pictures, words and a PDF\'s RGB are sent as the numbers that print as the file\'s colour (a PDF\'s CMYK goes as the designer set it); <b>To check for print</b> lists only colours past the ink\'s reach, with the nearest it has. <b>File colours</b> (the default) shows the customer\'s file as it is - hold the print beside it; <b>As printed</b> shows the print as this printer prints it. <b>Printer warmth</b> (-50 bluer to +50 yellower) takes out the press\'s drift by eye: prints coming out bluer than the file, slide towards yellower - every colour moves, blues and darks too, white and greys stay; it changes the print (and the As printed view), kept on this computer. <b>Hue/Saturation</b> is Photoshop\'s, for the print: Master or one colour range (Reds, Yellows, Greens, Cyans, Blues, Magentas), its Hue, Saturation and Lightness (greys and white left alone), and <b>Brightness</b> for the whole print, darks and strong colours as much as the rest, white kept paper; and a CMYK PDF\'s own colours go as the designer set them. Hold <b>Hold to see original</b> to see the sheet as uploaded. The saved PDF is <b>CMYK (GRACoL2013)</b>: pictures, words and pixel bleed are converted as the file is written; a PDF artwork goes in as it is. Pictures are previewed straight off a chart printed through that same CMYK, so the preview is what the download prints; a PDF artwork\'s own colours, RGB (Canva) or CMYK (Illustrator), are measured on both papers too - a CMYK PDF is drawn from its own CMYK numbers as this printer prints them.',sel:'#ppOpenBtn'},
@@ -62459,16 +62514,17 @@ async function fieryQueue(session,dir,names,ans,say,skipped){
       copies:ans.copies,
       pages:(ans.pagesFor&&ans.pagesFor[name]!=null)?ans.pagesFor[name]:ans.pages,
       action:ans.action,seq:i}));
-    let {data,error}=await sb.from('fiery_jobs').insert(rows).select('id');
-    // supabase-migration-FIERY-COPY.sql not run yet: no seq column
-    if(error&&/seq/.test(error.message||''))
-      ({data,error}=await sb.from('fiery_jobs').insert(rows.map(r=>{
-        const {seq,...rest}=r; return rest; })).select('id'));
-    // supabase-migration-FIERY-LINES.sql not run yet: the job still goes,
-    // it just cannot say which line it was
-    if(error&&/item_id/.test(error.message||'')&&rows.some(r=>'item_id' in r))
-      ({data,error}=await sb.from('fiery_jobs').insert(rows.map(r=>{
-        const {item_id,...rest}=r; return rest; })).select('id'));
+    let work=rows;
+    let {data,error}=await sb.from('fiery_jobs').insert(work).select('id');
+    // supabase-migration-FIERY-COPY.sql not run yet: no seq column.
+    // supabase-migration-FIERY-LINES.sql not run yet: no item_id - the job
+    // still goes, it just cannot say which line it was. Each is dropped from
+    // what was last sent, so a second retry does not put the first one back.
+    for(const col of ['seq','item_id','seq']){
+      if(!error||!new RegExp(col).test(error.message||'')||!work.some(r=>col in r)) continue;
+      work=work.map(r=>{ const o={...r}; delete o[col]; return o; });
+      ({data,error}=await sb.from('fiery_jobs').insert(work).select('id'));
+    }
     if(error) throw error;
     fieryWatch((data||[]).map(r=>r.id),ans,names.length,skipped,say);
     sb.rpc('purge_old_fiery_jobs').then(()=>{},()=>{});
@@ -64822,6 +64878,9 @@ async function mcChooseTemplate(why,offerAsIs){
 }
 async function mcAddSkusToSheet(rows,extra){
   const out=document.getElementById('mcSummaryMsg');
+  // which template each SKU goes on is read off the templates as they are now:
+  // the other computer may have changed one since the list was read
+  await freshTemplateRows();
   let usable=rows.filter(r=>designFileForSku(r.sku));
   // One sheet is one template. The first row's template was being used for the
   // whole batch, so a SKU routed to another card size landed on the wrong
