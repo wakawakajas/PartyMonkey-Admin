@@ -34188,7 +34188,7 @@ async function pdfExportCmykNow(bytes,ctx){
   const cm=await pdfCmykScan(bytes).catch(()=>false);
   if(cm) return await pdfConvertCmyk(bytes,printMatchPaper(ctx),printWarm());
   const was=_printCtxNow; _printCtxNow=ctx||was; _sheetKOnly++;
-  try{ return await pdfHiResBytes(bytes,false,600)||bytes; }
+  try{ return await pdfHiResBytes(bytes,false,_pdfTestScale?_pdfTestScale.dpi:600)||bytes; }
   catch(e){ return bytes; }
   finally{ _sheetKOnly--; _printCtxNow=was; }
 }
@@ -35641,9 +35641,31 @@ async function pdfMatchColours(bytes,ctx){
 // mp: the measured paper to match to, or null (GRACoL only). The bytes as they
 // were when the page cannot be read.
 // warm: Printer warmth for an export (the preview passes none)
-async function pdfConvertCmyk(bytes,mp,warm){
+// A CMYK design's colours as an export makes them (pdfConvertCmyk), and as the
+// test sheet makes each of its versions of one: the look added as a change on
+// the designer's CMYK, black ink alone kept black ink alone, Printer warmth
+// alone as yellow ink. Read when called: under a test sheet's version
+// (_printOv) it is that version's.
+// A test sheet's copies of a PDF made no finer than they print
+// ({maxPx, dpi}); null for an export, which keeps every pixel
+var _pdfTestScale=null;
+// CMYK pixels made smaller by averaging the boxes they cover
+function cmykShrink(src,W,H,w,h){
+  const out=new Uint8Array(w*h*4);
+  for(let y=0;y<h;y++){
+    const y0=Math.floor(y*H/h), y1=Math.max(y0+1,Math.floor((y+1)*H/h));
+    for(let x=0;x<w;x++){
+      const x0=Math.floor(x*W/w), x1=Math.max(x0+1,Math.floor((x+1)*W/w));
+      let c=0,m=0,yy=0,k=0,n=0;
+      for(let v=y0;v<y1;v++) for(let u=x0,q=(v*W+x0)*4;u<x1;u++,q+=4){ c+=src[q]; m+=src[q+1]; yy+=src[q+2]; k+=src[q+3]; n++; }
+      const o=(y*w+x)*4; out[o]=c/n+0.5|0; out[o+1]=m/n+0.5|0; out[o+2]=yy/n+0.5|0; out[o+3]=k/n+0.5|0;
+    }
+  }
+  return out;
+}
+async function cmykLookParts(mp,warm){
   const cms=mp?await printCms(mp).catch(()=>null):null;
-  const {L,lcms,srgb,cmykG,toGracol,fromGracol}=await lcmsLib();
+  const {toGracol,fromGracol}=await lcmsLib();
   const kt=await printKOnly(cms&&cms.matched('img')?mp:null).catch(()=>null);
   const toK0=(a,n)=>toGracol(cms&&cms.matchImg?cms.matchImg(a,n):a,n);
   // its RGB, as a picture's: through the print look (Hue/Saturation,
@@ -35688,6 +35710,11 @@ async function pdfConvertCmyk(bytes,mp,warm){
     for(let i=0;i<n*4;i+=4) if(!c[i]&&!c[i+1]&&!c[i+2]){ out[i]=out[i+1]=out[i+2]=0; out[i+3]=kOnly(c[i+3]); }
     return out;
   };
+  return {cms,kt,toK0,toK,look,lookK,w,kOnly,cmykLook};
+}
+async function pdfConvertCmyk(bytes,mp,warm){
+  const {L,lcms,srgb,cmykG,toGracol,fromGracol}=await lcmsLib();
+  const {cms,kt,toK0,toK,look,lookK,w,kOnly,cmykLook}=await cmykLookParts(mp,warm);
   const N='(-?(?:\\d+\\.?\\d*|\\.\\d+))';
   const lead='(?<=^|[\\s\\[\\]()<>{}])(?<![\\d.]\\s+)';
   const re3=new RegExp(lead+N+'\\s+'+N+'\\s+'+N+'\\s+(rg|RG)(?![A-Za-z])','g');
@@ -35760,10 +35787,16 @@ async function pdfConvertCmyk(bytes,mp,warm){
       }
       if(!o) return null;
       if(inv) for(let i=0;i<o.length;i++) o[i]=255-o[i];
-      if(lookK) o=cmykLook(o,W*H);
+      // a test sheet's small copies: no finer than it prints them (_pdfTestScale)
+      let Wo=W, Ho=H;
+      if(_pdfTestScale&&Math.max(W,H)>_pdfTestScale.maxPx){
+        const k=_pdfTestScale.maxPx/Math.max(W,H); Wo=Math.max(1,Math.round(W*k)); Ho=Math.max(1,Math.round(H*k));
+        o=cmykShrink(o,W,H,Wo,Ho);
+      }
+      if(lookK) o=cmykLook(o,Wo*Ho);
       else for(let i=2;i<o.length;i+=4) o[i]=printWarmY(o[i],w);
       hits++;
-      return {cs:'DeviceCMYK',data:o};
+      return {cs:'DeviceCMYK',data:o,...(Wo!==W?{w:Wo,h:Ho}:{})};
     }
     if(isName(cs,'DeviceRGB')) n=3;
     else if(isName(cs,'DeviceGray')) n=1;
@@ -36506,11 +36539,31 @@ function testSheetArt(){
   const img=pick[1].img, sw=swapsForIds(new Set([artImgId(img)]));
   return (sw.length&&swappedArtCanvas(img,sw))||img;
 }
+// What the test sheet draws and how each version is made CMYK, as the export
+// makes that artwork: a picture as a picture; a PDF from its page as the
+// export draws it (pdf5Draw 'export') - an RGB one with its greys as black
+// ink alone (_sheetKOnly, as pdfExportCmykNow), a CMYK one as its own CMYK
+// with the look added as a change (cmykLookParts, as pdfConvertCmyk). Drawn
+// from the preview's picture and made CMYK as a picture, the number picked on
+// a PDF design did not print the same in the real export.
+async function testSheetArtKind(){
+  const all=sideArtObjs(pcPopSide).filter(([,o])=>o&&o.img);
+  const pick=pcPopArt?all.find(([,o])=>artImgId(o.img)===pcPopArt):all[0];
+  if(!pick) return {art:null,kind:'img'};
+  const img=pick[1].img, f=printArtPdf(img);
+  const swapped=swapsForIds(new Set([artImgId(img)])).length>0;
+  if(!f) return {art:testSheetArt(),kind:'img'};
+  const cm=_pdfCmyk.get(f);
+  if(cm!==true&&cm!==false) return {art:testSheetArt(),kind:'img'};
+  // a PDF goes on the sheet as its export puts it: its own page, made CMYK by
+  // the export's own conversion once per version (testSheetPdf)
+  return {art:img,kind:'vec',o:pick[1],swapped};
+}
 async function testSheetPdf(mode,count,step){
   // the side it is made for, read once: the panel may follow the builder to
   // the other side while the versions are being made
   const side0=pcPopSide;
-  const art=testSheetArt(); if(!art) throw new Error('No artwork on this side');
+  const {art,kind,o:artO}=await testSheetArtKind(); if(!art) throw new Error('No artwork on this side');
   const {list,cols:fixedCols}=testSheetVersions(mode,count,step);
   const p=paperMm(), DPI=200, px=mm=>Math.round(mm/25.4*DPI);
   const W=px(p.w), H=px(p.h);
@@ -36540,8 +36593,8 @@ async function testSheetPdf(mode,count,step){
   list.forEach((v,i)=>{
     const c=i%best.c, r=(i/best.c)|0;
     const X=px(x0+c*(cwMm+GAP)), Y=px(TOP+r*(chMm+LAB+GAP)), w=px(cwMm), h=px(chMm);
-    g.drawImage(art,X,Y,w,h);
-    cells.push({v,X,Y,w,h});
+    if(kind!=='vec') g.drawImage(art,X,Y,w,h);
+    cells.push({v,X,Y,w,h,mm:{x:x0+c*(cwMm+GAP),y:TOP+r*(chMm+LAB+GAP),w:cwMm,h:chMm}});
     g.font=`700 ${px(2.8)}px "IBM Plex Sans",system-ui,sans-serif`;
     const mark=v.b===b0&&v.w===w0?'  (now)':'';
     g.fillText(`#${v.n}`,X,Y+h+px(0.7));
@@ -36549,6 +36602,32 @@ async function testSheetPdf(mode,count,step){
     g.fillText(`B ${v.b>0?'+':''}${v.b}  W ${v.w>0?'+':''}${v.w}${mark}`,X+px(7),Y+h+px(1));
   });
   const id=g.getImageData(0,0,W,H); cv.width=cv.height=0;
+  // A PDF: each version is its page made CMYK by the export's own conversion
+  // (pdfExportCmykNow - a CMYK one as its CMYK with the look added, an RGB
+  // one drawn and matched, greys as black ink) with that version's values,
+  // and placed as the export places it. The number picked then prints in
+  // the real export exactly as it did here.
+  if(kind==='vec'){
+    let src=await artPdfBytes(artO);
+    if(src&&artO.img){ const sw=swapsForIds(new Set([artImgId(artO.img)])); if(sw.length) src=await pdfSwapColours(src,sw).catch(()=>null); }
+    if(!src) throw new Error('the PDF could not be read');
+    const ctx=pcCtx()==='gt'?'gt':'custom', forms=new Map();
+    // each copy no finer than 300 dpi at the size it prints here: full-size
+    // copies made a 50-version sheet near 80 MB. The colours are the same.
+    const maxPx=Math.ceil(Math.max(cwMm,chMm)/25.4*300);
+    for(const {v} of cells){
+      _printOv={warm:v.w,bright:v.b}; _pdfTestScale={maxPx,dpi:300};
+      try{ forms.set('v'+v.n,{bytes:await pdfExportCmykNow(src,ctx),page:0,pdf:true}); }
+      finally{ _printOv=null; _pdfTestScale=null; }
+    }
+    const place=cells.map(({v,mm})=>({key:'v'+v.n,rect:{x:mm.x,y:mm.y,w:mm.w,h:mm.h,rot:0},clip:{x:mm.x,y:mm.y,w:mm.w,h:mm.h}}));
+    // the sheet's own pixels go over the pages placed under them, so they are
+    // see-through where each version's page is
+    for(const {X,Y,w,h} of cells) for(let y=Math.max(0,Y);y<Math.min(H,Y+h);y++) for(let x=Math.max(0,X);x<Math.min(W,X+w);x++) id.data[(y*W+x)*4+3]=0;
+    const out=await gtBuildPdf(1,async()=>({imgData:id,wMm:p.w,hMm:p.h,place,clear:true}),forms,ctx);
+    try{ localStorage.setItem(TEST_SHEET_KEY,JSON.stringify({made:now.toISOString(),paper:printPaperKey(),side:side0,list})); }catch(e){}
+    return {bytes:out,count:list.length,side:side0};
+  }
   // the sheet as the export makes it, then each version with its own values
   const sl=await sheetScanlines(id);
   if(sl.cmyk){
@@ -36559,7 +36638,10 @@ async function testSheetPdf(mode,count,step){
       const rgb=new Uint8Array(n2*3);
       for(let y=Y,j=0;y<y1;y++) for(let x=X,q=(y*W+X)*4;x<x1;x++,q+=4,j+=3){ rgb[j]=d[q]; rgb[j+1]=d[q+1]; rgb[j+2]=d[q+2]; }
       _printOv={warm:v.w,bright:v.b};
-      let k; try{ k=(await sheetToCmyk())(rgb,n2); }finally{ _printOv=null; }
+      let k;
+      try{
+        k=(await sheetToCmyk())(rgb,n2);
+      }finally{ _printOv=null; }
       for(let y=Y;y<y1;y++) sl.rows.set(k.subarray((y-Y)*ww*4,(y-Y+1)*ww*4),y*row+1+X*4);
     }
   }
@@ -37256,6 +37338,7 @@ const pdfLift=(function(){
           d.set('Filter', Name('FlateDecode'));
           d.set('ColorSpace', Name(ri.cs));
           d.set('BitsPerComponent', 8);
+          if (ri.w && ri.h) { d.set('Width', ri.w); d.set('Height', ri.h); }
           d.set('Length', packedRi.length);
           serialize(d, mapper, parts);
           parts.push(enc.encode('\nstream\n'), packedRi, enc.encode('\nendstream'));
@@ -41760,7 +41843,7 @@ const HELP=[
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'custom',t:'Print Edited Color Details',k:'colour record print settings crop mark warmth brightness hue saturation swaps record',h:'<b>Print preview</b> -> tick <b>Print Edited Color Details</b> (beside Hold to see original). Every sheet (Custom Template and gift tag) then prints one small grey line in the margin beside the top-left crop mark: which side it is, the paper, <b>Front</b> and <b>Back</b> Printer warmth (W) and Brightness (B), Hue/Saturation, this side\'s colour swaps and the date and time. It shows on the sheet on screen too: <b>drag it</b> to wherever you want it on the sheet (it stays there, on both sides and in the file); <b>double-click</b> it to put it back beside the crop mark. Untick it to print without.'},
   {on:'sheet custom',t:'Colours on a Magic Create line',k:'magic create line colours test sheet use warmth brightness hue saturation save to line draft',h:'With a Magic Create line open, Printer warmth, Brightness, Hue/Saturation and a test sheet\'s <b>Use</b> change <b>that line only</b> (Print preview\'s title says <b>this line only</b>). <b>Save to line</b> keeps them on the line and its file prints with them; close the line without saving and they are thrown away. Lines with none saved, shared sheets and gift tag lines print with this computer\'s colours.'},
-  {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is shared by both sides.'},
+  {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is shared by both sides. A PDF design is made exactly as the export makes it (its own CMYK, greys as black ink), so the number picked prints the same in the real file.'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them.',sel:'#gtPrintBtn'},
   {on:'sheet',t:'Saved sheets',k:'save keep later open job',h:'Left panel → <b>Saved sheets</b>: keep this sheet for later, or open one.',find:'Saved sheets'},
