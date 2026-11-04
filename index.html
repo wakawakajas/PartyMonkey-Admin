@@ -12205,7 +12205,7 @@ async function pdfHiResBytes(bytes,invert,dpi){
     for(let i=0;i<a.length;i+=4){ a[i]=255-a[i]; a[i+1]=255-a[i+1]; a[i+2]=255-a[i+2]; }
     ctx.putImageData(id,0,0);
   }
-  try{ return await imgPdfBytes(c); } finally{ c.width=c.height=0; try{ if(pdf) pdf.destroy(); }catch(e){} }
+  try{ return await imgPdfBytes(c,true); } finally{ c.width=c.height=0; try{ if(pdf) pdf.destroy(); }catch(e){} }
 }
 // A PDF's page drawn whole by pdf.js 5 at dpi (8000 px at most), see-through
 // where it is, its CMYK through GRACoL as the export reads it back
@@ -33448,15 +33448,86 @@ function printKOnly(paper){
 }
 // rows of CMYK with a leading filter byte, converted a slice at a time
 function rgbaToCmykScanlines(imgData,toGracol){
-  const w=imgData.width,h=imgData.height,data=imgData.data,row=1+w*4;
-  const out=new Uint8Array(row*h);
+  const w=imgData.width,h=imgData.height,row=1+w*4;
+  const out=new Uint8Array(row*h), conv=cmykRowsConv(imgData,toGracol);
   const step=Math.max(1,Math.floor(1048576/Math.max(1,w)));
-  for(let y0=0;y0<h;y0+=step){
-    const y1=Math.min(h,y0+step), n=(y1-y0)*w, rgb=new Uint8Array(n*3);
-    for(let i=0,q=y0*w*4;i<n*3;i+=3,q+=4){ rgb[i]=data[q]; rgb[i+1]=data[q+1]; rgb[i+2]=data[q+2]; }
-    const k=toGracol(rgb,n);
-    for(let y=y0;y<y1;y++){ const o=y*row; out[o]=0; out.set(k.subarray((y-y0)*w*4,(y-y0+1)*w*4),o+1); }
+  for(let y0=0;y0<h;y0+=step){ const y1=Math.min(h,y0+step); out.set(conv(y0,y1),y0*row); }
+  return out;
+}
+// conv(y0,y1): those rows as CMYK scanlines. The conversion is the same for
+// a colour wherever it is (K-only greys too), so each colour is converted
+// once: a run of it once, and one met before taken from a table of the
+// last 65536 - a sheet is mostly paper and flat colour, and its 20 million
+// pixels went through four colour transforms each (2-3 s a sheet, 5 s an
+// A4 PDF drawn at 600 dpi).
+function cmykRowsConv(imgData,to){
+  const w=imgData.width, data=imgData.data, row=1+w*4;
+  const hk=new Int32Array(65536).fill(-1), hv=new Uint32Array(65536);
+  return (y0,y1)=>{
+    const n=(y1-y0)*w, out=new Uint8Array((y1-y0)*row), ov=new DataView(out.buffer);
+    // the slice's colours as runs: each run's colour, length, and table slot
+    const rc=new Int32Array(n), rl=new Uint32Array(n);
+    let m=0;
+    for(let i=0,q=y0*w*4,prev=-1;i<n;i++,q+=4){
+      const c=(data[q]<<16)|(data[q+1]<<8)|data[q+2];
+      if(c===prev&&i%w){ rl[m-1]++; continue; }
+      rc[m]=c; rl[m]=1; m++; prev=c;
+    }
+    // the ones not in the table, converted together
+    // (a colour's value taken as it is found: the table can be written over
+    // by the new ones below)
+    const todo=new Uint8Array(m*3), val=new Uint32Array(m), slot=new Int32Array(m);
+    let t=0;
+    for(let r=0;r<m;r++){
+      const c=rc[r], s=Math.imul(c,-1640531535)>>>16;
+      if(hk[s]===c){ val[r]=hv[s]; slot[r]=-1; continue; }
+      slot[r]=t; todo[t*3]=c>>16; todo[t*3+1]=(c>>8)&255; todo[t*3+2]=c&255; t++;
+    }
+    const k=t?to(todo.subarray(0,t*3),t):null, kv=k?new DataView(k.buffer,k.byteOffset,k.length):null;
+    const got=new Uint32Array(t);
+    for(let j=0;j<t;j++){
+      const v=kv.getUint32(j*4), c=(todo[j*3]<<16)|(todo[j*3+1]<<8)|todo[j*3+2], s=Math.imul(c,-1640531535)>>>16;
+      got[j]=v; hk[s]=c; hv[s]=v;
+    }
+    // and laid out again, a filter byte before each row
+    for(let r=0,i=0;r<m;r++){
+      const v=slot[r]<0?val[r]:got[slot[r]];
+      for(let e=i+rl[r];i<e;i++){ const y=(i/w)|0; ov.setUint32(y*row+1+(i-y*w)*4,v); }
+    }
+    return out;
+  };
+}
+// The sheet's pixels as the export writes them, already packed: CMYK made a
+// slice at a time and fed to the packer as it is made, so a page never has
+// its whole CMYK held beside its pixels (an SRA3 page is 80 MB of each),
+// and the page gets a moment between slices rather than freezing.
+async function sheetPacked(imgData){
+  if(PRINT_CMYK_OUT){
+    try{
+      const conv=cmykRowsConv(imgData,await sheetToCmyk()), w=imgData.width, h=imgData.height;
+      const step=Math.max(1,Math.floor(1048576/Math.max(1,w)));
+      const packed=await deflateChunks(async put=>{
+        for(let y0=0;y0<h;y0+=step){
+          await put(conv(y0,Math.min(h,y0+step)));
+          await new Promise(r=>setTimeout(r));
+        }
+      });
+      return {cmyk:true,packed};
+    }
+    catch(e){ console.warn('CMYK conversion unavailable, writing sRGB',e); }
   }
+  return {cmyk:false,packed:await deflateBytes(rgbaToRawRgbScanlines(imgData))};
+}
+// deflate of what fill() puts, a piece at a time, read as it is made
+async function deflateChunks(fill){
+  const cs=new CompressionStream('deflate'), writer=cs.writable.getWriter(), reader=cs.readable.getReader();
+  const chunks=[]; let total=0;
+  const read=(async()=>{ for(;;){ const {done,value}=await reader.read(); if(done) break; chunks.push(value); total+=value.length; } })();
+  try{ await fill(async u8=>{ await writer.ready; await writer.write(u8); }); await writer.close(); }
+  catch(e){ try{ await writer.abort(e); }catch(e2){} await read.catch(()=>{}); throw e; }
+  await read;
+  const out=new Uint8Array(total); let o=0;
+  chunks.forEach(c=>{ out.set(c,o); o+=c.length; });
   return out;
 }
 // how an image of those rows is marked in the PDF
@@ -33758,7 +33829,27 @@ function printHslApplyT(T,a,n){
   return o;
 }
 let _sheetKOnly=0;                  // pdfExportCmyk: neutral pixels as black ink only
+// the last ones made, by the file's contents and everything they are made by;
+// up to 300 MB of them, the oldest let go first
+const _pdfCmykMade=new Map(); let _pdfCmykMadeSize=0;
 async function pdfExportCmyk(bytes,ctx){
+  if(!PDF_AS_CMYK||_printOv) return await pdfExportCmykNow(bytes,ctx);
+  let key=null;
+  try{
+    const d=new Uint8Array(await crypto.subtle.digest('SHA-256',bytes));
+    key=[...d].map(v=>v.toString(16).padStart(2,'0')).join('')+'|'+(printMatchPaper(ctx)||'-')+'|'
+      +printWarm()+'|'+JSON.stringify(printHsl());
+  }catch(e){ key=null; }
+  const had=key&&_pdfCmykMade.get(key);
+  if(had){ _pdfCmykMade.delete(key); _pdfCmykMade.set(key,had); return had; }
+  const out=await pdfExportCmykNow(bytes,ctx);
+  if(key&&out&&out!==bytes&&out.length<150e6){
+    _pdfCmykMade.set(key,out); _pdfCmykMadeSize+=out.length;
+    for(const [k,v] of _pdfCmykMade){ if(_pdfCmykMadeSize<=300e6) break; _pdfCmykMade.delete(k); _pdfCmykMadeSize-=v.length; }
+  }
+  return out;
+}
+async function pdfExportCmykNow(bytes,ctx){
   if(!PDF_AS_CMYK) return await pdfMatchColours(bytes,ctx);
   const cm=await pdfCmykScan(bytes).catch(()=>false);
   if(cm) return await pdfConvertCmyk(bytes,printMatchPaper(ctx),printWarm());
@@ -37376,20 +37467,26 @@ async function artPdfBytes(o){
 // sRGB, a see-through picture with its mask) so the same placing carries it.
 // A picture at or under 300dpi loses nothing on the sheet and stays there.
 const PRINT_SHEET_DPI=300;
-async function imgPdfBytes(img){
+async function imgPdfBytes(img,drop){
   const W=img&&(img.naturalWidth||img.width), H=img&&(img.naturalHeight||img.height);
   if(!(W>0&&H>0)||W*H>60e6) return null;
-  const c=document.createElement('canvas'); c.width=W; c.height=H;
   let id;
-  try{ c.getContext('2d').drawImage(img,0,0,W,H); id=c.getContext('2d').getImageData(0,0,W,H); }
-  catch(e){ return null; }
-  finally{ c.width=c.height=0; }
+  if(img instanceof HTMLCanvasElement&&img.width===W&&img.height===H){
+    try{ id=img.getContext('2d').getImageData(0,0,W,H); }catch(e){ id=null; }
+    if(drop&&id) img.width=img.height=0;
+  }
+  if(!id){
+    const c=document.createElement('canvas'); c.width=W; c.height=H;
+    try{ c.getContext('2d').drawImage(img,0,0,W,H); id=c.getContext('2d').getImageData(0,0,W,H); }
+    catch(e){ return null; }
+    finally{ c.width=c.height=0; }
+  }
   let see=false;
   for(let i=3;i<id.data.length;i+=4) if(id.data[i]<255){ see=true; break; }
   if(see) rgbaFillClear(id,4);
-  const sl=await sheetScanlines(id);
-  const rgb=await deflateBytes(sl.rows);
   const msk=see?await deflateBytes(rgbaToAlphaScanlines(id)):null;
+  const sl=await sheetPacked(id), rgb=sl.packed;
+  id=null;
   const enc=new TextEncoder(), parts=[], off=[]; let pos=0;
   const push=u8=>{ parts.push(u8); pos+=u8.length; };
   const obj=(n,head,stream)=>{
@@ -37446,7 +37543,7 @@ async function printVectorSources(side){
     if(bytes&&isPdf&&!inv) bytes=await pdfExportCmyk(bytes,'custom');
     if(bytes&&inv){ bytes=await pdfHiResBytes(bytes,true).catch(()=>null); inverted=!!bytes; }
     else if(!isPdf&&!inv&&o&&o.img&&imgFinerThanSheet(o.img,side))
-      bytes=await Promise.resolve().then(()=>imgPdfBytes(swaps.length?swappedArtCanvas(o.img,swaps):o.img)).catch(()=>null);
+      bytes=await Promise.resolve().then(()=>swaps.length?imgPdfBytes(swappedArtCanvas(o.img,swaps),true):imgPdfBytes(o.img)).catch(()=>null);
     if(bytes) out.set(key,{bytes,page:0,inverted,pdf:isPdf});
   }
   return out;
@@ -53704,8 +53801,7 @@ async function gtBuildPdfNow(count,render,sources){
     const alpha=(clear||put.length)?rgbaToAlphaScanlines(imgData):null;
     // what the mask hides takes its neighbours' colour, so no black is blended in
     if(alpha) rgbaFillClear(imgData,4);
-    const sl=await sheetScanlines(imgData);
-    const deflated=await deflateBytes(sl.rows);
+    const sl=await sheetPacked(imgData), deflated=sl.packed;
     const packedA=alpha?await deflateBytes(alpha):null;
     const imgNum=alloc(), maskNum=alpha?alloc():0, contentNum=alloc(), pageNum=alloc();
     let cs='';
@@ -53799,8 +53895,8 @@ async function gtBuildPdfNow(count,render,sources){
       const d=o.draw(); if(!d) continue;
       const a=rgbaToAlphaScanlines(d);
       rgbaFillClear(d,4);
-      const ls=await sheetScanlines(d);
-      const rgb=await deflateBytes(ls.rows), msk=await deflateBytes(a);
+      const ls=await sheetPacked(d);
+      const rgb=ls.packed, msk=await deflateBytes(a);
       const num=alloc(), mnum=alloc(), nm='Lw'+layers.length;
       mark(num); push(enc.encode(`${num} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${d.width} `
         +`/Height ${d.height} `+sheetColourSpace(ls,iccNum)+`/BitsPerComponent 8 /Columns ${d.width} >> `
@@ -53959,7 +54055,7 @@ async function gtVectorSources(side){
       // tag goes in at every pixel it has, the way a PDF does
       const img=side==='back'?null:gtImgs.get(d.id), dpi=img?gtDesignDpi(d):null;
       if(!inv&&img&&dpi&&dpi>PRINT_SHEET_DPI*1.05){
-        try{ const bytes=await imgPdfBytes(swaps.length?swappedArtCanvas(img,swaps):img); if(bytes) out.set(key,{bytes,page:0,pdf:false}); }catch(e){}
+        try{ const bytes=swaps.length?await imgPdfBytes(swappedArtCanvas(img,swaps),true):await imgPdfBytes(img); if(bytes) out.set(key,{bytes,page:0,pdf:false}); }catch(e){}
       }
       continue;
     }
