@@ -13558,7 +13558,9 @@ function renderSide(side,canvas,maxDim,opts){
             if(f&&_pdfCmyk.get(f)===true){
               const m=ctx.getTransform(), P=(x,y)=>[m.a*x*sc+m.c*y*sc+m.e,m.b*x*sc+m.d*y*sc+m.f];
               const box=(x,y,w,h)=>{ const a=P(x,y), b=P(x+w,y+h); return [Math.min(a[0],b[0]),Math.min(a[1],b[1]),Math.max(a[0],b[0]),Math.max(a[1],b[1])]; };
-              const o=box(mx-effW/2,my-effH/2,effW,effH), i=box(mx-trimW/2,my-trimH/2,trimW,trimH);
+              // inside: the card's own cut (the placed page shows only there); the
+              // page's box reaches past it, and the strip between printed matched
+              const o=box(mx-effW/2,my-effH/2,effW,effH), i=box(mx-ph.wMm/2,my-ph.hMm/2,ph.wMm,ph.hMm);
               (opts._cmykRings||(opts._cmykRings=[])).push({o,i,f,pic:printArtExportImg(img)});
             }
           }catch(e){}
@@ -17880,6 +17882,7 @@ async function bleedFill(img,bx,by,mode,say){
     mode==='ai'?{levels:2,coarseEm:2,label:'Sharpening the AI fill'}:{}),0,0);
   if(p.c.width===W&&p.c.height===H){
     p.ctx.drawImage(img,bx,by,nW,nH);
+    if(mode==='ai') bleedSeamMatch(p.c,bx,by,nW,nH);
     return p.c;
   }
   const out=document.createElement('canvas');
@@ -17888,7 +17891,56 @@ async function bleedFill(img,bx,by,mode,say){
   octx.imageSmoothingQuality='high';
   octx.drawImage(p.c,0,0,W,H);
   octx.drawImage(img,bx,by,nW,nH);
+  if(mode==='ai') bleedSeamMatch(out,bx,by,nW,nH);
   return out;
+}
+// The AI paints its band in colours of its own: on a Canva card it came back
+// about 20 points bluer than the card's edge, and as each fill is its own run,
+// the one on screen could meet the card while the one in the file did not.
+// The band is brought to the picture's own colour where they meet - along each
+// edge in short stretches, so a drift on one part of an edge is taken out
+// there - and that correction carried out through the band. What the AI drew
+// (its shapes and shading) is kept; only its colour is pulled back to the card.
+function bleedSeamMatch(cv,bx,by,nW,nH){
+  const W=cv.width, H=cv.height, x0=Math.round(bx), y0=Math.round(by), x1=Math.round(bx+nW), y1=Math.round(by+nH);
+  if(x0<1&&y0<1) return;
+  const ctx=cv.getContext('2d',{willReadFrequently:true}), id=ctx.getImageData(0,0,W,H), d=id.data;
+  const k=Math.max(2,Math.min(12,Math.round(Math.min(x0>0?x0:1e9,y0>0?y0:1e9)*0.6)));   // strip depth
+  const S=24;                                                                   // stretches per edge
+  // per edge: the inside strip's mean less the band strip's, per stretch
+  const edge=(along0,along1,inside,outside)=>{
+    const out=[];
+    for(let s=0;s<S;s++){
+      const a0=Math.floor(along0+(along1-along0)*s/S), a1=Math.max(a0+1,Math.floor(along0+(along1-along0)*(s+1)/S));
+      const mi=[0,0,0], mo=[0,0,0]; let ni=0, no=0;
+      for(let a=a0;a<a1;a++) for(let t=1;t<=k;t++){
+        const pi=inside(a,t), po=outside(a,t);
+        if(pi>=0){ mi[0]+=d[pi]; mi[1]+=d[pi+1]; mi[2]+=d[pi+2]; ni++; }
+        if(po>=0){ mo[0]+=d[po]; mo[1]+=d[po+1]; mo[2]+=d[po+2]; no++; }
+      }
+      out.push(ni&&no?[mi[0]/ni-mo[0]/no,mi[1]/ni-mo[1]/no,mi[2]/ni-mo[2]/no]:[0,0,0]);
+    }
+    // smoothed with its neighbours, so one detail at the edge does not make a patch
+    return out.map((v,s)=>{ const a=out[Math.max(0,s-1)], b=out[Math.min(S-1,s+1)]; return [0,1,2].map(c=>(a[c]+2*v[c]+b[c])/4); });
+  };
+  const P=(x,y)=>x<0||y<0||x>=W||y>=H?-1:(y*W+x)*4;
+  const top=y0>0?edge(x0,x1,(a,t)=>P(a,y0+t-1),(a,t)=>P(a,y0-t)):null;
+  const bot=y1<H?edge(x0,x1,(a,t)=>P(a,y1-t),(a,t)=>P(a,y1+t-1)):null;
+  const lef=x0>0?edge(y0,y1,(a,t)=>P(x0+t-1,a),(a,t)=>P(x0-t,a)):null;
+  const rig=x1<W?edge(y0,y1,(a,t)=>P(x1-t,a),(a,t)=>P(x1+t-1,a)):null;
+  const at=(arr,a,lo,hi)=>{ const f=Math.max(0,Math.min(S-1,(a-lo)/Math.max(1,hi-lo)*S-0.5)), i=Math.floor(f), j=Math.min(S-1,i+1), u=f-i;
+    return [0,1,2].map(c=>arr[i][c]*(1-u)+arr[j][c]*u); };
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+    const inX=x>=x0&&x<x1, inY=y>=y0&&y<y1;
+    if(inX&&inY) continue;                                   // the picture itself
+    const parts=[];
+    if(y<y0&&top) parts.push(at(top,x,x0,x1)); else if(y>=y1&&bot) parts.push(at(bot,x,x0,x1));
+    if(x<x0&&lef) parts.push(at(lef,y,y0,y1)); else if(x>=x1&&rig) parts.push(at(rig,y,y0,y1));
+    if(!parts.length) continue;
+    const q=(y*W+x)*4;
+    for(let c=0;c<3;c++){ let v=0; parts.forEach(p=>v+=p[c]); d[q+c]=Math.max(0,Math.min(255,Math.round(d[q+c]+v/parts.length))); }
+  }
+  ctx.putImageData(id,0,0);
 }
 
 // ---- content-aware: PatchMatch, the method behind Photoshop's classic fill ----
@@ -33719,48 +33771,108 @@ async function sheetPacked(imgData,rings){
 // (as pdfConvertCmyk gives the page it runs from), a grey as black ink alone
 // The band is made as the card is: the band's colours first given the PDF's
 // own ink numbers (pdfOwnCmykLut: each colour of the page as drawn, back to the
-// CMYK the designer set for it), then the print look added as a change, as
-// pdfConvertCmyk adds it to the page. Made CMYK again from its screen colours
-// (GRACoL), strong purples and blues lost their strength and black was made
-// again another way: the band printed about 10 points of magenta off the card.
+// CMYK the designer set for it), then held to the card's own ink along each
+// edge where the two meet (a colour stands for different ink mixes in
+// different parts of a design - a purple of dots and flat purple - so the
+// average for a colour was not what this edge of the card prints), and then
+// the print look added as a change, as pdfConvertCmyk adds it to the page.
+// Made CMYK again from its screen colours (GRACoL), a Canva card's band
+// printed 10-25 points off the card beside it.
 async function sheetRingConv(imgData,rings){
   const {toGracol}=await lcmsLib();
   const kg=await printKOnly(null).catch(()=>null);
   const P=await cmykLookParts(printMatchPaper(),printWarm());
   const luts=new Map();
   for(const r of rings) if(r.f&&!luts.has(r.f)) luts.set(r.f,await pdfOwnCmykLut(r.f,r.pic).catch(()=>null));
-  const w=imgData.width, data=imgData.data, row=1+w*4;
-  const R=rings.map(r=>({ox0:Math.max(0,Math.floor(r.o[0])),oy0:Math.max(0,Math.floor(r.o[1])),ox1:Math.min(w,Math.ceil(r.o[2])),oy1:Math.ceil(r.o[3]),
-    ix0:Math.ceil(r.i[0]),iy0:Math.ceil(r.i[1]),ix1:Math.floor(r.i[2]),iy1:Math.floor(r.i[3]),lut:r.f?luts.get(r.f):null}));
-  return (out,y0,y1)=>{
-    for(const r of R){
-      const pos=[], rgb=[];
-      for(let y=Math.max(y0,r.oy0);y<Math.min(y1,r.oy1);y++){
-        const inRow=y>=r.iy0&&y<r.iy1;
-        for(let x=r.ox0;x<r.ox1;x++){
-          if(inRow&&x>=r.ix0&&x<r.ix1){ x=r.ix1-1; continue; }
-          const q=(y*w+x)*4; pos.push((y-y0)*row+1+x*4); rgb.push(data[q],data[q+1],data[q+2]);
-        }
+  const w=imgData.width, hh=imgData.height, data=imgData.data, row=1+w*4;
+  const pre=[];
+  for(const r of rings){
+    const ox0=Math.max(0,Math.floor(r.o[0])), oy0=Math.max(0,Math.floor(r.o[1])), ox1=Math.min(w,Math.ceil(r.o[2])), oy1=Math.min(hh,Math.ceil(r.o[3]));
+    const ix0=Math.ceil(r.i[0]), iy0=Math.ceil(r.i[1]), ix1=Math.floor(r.i[2]), iy1=Math.floor(r.i[3]);
+    const lut=r.f?luts.get(r.f):null;
+    const xs=[], ys=[], rgb=[];
+    for(let y=oy0;y<oy1;y++){
+      const inRow=y>=iy0&&y<iy1;
+      for(let x=ox0;x<ox1;x++){
+        if(inRow&&x>=ix0&&x<ix1){ x=ix1-1; continue; }
+        const q=(y*w+x)*4; xs.push(x); ys.push(y); rgb.push(data[q],data[q+1],data[q+2]);
       }
-      if(!pos.length) continue;
-      const n=pos.length, a=Uint8Array.from(rgb);
-      // the designer's CMYK for each colour: the PDF's own, or GRACoL where it has none
-      const base=new Uint8Array(n*4), miss=[];
+    }
+    const n=xs.length; if(!n) continue;
+    const a=Uint8Array.from(rgb);
+    // the designer's CMYK for each colour: the PDF's own, or GRACoL where it has none
+    const base=new Int16Array(n*4), miss=[];
+    for(let j=0;j<n;j++){
+      const v=lut&&lut(a[j*3],a[j*3+1],a[j*3+2]);
+      if(v){ base.set(v,j*4); continue; }
+      if(kg&&a[j*3]===a[j*3+1]&&a[j*3]===a[j*3+2]){ base[j*4+3]=kg[a[j*3]]; continue; }
+      miss.push(j);
+    }
+    if(miss.length){
+      const m=new Uint8Array(miss.length*3); miss.forEach((j,t)=>m.set(a.subarray(j*3,j*3+3),t*3));
+      const k=toGracol(m,miss.length); miss.forEach((j,t)=>{ for(let c=0;c<4;c++) base[j*4+c]=k[t*4+c]; });
+    }
+    // held to the card's own ink where they meet, edge by edge in short
+    // stretches - where the page is one picture laid square on the card
+    const img=lut&&lut.img, cw=ix1-ix0, ch=iy1-iy0;
+    if(img&&cw>4&&ch>4&&Math.abs(cw/ch-img.W/img.H)<0.15*(img.W/img.H)){
+      const S=24, ks=Math.max(2,Math.min(8,Math.round(Math.min(ix0-ox0,iy0-oy0,ox1-ix1,oy1-iy1)*0.5)));
+      const kk=Math.max(2,Math.round(Math.min(img.W,img.H)*0.01)), inset=2;
+      const imgMean=(cx0,cx1,cy0,cy1)=>{ const m=[0,0,0,0]; let c=0;
+        for(let y=Math.max(0,cy0);y<Math.min(img.H,cy1);y++) for(let x=Math.max(0,cx0);x<Math.min(img.W,cx1);x++){ const q=(y*img.W+x)*4; for(let t=0;t<4;t++) m[t]+=img.c[q+t]; c++; }
+        return c?m.map(v=>v/c):null; };
+      // band strip means, per side and stretch
+      const acc={top:[],bot:[],lef:[],rig:[]};
+      for(const k of Object.keys(acc)) for(let s=0;s<S;s++) acc[k].push([0,0,0,0,0]);
       for(let j=0;j<n;j++){
-        const v=r.lut&&r.lut(a[j*3],a[j*3+1],a[j*3+2]);
-        if(v){ base.set(v,j*4); continue; }
-        if(kg&&a[j*3]===a[j*3+1]&&a[j*3]===a[j*3+2]){ base[j*4+3]=kg[a[j*3]]; continue; }
-        miss.push(j);
+        const x=xs[j], y=ys[j]; let side=null, s=0;
+        if(y<iy0&&y>=iy0-ks&&x>=ix0&&x<ix1){ side='top'; s=Math.floor((x-ix0)/cw*S); }
+        else if(y>=iy1&&y<iy1+ks&&x>=ix0&&x<ix1){ side='bot'; s=Math.floor((x-ix0)/cw*S); }
+        else if(x<ix0&&x>=ix0-ks&&y>=iy0&&y<iy1){ side='lef'; s=Math.floor((y-iy0)/ch*S); }
+        else if(x>=ix1&&x<ix1+ks&&y>=iy0&&y<iy1){ side='rig'; s=Math.floor((y-iy0)/ch*S); }
+        if(!side) continue;
+        const A=acc[side][Math.min(S-1,s)]; for(let t=0;t<4;t++) A[t]+=base[j*4+t]; A[4]++;
       }
-      if(miss.length){
-        const m=new Uint8Array(miss.length*3); miss.forEach((j,t)=>m.set(a.subarray(j*3,j*3+3),t*3));
-        const k=toGracol(m,miss.length); miss.forEach((j,t)=>base.set(k.subarray(t*4,t*4+4),j*4));
+      const delta=(side)=>{
+        const out=[];
+        for(let s=0;s<S;s++){
+          const A=acc[side][s]; if(!A[4]){ out.push([0,0,0,0]); continue; }
+          const b=A.slice(0,4).map(v=>v/A[4]);
+          let des=null;
+          const fx0=Math.floor(img.W*s/S), fx1=Math.ceil(img.W*(s+1)/S), fy0=Math.floor(img.H*s/S), fy1=Math.ceil(img.H*(s+1)/S);
+          if(side==='top') des=imgMean(fx0,fx1,inset,inset+kk);
+          else if(side==='bot') des=imgMean(fx0,fx1,img.H-inset-kk,img.H-inset);
+          else if(side==='lef') des=imgMean(inset,inset+kk,fy0,fy1);
+          else des=imgMean(img.W-inset-kk,img.W-inset,fy0,fy1);
+          out.push(des?des.map((v,t)=>v-b[t]):[0,0,0,0]);
+        }
+        return out.map((v,s)=>{ const p=out[Math.max(0,s-1)], q=out[Math.min(S-1,s+1)]; return v.map((c,t)=>(p[t]+2*c+q[t])/4); });
+      };
+      const D={top:delta('top'),bot:delta('bot'),lef:delta('lef'),rig:delta('rig')};
+      const at=(arr,a0,lo,hi)=>{ const f=Math.max(0,Math.min(S-1,(a0-lo)/Math.max(1,hi-lo)*S-0.5)), i=Math.floor(f), jj=Math.min(S-1,i+1), u=f-i;
+        return arr[i].map((c,t)=>c*(1-u)+arr[jj][t]*u); };
+      for(let j=0;j<n;j++){
+        const x=xs[j], y=ys[j], parts=[];
+        if(y<iy0) parts.push(at(D.top,x,ix0,ix1)); else if(y>=iy1) parts.push(at(D.bot,x,ix0,ix1));
+        if(x<ix0) parts.push(at(D.lef,y,iy0,iy1)); else if(x>=ix1) parts.push(at(D.rig,y,iy0,iy1));
+        if(!parts.length) continue;
+        for(let t=0;t<4;t++){ let v=0; parts.forEach(p=>v+=p[t]); base[j*4+t]=Math.round(base[j*4+t]+v/parts.length); }
       }
-      // and the look on top, exactly as the page took it
-      let k=base;
-      if(P.lookK) k=P.cmykLook(base,n);
-      else if(P.w){ k=base.slice(); for(let q=2;q<k.length;q+=4) k[q]=printWarmY(k[q],P.w); }
-      for(let j=0;j<n;j++){ const p=pos[j]; out[p]=k[j*4]; out[p+1]=k[j*4+1]; out[p+2]=k[j*4+2]; out[p+3]=k[j*4+3]; }
+    }
+    const b8=new Uint8Array(n*4); for(let j=0;j<n*4;j++) b8[j]=Math.max(0,Math.min(255,base[j]));
+    // and the look on top, exactly as the page took it
+    let k=b8;
+    if(P.lookK) k=P.cmykLook(b8,n);
+    else if(P.w){ k=b8.slice(); for(let q=2;q<k.length;q+=4) k[q]=printWarmY(k[q],P.w); }
+    pre.push({xs,ys,k});
+  }
+  return (out,y0,y1)=>{
+    for(const {xs,ys,k} of pre){
+      for(let j=0;j<xs.length;j++){
+        const y=ys[j]; if(y<y0||y>=y1) continue;
+        const p=(y-y0)*row+1+xs[j]*4;
+        out[p]=k[j*4]; out[p+1]=k[j*4+1]; out[p+2]=k[j*4+2]; out[p+3]=k[j*4+3];
+      }
     }
   };
 }
@@ -33822,7 +33934,7 @@ function pdfOwnCmykLut(f,pic){
         vs+=Math.max(0,sq[cell]/n-m2)*n; vn+=n; }
       if(!vn||Math.sqrt(vs/vn/4)>42) return null; }   // ~34 paired right, ~50 paired wrong
     const memo=new Map();
-    return (r,gg,b)=>{
+    const look=(r,gg,b)=>{
       const R0=r>>3, G0=gg>>3, B0=b>>3, key=(R0<<10)|(G0<<5)|B0;
       if(memo.has(key)) return memo.get(key);
       let v=at(key);
@@ -33838,6 +33950,8 @@ function pdfOwnCmykLut(f,pic){
       }
       memo.set(key,v); return v;
     };
+    look.img=best;            // the page picture itself, for the band's edges (sheetRingConv)
+    return look;
   })().catch(()=>null));
   return _pdfOwnLut.get(f);
 }
