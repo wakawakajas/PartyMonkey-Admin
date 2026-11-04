@@ -13565,8 +13565,16 @@ function renderSide(side,canvas,maxDim,opts){
               // band's box sat off the card by the nudge and a strip of the band at
               // the cut went out matched to the paper, a darker line
               const sx=(shift&&shift.xMm)||0, sy=(shift&&shift.yMm)||0;
-              const o=box(mx-sx-effW/2,my-sy-effH/2,effW,effH), i=box(mx-sx-ph.wMm/2,my-sy-ph.hMm/2,ph.wMm,ph.hMm);
-              (opts._cmykRings||(opts._cmykRings=[])).push({o,i,f,pic:printArtExportImg(img)});
+              const o=box(mx-sx-effW/2,my-sy-effH/2,effW,effH);
+              // nothing kept out: the band is drawn over the page's edge on purpose
+              // (no hairline of paper between), and that overlap printed matched,
+              // a darker line just inside the cut. Every pixel this art leaves on
+              // the sheet is made CMYK here; the page's own place is see-through.
+              const i=[(o[0]+o[2])/2,(o[1]+o[3])/2,(o[0]+o[2])/2,(o[1]+o[3])/2];
+              // and the artwork's own box, so the band can be held to the picture's
+              // colour where the cut actually falls on it
+              const ab=box(mx-sx-wMm/2,my-sy-hMm/2,wMm,hMm);
+              (opts._cmykRings||(opts._cmykRings=[])).push({o,i,a:ab,rot:rotDeg||0,f,pic:printArtExportImg(img)});
             }
           }catch(e){}
         }
@@ -33800,7 +33808,8 @@ async function sheetRingConv(imgData,rings){
       const inRow=y>=iy0&&y<iy1;
       for(let x=ox0;x<ox1;x++){
         if(inRow&&x>=ix0&&x<ix1){ x=ix1-1; continue; }
-        const q=(y*w+x)*4; xs.push(x); ys.push(y); rgb.push(data[q],data[q+1],data[q+2]);
+        const q=(y*w+x)*4; if(!data[q+3]) continue;      // see-through: the placed page shows there
+        xs.push(x); ys.push(y); rgb.push(data[q],data[q+1],data[q+2]);
       }
     }
     const n=xs.length; if(!n) continue;
@@ -33817,49 +33826,61 @@ async function sheetRingConv(imgData,rings){
       const m=new Uint8Array(miss.length*3); miss.forEach((j,t)=>m.set(a.subarray(j*3,j*3+3),t*3));
       const k=toGracol(m,miss.length); miss.forEach((j,t)=>{ for(let c=0;c<4;c++) base[j*4+c]=k[t*4+c]; });
     }
-    // held to the card's own ink where they meet, edge by edge in short
-    // stretches - where the page is one picture laid square on the card
-    const img=lut&&lut.img, cw=ix1-ix0, ch=iy1-iy0;
-    if(img&&cw>4&&ch>4&&Math.abs(cw/ch-img.W/img.H)<0.15*(img.W/img.H)){
+    // Where the page is one picture laid square on the card: the band pixels
+    // that are the picture itself (a nudged picture runs past the cut on two
+    // sides) take its own ink there, exactly as the card does; the made-up
+    // fill beyond the picture is held to the picture's own ink where the two
+    // meet, edge by edge in short stretches, and that carried out through it.
+    // Held to the cut instead, the fill printed lighter than the card beside it.
+    const img=lut&&lut.img;
+    const A=r.a&&!(r.rot%360)?{x0:r.a[0],y0:r.a[1],x1:r.a[2],y1:r.a[3]}:null;
+    if(img&&A&&A.x1-A.x0>4&&A.y1-A.y0>4){
+      const AW=A.x1-A.x0, AH=A.y1-A.y0;
+      const U=X=>Math.max(0,Math.min(img.W-1,Math.floor((X+0.5-A.x0)/AW*img.W)));
+      const V=Y=>Math.max(0,Math.min(img.H-1,Math.floor((Y+0.5-A.y0)/AH*img.H)));
+      const inA=(x,y)=>x>=A.x0&&x<A.x1&&y>=A.y0&&y<A.y1;
+      // the picture's own pixels: its ink, as the card prints it
+      for(let j=0;j<n;j++) if(inA(xs[j],ys[j])){ const q=(V(ys[j])*img.W+U(xs[j]))*4; for(let t=0;t<4;t++) base[j*4+t]=img.c[q+t]; }
       const S=24, ks=Math.max(2,Math.min(8,Math.round(Math.min(ix0-ox0,iy0-oy0,ox1-ix1,oy1-iy1)*0.5)));
-      const kk=Math.max(2,Math.round(Math.min(img.W,img.H)*0.01)), inset=2;
+      const kk=Math.max(2,Math.round(Math.min(img.W,img.H)*0.01)), inset=1;
       const imgMean=(cx0,cx1,cy0,cy1)=>{ const m=[0,0,0,0]; let c=0;
         for(let y=Math.max(0,cy0);y<Math.min(img.H,cy1);y++) for(let x=Math.max(0,cx0);x<Math.min(img.W,cx1);x++){ const q=(y*img.W+x)*4; for(let t=0;t<4;t++) m[t]+=img.c[q+t]; c++; }
         return c?m.map(v=>v/c):null; };
-      // band strip means, per side and stretch
+      // the fill's strip just outside the picture, per side and stretch
       const acc={top:[],bot:[],lef:[],rig:[]};
       for(const k of Object.keys(acc)) for(let s=0;s<S;s++) acc[k].push([0,0,0,0,0]);
+      const stretchX=x=>Math.max(0,Math.min(S-1,Math.floor((x-A.x0)/AW*S))), stretchY=y=>Math.max(0,Math.min(S-1,Math.floor((y-A.y0)/AH*S)));
       for(let j=0;j<n;j++){
         const x=xs[j], y=ys[j]; let side=null, s=0;
-        if(y<iy0&&y>=iy0-ks&&x>=ix0&&x<ix1){ side='top'; s=Math.floor((x-ix0)/cw*S); }
-        else if(y>=iy1&&y<iy1+ks&&x>=ix0&&x<ix1){ side='bot'; s=Math.floor((x-ix0)/cw*S); }
-        else if(x<ix0&&x>=ix0-ks&&y>=iy0&&y<iy1){ side='lef'; s=Math.floor((y-iy0)/ch*S); }
-        else if(x>=ix1&&x<ix1+ks&&y>=iy0&&y<iy1){ side='rig'; s=Math.floor((y-iy0)/ch*S); }
+        if(y<A.y0&&y>=A.y0-ks&&x>=A.x0&&x<A.x1){ side='top'; s=stretchX(x); }
+        else if(y>=A.y1&&y<A.y1+ks&&x>=A.x0&&x<A.x1){ side='bot'; s=stretchX(x); }
+        else if(x<A.x0&&x>=A.x0-ks&&y>=A.y0&&y<A.y1){ side='lef'; s=stretchY(y); }
+        else if(x>=A.x1&&x<A.x1+ks&&y>=A.y0&&y<A.y1){ side='rig'; s=stretchY(y); }
         if(!side) continue;
-        const A=acc[side][Math.min(S-1,s)]; for(let t=0;t<4;t++) A[t]+=base[j*4+t]; A[4]++;
+        const Q=acc[side][s]; for(let t=0;t<4;t++) Q[t]+=base[j*4+t]; Q[4]++;
       }
       const delta=(side)=>{
         const out=[];
         for(let s=0;s<S;s++){
-          const A=acc[side][s]; if(!A[4]){ out.push([0,0,0,0]); continue; }
-          const b=A.slice(0,4).map(v=>v/A[4]);
-          let des=null;
+          const Q=acc[side][s]; if(!Q[4]){ out.push(null); continue; }
+          const b=Q.slice(0,4).map(v=>v/Q[4]);
           const fx0=Math.floor(img.W*s/S), fx1=Math.ceil(img.W*(s+1)/S), fy0=Math.floor(img.H*s/S), fy1=Math.ceil(img.H*(s+1)/S);
-          if(side==='top') des=imgMean(fx0,fx1,inset,inset+kk);
-          else if(side==='bot') des=imgMean(fx0,fx1,img.H-inset-kk,img.H-inset);
-          else if(side==='lef') des=imgMean(inset,inset+kk,fy0,fy1);
-          else des=imgMean(img.W-inset-kk,img.W-inset,fy0,fy1);
-          out.push(des?des.map((v,t)=>v-b[t]):[0,0,0,0]);
+          const des=side==='top'?imgMean(fx0,fx1,inset,inset+kk):side==='bot'?imgMean(fx0,fx1,img.H-inset-kk,img.H-inset)
+            :side==='lef'?imgMean(inset,inset+kk,fy0,fy1):imgMean(img.W-inset-kk,img.W-inset,fy0,fy1);
+          out.push(des?des.map((v,t)=>v-b[t]):null);
         }
-        return out.map((v,s)=>{ const p=out[Math.max(0,s-1)], q=out[Math.min(S-1,s+1)]; return v.map((c,t)=>(p[t]+2*c+q[t])/4); });
+        // stretches with none of the fill beside them take their neighbours'
+        const filled=out.map((v,s)=>{ if(v) return v; for(let d=1;d<S;d++){ if(out[s-d]) return out[s-d]; if(out[s+d]) return out[s+d]; } return [0,0,0,0]; });
+        return filled.map((v,s)=>{ const p=filled[Math.max(0,s-1)], q=filled[Math.min(S-1,s+1)]; return v.map((c,t)=>(p[t]+2*c+q[t])/4); });
       };
       const D={top:delta('top'),bot:delta('bot'),lef:delta('lef'),rig:delta('rig')};
-      const at=(arr,a0,lo,hi)=>{ const f=Math.max(0,Math.min(S-1,(a0-lo)/Math.max(1,hi-lo)*S-0.5)), i=Math.floor(f), jj=Math.min(S-1,i+1), u=f-i;
+      const at=(arr,f)=>{ const g=Math.max(0,Math.min(S-1,f*S-0.5)), i=Math.floor(g), jj=Math.min(S-1,i+1), u=g-i;
         return arr[i].map((c,t)=>c*(1-u)+arr[jj][t]*u); };
       for(let j=0;j<n;j++){
-        const x=xs[j], y=ys[j], parts=[];
-        if(y<iy0) parts.push(at(D.top,x,ix0,ix1)); else if(y>=iy1) parts.push(at(D.bot,x,ix0,ix1));
-        if(x<ix0) parts.push(at(D.lef,y,iy0,iy1)); else if(x>=ix1) parts.push(at(D.rig,y,iy0,iy1));
+        const x=xs[j], y=ys[j]; if(inA(x,y)) continue;
+        const parts=[];
+        if(y<A.y0) parts.push(at(D.top,(x-A.x0)/AW)); else if(y>=A.y1) parts.push(at(D.bot,(x-A.x0)/AW));
+        if(x<A.x0) parts.push(at(D.lef,(y-A.y0)/AH)); else if(x>=A.x1) parts.push(at(D.rig,(y-A.y0)/AH));
         if(!parts.length) continue;
         for(let t=0;t<4;t++){ let v=0; parts.forEach(p=>v+=p[t]); base[j*4+t]=Math.round(base[j*4+t]+v/parts.length); }
       }
