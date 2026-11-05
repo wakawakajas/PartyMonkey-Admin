@@ -36943,9 +36943,9 @@ function testSheetVersions(mode,count,step){
 }
 // the design to try: the panel's side (and design, if one is picked), its
 // colour changes made
-function testSheetArt(){
-  const all=sideArtObjs(pcPopSide).filter(([,o])=>o&&o.img);
-  const pick=pcPopArt?all.find(([,o])=>artImgId(o.img)===pcPopArt):all[0];
+function testSheetArt(side=pcPopSide,artId=pcPopArt){
+  const all=sideArtObjs(side).filter(([,o])=>o&&o.img);
+  const pick=(artId&&all.find(([,o])=>artImgId(o.img)===artId))||all[0];
   if(!pick) return null;
   const img=pick[1].img, sw=swapsForIds(new Set([artImgId(img)]));
   return (sw.length&&swappedArtCanvas(img,sw))||img;
@@ -36957,15 +36957,16 @@ function testSheetArt(){
 // with the look added as a change (cmykLookParts, as pdfConvertCmyk). Drawn
 // from the preview's picture and made CMYK as a picture, the number picked on
 // a PDF design did not print the same in the real export.
-async function testSheetArtKind(){
-  const all=sideArtObjs(pcPopSide).filter(([,o])=>o&&o.img);
-  const pick=pcPopArt?all.find(([,o])=>artImgId(o.img)===pcPopArt):all[0];
+// side/artId: a front + back sheet reads each side without moving the panel
+async function testSheetArtKind(side=pcPopSide,artId=pcPopArt){
+  const all=sideArtObjs(side).filter(([,o])=>o&&o.img);
+  const pick=(artId&&all.find(([,o])=>artImgId(o.img)===artId))||all[0];
   if(!pick) return {art:null,kind:'img'};
-  const side=pcPopSide, gt=pcCtx()==='gt', [key,o]=pick, img=o.img;
+  const gt=pcCtx()==='gt', [key,o]=pick, img=o.img;
   // a PDF by its file, as the export tells (printVectorSources, gtVectorSources),
   // its colours swapped or not
   let src=await artPdfBytes(o).catch(()=>null);
-  if(!src) return {art:testSheetArt(),kind:'img'};
+  if(!src) return {art:testSheetArt(side,artId),kind:'img'};
   // a gift tag's front is placed cleaned of its cut line (gtVectorSources)
   if(gt&&o.gtCut&&o.blob){
     const lift=await gtCutLift(o.blob,!!o.gtCut.cutSheet).catch(()=>null);
@@ -36975,7 +36976,7 @@ async function testSheetArtKind(){
   // that way the export leaves to the sheet, its pixels swapped
   const sw=swapsForIds(new Set([artImgId(img)]));
   if(sw.length) src=await pdfSwapColours(src,sw).catch(()=>null);
-  if(!src) return {art:testSheetArt(),kind:'img'};
+  if(!src) return {art:testSheetArt(side,artId),kind:'img'};
   const inv=gt?side!=='back'&&!!gtSheet.invertArt
     :!!withLook(side,key.startsWith('d:')?o:null,()=>!!(state.bleed&&state.bleed.invert));
   // a PDF goes on the sheet as its export puts it: its own page, made CMYK by
@@ -36985,7 +36986,7 @@ async function testSheetArtKind(){
 async function testSheetPdf(mode,count,step,pair){
   // the side it is made for, read once: the panel may follow the builder to
   // the other side while the versions are being made
-  const side0=pair?'both':pcPopSide;
+  const side0=pair?'both':pcPopSide; const art0=pair?null:pcPopArt;
   // pair: 2 columns of the front's last sheet and 2 of the back's, side by
   // side - each version as its own side prints it
   const groups=pair?await testPairGroups(pair):null;
@@ -37077,7 +37078,7 @@ async function testSheetPdf(mode,count,step,pair){
     // see-through where each version's page is
     for(const {X,Y,w,h} of cells) for(let y=Math.max(0,Y);y<Math.min(H,Y+h);y++) for(let x=Math.max(0,X);x<Math.min(W,X+w);x++) id.data[(y*W+x)*4+3]=0;
     const out=await gtBuildPdf(1,async()=>({imgData:id,wMm:p.w,hMm:p.h,place,clear:true}),forms,ctx);
-    testSheetKeep(now,side0,list,fixedCols,mode);
+    testSheetKeep(now,side0,list,fixedCols,mode,art0);
     return {bytes:out,count:list.filter(Boolean).length,side:side0};
   }
   // the sheet as the export makes it, then each version with its own values
@@ -37123,40 +37124,43 @@ async function testSheetPdf(mode,count,step,pair){
   const out=new Uint8Array(pos); let o=0;
   parts.forEach(u=>{ out.set(u,o); o+=u.length; });
   // and the side it was made for, which is the side its Use sets
-  testSheetKeep(now,side0,list,fixedCols,mode);
+  testSheetKeep(now,side0,list,fixedCols,mode,art0);
   return {bytes:out,count:list.filter(Boolean).length,side:side0};
 }
 function testSheetKept(){ try{ return JSON.parse(localStorage.getItem(TEST_SHEET_KEY)||'null'); }catch(e){ return null; } }
 // each side's last sheet of its own, kept beside the last sheet made: a front
 // + back sheet is made from them, and its numbers are theirs
 function testSheetKeptSide(side){ try{ return JSON.parse(localStorage.getItem(TEST_SHEET_KEY+'.'+side)||'null'); }catch(e){ return null; } }
-function testSheetKeep(now,side,list,cols,mode){
+// and its last grid sheet apart (.grid): a darker-only sheet made after it
+// left the front + back pickers empty
+function testSheetKeep(now,side,list,cols,mode,art){
   const all=list.filter(Boolean);
   try{ localStorage.setItem(TEST_SHEET_KEY,JSON.stringify({made:now.toISOString(),paper:printPaperKey(),side,list:all})); }catch(e){}
-  if(side==='front'||side==='back')
-    try{ localStorage.setItem(TEST_SHEET_KEY+'.'+side,JSON.stringify({made:now.toISOString(),paper:printPaperKey(),mode,cols:cols||0,list:all})); }catch(e){}
+  if(side==='front'||side==='back'){
+    const rec=JSON.stringify({made:now.toISOString(),paper:printPaperKey(),mode,cols:cols||0,art:art??null,list:all});
+    try{ localStorage.setItem(TEST_SHEET_KEY+'.'+side,rec); }catch(e){}
+    if(cols) try{ localStorage.setItem(TEST_SHEET_KEY+'.'+side+'.grid',rec); }catch(e){}
+  }
 }
 // the 4 columns of a front + back sheet: each side's art and its last sheet's
 // versions in the column picked
+// (the design its grid was made of; the panel's side is never moved)
 async function testPairGroups(pair){
-  const out=[], ws=pcPopSide, wa=pcPopArt;
-  try{
-    for(const side of ['front','back']){
-      const k=testSheetKeptSide(side);
-      if(!k||!k.cols) throw new Error(`make a ${side} test sheet first (one of the cooler/warmer grids), then pick its columns`);
-      pcPopSide=side; pcPopArt=null;
-      const a=await testSheetArtKind();
-      if(!a.art) throw new Error('No artwork on the '+side);
-      const b0=printLookUiDo(side,()=>printHsl().bright), w0=printLookUiDo(side,printWarm);
-      for(const c of pair[side]) out.push({...a,side,col:c,b0,w0,list:k.list.filter((v,i)=>i%k.cols===c)});
-    }
-  }finally{ pcPopSide=ws; pcPopArt=wa; }
+  const out=[];
+  for(const side of ['front','back']){
+    const k=testSheetKeptSide(side+'.grid');
+    if(!k||!k.cols) throw new Error(`make a ${side} test sheet first (one of the cooler/warmer grids), then pick its columns`);
+    const a=await testSheetArtKind(side,k.art||null);
+    if(!a.art) throw new Error('No artwork on the '+side);
+    const b0=printLookUiDo(side,()=>printHsl().bright), w0=printLookUiDo(side,printWarm);
+    for(const c of pair[side]) out.push({...a,side,col:c,b0,w0,list:k.list.filter((v,i)=>i%k.cols===c)});
+  }
   return out;
 }
 // the column pickers: the columns of each side's last grid sheet, by warmth
 function testPairFill(){
   ['front','back'].forEach(side=>{
-    const k=testSheetKeptSide(side), ids=side==='front'?['pcTestPF1','pcTestPF2']:['pcTestPB1','pcTestPB2'];
+    const k=testSheetKeptSide(side+'.grid'), ids=side==='front'?['pcTestPF1','pcTestPF2']:['pcTestPB1','pcTestPB2'];
     ids.forEach((id,j)=>{
       const el=document.getElementById(id); if(!el) return;
       const was=el.value;
@@ -37170,7 +37174,8 @@ function testPairFill(){
 // a number from the sheet taken for the job: its Brightness and Printer warmth
 // - for the side on show only (pcPopSide): the other side keeps its own
 function testSheetUse(num,side){
-  const t=testSheetKeptSide(side)||testSheetKept(), v=t&&t.list.find(x=>x.n===num);
+  // a front + back sheet's F/B numbers are each side's grid's
+  const m=testSheetKept(), t=m&&m.side==='both'?testSheetKeptSide(side+'.grid'):(testSheetKeptSide(side)||m), v=t&&t.list.find(x=>x.n===num);
   if(!v) return false;
   printLookUiDo(side,()=>{ printWarmSet(side,v.w); printBrightSet(side,v.b); });
   return v;
@@ -42359,7 +42364,7 @@ const HELP=[
   {on:'custom',t:'Print Edited Color Details',k:'colour record print settings crop mark warmth brightness hue saturation swaps record',h:'<b>Print preview</b> -> tick <b>Print Edited Color Details</b> (beside Hold to see original). Every sheet (Custom Template and gift tag) then prints one small grey line in the margin beside the top-left crop mark: which side it is, the paper, <b>Front</b> and <b>Back</b> Printer warmth (W) and Brightness (B), Hue/Saturation, this side\'s colour swaps and the date and time. It shows on the sheet on screen too: <b>drag it</b> to wherever you want it on the sheet (it stays there, on both sides and in the file); <b>double-click</b> it to put it back beside the crop mark. Untick it to print without.'},
   {on:'sheet custom',t:'Colours on a Magic Create line',k:'magic create line colours test sheet use warmth brightness hue saturation save to line draft',h:'With a Magic Create line open, Printer warmth, Brightness, Hue/Saturation and a test sheet\'s <b>Use</b> change <b>that line only</b>, and only the side on show (<b>Front</b> or <b>Back</b>): each side keeps its own (Print preview\'s title says <b>this line only</b>). <b>Save to line</b> keeps them on the line and its file prints with them; close the line without saving and they are thrown away. Lines with none saved, shared sheets and gift tag lines print with this computer\'s colours.'},
   {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is the side on show only too: each side keeps its own. A PDF design is made exactly as the export makes it (its own CMYK, greys as black ink, its changed colours and Invert colours too), so the number picked prints the same in the real file. On the gift tag page the sheet is the gift tag paper, and a PDF tag goes on without its cut line.'},
-  {on:'sheet custom',t:'Test sheet: 2 columns of front and back on one sheet',k:'test sheet front back columns pick two print together pair',h:'<b>Print preview</b> -> <b>Test sheet</b>: make a cooler/warmer grid sheet for the <b>Front</b> and one for the <b>Back</b> first. Then under <b>Front</b> and <b>Back</b> pick 2 columns each and press <b>Make front + back sheet</b>: one sheet with those 4 columns side by side, each version made as its own side prints. Numbers read <b>F#</b> (front) and <b>B#</b> (back): show the front, type its F number, <b>Use</b>; then the back with its B number.',find:'Make front + back sheet'},
+  {on:'sheet custom',t:'Test sheet: 2 columns of front and back on one sheet',k:'test sheet front back columns pick two print together pair',h:'<b>Print preview</b> -> <b>Test sheet</b>: make a cooler/warmer grid sheet for the <b>Front</b> and one for the <b>Back</b> first. Each side keeps its last grid sheet (and the design it was made of), even after a lighter or darker sheet. Then under <b>Front</b> and <b>Back</b> pick 2 columns each and press <b>Make front + back sheet</b>: one sheet with those 4 columns side by side, each version made as its own side prints. Numbers read <b>F#</b> (front) and <b>B#</b> (back): show the front, type its F number, <b>Use</b>; then the back with its B number.',find:'Make front + back sheet'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them. A front or back picture that cannot be read stops it, by name, rather than printing a blank tag; a sheet whose cut file cannot be made is named in the result.',sel:'#gtPrintBtn'},
   {on:'sheet',t:'Saved sheets',k:'save keep later open job',h:'Left panel → <b>Saved sheets</b>: keep this sheet for later, or open one.',find:'Saved sheets'},
