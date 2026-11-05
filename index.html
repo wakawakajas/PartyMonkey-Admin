@@ -42474,7 +42474,7 @@ const HELP=[
   {on:'sheet',t:'Cut file settings (.plt)',k:'plt overcut cut inside thumb drive',
    h:'Right panel → <b>Cut &amp; print</b> → <b>Cut file (.plt)</b>: overcut, <b>Cut inside first</b>, count from the bottom-right dot, <b>💾 Choose thumb drive</b> to save straight to it.',tab:'#gtNl [data-nltab="cut"]',find:'Cut file (.plt)'},
   {on:'sheet',t:'Pick, copy or delete placeholders',k:'placeholders pick select all invert duplicate delete add alt drag copy',
-   h:'Right panel → <b>Placeholders</b>: <b>Select all</b>, <b>Invert</b>, <b>⧉ Duplicate selected</b>, <b>🗑 Delete selected</b>, <b>+ Add placeholder</b>. In Contours: <b>Ctrl+A</b> picks all, <b>Esc</b> none, <b>Ctrl+D</b> copies, <b>Alt + drag</b> drags out a copy (as in Illustrator), arrows nudge (Shift 2 mm, Alt 0.1 mm).',tab:'#gtNl [data-nltab="slots"]',find:'Select all'},
+   h:'Right panel → <b>Placeholders</b>: <b>Select all</b>, <b>Invert</b>, <b>⧉ Duplicate selected</b>, <b>🗑 Delete selected</b>, <b>+ Add placeholder</b>. In Contours: <b>Ctrl+A</b> picks all, <b>Esc</b> none, <b>Ctrl+D</b> copies, <b>Alt + drag</b> drags out a copy (as in Illustrator; on a nested sheet it is one more tag on the order, or one more of that sticker on a sheet broken into stickers, and deleting it takes it off again), arrows nudge (Shift 2 mm, Alt 0.1 mm).',tab:'#gtNl [data-nltab="slots"]',find:'Select all'},
   {on:'sheet',t:'Arrange picked placeholders',k:'arrange grid pack by size picked',
    h:'Right panel → <b>Placeholders</b> → <b>Arrange the picked ones</b>: into a grid, or packed by size.',tab:'#gtNl [data-nltab="slots"]',find:'Arrange the picked ones'},
   {on:'sheet',t:'Placeholder size and position',k:'size position resize keep artwork fit corner apply',
@@ -45880,6 +45880,10 @@ function gtQueue(lines){
       if(ps&&ps.length){
         const cut=ps.map(p=>gtWordsCut(p,L));
         for(let i=0;i<n;i++) cut.forEach(p=>out.push(gtSetLine(L,p)));
+        // and the stickers copied off the sheet with Alt + drag, one more of
+        // each (line.pieceMore, by sticker - see gtNestCopyDrop)
+        const more=L===l&&l.pieceMore;
+        if(more) ps.forEach((p,i)=>{ for(let m=Math.floor(Number(more[p.id])||0);m>0;m--) out.push(gtSetLine(L,cut[i])); });
         return;
       }
       const w=gtWordsCut(d,L);
@@ -47631,6 +47635,42 @@ function gtNestHandKeep(){
   }
   gtNestHand={sig:gtNestCache.sig,frame:gtNestCache.frame,pages};
   gtNestCache=null;
+}
+// Alt + drag on a nested sheet: each copy let go is one more of its tag - its
+// line's qty one up, or on a sheet broken into stickers one more of that
+// sticker (line.pieceMore) - held by hand where it was put. How many it made.
+function gtNestCopyDrop(cp){
+  const en=gtNestEntry(); if(!en) return 0;
+  const wants=[];
+  cp.forEach((c,j)=>{
+    const k=en.slots.findIndex(s=>s.id===cp.was[j]), L=k>=0?en.queue[k]:null;
+    // a name of a list is that row's tag: there is no line to give one more to
+    if(L&&L.nameRow==null) wants.push({L,slot:{...c}});
+  });
+  cp.forEach(q=>{ const i=en.slots.indexOf(q); if(i>=0) en.slots.splice(i,1); });
+  gtNestHandKeep();
+  const add=new Map(), put=[];
+  wants.forEach(({L,slot})=>{
+    const line=gtOrder.find(x=>x.id===(L.setLine||L.id)); if(!line) return;
+    if(gtLineSplits(line,gtDesign(line.designId))){
+      const pc=gtDesign(L.designId), pid=(pc&&pc.wordsOf)||L.designId;
+      const pm=line.pieceMore||(line.pieceMore={});
+      pm[pid]=Math.max(0,Math.floor(Number(pm[pid])||0))+1;
+    }else line.qty=Math.max(0,Math.floor(Number(line.qty)||0))+1;
+    const b=L.id+'|'+L.designId;
+    add.set(b,(add.get(b)||0)+1); put.push({b,slot});
+  });
+  if(!put.length) return 0;
+  // the copies added are the last of their line's (gtQueue): numbered after the rest
+  const tot=new Map(); gtQueue().forEach(l=>{ const b=l.id+'|'+l.designId; tot.set(b,(tot.get(b)||0)+1); });
+  const H=gtNestHand||{sig:'',frame:null,pages:[]}, pages=H.pages.map(pg=>pg.slice());
+  while(pages.length<=gtPage) pages.push([]);
+  const next=new Map();
+  put.forEach(({b,slot})=>{ const o=(tot.get(b)||0)-(add.get(b)||0)+(next.get(b)||0)+1; next.set(b,(next.get(b)||0)+1);
+    pages[gtPage].push({i:null,slot,key:b+'#'+o}); });
+  gtNestHand={...H,sig:'',pages};
+  gtNestCache=null;
+  return put.length;
 }
 // the nested sheet on screen, if the sheets are nested
 function gtNestEntry(){
@@ -50063,6 +50103,14 @@ function gtSheetDrag(c,side){
         gtRenderSlots(); gtSlotCardSync(); gtSlotScopeSync(); gtDraw();
         return;
       }
+      // on a nested sheet a copy is one more tag on the order, held where it was let go
+      if(cp&&gtNestEntry()){
+        const n=gtNestCopyDrop(cp);
+        gtPickOnly(null);
+        gtRenderOrder(); gtRenderSlots(); gtSlotCardSync(); gtDraw(); gtSaveSoon(); gtNestSync();
+        gtSlotToolMsg(n?'\u2713 '+n+' more on the order':'A name from a list cannot be copied - add it to the list',!!n);
+        return;
+      }
       // on a plain grid a tag let go across a guide is pushed off it
       if(!gtSheet.nestOn&&!gtLayout) gtGuideNudge(moved);
       // on a nested sheet the tags stay where they were put, and the room
@@ -51380,15 +51428,36 @@ function gtDeletePicked(){
   // still asking for it.
   const en=gtNestEntry();
   if(en){
-    const count=new Map(), gone=new Set();
+    const count=new Map(), gone=new Set(), pcs=new Map();
     en.slots.forEach((s,k)=>{ const l=en.queue[k]; if(!l||!gtSelSet.has(s.id)) return;
       count.set(l.id,(count.get(l.id)||0)+1);
+      if(l.setLine){ const b=l.id+'|'+l.designId; pcs.set(b,(pcs.get(b)||0)+1); }
       if(gtNestCache&&gtNestCache.keys&&en.idx&&en.idx[k]!=null) gone.add(gtNestCache.keys[en.idx[k]]); });
     let took=0;
     count.forEach((c,id)=>{
       const l=gtOrder.find(x=>x.id===id); if(!l) return;
-      // a sheet broken into stickers counts stickers, not copies: left alone
-      if(gtLineSplits(l,gtDesign(l.designId))) return;
+      // a sheet broken into stickers counts stickers, not copies: only those
+      // copied with Alt + drag (pieceMore) come off
+      if(gtLineSplits(l,gtDesign(l.designId))){
+        const pm=l.pieceMore||{}, keys=gtNestCache&&gtNestCache.keys||[];
+        pcs.forEach((c,b)=>{
+          if(b.split('|')[0]!==id) return;
+          const did=b.slice(b.indexOf('|')+1), pc=gtDesign(did), pid=(pc&&pc.wordsOf)||did;
+          const had=Math.max(0,Math.floor(Number(pm[pid])||0)), drop=Math.min(c,had); if(!drop) return;
+          pm[pid]=had-drop; took+=drop;
+          const nq=keys.filter(k=>k.slice(0,k.lastIndexOf('#'))===b).length-drop;
+          if(gtNestHand){
+            const occ=k=>Number(k.slice(k.lastIndexOf('#')+1))||0, mine=k=>k&&k.slice(0,k.lastIndexOf('#'))===b;
+            const free=[...gone].filter(mine).map(occ).filter(o=>o<=nq).sort((x,y)=>x-y);
+            gtNestHand={...gtNestHand,sig:'',pages:gtNestHand.pages.map(pg=>pg.filter(h=>!h.key||!gone.has(h.key)).map(h=>{
+              if(!mine(h.key)||occ(h.key)<=nq) return h;
+              const o=free.shift(); return o?{...h,key:b+'#'+o}:null; }).filter(Boolean))};
+          }
+        });
+        l.pieceMore=Object.fromEntries(Object.entries(pm).filter(([,v])=>v>0));
+        if(!Object.keys(l.pieceMore).length) delete l.pieceMore;
+        return;
+      }
       const q=Math.floor(Number(l.qty)||0), nq=Math.max(0,q-c); took+=q-nq; l.qty=nq;
       // tags moved by hand stay put: the line's copies past its new qty take
       // the numbers of the ones deleted
