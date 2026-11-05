@@ -46664,11 +46664,13 @@ function gtNestWorkerGet(slot){
             (a,b)=>Math.max(b.sz.w,b.sz.h)-Math.max(a.sz.w,a.sz.h)||b.sz.h-a.sz.h||a.i-b.i];
           const deadline=Date.now()+budget; let best=null;
           try{
-            const steps=[...new Set([90,want<45?45:90,want])];
-            for(const step of steps) for(const scan of ['row','col']) for(const cmp of byKey){
+            // nothing turned first (quick), then the turns: Rotate is never worse than off
+            const steps=[...new Set([90,want<45?45:90,want])].map(s=>[s,rotate]);
+            if(rotate) steps.unshift([90,false]);
+            for(const [step,turn] of steps) for(const scan of ['row','col']) for(const cmp of byKey){
               if(Date.now()>deadline) throw 'late';
               const soft=Date.now()+(deadline-Date.now())/2;
-              const r=gtNestRealPack(items.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,dotBlocks,rotate,step,soft);
+              const r=gtNestRealPack(items.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,dotBlocks,turn,step,soft);
               if(!r) throw 'late';
               if(!best||gtNestRealBetter(r,best)) best=r;
             }
@@ -47418,12 +47420,13 @@ function gtNestPlan(){
     (a,b)=>b.sz.w-a.sz.w||b.sz.h-a.sz.h||a.i-b.i,
     (a,b)=>Math.max(b.sz.w,b.sz.h)-Math.max(a.sz.w,a.sz.h)||b.sz.h-a.sz.h||a.i-b.i
   ];
-  const packWith=(items,mode)=>{
+  // noTurn: packed with no tag turned, even with Rotate on (see below)
+  const packWith=(items,mode,noTurn)=>{
     const pages=[]; let tooBig=0;
     items.forEach(it=>{
       const e=2*(it.bl||0), ex=e+Math.max(0,gx-e), ey=e+Math.max(0,gy-e);
       const cw=Math.max(0.1,it.sz.w+ex), ch=Math.max(0.1,it.sz.h+ey);
-      const alt=(S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)
+      const alt=(!noTurn&&S.nestRotate!==false&&Math.abs(it.sz.w-it.sz.h)>0.01)
         ?{w:Math.max(0.1,it.sz.h+ex),h:Math.max(0.1,it.sz.w+ey)}:null;
       let pos=null, pg=null;
       for(const p of pages){ pos=p.bin.add(cw,ch,alt,cutOfIt(it)); if(pos){ pg=p; break; } }
@@ -47447,7 +47450,9 @@ function gtNestPlan(){
   // lines ticked "Fill the gaps" packed into the room the rows leave
   const neat=!!S.nestNeat;
   const memo=neat?null:gtNestBoxMemo.get(sig);
-  if(neat) packed=gtNestNeatPack(all,availW+gx,availH+gy,gx,gy,dotBlocks,S.nestRotate!==false,
+  // Own Rows packed with Rotate as set, and with Rotate on also with nothing
+  // turned - whichever takes fewer sheets: Rotate is never worse than off
+  const neatPack=turn=>gtNestNeatPack(all,availW+gx,availH+gy,gx,gy,dotBlocks,turn,
     rest=>{ let best=null;
       orders.forEach(cmp=>Object.keys(GT_NEST_SCORE).forEach(mode=>{
         const r=packWith(rest.slice().sort(cmp),mode);
@@ -47465,15 +47470,26 @@ function gtNestPlan(){
       };
     })():null,
     cutOfId,dotSoft.lead);
+  if(neat){
+    packed=neatPack(S.nestRotate!==false);
+    if(S.nestRotate!==false){
+      let flat=null; try{ flat=neatPack(false); }catch(e){ flat=null; }
+      if(flat&&!flat.tooBig&&flat.pages.length<packed.pages.length) packed=flat;
+    }
+  }
   else if(memo) packed={tooBig:memo.tooBig,fill:memo.fill,
     pages:memo.pages.map(pg=>({...pg,items:pg.items.map(({it,pos})=>({it:all[it.i],pos})).filter(x=>x.it)}))};
+  // Turning a tag is a choice each tag makes for itself, first come first
+  // served, and an early turn can block the rest: with Rotate on an order
+  // took 3 sheets that went on 2 with it off. So the same orders are packed
+  // with nothing turned as well - Rotate can only ever save paper.
   else orders.forEach(cmp=>{
     const items=all.slice().sort(cmp);
-    Object.keys(GT_NEST_SCORE).forEach(mode=>{
-      const r=packWith(items,mode);
+    Object.keys(GT_NEST_SCORE).forEach(mode=>(S.nestRotate!==false?[false,true]:[false]).forEach(noTurn=>{
+      const r=packWith(items,mode,noTurn);
       if(!packed||r.pages.length<packed.pages.length
         ||(r.pages.length===packed.pages.length&&r.fill<packed.fill-1e-6)) packed=r;
-    });
+    }));
   });
   // The aim is paper saved, so past the tidy orders it keeps trying: the same
   // sorts with the sizes jostled a little, and plain shuffles, each placed by
@@ -47530,14 +47546,15 @@ function gtNestPlan(){
         // A finer step is not always a better packing - each tag takes the first
         // place it fits, and an early odd turn can block a later neat one - so
         // the coarser steps are packed too, quickest first, and the best kept.
-        const want=gtNestStep(), steps=[...new Set([90,want<45?45:90,want])];
-        for(const step of steps) for(const scan of ['row','col']) for(const cmp of byKey){
+        const want=gtNestStep(), steps=[...new Set([90,want<45?45:90,want])].map(s=>[s,S.nestRotate!==false]);
+        if(S.nestRotate!==false) steps.unshift([90,false]);
+        for(const [step,turn] of steps) for(const scan of ['row','col']) for(const cmp of byKey){
           if(Date.now()>deadline) throw 'late';
           // finer turns are tried in the first half of what time is left for this
           // round, quarters after - so a round always finishes
           const soft=Date.now()+(deadline-Date.now())/2;
           const r=gtNestRealPack(rall.slice().sort(cmp),availW,availH,gx,gy,scan,deadline,realDots,
-            S.nestRotate!==false,step,soft);
+            turn,step,soft);
           if(!r) throw 'late';
           if(gtNestRealBetter(r,packed,!realUsed)){ packed=r; realUsed=true; }
         }
@@ -47647,9 +47664,9 @@ function gtNestPlan(){
         });
         const ritems=free.map(mk).sort(byArea);
         let r=null;
-        for(const scan of ['row','col']){
+        for(const [scan,turn] of [['row',S.nestRotate!==false],['col',S.nestRotate!==false]].concat(S.nestRotate!==false?[['row',false],['col',false]]:[])){
           let x=null;
-          try{ x=gtNestRealPack(ritems,availW,availH,gx,gy,scan,deadline,realDots,S.nestRotate!==false,
+          try{ x=gtNestRealPack(ritems,availW,availH,gx,gy,scan,deadline,realDots,turn,
             gtNestStep(),Date.now()+300,seed); }catch(e){ x=null; }
           if(x&&!x.tooBig&&(!r||x.pages.length<r.pages.length)) r=x;
         }
