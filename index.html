@@ -11319,8 +11319,8 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
         style="width:58px;padding:3px 6px;font-size:12px;text-align:right;"/></label>
     <label style="display:grid;grid-template-columns:78px 1fr 58px;gap:6px;align-items:center;margin-top:8px;"
       title="The whole print lighter or darker, its white and black kept (Photoshop's Brightness)">
-      <b>Brightness</b><input type="range" min="-100" max="100" step="1" data-hsl-k="b"/>
-      <input type="number" min="-100" max="100" step="1" data-hsl-n="b" inputmode="numeric" aria-label="Brightness"
+      <b>Brightness</b><input type="range" min="-150" max="150" step="1" data-hsl-k="b"/>
+      <input type="number" min="-150" max="150" step="1" data-hsl-n="b" inputmode="numeric" aria-label="Brightness"
         style="width:58px;padding:3px 6px;font-size:12px;text-align:right;"/></label>
   </div>
   <!-- Test sheet: this design in many numbered versions, one sheet (testSheetPdf) -->
@@ -34447,7 +34447,7 @@ function printHsl(){
   // Brightness, the whole print's: one figure, whichever range is picked
   let bb=_printSideNow==='back'?0:v.bright&&v.bright.b;
   if(_printSideNow==='back'){ try{ bb=Number(printLookStore.getItem(PRINT_BACK_BRIGHT_KEY)); }catch(e){} }
-  out.bright=cl(_printOv&&!_printLookUi&&_printOv.bright!=null?_printOv.bright:bb,-100,100);
+  out.bright=cl(_printOv&&!_printLookUi&&_printOv.bright!=null?_printOv.bright:bb,-150,150);
   out.warm=printWarm();
   return out;
 }
@@ -34477,34 +34477,71 @@ async function cmykJpegDecode(raw,W,H){
   return j.getData({width:W,height:H,forceRGB:false,isSourcePDF:true});
 }
 printSideInit();                 // the back's own values, from the front's the first time
-// one colour through the settings, 0-1 each
+// one colour through the settings, 0-1 each: Hue/Saturation as Photoshop's
+// own (checked against Photoshop 2023 on 9,000 colours, 5 Nov - within 2 of
+// 255 for the Master sliders, within about 5 for the colour ranges):
+// - Hue turns the colour round, its strongest and weakest channel kept.
+// - Lightness: Master takes every channel towards white (+) or black (-);
+//   a colour range takes it towards the colour's own strongest channel (+)
+//   or its weakest (-), so a red never goes pink or grey by it.
+// - Saturation moves each channel away from (+) or towards (-) the middle
+//   of its strongest and weakest; + stops where a channel would pass 0 or 255.
+// - A range takes the full amount within 15 deg of its hue, fading to none
+//   at 45; a grey is in no range. Lightness comes before Saturation.
 function printHslOne(r,g,b,s){
-  const mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn;
-  let l=(mx+mn)/2, sat=d===0?0:d/(1-Math.abs(2*l-1)), h=0;
+  let mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn, h=0;
   if(d){ h=mx===r?((g-b)/d)%6:mx===g?(b-r)/d+2:(r-g)/d+4; h=(h*60+360)%360; }
-  let dh=s.master.h, ds=s.master.s, dl=s.master.l;
-  if(sat>0) for(const [k,,c] of PRINT_HSL_BANDS){
+  const hf=Math.floor(h), m=s.master;
+  let dh=m.h, dlm=m.l/100, dlr=0, P=0, N=0;
+  const satIn=(w,v)=>{ if(v>=1) P+=w*1e6; else if(v>0) P+=w*(1/(1-v)-1); else N+=w*v; };
+  satIn(1,m.s/100);
+  if(d) for(const [k,,c] of PRINT_HSL_BANDS){
     if(c===null) continue;
     const e=s[k]; if(!(e.h||e.s||e.l)) continue;
-    let a=Math.abs(h-c); if(a>180) a=360-a;
-    let w=a<=15?1:a>=45?0:(45-a)/30;
-    w*=Math.min(1,sat*5);                       // greys are left alone
-    dh+=e.h*w; ds+=e.s*w; dl+=e.l*w;
+    let a=Math.abs(hf-c); if(a>180) a=360-a;
+    const w=a<=15?1:a>=45?0:(45-a)/30; if(!w) continue;
+    dh+=e.h*w; dlr+=e.l/100*w; satIn(w,e.s/100);
   }
-  if(!dh&&!ds&&!dl) return printLook(r,g,b,s);
-  h=((h+dh)%360+360)%360;
-  sat=ds<0?sat*(1+ds/100):sat+(1-sat)*ds/100;
-  l=dl<0?l*(1+dl/100):l+(1-l)*dl/100;
-  sat=Math.max(0,Math.min(1,sat)); l=Math.max(0,Math.min(1,l));
-  const C=(1-Math.abs(2*l-1))*sat, X=C*(1-Math.abs((h/60)%2-1)), m=l-C/2;
-  const [r1,g1,b1]=h<60?[C,X,0]:h<120?[X,C,0]:h<180?[0,C,X]:h<240?[0,X,C]:h<300?[X,0,C]:[C,0,X];
-  return printLook(r1+m,g1+m,b1+m,s);
+  if(!dh&&!dlm&&!dlr&&!P&&!N) return printLook(r,g,b,s);
+  if(dh&&d){
+    const q=((h+dh)%360+360)%360/60, X=k=>Math.min(1,Math.max(0,Math.abs((q+k)%6-3)-1));
+    r=mn+d*X(0); g=mn+d*X(4); b=mn+d*X(2);
+  }
+  if(dlm){ const f=c=>dlm>0?c+(1-c)*dlm:c*(1+dlm); r=f(r); g=f(g); b=f(b); }
+  if(dlr){
+    const x=Math.max(r,g,b), n=Math.min(r,g,b), f=c=>dlr>0?c+(x-c)*dlr:c+(c-n)*dlr;
+    r=f(r); g=f(g); b=f(b);
+  }
+  if(P||N){
+    const x=Math.max(r,g,b), n=Math.min(r,g,b), L=(x+n)/2, dd=x-n;
+    if(dd>0){
+      const S=L<0.5?dd/(x+n):dd/(2-x-n), cap=1/S-1;
+      const st=Math.min(1,N+1-1/(1+P));
+      const al=st>0?(st>=1?cap:Math.min(cap,1/(1-st)-1)):st;
+      r+=(r-L)*al; g+=(g-L)*al; b+=(b-L)*al;
+    }
+  }
+  const cl=v=>Math.max(0,Math.min(1,v));
+  return printLook(cl(r),cl(g),cl(b),s);
 }
-// Brightness and Printer warmth, on every colour alike, in Lab:
-// - Brightness moves lightness by up to 25 L* at +-100, darks and strong
-//   colours as much as the middle (a curve on the midtones moved a maroon
-//   or a navy next to nothing); only the paper's white and the deepest
-//   black are eased out of it, so white stays paper and black stays black.
+// Brightness as Photoshop's (Brightness/Contrast, Use Legacy off): one curve
+// on R, G and B alike, so white stays paper, black stays black and a grey a
+// grey. The curves are Photoshop 2023's own, measured at every 5 from -150 to
+// +150 (61 x 256 levels) - a step between two is within 1 level of Photoshop.
+const PS_BRIGHT_B64='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kZOVmJqcnqCipKaoqqyur7Gztba4uru9vsDBw8TGx8jKy8zOz9DR0tPU1tfY2drb29zd3t/g4eHi4+Tl5ebn5+jp6erq6+vs7e3u7u7v7/Dw8fHy8vLz8/P09PT19fX29vb29/f39/j4+Pj4+fn5+fn6+vr6+vr6+/v7+/v7+/z8/Pz8/Pz8/Pz9/f39/f39/f39/f39/f3+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v//////////////////////AAIFBwkMDhATFRcaHB4hIyUoKiwvMTQ2ODs9P0JERklLTVBSVFdZW15gYmVnaWxucHN1d3p8foGDhYiKjI+Rk5WYmpyeoKKkpqiqrK6wsrS1t7m6vL6/wcLExcfIycvMzc7Q0dLT1NXW19jZ2tvc3d7f4OHh4uPk5eXm5+fo6enq6uvs7O3t7u7v7/Dw8PHx8vLy8/Pz9PT09fX19vb29vf39/f4+Pj4+fn5+fn5+vr6+vr6+/v7+/v7+/v8/Pz8/Pz8/Pz8/f39/f39/f39/f39/f3+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/////////////////////////wACBQcKDA4RExYYGx0fIiQnKSsuMDM1ODo8P0FERkhLTVBSVVdZXF5hY2Voam1vcnR2eXt+gIKFh4qMjpGTlZeanJ6goqWnqautr7CytLa4ubu9vsDBw8TGx8nKy83Oz9DS09TV1tfY2drb3N3e3+Dh4eLj5OTl5ufn6Onp6urr7Ozt7e7u7+/w8PDx8fLy8vPz8/T09PX19fb29vb39/f3+Pj4+Pn5+fn5+fr6+vr6+vv7+/v7+/v7/Pz8/Pz8/Pz8/P39/f39/f39/f39/f39/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7///////////////////////////8AAgUHCgwPERQWGRseICMlKCotLzI0Nzk8PkFDRkhLTVBSVVdaXF9hZGZpa25wc3V4en1/goSHiYuOkJKVl5mcnqCipKepq62vsbO1tri6vL2/wcLExcfIycvMzc/Q0dLU1dbX2Nna29zd3t/g4OHi4+Tk5ebn5+jp6erq6+zs7e3u7u/v8PDw8fHy8vLz8/T09PT19fX29vb39/f39/j4+Pj5+fn5+fr6+vr6+vr7+/v7+/v7+/z8/Pz8/Pz8/Pz9/f39/f39/f39/f39/f3+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v//////////////////////////////AAMFCAoNDxIVFxocHyEkJyksLjEzNjk7PkBDRUhLTVBSVVdaXV9iZGdqbG9xdHZ5fH6Bg4aIi42QkpSXmZueoKKkp6mrra+xs7W3uLq8vr/Bw8TGx8nKy83Oz9HS09TV1tjZ2tvc3d7e3+Dh4uPj5OXm5ufo6Onq6uvr7O3t7u7v7/Dw8PHx8vLy8/P09PT09fX19vb29/f39/f4+Pj4+fn5+fn6+vr6+vr6+/v7+/v7+/v8/Pz8/Pz8/Pz8/f39/f39/f39/f39/f39/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/////////////////////////////////w==';
+let _psBrightT=null; const _psBrightC=new Map();
+function psBrightCurve(v){
+  v=Math.max(-150,Math.min(150,v));
+  let c=_psBrightC.get(v); if(c) return c;
+  if(!_psBrightT){ const s=atob(PS_BRIGHT_B64); _psBrightT=new Uint8Array(s.length); for(let i=0;i<s.length;i++) _psBrightT[i]=s.charCodeAt(i); }
+  const x=(v+150)/5, i0=Math.min(59,Math.floor(x)), t=x-i0;
+  c=new Float32Array(256);
+  for(let k=0;k<256;k++) c[k]=(_psBrightT[i0*256+k]*(1-t)+_psBrightT[(i0+1)*256+k]*t)/255;
+  if(_psBrightC.size>40) _psBrightC.clear();
+  _psBrightC.set(v,c); return c;
+}
+function psBright(c,cv){ const x=Math.max(0,Math.min(1,c))*255, i=Math.min(254,Math.floor(x)), t=x-i; return cv[i]+(cv[i+1]-cv[i])*t; }
+// Brightness (above), then Printer warmth, in Lab:
 // - Printer warmth moves every colour towards yellow (or blue) by up to 10 b*
 //   at +-50, as a press drifting blue makes everything bluer - its yellow
 //   toner scaled warmed only what had yellow in it, a blue not at all.
@@ -34513,14 +34550,13 @@ function printHslOne(r,g,b,s){
 function printLook(r,g,b,s){
   const vb=s.bright||0, vw=s.warm||0;
   if(!vb&&!vw) return [r,g,b];
+  if(vb){ const cv=psBrightCurve(vb); r=psBright(r,cv); g=psBright(g,cv); b=psBright(b,cv); }
+  if(!vw) return [r,g,b];
   const grey=r===g&&g===b;
+  if(grey) return [r,g,b];
   let [L,A,B]=srgbToLab(r,g,b);
-  if(vb) L+=vb/100*25*Math.min(1,(100-L)/10)*Math.min(1,L/8);
-  if(vw&&!grey) B+=vw/50*10*Math.min(1,(100-L)/12);
-  L=Math.max(0,Math.min(100,L));
-  const o=labToSrgb(L,A,B);
-  if(grey){ const v=(o[0]+o[1]+o[2])/3; return [v,v,v]; }
-  return o;
+  B+=vw/50*10*Math.min(1,(100-L)/12);
+  return labToSrgb(L,A,B);
 }
 // sRGB 0-1 to CIE Lab (D65) and back, clipped to sRGB
 function srgbToLab(r,g,b){
@@ -36853,7 +36889,7 @@ document.addEventListener('input',e=>{
   const el=e.target; if(!el||!el.closest||!el.closest('#pcHsl')) return;
   const k=el.dataset.hslK||el.dataset.hslN; if(!k) return;
   if(el.value===''||el.value==='-') return;            // still being typed
-  const band=k==='b'?'bright':document.getElementById('pcHslBand').value, lim=k==='h'?180:100;
+  const band=k==='b'?'bright':document.getElementById('pcHslBand').value, lim=k==='h'?180:k==='b'?150:100;
   const v=Math.max(-lim,Math.min(lim,Math.round(Number(el.value)||0)));
   printLookUiDo(pcPopSide,()=>{
   if(band==='bright') printBrightSet(pcPopSide,v);   // the side on show only
@@ -36921,11 +36957,11 @@ const TEST_SHEET_KEY='pigu.testSheet';
 // colour under 1 b* a column, too little to see on the sheet
 // (each step 1 L* / 1 b* at fine, 2 at medium, 3 or more at big - fewer
 // than 2 apart are hard to tell on paper)
-const TEST_STEPS={fine:{b:4,w:5},medium:{b:8,w:10},coarse:{b:14,w:16}};
+const TEST_STEPS={fine:{b:3,w:5},medium:{b:6,w:10},coarse:{b:10,w:16}};
 // the versions, numbered from 1: {n,b,w} - Brightness and Printer warmth
 function testSheetVersions(mode,count,step){
   const S=TEST_STEPS[step]||TEST_STEPS.medium, b0=printLookUiDo(pcPopSide,()=>printHsl().bright), w0=printLookUiDo(pcPopSide,printWarm);
-  const cb=v=>Math.max(-100,Math.min(100,Math.round(v))), cw=v=>Math.max(-50,Math.min(50,Math.round(v)));
+  const cb=v=>Math.max(-150,Math.min(150,Math.round(v))), cw=v=>Math.max(-50,Math.min(50,Math.round(v)));
   const out=[], seen=new Set();
   const add=(b,w)=>{ b=cb(b); w=cw(w); const k=b+'|'+w; if(seen.has(k)) return; seen.add(k); out.push({n:out.length+1,b,w}); };
   // n values along one slider from v0 (lo to hi): 'up' from v0, 'down' from
@@ -36955,7 +36991,7 @@ function testSheetVersions(mode,count,step){
     // no warmer version at all), never more than there are
     cols=Math.min(count,Math.max(5,Math.round(Math.sqrt(count/2))|1));
     const rows=Math.ceil(count/cols);
-    const bs=axis(b0,rows,S.b,-100,100,mode==='grid'?'both':mode==='lighter-w'?'up':'down');
+    const bs=axis(b0,rows,S.b,-150,150,mode==='grid'?'both':mode==='lighter-w'?'up':'down');
     if(mode==='grid') bs.reverse();                   // lightest at the top
     const ws=axis(w0,cols,S.w,-50,50,'both');
     for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
@@ -36966,8 +37002,8 @@ function testSheetVersions(mode,count,step){
   }else{
     // one way only: fine one apart, medium two, big as far as the slider goes
     const s1={fine:1,medium:2,coarse:100}[step]||2;
-    if(mode==='lighter') axis(b0,count,s1,-100,100,'up').forEach(v=>add(v,w0));
-    else if(mode==='darker') axis(b0,count,s1,-100,100,'down').forEach(v=>add(v,w0));
+    if(mode==='lighter') axis(b0,count,s1,-150,150,'up').forEach(v=>add(v,w0));
+    else if(mode==='darker') axis(b0,count,s1,-150,150,'down').forEach(v=>add(v,w0));
     else axis(w0,count,s1,-50,50,'both').forEach(v=>add(b0,v));   // cooler to warmer
   }
   return {list:out,cols};
@@ -42423,6 +42459,7 @@ const HELP=[
   {on:'sheet',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#gtPpBtn'},
   {on:'custom',t:'Print Edited Color Details',k:'colour record print settings crop mark warmth brightness hue saturation swaps record',h:'<b>Print preview</b> -> tick <b>Print Edited Color Details</b> (beside Hold to see original). Every sheet (Custom Template and gift tag) then prints one small grey line in the margin beside the top-left crop mark: which side it is, the paper, <b>Front</b> and <b>Back</b> Printer warmth (W) and Brightness (B), Hue/Saturation, this side\'s colour swaps and the date and time. It shows on the sheet on screen too: <b>drag it</b> to wherever you want it on the sheet (it stays there, on both sides and in the file); <b>double-click</b> it to put it back beside the crop mark. Untick it to print without.'},
   {on:'sheet custom',t:'Colours on a Magic Create line',k:'magic create line colours test sheet use warmth brightness hue saturation save to line draft',h:'With a Magic Create line open, Printer warmth, Brightness, Hue/Saturation and a test sheet\'s <b>Use</b> change <b>that line only</b>, and only the side on show (<b>Front</b> or <b>Back</b>): each side keeps its own (Print preview\'s title says <b>this line only</b>). <b>Save to line</b> keeps them on the line and its file prints with them; close the line without saving and they are thrown away. Lines with none saved print at 0. Outside a line (Custom Template, gift tag sheet, Die Cut) the colours belong to the pictures on screen only: a new picture, template or page starts at 0, and nothing is kept on the computer.'},
+  {on:'sheet custom',t:'Brightness and Hue/Saturation work as Photoshop',k:'brightness hue saturation lightness photoshop same match range reds yellows',h:'<b>Print preview</b> -> <b>Brightness</b> (-150 to 150) and <b>Hue/Saturation</b> (Master, Reds, Yellows, Greens, Cyans, Blues, Magentas) give the same colours as the same numbers in Photoshop (Brightness/Contrast with Use Legacy off; Hue/Saturation). They were checked against Photoshop 2023 on thousands of colours. So a value you found in Photoshop can be typed straight in. Printer warmth is Pigu\'s own and has no Photoshop slider.'},
   {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is the side on show only too: each side keeps its own. A PDF design is made exactly as the export makes it (its own CMYK, greys as black ink, its changed colours and Invert colours too), so the number picked prints the same in the real file. On the gift tag page the sheet is the gift tag paper, and a PDF tag goes on without its cut line.'},
   {on:'sheet custom',t:'Test sheet: 2 columns of front and back on one sheet',k:'test sheet front back columns pick two print together pair',h:'<b>Print preview</b> -> <b>Test sheet</b>: make a cooler/warmer grid sheet for the <b>Front</b> and one for the <b>Back</b> first. Each side keeps its last grid sheet (and the design it was made of), even after a lighter or darker sheet. Then under <b>Front</b> and <b>Back</b> pick 2 columns each and press <b>Make front + back sheet</b>: one sheet with those 4 columns side by side, each version made as its own side prints. Numbers read <b>F#</b> (front) and <b>B#</b> (back): show the front, type its F number, <b>Use</b>; then the back with its B number.',find:'Make front + back sheet'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
