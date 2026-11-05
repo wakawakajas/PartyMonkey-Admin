@@ -9978,6 +9978,8 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
         <div class="click-row" style="margin:-6px 0 14px;">
           <label class="click-tog"><input type="checkbox" id="artLinkToggle"/>Width &amp; height move together</label>
         </div>
+        <!-- Place Card: how many cards the one artwork goes on (blank: every card) -->
+        <label class="field" id="finalQtyRow" style="margin:-4px 0 14px;max-width:240px;" hidden><span title="How many cards get this artwork, counted across the sheets. Blank: every card. More than one sheet holds adds sheets.">Qty (cards)</span><input type="number" min="0" step="1" id="finalQty" placeholder="every card" inputmode="numeric"/></label>
       </div>
 
       <!-- outside the block above, so it is still there to reach once the
@@ -11802,6 +11804,7 @@ const state={
   // the first one, so anything that only ever knew the single picture (the
   // WIDTH/HEIGHT boxes, the quality check) keeps working off that.
   finalList:{front:[],back:[]},
+  finalQty:0,
   finalSplit:false,
   art:{front:{wMm:0,hMm:0},back:{wMm:0,hMm:0}},
   // A job is often several designs at a few each rather than one design over
@@ -12904,6 +12907,10 @@ function artOrder(){
     ({id:g.id,label:g.label,rot:g.rot,xMm:g.xMm,yMm:g.yMm,wMm:g.r-g.xMm,hMm:g.b-g.yMm,card:true})));
 }
 const artPerSheet=()=>artOrder().length;
+// Place Card's single artwork Qty: how many cards it goes on (0: every card).
+// Not with Preset or Multiple Design, which have their own quantities.
+const finalQtyNow=()=>pcMode==='placecard'&&!usingPreset()&&!state.finalSplit
+  ?Math.max(0,Math.floor(Number(state.finalQty)||0)):0;
 // one entry per physical card, in the order the lines are listed. The same
 // design object is pushed n times rather than copied — a placeholder always
 // knows the line it came from.
@@ -12964,6 +12971,7 @@ function sheetCount(){
     if(bl) n=Math.max(n,Math.ceil(bl.length/per));
   }
   if(pcMode==='placecard') n=Math.max(n,pcSheetCount());
+  if(per&&finalQtyNow()) n=Math.max(n,Math.ceil(finalQtyNow()/per));
   return n;
 }
 function clampPage(){
@@ -13252,7 +13260,10 @@ const ART_REACH_MM=2.5;
 function artGeom(side,img,ph,line){
   const a=state.art[side];
   // a Place Card card is its own box and its words together, and fills that
-  let wMm=ph.card?ph.wMm:a.wMm, hMm=ph.card?ph.hMm:a.hMm;
+  // ...on Placeholder size; Actual size keeps the WIDTH/HEIGHT box, words box
+  // or not (one added put the picture back to the card's size)
+  const cardFill=ph.card&&!(state.artFit==='actual'&&a.wMm>0&&a.hMm>0);
+  let wMm=cardFill?ph.wMm:a.wMm, hMm=cardFill?ph.hMm:a.hMm;
   // a placeholder turned on its own (a quarter turn swaps its box about its
   // middle) takes the card's footprint on its side; a card box already is
   const pr=phRotOf(ph), qt=pr%180!==0;
@@ -13761,7 +13772,9 @@ function renderSide(side,canvas,maxDim,opts){
     const art=state.final[side].img;
     // by card, as Preset and Split lay it: on Place Card a words box is part
     // of its card, not a card of its own
-    if(art&&a.wMm&&a.hMm) cardTrims.forEach(ph=>one(art,ph,null,'final:'+side));
+    // Place Card's Qty: the first that many cards, counted on across the sheets
+    const qty=finalQtyNow(), start=(opts.page||0)*cardTrims.length;
+    if(art&&a.wMm&&a.hMm) cardTrims.forEach((ph,i)=>{ if(qty&&start+i>=qty) return; one(art,ph,null,'final:'+side); });
   }
   };
   if(!opts.forExport){ artPhase='ghost'; runArt(); }
@@ -14527,7 +14540,7 @@ function pcPaintMode(){
   if(t) t.textContent=placecard?'Place Card':'Custom Template';
   const show=(id,on)=>{ const el=document.getElementById(id); if(el) el.hidden=!on; };
   show('printTplCard',!placecard);
-  show('bulkCatRow',placecard);
+  show('bulkCatRow',placecard);  show('finalQtyRow',placecard);
   show('pcTemplateCard',placecard);
   show('pcCatsCard',placecard);
   show('pcLibCard',placecard);
@@ -16654,6 +16667,7 @@ function refreshArtInputs(){
   document.getElementById('finalSplitToggle').checked=!!state.finalSplit;
   document.getElementById('finalSplitHintOff').hidden=!!state.finalSplit;
   document.getElementById('finalSplitHintOn').hidden=!state.finalSplit;
+  { const fq=document.getElementById('finalQty'); if(fq&&document.activeElement!==fq) fq.value=state.finalQty>0?state.finalQty:''; }
   syncBleedChips();
   syncBleedModeSeg();
 }
@@ -16694,6 +16708,9 @@ function syncBleedChips(){
 // what the sheet is stamped with and what the exported files are named after
 document.getElementById('artOrderId').addEventListener('input',e=>{
   state.orderId=e.target.value.trim(); refreshPdfNamingPreview(); drawAll();
+});
+document.getElementById('finalQty').addEventListener('input',e=>{
+  const v=Math.floor(Number(e.target.value)); state.finalQty=v>0?v:0; drawAll();
 });
 document.getElementById('refitArtBtn').addEventListener('click',()=>{
   fitArtToCard('front');fitArtToCard('back');refreshArtInputs();drawAll();
@@ -32345,7 +32362,7 @@ async function saveTemplate(){
       design,designBack,designs,unkept,orderId:state.orderId,pdfNaming:state.pdfNaming,
       // the job, not just the layout: what it is printed on, how big the
       // artwork sits and how far it bleeds all come back with the template
-      artFit:state.artFit,artMode:state.artMode,art:state.art,bleed:state.bleed,
+      artFit:state.artFit,artMode:state.artMode,art:state.art,bleed:state.bleed,finalQty:state.finalQty||0,
       paperType:state.paperType,gsm:state.gsm};
     // The row that was loaded is the row that is written, by id — the same
     // way Load and Delete already work. Saving by name alone wrote to
@@ -32490,6 +32507,7 @@ function applyPrintState(meta,name,whole,keepArt){
   // after, and a snapshot carries none of these.
   if(meta.orderId!==undefined) state.orderId=meta.orderId||'';
   if(meta.pdfNaming!==undefined) setPdfNaming(meta.pdfNaming,true);
+  if(meta.finalQty!==undefined||whole) state.finalQty=meta.finalQty>0?Math.floor(meta.finalQty):0;
   if(meta.artFit!==undefined) setArtFit(meta.artFit,true);
   else if(whole) setArtFit('actual',true);
   // Templates saved before the mode existed say which they meant by what they
@@ -32814,7 +32832,7 @@ async function pcSaveTemplate(){
       showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
       refMark:state.refMark,foldLine:state.foldLine,shift:state.shift,rotate:state.rotate,
       design,designBack,designs,unkept,orderId:state.orderId,pdfNaming:state.pdfNaming,
-      artFit:state.artFit,artMode:state.artMode,art:state.art,bleed:state.bleed,
+      artFit:state.artFit,artMode:state.artMode,art:state.art,bleed:state.bleed,finalQty:state.finalQty||0,
       paperType:state.paperType,gsm:state.gsm};
     const open=pcTemplateById(pcSelectedTemplate);
     const sameRow=open&&open.user_id===session.user.id&&open.name===name;
@@ -42498,6 +42516,7 @@ const HELP=[
   {on:'custom',t:'Screen tune',k:'preview screen brightness warmth colour strength match print',h:'<b>🖨 Print preview</b> → <b>Screen tune</b>: hold a print beside the screen and slide <b>Brightness</b> down till the whites match, <b>Warmth</b> till the white has the paper\'s tint (left cooler, right warmer), then <b>Tint</b> if it stays bluish or yellowish (left greener, right pinker), <b>Colour strength</b> down till colours look as strong. <b>By colour</b>: press a dot (red, yellow, green, teal, blue, pink) and set that family\'s own <b>Strength</b> and <b>Lightness</b> - e.g. green down, pink up; a tuned dot has a ring. Preview only, kept on this computer; <b>Reset</b> undoes it.',sel:'#ppOpenBtn'},
   {on:'custom',t:'Download and print',k:'download print front back pdf fiery',
    h:'Top bar → <b>Download &amp; Print front</b> / <b>back</b>. <b>⚠ to check</b> lists anything to fix first.',sel:'#printFrontBtn'},
+  {on:'custom',t:'Place Card: artwork qty and size',k:'place card single artwork qty quantity how many cards size actual width height words box',h:'<b>Artwork</b> -> Single artwork: type <b>Qty (cards)</b> under the size boxes and the artwork goes on that many cards only, counted on across the sheets (more than a sheet holds adds sheets). Leave it blank for every card. On <b>Actual size</b> the artwork keeps the Width and Height you type, also on cards with a words box added; <b>Placeholder size</b> fills the card and its words box.'},
   {on:'custom',t:'Place Card words',k:'place card words category names list',h:'Place Card: right panel → <b>Words</b> tab - the categories and the names on the cards.',find:'Words'},
   // ---- added in the full check: every control on each screen has an entry
   {on:'sheet',t:'Show All, Festive or Custom designs',k:'die cut kind filter all festive custom',
@@ -56494,7 +56513,7 @@ undoDef('print',{
   snap:()=>({paper:state.paper,layout:state.layout,placeholders:state.placeholders,
     showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
     refMark:state.refMark,foldLine:state.foldLine,bleed:state.bleed,
-    rotate:state.rotate,shift:state.shift,art:state.art,
+    rotate:state.rotate,shift:state.shift,art:state.art,finalQty:state.finalQty||0,
     // the design lines — added, taken off, how many of each
     // held by line and file together: a row swapped to another file keeps its
     // id, and a step back gave it the old file's name with the new one's picture
@@ -68801,7 +68820,7 @@ function mcSnapshot(){
     showCut:state.showCut,cutColor:state.cutColor,foldOverlay:state.foldOverlay,
     refMark:cp(state.refMark),foldLine:cp(state.foldLine),bleed:cp(state.bleed),
     shift:cp(state.shift),rotate:cp(state.rotate),
-    artMode:state.artMode,artFit:state.artFit,art:cp(state.art),
+    artMode:state.artMode,artFit:state.artFit,art:cp(state.art),finalQty:state.finalQty||0,
     design:front&&front.source&&front.source.path
       ?{path:front.source.path,name:front.name||''}:null,
     designs:(state.designs||[]).filter(d=>d.source&&d.source.path).map(d=>
