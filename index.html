@@ -42239,6 +42239,8 @@ function gtNlDressWords(){
   }
   // the gift tag sheet pans with Alt + drag while zoomed in: that is left to it
   const panning=()=>currentScreen==='tool-gift-tag'&&typeof gtZoomOn!=='undefined'&&gtZoomOn;
+  // in Contours, Alt + drag on the sheet copies the placeholders: left to it too
+  const slotCopy=e=>currentScreen==='tool-gift-tag'&&typeof gtSlotEdit!=='undefined'&&gtSlotEdit&&e.target&&e.target.id==='gtCanvas';
   function takeInto(el,rgb){
     if(!el) return;
     const keep=inp; inp=el; [h,s,v]=rgb2hsv(...rgb);
@@ -42246,7 +42248,7 @@ function gtNlDressWords(){
     inp=keep;
   }
   document.addEventListener('pointerdown',async e=>{
-    if(!e.altKey||(inp&&box&&!box.hidden)||panning()) return;
+    if(!e.altKey||(inp&&box&&!box.hidden)||panning()||slotCopy(e)) return;
     const el=fillTarget(); if(!el) return;
     const under=document.elementsFromPoint(e.clientX,e.clientY), cvs=under.find(x=>x.tagName==='CANVAS');
     if(!cvs) return;
@@ -42471,8 +42473,8 @@ const HELP=[
    h:'Right panel → <b>Cut &amp; print</b> → <b>QR code for the cutter</b>: the next number and how far above the dot.',tab:'#gtNl [data-nltab="cut"]',find:'QR code for the cutter'},
   {on:'sheet',t:'Cut file settings (.plt)',k:'plt overcut cut inside thumb drive',
    h:'Right panel → <b>Cut &amp; print</b> → <b>Cut file (.plt)</b>: overcut, <b>Cut inside first</b>, count from the bottom-right dot, <b>💾 Choose thumb drive</b> to save straight to it.',tab:'#gtNl [data-nltab="cut"]',find:'Cut file (.plt)'},
-  {on:'sheet',t:'Pick, copy or delete placeholders',k:'placeholders pick select all invert duplicate delete add',
-   h:'Right panel → <b>Placeholders</b>: <b>Select all</b>, <b>Invert</b>, <b>⧉ Duplicate selected</b>, <b>🗑 Delete selected</b>, <b>+ Add placeholder</b>. In Contours: <b>Ctrl+A</b> picks all, <b>Esc</b> none, <b>Ctrl+D</b> copies, arrows nudge (Shift 2 mm, Alt 0.1 mm).',tab:'#gtNl [data-nltab="slots"]',find:'Select all'},
+  {on:'sheet',t:'Pick, copy or delete placeholders',k:'placeholders pick select all invert duplicate delete add alt drag copy',
+   h:'Right panel → <b>Placeholders</b>: <b>Select all</b>, <b>Invert</b>, <b>⧉ Duplicate selected</b>, <b>🗑 Delete selected</b>, <b>+ Add placeholder</b>. In Contours: <b>Ctrl+A</b> picks all, <b>Esc</b> none, <b>Ctrl+D</b> copies, <b>Alt + drag</b> drags out a copy (as in Illustrator), arrows nudge (Shift 2 mm, Alt 0.1 mm).',tab:'#gtNl [data-nltab="slots"]',find:'Select all'},
   {on:'sheet',t:'Arrange picked placeholders',k:'arrange grid pack by size picked',
    h:'Right panel → <b>Placeholders</b> → <b>Arrange the picked ones</b>: into a grid, or packed by size.',tab:'#gtNl [data-nltab="slots"]',find:'Arrange the picked ones'},
   {on:'sheet',t:'Placeholder size and position',k:'size position resize keep artwork fit corner apply',
@@ -49875,7 +49877,7 @@ function gtSheetDrag(c,side){
         gtDraw();
         return;
       }
-      const s=hitSlot(p);
+      let s=hitSlot(p);
       if(!s){
         if(!e.shiftKey) gtPickOnly(null);
         gtSlotCardSync(); gtSlotScopeSync();
@@ -49895,6 +49897,19 @@ function gtSheetDrag(c,side){
       if(e.shiftKey){ gtPickToggle(s.slot.id); gtSlotCardSync(); gtSlotScopeSync(); gtDraw(); return; }
       if(!gtSelSet.has(s.slot.id)) gtPickOnly(s.slot.id);
       else gtSelSlot=s.slot.id;
+      // Alt-drag (as in Illustrator): the picked ones stay where they are and
+      // copies of them are what moves; let go without moving, no copy is kept
+      let copies=null;
+      if(e.altKey&&!s.corner){
+        const src=gtSheet.slots.filter(x=>gtSelSet.has(x.id));
+        copies=src.map(q=>{ const k={...q,id:gtId('s'),added:true}; if(q.hole) k.hole={...q.hole}; return k; });
+        copies.was=src.map(q=>q.id);
+        gtSheet.slots.push(...copies);
+        gtSelSet.clear(); copies.forEach(k=>gtSelSet.add(k.id));
+        s={...s,slot:copies[src.indexOf(s.slot)]};
+        gtSelSlot=s.slot.id;
+        gtRenderSlots();
+      }
       gtSlotCardSync(); gtSlotScopeSync();
       const group=s.corner?[]:gtSheet.slots.filter(x=>x!==s.slot&&gtSelSet.has(x.id))
         .map(x=>({s:x,x:x.x,y:x.y}));
@@ -49902,7 +49917,7 @@ function gtSheetDrag(c,side){
       const rgroup=s.corner&&document.getElementById('gtSizeTogether').checked
         ?gtSheet.slots.filter(x=>x!==s.slot&&gtSelSet.has(x.id)).map(x=>({s:x,w:x.w,h:x.h})):[];
       const keep=s.corner?[s.slot,...rgroup.map(g=>g.s)].map(q=>({slot:q,w:q.w,h:q.h,s:gtScaleOf(q)})):[];
-      sdrag={slot:s.slot,mode:s.corner?'resize':'move',group,rgroup,keep,
+      sdrag={slot:s.slot,mode:s.corner?'resize':'move',group,rgroup,keep,copies,
              px:p.mx,py:p.my,x:s.slot.x,y:s.slot.y,w:s.slot.w,h:s.slot.h};
       try{ c.setPointerCapture(e.pointerId); }catch(err){}
       gtDraw();
@@ -50038,8 +50053,16 @@ function gtSheetDrag(c,side){
       return;
     }
     if(sdrag){
-      const moved=[sdrag.slot,...(sdrag.group||[]).map(g=>g.s)];
+      const moved=[sdrag.slot,...(sdrag.group||[]).map(g=>g.s)], cp=sdrag.copies;
+      const still=sdrag.slot.x===sdrag.x&&sdrag.slot.y===sdrag.y;
       sdrag=null;
+      if(cp&&still){
+        cp.forEach(q=>{ const i=gtSheet.slots.indexOf(q); if(i>=0) gtSheet.slots.splice(i,1); });
+        gtSelSet.clear(); cp.was.forEach(id=>gtSelSet.add(id));
+        gtSelSlot=cp.was[cp.indexOf(moved[0])]||cp.was[0]||null;
+        gtRenderSlots(); gtSlotCardSync(); gtSlotScopeSync(); gtDraw();
+        return;
+      }
       // on a plain grid a tag let go across a guide is pushed off it
       if(!gtSheet.nestOn&&!gtLayout) gtGuideNudge(moved);
       // on a nested sheet the tags stay where they were put, and the room
@@ -50048,6 +50071,7 @@ function gtSheetDrag(c,side){
       // the numbers on the form catch up with what the sheet was just told,
       // and the placeholder as moved is what gets written to the library
       gtRenderSlots(); gtSlotCardSync(); gtDraw(); gtSaveSoon();
+      if(cp) gtSlotToolMsg('\u2713 '+cp.length+' copied');
       return;
     }
     if(!drag) return;
