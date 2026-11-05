@@ -42240,7 +42240,7 @@ function gtNlDressWords(){
   // the gift tag sheet pans with Alt + drag while zoomed in: that is left to it
   const panning=()=>currentScreen==='tool-gift-tag'&&typeof gtZoomOn!=='undefined'&&gtZoomOn;
   // in Contours, Alt + drag on the sheet copies the placeholders: left to it too
-  const slotCopy=e=>currentScreen==='tool-gift-tag'&&typeof gtSlotEdit!=='undefined'&&gtSlotEdit&&e.target&&e.target.id==='gtCanvas';
+  const slotCopy=e=>currentScreen==='tool-gift-tag'&&e.target&&typeof e.target._altCopy==='function'&&e.target._altCopy(e);
   function takeInto(el,rgb){
     if(!el) return;
     const keep=inp; inp=el; [h,s,v]=rgb2hsv(...rgb);
@@ -45882,7 +45882,7 @@ function gtQueue(lines){
         for(let i=0;i<n;i++) cut.forEach(p=>out.push(gtSetLine(L,p)));
         // and the stickers copied off the sheet with Alt + drag, one more of
         // each (line.pieceMore, by sticker - see gtNestCopyDrop)
-        const more=L===l&&l.pieceMore;
+        const more=L===l&&l.pieceMore&&(!l.pieceMoreOf||l.pieceMoreOf===d.file)&&l.pieceMore;
         if(more) ps.forEach((p,i)=>{ for(let m=Math.floor(Number(more[p.id])||0);m>0;m--) out.push(gtSetLine(L,cut[i])); });
         return;
       }
@@ -45986,13 +45986,18 @@ function gtSetLine(l,p){
   for(const key of Object.keys(x)) if(!(key in l)) delete x[key];
   return Object.assign(x,l,{designId:p.id,setLine:l.id});
 }
+// how many stickers were copied onto the sheet with Alt + drag (gtNestCopyDrop)
+function gtPieceMoreN(l,d){
+  if(!l||!l.pieceMore||(l.pieceMoreOf&&d&&l.pieceMoreOf!==d.file)) return 0;
+  return Object.values(l.pieceMore).reduce((a,v)=>a+Math.max(0,Math.floor(Number(v)||0)),0);
+}
 // the tick on an order line, for a sticker sheet: break it up or keep it whole
 function gtSplitRow(l,d){
   if(!d||!d.cutSheet||!gtIsPdfFile(d.file)) return '';
   const ps=gtLineSplits(l,d)?gtSetPiecesOf(d):null;
   return `<div class="click-row" style="margin:0 0 6px;align-items:center;gap:10px;">
     <label class="click-tog" title="On: every sticker on the sheet is a tag of its own and nests on its own. Off: the sheet is one block, laid out as it is drawn.">
-    <input type="checkbox" data-gtl="split"${gtLineSplits(l,d)?' checked':''}/>Break up into separate stickers${ps&&ps.length?` (${ps.length})`:''}</label></div>`;
+    <input type="checkbox" data-gtl="split"${gtLineSplits(l,d)?' checked':''}/>Break up into separate stickers${ps&&ps.length?` (${ps.length})`:''}${gtPieceMoreN(l,d)?` + ${gtPieceMoreN(l,d)} copied (Alt + drag)`:''}</label></div>`;
 }
 
 // ---------- one order, several shapes ----------
@@ -47654,8 +47659,12 @@ function gtNestCopyDrop(cp){
     const line=gtOrder.find(x=>x.id===(L.setLine||L.id)); if(!line) return;
     if(gtLineSplits(line,gtDesign(line.designId))){
       const pc=gtDesign(L.designId), pid=(pc&&pc.wordsOf)||L.designId;
+      // the copies are of this artwork: replaced, they are not the new one's
+      const dl=gtDesign(line.designId);
+      if(line.pieceMore&&line.pieceMoreOf&&dl&&line.pieceMoreOf!==dl.file) delete line.pieceMore;
       const pm=line.pieceMore||(line.pieceMore={});
       pm[pid]=Math.max(0,Math.floor(Number(pm[pid])||0))+1;
+      if(dl) line.pieceMoreOf=dl.file;
     }else line.qty=Math.max(0,Math.floor(Number(line.qty)||0))+1;
     const b=L.id+'|'+L.designId;
     add.set(b,(add.get(b)||0)+1); put.push({b,slot});
@@ -49845,6 +49854,8 @@ function gtSheetDrag(c,side){
   // pushed about; dragging a tag's own words still moves the words. Which one
   // it is answers itself from what is under the pointer when it goes down.
   c._startPan=e=>startPan(e);
+  // Alt on a placeholder in Contours drags out a copy: the eyedropper leaves it be
+  c._altCopy=e=>{ if(!gtSlotEdit) return false; const q=at(e), s=q&&hitSlot(q); return !!(s&&!s.corner); };
   c._ccHandle=e=>{ const q=at(e); if(!q) return false; const h=hit(q); if(h&&h.corner) return true;
     if(gtSlotEdit){ const s=hitSlot(q); return !!(s&&s.corner); } return false; };
   const startPan=e=>{
@@ -50108,7 +50119,7 @@ function gtSheetDrag(c,side){
         const n=gtNestCopyDrop(cp);
         gtPickOnly(null);
         gtRenderOrder(); gtRenderSlots(); gtSlotCardSync(); gtDraw(); gtSaveSoon(); gtNestSync();
-        gtSlotToolMsg(n?'\u2713 '+n+' more on the order':'A name from a list cannot be copied - add it to the list',!!n);
+        gtSlotToolMsg(n?'\u2713 '+n+' more on the order':'Not copied - an empty place, or a name from a list (add it to the list), has no line to add to',!!n);
         return;
       }
       // on a plain grid a tag let go across a guide is pushed off it
@@ -51455,7 +51466,7 @@ function gtDeletePicked(){
           }
         });
         l.pieceMore=Object.fromEntries(Object.entries(pm).filter(([,v])=>v>0));
-        if(!Object.keys(l.pieceMore).length) delete l.pieceMore;
+        if(!Object.keys(l.pieceMore).length){ delete l.pieceMore; delete l.pieceMoreOf; }
         return;
       }
       const q=Math.floor(Number(l.qty)||0), nq=Math.max(0,q-c); took+=q-nq; l.qty=nq;
