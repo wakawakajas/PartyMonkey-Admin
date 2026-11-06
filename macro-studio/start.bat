@@ -20,6 +20,16 @@ reg add "HKCU\Software\Classes\macrostudio" /ve /d "URL:Macro Studio Protocol" /
 reg add "HKCU\Software\Classes\macrostudio" /v "URL Protocol" /d "" /f >nul 2>&1
 reg add "HKCU\Software\Classes\macrostudio\shell\open\command" /ve /d "\"%~f0\" \"%%1\"" /f >nul 2>&1
 
+rem Lyrics Overlay is a separate program in this same repo. Registering its
+rem lyricsoverlay:// link here too means Pigu's "Start Lyrics Overlay"
+rem button works on every shop PC, even one that has never opened it (its
+rem own launcher sets itself up on that first start).
+if exist "%~dp0..\lyrics-overlay\Start Lyrics Overlay.bat" (
+    reg add "HKCU\Software\Classes\lyricsoverlay" /ve /d "URL:Lyrics Overlay Protocol" /f >nul 2>&1
+    reg add "HKCU\Software\Classes\lyricsoverlay" /v "URL Protocol" /d "" /f >nul 2>&1
+    reg add "HKCU\Software\Classes\lyricsoverlay\shell\open\command" /ve /d "\"%~dp0..\lyrics-overlay\Start Lyrics Overlay.bat\" \"%%1\"" /f >nul 2>&1
+)
+
 rem ---------------------------------------------------------------------
 rem Step 0b: if an agent is already up (this was launched again while one
 rem is already running -- e.g. via the macrostudio:// link), don't spawn a

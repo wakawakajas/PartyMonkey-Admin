@@ -4,6 +4,17 @@ title Lyrics Overlay
 cd /d "%~dp0"
 
 rem ---------------------------------------------------------------------
+rem Register the lyricsoverlay:// link (per-user, no admin needed) so the
+rem "Start Lyrics Overlay" button in Pigu can start this exact install.
+rem Redone every run: %~f0 always points at THIS file, so it stays right
+rem if the folder moves. (Macro Studio's start.bat registers it too, so
+rem the button works on PCs that have never opened the overlay yet.)
+rem ---------------------------------------------------------------------
+reg add "HKCU\Software\Classes\lyricsoverlay" /ve /d "URL:Lyrics Overlay Protocol" /f >nul 2>&1
+reg add "HKCU\Software\Classes\lyricsoverlay" /v "URL Protocol" /d "" /f >nul 2>&1
+reg add "HKCU\Software\Classes\lyricsoverlay\shell\open\command" /ve /d "\"%~f0\" \"%%1\"" /f >nul 2>&1
+
+rem ---------------------------------------------------------------------
 rem Get the newest version from GitHub first, so every PC runs the same
 rem app without anyone sending files around. Only tracked code changes:
 rem settings.json (bar position, sync fixes) is git-ignored and kept.
