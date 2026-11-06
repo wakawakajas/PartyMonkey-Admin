@@ -726,6 +726,13 @@ class Overlay:
     @staticmethod
     def _lyrics_from_media(np):
         """(song title, lyrics) from the YouTube video / Spotify title."""
+        orig = np.get("browser") and ytcc.original_title(np)
+        if orig and lyrics.has_cjk(orig) and not lyrics.has_cjk(np["title"]):
+            # YouTube showed this PC an English translation of a Chinese title: search the real one
+            for title, artist in media.queries(dict(np, title=orig)):
+                lines = lyrics.find_lyrics(title, artist)
+                if lines:
+                    return title, lines
         for title, artist in media.queries(np):
             lines = lyrics.find_lyrics(title, artist)
             if lines:
@@ -797,6 +804,8 @@ class Overlay:
             known = self.scan_known
             words = " ".join(w for _, w in known or [])
             lang = "en" if words and not lyrics.has_cjk(words) else "zh"   # mostly Chinese songs here
+            if lyrics.has_cjk(ytcc.original_title(np) or np["title"]):
+                lang = "zh"                        # Chinese video title: the Chinese row is the lyrics
             # a faster PC Joined to this one reads videos for us: give it a moment to start
             helped = any(p.get("via") == share.NAME and p.get("helps") for p in share.peers())
             p = subprocess.Popen([sys.executable, os.path.join(HERE, "ytvideo.py"), vid, str(np["pos"] or 0), lang]

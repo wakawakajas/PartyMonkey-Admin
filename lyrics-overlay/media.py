@@ -84,9 +84,17 @@ def queries(np):
     if not np["browser"]:                         # Spotify etc: real song + singer
         cands += [(t, artist) for t in _variants(title)]
     else:                                         # YouTube: song name is hidden in the video title
+        # "Singer - Song『a lyric line』【HQ|Lyrics】": singer and song before any bracket
+        head = re.split(r"[『「《【（(\[“\"|｜/]", title)[0].strip(" -|｜:：")
+        if " - " in head:
+            a, t = (x.strip() for x in head.split(" - ", 1))
+            if t and len(t) <= 30:
+                cands.append((t, a))
         for a, b in (("《", "》"), ("「", "」"), ("『", "』"), ("【", "】"), ("“", "”"), ('"', '"')):
             for inner in re.findall(re.escape(a) + r"(.+?)" + re.escape(b), title):
                 inner = inner.strip()
+                if len(inner) > 15 or re.search(r"[，。！？,!?]", inner):
+                    continue                      # a quoted lyric line, not the song name
                 if inner and not JUNK.search(inner):
                     before = title.split(a)[0].strip(" -|｜:：")
                     singer = before if 0 < len(before) <= 20 else ""

@@ -28,7 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, "cache")
 CACHE_VERSION = "video3"
 FORMAT = "134/bv*[height<=360][vcodec^=avc1]/18/bv*[height<=480]/worst"
-CROP = 0.55            # lyrics live in the lower part of the picture: read from 55% down
+CROP = 0.3             # lyrics live in the lower part of the picture (some mid-screen): read from 30% down
 MIN_CONF = 0.75
 BAND = 18              # px (in the 2x crop) a lyric may sit above/below the lyric row
 GIVE_UP_AFTER = 120    # samples without any lyric row -> this video has no lyrics in its picture
@@ -92,6 +92,8 @@ def load_cached(video_id, lang):
         try:
             with open(os.path.join(d, name), encoding="utf-8") as f:
                 data = json.load(f)
+            if data.get("crop", 0.55) != CROP and len(data.get("lines") or []) < 15:
+                continue                               # a poor read of a smaller part of the picture: read again
             if d != CACHE:                             # keep a copy here too
                 save_local(name, data)
             return data
@@ -115,7 +117,7 @@ def save_cached(video_id, lang, data):
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
-            os.rename(tmp, os.path.join(d, name))     # written once, never replaced (NAS caching)
+            os.replace(tmp, os.path.join(d, name))    # new name per version; only a poor old read is replaced
         except OSError:
             try:
                 os.remove(tmp)
@@ -526,7 +528,7 @@ def scan(video_id, start, lang="zh", mode=""):
                                         for x, y, _ in r.read(t - 0.5)):
                         final[i] = (t - 0.5, text)
         out(**({"lines": final, "final": True} if final else {"none": True}))
-        save_cached(video_id, lang, {"lines": final, "vertical": r.vertical, "at": time.time()})
+        save_cached(video_id, lang, {"lines": final, "vertical": r.vertical, "at": time.time(), "crop": CROP})
         out(done=True)
     finally:
         drop_lock(video_id, lang)

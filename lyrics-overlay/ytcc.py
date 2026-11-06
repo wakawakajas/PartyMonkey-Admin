@@ -174,6 +174,14 @@ def is_song(vid):
     return bool(SONG_WORDS.search(title or ""))
 
 
+def original_title(np):
+    """The video's own title when YouTube showed this PC a translated one (e.g. "Miss Him" for
+    "王晴 - 還是錯過他"), else None. Only known once video_id / captions found the video."""
+    vid = _ids.get((np["title"], round(np.get("duration") or 0)))
+    title = _kind.get(vid, (None, ""))[1] if vid else ""
+    return title if title and _norm(title) != _norm(np["title"]) else None
+
+
 def _remember(info):
     if info and info.get("id"):
         _kind[info["id"]] = (info.get("categories") or [], info.get("title") or "")

@@ -209,7 +209,25 @@ def find_lyrics(title, artist):
                 continue
             if len(lines) > 3:
                 return lines
+    if has_cjk(title + artist):                    # traditional characters (還是錯過他) often find nothing:
+        st, sa = to_simplified(title), to_simplified(artist)   # try the simplified ones (还是错过他)
+        if (st, sa) != (title, artist):
+            return find_lyrics(st, sa)
     return None
+
+
+_t2s = None
+
+
+def to_simplified(s):
+    global _t2s
+    try:
+        if _t2s is None:
+            from opencc import OpenCC
+            _t2s = OpenCC("t2s")
+        return _t2s.convert(s)
+    except Exception:
+        return s
 
 
 # ---------- word-by-word timing (karaoke highlight) ----------
