@@ -72,13 +72,20 @@ class Overlay:
         self.size = self.cfg.get("size", 26)
         self.font_main = tkfont.Font(family="Microsoft YaHei UI", size=self.size, weight="bold")
         self.font_small = tkfont.Font(family="Microsoft YaHei UI", size=max(10, self.size // 2))
+        self.font_btn = tkfont.Font(family="Segoe UI", size=9)
         self.canvas = tk.Canvas(self.root, bg=KEY, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
 
         self.srcs = sources()
         names = [s[0] for s in self.srcs]
         saved = self.cfg.get("source") or ""
-        self.source = tk.StringVar(value=saved if (saved in names or saved.startswith("Player:")) else names[0])
+        # no speaker/mic at all (Join and Player modes still work): default to following the player
+        default = names[0] if names else "Player:auto"
+        self.source = tk.StringVar(value=saved if (saved in names or saved.startswith("Player:")) else default)
+        self.no_pos = False            # Player mode: the player doesn't report its position
+        self.follow_fails = 0          # Join: failed polls in a row (one hiccup shouldn't blank the lyrics)
+        self.follow_lrev = None        # Join: which lyrics we already have from the host
+        self.hotkeys = {}
         self.player_title = None       # Player mode: the title we last looked up lyrics for
         self.player_paused = False
         self.player_app = None         # app id of the player we're following
@@ -108,8 +115,17 @@ class Overlay:
         self.canvas.bind("<B1-Motion>", self._drag)
         self.canvas.bind("<ButtonRelease-1>", lambda e: self._save())
         self.canvas.bind("<Button-3>", self._menu)
-        self.canvas.bind("<Double-Button-1>", lambda e: self.listen())
+        self.canvas.bind("<Double-Button-1>", self._double_click)
         self.root.bind("<Escape>", lambda e: self.quit())
+        # one-click sync buttons drawn on the bar (redrawn every frame; the bindings live on the tags)
+        self._btn_clicked = 0.0
+        for tag, fn in (("btn_early", lambda: self._nudge(0.5)), ("btn_sync", self._sync_next),
+                        ("btn_late", lambda: self._nudge(-0.5))):
+            self.canvas.tag_bind(tag, "<Button-1>", lambda e, fn=fn: self._button(fn))
+            self.canvas.tag_bind(tag, "<Enter>", lambda e: self.canvas.config(cursor="hand2"))
+            self.canvas.tag_bind(tag, "<Leave>", lambda e: self.canvas.config(cursor=""))
+        self.flash = ("", 0.0)                 # short note after a sync ("lyrics 0.5s earlier")
+        threading.Thread(target=self._hotkey_loop, daemon=True).start()
 
         self.tick()
         if self.auto.get():
@@ -133,7 +149,7 @@ class Overlay:
         join = tk.Menu(m, tearoff=0)
         join.add_radiobutton(label="Off - use my own listening", value="", variable=self.follow,
                              command=self._follow_changed)
-        ps = share.peers()
+        ps = share.peers(hosts_only=True)    # PCs that are themselves Joined to someone aren't listed
         if ps:
             join.add_separator()
         for p in ps:
@@ -158,9 +174,10 @@ class Overlay:
         m.add_cascade(label="Sound source", menu=src)
         m.add_command(label="Share with colleagues (QR code)…", command=self._share_window)
         m.add_separator()
-        m.add_command(label="▶ Next line starts NOW  (sync)", command=self._sync_next)
-        m.add_command(label="Lyrics earlier  (-0.5s)", command=lambda: self._nudge(0.5))
-        m.add_command(label="Lyrics later  (+0.5s)", command=lambda: self._nudge(-0.5))
+        hk = lambda act: f"   [{self.hotkeys[act]}]" if act in self.hotkeys else ""
+        m.add_command(label="▶ Next line starts NOW  (sync)" + hk("sync"), command=self._sync_next)
+        m.add_command(label="Lyrics earlier  (-0.5s)" + hk("early"), command=lambda: self._nudge(0.5))
+        m.add_command(label="Lyrics later  (+0.5s)" + hk("late"), command=lambda: self._nudge(-0.5))
         m.add_command(label="Reset sync for this song", command=self._reset_shift)
         m.add_command(label="Bigger text", command=lambda: self._resize(+4))
         m.add_command(label="Smaller text", command=lambda: self._resize(-4))
@@ -188,7 +205,10 @@ class Overlay:
         self._publish()
 
     def _nudge(self, s):
+        if not self.lines:
+            return
         self._set_shift(self._shift() - s)
+        self.flash = (f"lyrics {abs(s):g}s {'earlier' if s > 0 else 'later'}", time.time() + 1.5)
 
     def _reset_shift(self):
         self._set_shift(0.0)
@@ -201,6 +221,33 @@ class Overlay:
         nxt = next((t for t, _ in self.lines if t > pos), None)
         if nxt is not None:
             self._set_shift(self._shift() + (pos - nxt))
+            self.flash = ("synced ✓", time.time() + 1.5)
+
+    # ---------- shortcuts: buttons on the bar + keys that work from any app ----------
+    HOTKEYS = (("Ctrl+Alt+←", 0x25, "early"), ("Ctrl+Alt+→", 0x27, "late"), ("Ctrl+Alt+↓", 0x28, "sync"))
+
+    def _button(self, fn):
+        self._btn_clicked = time.time()
+        fn()
+
+    def _double_click(self, e):
+        if time.time() - self._btn_clicked > 0.6:   # fast clicks on a sync button aren't "Listen now"
+            self.listen()
+
+    def _hotkey_loop(self):
+        """Windows-wide hotkeys, so you can sync without leaving YouTube / Spotify."""
+        import ctypes.wintypes as wt
+        user32 = ctypes.windll.user32
+        actions = {"early": lambda: self._nudge(0.5), "late": lambda: self._nudge(-0.5), "sync": self._sync_next}
+        ids = {}
+        for i, (label, vk, act) in enumerate(self.HOTKEYS, start=1):
+            if user32.RegisterHotKey(None, i, 0x0001 | 0x0002 | 0x4000, vk):   # Alt | Ctrl | no auto-repeat
+                ids[i] = act
+                self.hotkeys[act] = label
+        msg = wt.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == 0x0312 and msg.wParam in ids:                     # WM_HOTKEY
+                self.root.after(0, actions[ids[msg.wParam]])
 
     # ---------- join a colleague ----------
     def _follow_changed(self):
@@ -208,17 +255,18 @@ class Overlay:
         self._save()
         self.song, self.lines, self.misses = None, None, 0
         self.status = f"Joining {self.follow.get()}…" if self.follow.get() else "Right-click for menu"
+        self.follow_fails, self.follow_lrev = 0, None
         self.next_follow = 0.0
         self.next_check = 0.0
         self._publish()
 
-    def _follow_worker(self, name):
+    def _follow_worker(self, name, lrev):
         try:
             host = next((p for p in share.peers() if p["name"] == name), None)
             if not host:
                 self.root.after(0, self._follow_apply, name, None, 0.0)
                 return
-            st, off = share.fetch_state(host["url"])
+            st, off = share.fetch_state(host["url"], lrev)
             self.root.after(0, self._follow_apply, name, st, off)
         except Exception:
             self.root.after(0, self._follow_apply, name, None, 0.0)
@@ -228,13 +276,23 @@ class Overlay:
         if self.follow.get() != name:          # switched while we were fetching
             return
         if st is None:
-            self.song, self.lines = None, None
-            self.status = f"Waiting for {name}… (is their app open?)"
-        elif not st.get("title"):
+            self.follow_fails += 1
+            if self.follow_fails >= 3:         # ~6s without an answer, not just one dropped reply
+                self.song, self.lines, self.follow_lrev = None, None, None
+                self.status = f"Waiting for {name}… (is their app open?)"
+                self._publish()
+            return
+        self.follow_fails = 0
+        if not st.get("title"):
             self.song, self.lines = None, None
             self.status = f"{name}: {st.get('status') or 'nothing playing'}"
+            self.follow_lrev = st.get("lrev")
         else:
-            lines = [tuple(x) for x in st["lines"]] or None
+            if "lines" in st:                  # lyrics left out = same as the ones we already have
+                self.follow_lrev = st.get("lrev")
+                lines = [tuple(x) for x in st["lines"]] or None
+            else:
+                lines = self.lines
             if lines != self.lines:
                 self.rough = bool(lines) and lyrics.rough_timing(lines)
             self.song = {"title": st["title"], "artist": st["artist"], "offset": 0.0, "static_lyrics": None}
@@ -245,7 +303,7 @@ class Overlay:
         self._publish()
 
     def _publish(self):
-        share.publish(self.song, self.lines, self.t0, self.status)
+        share.publish(self.song, self.lines, self.t0, self.status, via=self.follow.get() or None)
 
     def _share_window(self):
         win = tk.Toplevel(self.root)
@@ -348,7 +406,8 @@ class Overlay:
                          "offset": 0.0, "static_lyrics": None, "media": np["title"]}
             self.lines, self.rough, self.status = None, False, "Finding lyrics…"
             threading.Thread(target=self._player_lyrics, args=(np,), daemon=True).start()
-        if np["pos"] is not None:
+        self.no_pos = np["pos"] is None and not self.song.get("from_shazam")
+        if np["pos"] is not None and not self.song.get("from_shazam"):
             t0 = read_at - np["pos"] + self._shift()
             if abs(t0 - self.t0) > 0.3 or self.player_paused:   # small wobble ignored, skips/pauses followed
                 self.t0 = t0
@@ -356,14 +415,47 @@ class Overlay:
 
     def _player_lyrics(self, np):
         title, lines = self._lyrics_from_media(np)
-        self.root.after(0, self._player_lyrics_done, np["title"], title, lines)
+        shazam = None
+        if not lines:
+            # the video title didn't lead to lyrics (odd title, cover...): listen to this PC's sound and ask
+            # Shazam for the real song name, then look that up
+            shazam = self._shazam_pc_sound()
+            if shazam:
+                lines = lyrics.find_lyrics(shazam["title"], shazam["artist"])
+                if lines:
+                    title = shazam["title"]
+        self.root.after(0, self._player_lyrics_done, np["title"], title, lines, shazam)
 
-    def _player_lyrics_done(self, media_title, title, lines):
+    def _shazam_pc_sound(self):
+        """Record 8s of this PC's sound and identify it. Returns Shazam's dict (+ 'started') or None."""
+        try:
+            ctypes.windll.ole32.CoInitializeEx(None, 0)
+            spk = sc.default_speaker()
+            dev = sc.get_microphone(spk.name, include_loopback=True)
+            started = time.time()
+            with dev.recorder(samplerate=RATE) as rec:
+                audio = rec.record(numframes=RATE * CLIP_SECONDS)
+            if abs(audio).max() < 0.0003:
+                return None
+            song = lyrics.recognize(lyrics.to_wav_bytes(audio, RATE))
+            if song:
+                song["started"] = started
+            return song
+        except Exception:
+            return None
+
+    def _player_lyrics_done(self, media_title, title, lines, shazam=None):
         if media_title != self.player_title or not self.song:
             return                                 # the video changed while we were searching
         old_shift = self._shift()
         self.song["title"] = title
-        self.t0 += self._shift() - old_shift       # saved sync for this song (key is the title)
+        if shazam and lines and self.no_pos:       # no position from the player: time it from Shazam
+            self.song["artist"] = shazam["artist"]
+            self.song["from_shazam"] = True
+            self.no_pos = False
+            self.t0 = shazam["started"] - shazam["offset"] + self._shift()
+        else:
+            self.t0 += self._shift() - old_shift   # saved sync for this song (key is the title)
         self.lines = lines
         self.rough = bool(lines) and lyrics.rough_timing(lines)
         self.status = "" if lines else "No synced lyrics found"
@@ -372,8 +464,11 @@ class Overlay:
     def listen(self):
         if self.listening or self.follow.get() or self._player_mode():
             return
+        dev = dict(self.srcs).get(self.source.get())
+        if dev is None:
+            self.status = "No speaker or mic found - use Sound source › Follow this PC's player"
+            return
         self.listening = True
-        dev = dict(self.srcs)[self.source.get()]
         self.status = "Listening…"
         threading.Thread(target=self._listen_worker, args=(dev,), daemon=True).start()
 
@@ -463,7 +558,8 @@ class Overlay:
         if self.follow.get():
             if not self.busy_follow and now >= self.next_follow:
                 self.busy_follow, self.next_follow = True, now + 2
-                threading.Thread(target=self._follow_worker, args=(self.follow.get(),), daemon=True).start()
+                threading.Thread(target=self._follow_worker, args=(self.follow.get(), self.follow_lrev),
+                                 daemon=True).start()
         elif self._player_mode():
             if not self.busy_player and now >= self.next_player:
                 self.busy_player, self.next_player = True, now + 1.5
@@ -487,6 +583,20 @@ class Overlay:
                                     justify="center")
         self.canvas.create_text(x, y, text=s, font=font, fill=fill, width=wrap, justify="center")
 
+    def _draw_buttons(self):
+        """Three small pills in the top-left corner. They need a solid background: the see-through
+        parts of the bar let clicks fall through to the window underneath."""
+        c, k = self.canvas, self.k
+        x, y, gap = int(6 * k), int(4 * k), int(4 * k)
+        for tag, label in (("btn_early", "◀ earlier"), ("btn_sync", "next line NOW"), ("btn_late", "later ▶")):
+            t = c.create_text(0, 0, text=label, font=self.font_btn, fill="#ffffff", anchor="nw", tags=tag)
+            x1, y1, x2, y2 = c.bbox(t)
+            w, h = x2 - x1 + int(14 * k), y2 - y1 + int(6 * k)
+            r = c.create_rectangle(x, y, x + w, y + h, fill="#2b2f3a", outline="#5d6675", tags=tag)
+            c.coords(t, x + int(7 * k), y + int(3 * k))
+            c.tag_raise(t, r)
+            x += w + gap
+
     def draw(self):
         c = self.canvas
         c.delete("all")
@@ -500,17 +610,23 @@ class Overlay:
                 top += "   ⚠ rough timing - right-click › sync"
         if self.follow.get():
             top = (top + "   " if top else "") + f"⇢ from {self.follow.get()}"
-        if self.update_ready:
-            top = (top + "   " if top else "") + "⬆ update ready (right-click › Restart)"
-        elif self._player_mode() and self.song and self.player_paused:
+        if self._player_mode() and self.song and self.player_paused:
             top += "   ⏸ paused"
         elif self.listening:
             top = (top + "   " if top else "") + "● listening"
+        if self.update_ready:                    # its own line item, so it never hides paused / listening
+            top = (top + "   " if top else "") + "⬆ update ready (right-click › Restart)"
+        if self.flash[1] > time.time():
+            top = self.flash[0]
         if top:
             self._text(cx, int(14 * self.k), top, self.font_small, "#9fe7ff")
+        if self.lines:
+            self._draw_buttons()
 
         cur, nxt = self.status, ""
-        if self.lines:
+        if self.lines and self.no_pos and self._player_mode():
+            cur = "This player doesn't share its position - try Sound source › PC sound"
+        elif self.lines:
             pos = time.time() - self.t0
             i = -1
             for k, (t, _) in enumerate(self.lines):

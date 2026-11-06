@@ -41,6 +41,11 @@ if not exist ".venv\Scripts\pythonw.exe" (
     echo First run - setting up, this takes a minute...
     call "%~dp0Install on this PC.bat" < nul
 )
+if not exist ".venv\Scripts\pythonw.exe" (
+    rem setup failed (no internet, Python couldn't be installed...) - say so instead of silently doing nothing
+    powershell -NoProfile -Command "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('Lyrics Overlay could not be set up on this PC. Check the internet connection, then double-click \"Install on this PC.bat\" in the lyrics-overlay folder to see what went wrong.', 'Lyrics Overlay') | Out-Null"
+    exit /b 1
+)
 
 rem ---- new libraries needed by an update? install them ----
 fc /b requirements.txt .requirements.installed >nul 2>&1

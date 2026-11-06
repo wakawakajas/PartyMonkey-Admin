@@ -34,10 +34,14 @@ def recognize(wav: bytes):
     # zh-CN gives Chinese song names in Chinese (not "Sunny Day"/pinyin); English songs stay English
     # Shazam often answers "429 too many requests" and its built-in retry then keeps hitting the same
     # wall for minutes. A fresh request usually goes straight through, so: up to 3 fresh tries, 4s each.
+    async def once():
+        async with Shazam(language="zh-CN") as shazam:   # closes its connection even on timeout
+            return await shazam.recognize(wav)
+
     async def ask():
         for _ in range(3):
             try:
-                return await asyncio.wait_for(Shazam(language="zh-CN").recognize(wav), timeout=4)
+                return await asyncio.wait_for(once(), timeout=4)
             except Exception:
                 await asyncio.sleep(0.5)
         return {}
@@ -79,8 +83,17 @@ def parse_lrc(text: str):
             return True
         m = re.match(r"^(.{1,50}?)\s*[:：]", w)      # "大提琴独奏 Cello Solo：张平" -> look at the part before ：
         return bool(m and CREDIT_WORDS.search(m.group(1)))
-    return [(t, w) for t, w in lines
+    kept = [(t, w) for t, w in lines
             if w and not is_credit(w) and not (t < 25 and early.match(w)) and not notice.search(w)]
+    # two-language files put "你好" and "Hello" at the same moment: show them together, not just the last
+    merged = []
+    for t, w in kept:
+        if merged and abs(merged[-1][0] - t) < 0.01:
+            if w != merged[-1][1]:
+                merged[-1] = (merged[-1][0], merged[-1][1] + "  /  " + w)
+        else:
+            merged.append((t, w))
+    return merged
 
 
 CREDIT_WORDS = re.compile(

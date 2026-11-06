@@ -3,6 +3,7 @@
 The overlay calls publish(); colleagues open http://<this-pc>:8765 and see the same song + lyrics in sync.
 """
 import json
+import re
 import socket
 import threading
 import time
@@ -13,16 +14,22 @@ PORT = 8765
 BEACON_PORT = 8766            # every running app announces itself here so others can Join it
 NAME = socket.gethostname()
 ID = uuid.uuid4().hex            # tells this copy of the app apart from others (even on the same PC)
-_state = {"title": "", "artist": "", "lines": [], "t0": None, "status": "Waiting for a song…", "rev": 0}
+# rev changes on any change; lrev only when the song or its lyrics change (so pollers can skip the lyrics)
+_state = {"title": "", "artist": "", "lines": [], "t0": None, "status": "Waiting for a song…", "via": None,
+          "rev": 0, "lrev": 0}
 _lock = threading.Lock()
-_peers = {}                   # url -> {"name", "url", "title", "artist", "seen"}
+_peers = {}                   # url -> {"name", "url", "title", "artist", "via", "seen"}
 _my_url = None
+URL_OK = re.compile(r"^http://\d{1,3}(\.\d{1,3}){3}:\d{1,5}$")   # beacons come from the open network: check them
 
 
-def publish(song, lines, t0, status):
+def publish(song, lines, t0, status, via=None):
+    """via = the PC we're Joined to (we only pass its song on), None if this PC finds songs itself."""
     with _lock:
         new = {"title": song["title"] if song else "", "artist": song["artist"] if song else "",
-               "lines": lines or [], "t0": t0 if song else None, "status": status}
+               "lines": [list(x) for x in lines or []], "t0": t0 if song else None, "status": status, "via": via}
+        if any(new[k] != _state[k] for k in ("title", "artist", "lines")):
+            _state["lrev"] += 1
         if any(new[k] != _state[k] for k in new):
             _state.update(new)
             _state["rev"] += 1
@@ -49,7 +56,7 @@ def _beacon_loop():
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     while True:
         with _lock:
-            msg = {"app": "lyrics-overlay", "id": ID, "name": NAME, "url": url(),
+            msg = {"app": "lyrics-overlay", "id": ID, "name": NAME, "url": url(), "via": _state["via"],
                    "title": _state["title"], "artist": _state["artist"], "has": bool(_state["lines"])}
         try:
             s.sendto(json.dumps(msg, ensure_ascii=False).encode("utf-8"), ("255.255.255.255", BEACON_PORT))
@@ -69,26 +76,36 @@ def _listen_loop():
         try:
             data, _ = s.recvfrom(4096)
             m = json.loads(data.decode("utf-8"))
-            if m.get("app") == "lyrics-overlay" and m.get("id") != ID:
-                with _lock:
-                    _peers[m["url"]] = {**m, "seen": time.time()}
+            if m.get("app") != "lyrics-overlay" or m.get("id") == ID:
+                continue
+            url_ = str(m.get("url", ""))
+            if not URL_OK.match(url_):           # only plain http://<ip>:<port> addresses
+                continue
+            clean = {"id": str(m.get("id", ""))[:64], "url": url_, "name": str(m.get("name", "?"))[:64],
+                     "title": str(m.get("title") or "")[:200], "artist": str(m.get("artist") or "")[:200],
+                     "via": (str(m["via"])[:64] if m.get("via") else None), "seen": time.time()}
+            with _lock:
+                _peers[url_] = clean
         except Exception:
             pass
 
 
-def peers():
-    """Other PCs running the app, seen in the last 8 seconds. Ones playing a song come first."""
+def peers(hosts_only=False):
+    """Other PCs running the app, seen in the last 8 seconds. Ones playing a song come first.
+    hosts_only: leave out PCs that are themselves Joined to someone (they only pass a song on)."""
     now = time.time()
     with _lock:
-        live = [p for p in _peers.values() if now - p["seen"] < 8]
+        live = [p for p in _peers.values() if now - p["seen"] < 8 and not (hosts_only and p.get("via"))]
     return sorted(live, key=lambda p: (not p.get("title"), p["name"]))
 
 
-def fetch_state(host_url):
-    """Read another PC's current song. Returns (state, clock_offset) where offset = their clock - ours."""
+def fetch_state(host_url, lrev=None):
+    """Read another PC's current song. Returns (state, clock_offset) where offset = their clock - ours.
+    With the lrev we already have, the reply leaves the lyrics out if they haven't changed."""
     import urllib.request
     t1 = time.time()
-    with urllib.request.urlopen(host_url + "/state", timeout=3) as r:
+    q = f"?lrev={lrev}" if lrev is not None else ""
+    with urllib.request.urlopen(host_url + "/state" + q, timeout=3) as r:
         st = json.loads(r.read().decode("utf-8"))
     return st, st["now"] - (t1 + time.time()) / 2
 
@@ -115,17 +132,18 @@ footer a{display:inline-block;margin:4px 8px 4px 0;padding:6px 10px;border-radiu
 <div id="wrap"><div id="list"></div><div id="msg"></div></div>
 <footer id="peers"></footer>
 <script>
-let st=null, rev=-1, offset=0, cur=-1;
+let st=null, lrev=-1, offset=0, cur=-1;
 const list=document.getElementById('list'), msg=document.getElementById('msg');
 async function poll(){
   try{
-    const t=Date.now()/1000, r=await fetch('/state?rev='+rev,{cache:'no-store'}), j=await r.json();
+    const t=Date.now()/1000, r=await fetch('/state?lrev='+lrev,{cache:'no-store'}), j=await r.json();
     offset=j.now-(t+Date.now()/1000)/2;               // server clock minus ours
-    if(j.rev!==rev){rev=j.rev; st=j; render();}
+    if(j.lrev!==lrev || !st){lrev=j.lrev; st=j; render();}   // new song / lyrics: rebuild the list
+    else {st.t0=j.t0; st.status=j.status; if(!st.lines.length) msg.textContent=st.status||'';}  // timing only
   }catch(e){}
   setTimeout(poll,2000);
 }
-function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function render(){
   document.getElementById('song').innerHTML = st.title ? '<b>'+esc(st.title)+'</b> — '+esc(st.artist) : '<b>Nothing playing</b>';
   cur=-1;
@@ -148,7 +166,8 @@ function tick(){
 }
 async function peers(){
   try{
-    const ps=await (await fetch('/peers',{cache:'no-store'})).json(), f=document.getElementById('peers');
+    const ps=(await (await fetch('/peers',{cache:'no-store'})).json()).filter(p=>/^http:\/\/[\d.]+:\d+$/.test(p.url)),
+          f=document.getElementById('peers');
     f.style.display = ps.length ? 'block' : 'none';
     f.innerHTML = 'Other PCs: ' + ps.map(p=>'<a href="'+esc(p.url)+'">'+esc(p.name)+
       (p.title ? ' — ♪ '+esc(p.title) : ' — idle')+'</a>').join('');
@@ -162,11 +181,15 @@ poll(); tick(); peers();
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/state"):
+            m = re.search(r"[?&]lrev=(-?\d+)", self.path)
             with _lock:
-                body = json.dumps({**_state, "now": time.time()}, ensure_ascii=False).encode("utf-8")
+                reply = {**_state, "now": time.time()}
+                if m and int(m.group(1)) == _state["lrev"]:
+                    del reply["lines"]               # they already have these lyrics: send timing only
+                body = json.dumps(reply, ensure_ascii=False).encode("utf-8")
             ctype = "application/json; charset=utf-8"
         elif self.path.startswith("/peers"):
-            body = json.dumps([{k: p[k] for k in ("name", "url", "title", "artist")} for p in peers()],
+            body = json.dumps([{k: p[k] for k in ("name", "url", "title", "artist")} for p in peers(True)],
                               ensure_ascii=False).encode("utf-8")
             ctype = "application/json; charset=utf-8"
         elif self.path in ("/", "/index.html"):
