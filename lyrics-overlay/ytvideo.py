@@ -122,7 +122,9 @@ def group(samples, row):
         texts = [x for x, _ in seen]
         # the version read most often; ties -> longest (lines that build up word by word) then surest
         text = max(seen, key=lambda s: (texts.count(s[0]), len(s[0]), s[1]))[0]
-        out_lines.append((start, text))
+        text = text.strip(" \"'“”‘’「」?？.。,，")   # decorative quote marks around the line
+        if text:
+            out_lines.append((start, text))
     return out_lines
 
 
