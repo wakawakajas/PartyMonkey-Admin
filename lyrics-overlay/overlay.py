@@ -84,6 +84,9 @@ class Overlay:
         self.root.attributes("-topmost", True)
         self.root.config(bg=KEY)
         self.root.attributes("-transparentcolor", KEY)
+        self.pinyin = tk.BooleanVar(value=self.cfg.get("pinyin", True))
+        self.karaoke = tk.BooleanVar(value=self.cfg.get("karaoke", True))
+        self._apply_layout()
         self.k = max(1.0, self.root.winfo_fpixels("1i") / 96)   # display scaling (2.0 at 200%)
         w = int(1000 * self.k)
         h = int(self.cfg.get("size", 26) * self.HEIGHT_PER_PT * self.k)   # room for the sync buttons row
@@ -98,6 +101,9 @@ class Overlay:
         self.size = self.cfg.get("size", 26)
         self.font_main = tkfont.Font(family="Microsoft YaHei UI", size=self.size, weight="bold")
         self.font_small = tkfont.Font(family="Microsoft YaHei UI", size=max(10, self.size // 2))
+        self.font_next = tkfont.Font(family="Microsoft YaHei UI", size=max(11, round(self.size * 0.62)))
+        self.font_pin = tkfont.Font(family="Microsoft YaHei UI", size=max(9, round(self.size * 0.42)))
+        self.pin_cache = {}
         self.font_btn = tkfont.Font(family="Segoe UI", size=9)
         self.canvas = tk.Canvas(self.root, bg=KEY, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
@@ -180,7 +186,8 @@ class Overlay:
 
     def _save(self):
         self.cfg.update(pos=(self.root.winfo_x(), self.root.winfo_y()), size=self.size,
-                        source=self.source.get(), auto=self.auto.get(), read_ahead=self.read_ahead.get())
+                        source=self.source.get(), auto=self.auto.get(), read_ahead=self.read_ahead.get(),
+                        pinyin=self.pinyin.get(), karaoke=self.karaoke.get())
         with open(SETTINGS, "w", encoding="utf-8") as f:
             json.dump(self.cfg, f, ensure_ascii=False)
 
@@ -228,6 +235,10 @@ class Overlay:
                       state="normal" if self.song and self.lines else "disabled")
         m.add_checkbutton(label="Read videos ahead for the team  (uses this PC's spare power)",
                           variable=self.read_ahead, command=self._save)
+        m.add_checkbutton(label="Show pinyin", variable=self.pinyin, command=self._toggle_pinyin)
+        m.add_checkbutton(label="Karaoke highlight  (" + ("this song has it" if self.words else
+                          "not for this song - no word timing found") + ")", variable=self.karaoke,
+                          command=self._save)
         m.add_command(label="Bigger text", command=lambda: self._resize(+4))
         m.add_command(label="Smaller text", command=lambda: self._resize(-4))
         m.add_separator()
@@ -409,6 +420,17 @@ class Overlay:
         self.size = max(12, min(60, self.size + d))
         self.font_main.config(size=self.size)
         self.font_small.config(size=max(10, self.size // 2))
+        self.font_next.config(size=max(11, round(self.size * 0.62)))
+        self.font_pin.config(size=max(9, round(self.size * 0.42)))
+        self.root.geometry(f"{self.root.winfo_width()}x{int(self.size * self.HEIGHT_PER_PT * self.k)}")
+        self._save()
+
+    def _apply_layout(self):
+        """Where each row sits (parts of the bar's height) and how tall the bar is, with/without pinyin."""
+        self.LYRIC_Y, self.PIN_Y, self.NEXT_Y, self.HEIGHT_PER_PT = self.LAYOUTS[bool(self.pinyin.get())]
+
+    def _toggle_pinyin(self):
+        self._apply_layout()
         self.root.geometry(f"{self.root.winfo_width()}x{int(self.size * self.HEIGHT_PER_PT * self.k)}")
         self._save()
 
@@ -724,6 +746,9 @@ class Overlay:
             return
         if not vid:
             diag["scan"] = "video not found on YouTube: " + np["title"][:40]
+            return
+        if not ytcc.is_song(vid):
+            diag["scan"] = f"{vid}: not a music video (ad?) - not read"
             return
         err_path = os.path.join(tempfile.gettempdir(), "lyrics-overlay-video.log")
         try:
@@ -1077,29 +1102,59 @@ class Overlay:
         self.draw()
         self.root.after(100, self.tick)
 
-    def _text_sung(self, x, y, s, sung):
+    def _text_sung(self, x, y, s, sung, font=None, cut=None, rest="#ffffff"):
         """Karaoke: the sung part of the line in gold, the rest white. False if the line is too long
-        for one row (then it's drawn the normal way)."""
-        font = self.font_main
+        for one row (then it's drawn the normal way). `sung` counts letters/characters (not spaces or
+        punctuation); or give `cut`, the position in `s` where the gold ends."""
+        font = font or self.font_main
         width = font.measure(s)
         if width > self.canvas.winfo_width() - int(40 * self.k):
             return False
-        n, cut = 0, len(s)                       # `sung` counts letters/characters, not spaces/punctuation
-        for k, ch in enumerate(s):
-            if n >= sung:
-                cut = k
-                break
-            if lyrics._plain(ch):
-                n += 1
+        if cut is None:
+            n, cut = 0, len(s)
+            for k, ch in enumerate(s):
+                if n >= sung:
+                    cut = k
+                    break
+                if lyrics._plain(ch):
+                    n += 1
         left = x - width / 2
         o = max(2, round(2 * self.k))
-        for part, px, fill in ((s[:cut], left, "#ffd34d"), (s[cut:], left + font.measure(s[:cut]), "#ffffff")):
+        for part, px, fill in ((s[:cut], left, "#ffd34d"), (s[cut:], left + font.measure(s[:cut]), rest)):
             if not part:
                 continue
             for dx, dy in ((-o, 0), (o, 0), (0, -o), (0, o), (-o, -o), (o, o), (-o, o), (o, -o)):
                 self.canvas.create_text(px + dx, y + dy, text=part, font=font, fill="#111111", anchor="w")
             self.canvas.create_text(px, y, text=part, font=font, fill=fill, anchor="w")
         return True
+
+    def _pinyin(self, line):
+        """(pinyin text, [(end position in that text, characters it covers)]) for a Chinese line.
+        English words and numbers stay as they are."""
+        if line not in self.pin_cache:
+            segs = re.findall(r"[一-鿿]|[^\W\d_一-鿿]+|\d+", line)
+            hans = [g for g in segs if "一" <= g[0] <= "鿿"]
+            try:
+                from pypinyin import lazy_pinyin, Style
+                py = lazy_pinyin("".join(hans), style=Style.TONE)   # whole line: better for 多音字
+            except Exception:
+                py = []
+            if len(py) != len(hans):
+                py = []
+            text, marks, k = "", [], 0
+            for g in segs:
+                if "一" <= g[0] <= "鿿":
+                    if not py:
+                        continue
+                    tok, k = py[k], k + 1
+                else:
+                    tok = g
+                text = (text + " " + tok) if text else tok
+                marks.append((len(text), len(g)))
+            if len(self.pin_cache) > 300:
+                self.pin_cache.clear()
+            self.pin_cache[line] = (text if py else "", marks)
+        return self.pin_cache[line]
 
     def _text(self, x, y, s, font, fill):
         wrap = max(200, self.canvas.winfo_width() - int(40 * self.k))
@@ -1110,8 +1165,10 @@ class Overlay:
         self.canvas.create_text(x, y, text=s, font=font, fill=fill, width=wrap, justify="center")
 
     # layout, as parts of the bar's height: song name on top, sync buttons, lyric line, next line
-    BTN_Y, LYRIC_Y, NEXT_Y = 0.17, 0.57, 0.87
+    BTN_Y, LYRIC_Y, PIN_Y, NEXT_Y = 0.17, 0.57, None, 0.87
     HEIGHT_PER_PT = 7.1                       # bar height = text size x this (x display scaling)
+    LAYOUTS = {False: (0.57, None, 0.88, 7.4),     # lyric row, pinyin row, next line, height per pt
+               True: (0.47, 0.665, 0.88, 8.8)}
 
     def _draw_buttons(self):
         """Three small pills in a row right above the lyric line. They need a solid background: the
@@ -1188,14 +1245,25 @@ class Overlay:
         elif self.song and self.song.get("static_lyrics") and not self.status:
             cur = "(lyrics not synced)"
         sung = None
-        if self.lines and i >= 0 and cur == self.lines[i][1] and self.words:
+        if self.lines and i >= 0 and cur == self.lines[i][1] and self.words and self.karaoke.get():
             ws = self.words.get(lyrics._plain(cur))
             if ws:
                 sung = lyrics.sung_chars(ws, pos - self.lines[i][0])
         if sung is None or not self._text_sung(cx, h * self.LYRIC_Y, cur, sung):
             self._text(cx, h * self.LYRIC_Y, cur, self.font_main, "#ffffff")
+        if self.pinyin.get() and self.PIN_Y and lyrics.has_cjk(cur) and "♪" not in cur:
+            pin, marks = self._pinyin(cur)
+            if pin:
+                cut, n = 0, 0
+                for end, chars in marks:          # gold up to the last syllable already sung
+                    if sung is None or n + chars > sung:
+                        break
+                    n += chars
+                    cut = end
+                if sung is None or not self._text_sung(cx, h * self.PIN_Y, pin, 0, self.font_pin, cut, "#e8e8e8"):
+                    self._text(cx, h * self.PIN_Y, pin, self.font_pin, "#e8e8e8")
         if nxt:
-            self._text(cx, h * self.NEXT_Y, nxt, self.font_small, "#cccccc")
+            self._text(cx, h * self.NEXT_Y, nxt, self.font_next, "#d6d6d6")
 
 
 if __name__ == "__main__":

@@ -160,6 +160,23 @@ def retime(lines, sub):
 
 _cache = {}
 _ids = {}
+_kind = {}          # video id -> (YouTube categories, title): to tell songs from ads
+SONG_WORDS = re.compile(r"《|》|歌|曲|唱|音乐|音樂|MV|DJ|remix|cover|lyric|song|music|karaoke|ktv|歌詞|歌词", re.I)
+
+
+def is_song(vid):
+    """False for videos that are clearly not music (YouTube ads are other categories: news, autos...)."""
+    cats, title = _kind.get(vid, (None, ""))
+    if cats is None:
+        return True                                   # unknown: give it the benefit of the doubt
+    if any(c in ("Music", "Entertainment") for c in cats):
+        return True
+    return bool(SONG_WORDS.search(title or ""))
+
+
+def _remember(info):
+    if info and info.get("id"):
+        _kind[info["id"]] = (info.get("categories") or [], info.get("title") or "")
 
 
 def video_id(np):
@@ -173,6 +190,7 @@ def video_id(np):
         except Exception:
             return None
         _ids[key] = info and info.get("id")
+        _remember(info)
     return _ids[key]
 
 
@@ -186,6 +204,7 @@ def captions(np):
         try:
             info = find_video(np["title"], np.get("duration") or 0, np.get("artist") or "")
             _ids[key] = info and info.get("id")
+            _remember(info)
             _cache[key] = captions_for(info) if info else (None, False)
         except Exception:
             return None, False                       # network hiccup: try again next time
