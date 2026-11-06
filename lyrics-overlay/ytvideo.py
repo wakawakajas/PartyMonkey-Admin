@@ -28,7 +28,8 @@ GIVE_UP_AFTER = 120    # samples without any lyric row -> this video has no lyri
 
 
 def out(**d):
-    print(json.dumps(d, ensure_ascii=False), flush=True)
+    # plain ASCII (\u escapes): the pipe to the app may use an old Windows code page that has no Chinese
+    print(json.dumps(d, ensure_ascii=True), flush=True)
 
 
 def similar(a, b):
