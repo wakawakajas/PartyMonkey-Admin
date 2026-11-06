@@ -1,0 +1,531 @@
+"""Lyrics Overlay - listens to PC sound or a mic, finds the song, shows synced lyrics on top of everything.
+
+Right-click the bar for: sound source, Listen now, Auto, text size, quit. Drag to move.
+"""
+import ctypes
+import json
+import os
+
+try:  # real pixel coordinates on scaled (125%/150%) displays, so the bar lands where expected
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    pass
+import threading
+import time
+import tkinter as tk
+import tkinter.font as tkfont
+import warnings
+
+import soundcard as sc
+
+import lyrics
+import media
+import share
+
+warnings.filterwarnings("ignore", category=sc.SoundcardRuntimeWarning)
+
+RATE = 44100
+CLIP_SECONDS = 8
+RECHECK_SECONDS = 40          # auto mode: re-listen this often to catch song changes / resync
+HERE = os.path.dirname(os.path.abspath(__file__))
+SETTINGS = os.path.join(HERE, "settings.json")
+KEY = "#010101"               # transparent colour
+
+
+def load_settings():
+    try:
+        with open(SETTINGS, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def sources():
+    """[(label, device)] - PC sound (loopback of each speaker) first, then microphones."""
+    out = []
+    for m in sc.all_microphones(include_loopback=True):
+        label = ("PC sound: " if m.isloopback else "Mic: ") + m.name
+        out.append((label, m))
+    out.sort(key=lambda x: not x[0].startswith("PC"))
+    return out
+
+
+class Overlay:
+    def __init__(self):
+        self.cfg = load_settings()
+        self.root = tk.Tk()
+        self.root.title("Lyrics Overlay")
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.root.config(bg=KEY)
+        self.root.attributes("-transparentcolor", KEY)
+        self.k = max(1.0, self.root.winfo_fpixels("1i") / 96)   # display scaling (2.0 at 200%)
+        w, h = int(1000 * self.k), int(150 * self.k)
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        x, y = self.cfg.get("pos", ((sw - w) // 2, sh - h - int(80 * self.k)))
+        vx, vy = self.root.winfo_vrootx(), self.root.winfo_vrooty()
+        vw, vh = max(sw, self.root.winfo_vrootwidth()), max(sh, self.root.winfo_vrootheight())
+        if not (vx - w // 2 <= x <= vx + vw - w // 2 and vy <= y <= vy + vh - 40):
+            x, y = (sw - w) // 2, sh - h - int(80 * self.k)   # saved spot is off-screen: reset to bottom-centre
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+        self.size = self.cfg.get("size", 26)
+        self.font_main = tkfont.Font(family="Microsoft YaHei UI", size=self.size, weight="bold")
+        self.font_small = tkfont.Font(family="Microsoft YaHei UI", size=max(10, self.size // 2))
+        self.canvas = tk.Canvas(self.root, bg=KEY, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+
+        self.srcs = sources()
+        names = [s[0] for s in self.srcs]
+        saved = self.cfg.get("source") or ""
+        self.source = tk.StringVar(value=saved if (saved in names or saved.startswith("Player:")) else names[0])
+        self.player_title = None       # Player mode: the title we last looked up lyrics for
+        self.player_paused = False
+        self.player_app = None         # app id of the player we're following
+        self.busy_player = False
+        self.next_player = 0.0
+        self.auto = tk.BooleanVar(value=self.cfg.get("auto", True))
+
+        self.song = None              # dict from lyrics.recognize
+        self.lines = None             # [(t, text)]
+        self.t0 = 0.0                 # wall-clock time when song position was 0
+        self.rough = False            # lyric file timestamps look guessed
+        self.status = "Right-click for menu"
+        self.listening = False
+        self.next_check = 0.0
+        self.share_url = share.start()   # live lyrics page for colleagues on the office network
+        self.update_ready = False
+        threading.Thread(target=self._update_loop, daemon=True).start()
+        self.follow = tk.StringVar(value=self.cfg.get("follow") or "")   # PC name we Join, "" = listen myself
+        self.misses = 0                  # failed recognitions in a row
+        self.last_media = None           # title Windows says is playing (to spot song changes)
+        self.next_media_check = 0.0
+        self.next_follow = 0.0
+        self.busy_media = False
+        self.busy_follow = False
+
+        self.canvas.bind("<ButtonPress-1>", self._drag_start)
+        self.canvas.bind("<B1-Motion>", self._drag)
+        self.canvas.bind("<ButtonRelease-1>", lambda e: self._save())
+        self.canvas.bind("<Button-3>", self._menu)
+        self.canvas.bind("<Double-Button-1>", lambda e: self.listen())
+        self.root.bind("<Escape>", lambda e: self.quit())
+
+        self.tick()
+        if self.auto.get():
+            self.listen()
+
+    # ---------- window ----------
+    def _drag_start(self, e):
+        self._dx, self._dy = e.x, e.y
+
+    def _drag(self, e):
+        self.root.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
+
+    def _save(self):
+        self.cfg.update(pos=(self.root.winfo_x(), self.root.winfo_y()), size=self.size,
+                        source=self.source.get(), auto=self.auto.get())
+        with open(SETTINGS, "w", encoding="utf-8") as f:
+            json.dump(self.cfg, f, ensure_ascii=False)
+
+    def _menu(self, e):
+        m = tk.Menu(self.root, tearoff=0)
+        join = tk.Menu(m, tearoff=0)
+        join.add_radiobutton(label="Off - use my own listening", value="", variable=self.follow,
+                             command=self._follow_changed)
+        ps = share.peers()
+        if ps:
+            join.add_separator()
+        for p in ps:
+            label = f"{p['name']}  —  " + (f"♪ {p['title']}" if p.get("title") else "nothing playing")
+            join.add_radiobutton(label=label, value=p["name"], variable=self.follow, command=self._follow_changed)
+        if not ps:
+            join.add_command(label="(no other PCs found yet - is their app open?)", state="disabled")
+        m.add_cascade(label="Join a colleague's lyrics", menu=join)
+        m.add_separator()
+        m.add_command(label="Listen now  (double-click)", command=self.listen)
+        m.add_checkbutton(label="Auto (keep listening)", variable=self.auto, command=self._save)
+        src = tk.Menu(m, tearoff=0)
+        src.add_radiobutton(label="Follow this PC's player - auto (YouTube / Spotify, no listening)",
+                            value="Player:auto", variable=self.source, command=self._source_changed)
+        for s in media.sessions():
+            label = f"Follow {s['name']}  —  {s['title'][:45]}" + ("" if s["playing"] else "  (paused)")
+            src.add_radiobutton(label=label, value="Player:" + s["app"], variable=self.source,
+                                command=self._source_changed)
+        src.add_separator()
+        for label, _ in self.srcs:
+            src.add_radiobutton(label=label, value=label, variable=self.source, command=self._source_changed)
+        m.add_cascade(label="Sound source", menu=src)
+        m.add_command(label="Share with colleagues (QR code)…", command=self._share_window)
+        m.add_separator()
+        m.add_command(label="▶ Next line starts NOW  (sync)", command=self._sync_next)
+        m.add_command(label="Lyrics earlier  (-0.5s)", command=lambda: self._nudge(0.5))
+        m.add_command(label="Lyrics later  (+0.5s)", command=lambda: self._nudge(-0.5))
+        m.add_command(label="Reset sync for this song", command=self._reset_shift)
+        m.add_command(label="Bigger text", command=lambda: self._resize(+4))
+        m.add_command(label="Smaller text", command=lambda: self._resize(-4))
+        m.add_separator()
+        m.add_command(label="⬆ Restart to update  (new version ready)" if self.update_ready
+                      else "Restart  (gets the newest version)", command=self.restart)
+        m.add_command(label="Quit", command=self.quit)
+        m.tk_popup(e.x_root, e.y_root)
+
+    # ---------- sync (remembered per song, so badly timed lyric files only need fixing once) ----------
+    def _song_key(self):
+        return f"{self.song['title']}|{self.song['artist']}" if self.song else None
+
+    def _shift(self):
+        return self.cfg.get("shifts", {}).get(self._song_key(), 0.0)
+
+    def _set_shift(self, value):
+        key = self._song_key()
+        if not key:
+            return
+        old = self._shift()
+        self.cfg.setdefault("shifts", {})[key] = round(value, 2)
+        self.t0 += value - old
+        self._save()
+        self._publish()
+
+    def _nudge(self, s):
+        self._set_shift(self._shift() - s)
+
+    def _reset_shift(self):
+        self._set_shift(0.0)
+
+    def _sync_next(self):
+        """The line shown underneath is being sung right now -> line up the lyrics to it."""
+        if not self.lines:
+            return
+        pos = time.time() - self.t0
+        nxt = next((t for t, _ in self.lines if t > pos), None)
+        if nxt is not None:
+            self._set_shift(self._shift() + (pos - nxt))
+
+    # ---------- join a colleague ----------
+    def _follow_changed(self):
+        self.cfg["follow"] = self.follow.get()
+        self._save()
+        self.song, self.lines, self.misses = None, None, 0
+        self.status = f"Joining {self.follow.get()}…" if self.follow.get() else "Right-click for menu"
+        self.next_follow = 0.0
+        self.next_check = 0.0
+        self._publish()
+
+    def _follow_worker(self, name):
+        try:
+            host = next((p for p in share.peers() if p["name"] == name), None)
+            if not host:
+                self.root.after(0, self._follow_apply, name, None, 0.0)
+                return
+            st, off = share.fetch_state(host["url"])
+            self.root.after(0, self._follow_apply, name, st, off)
+        except Exception:
+            self.root.after(0, self._follow_apply, name, None, 0.0)
+
+    def _follow_apply(self, name, st, off):
+        self.busy_follow = False
+        if self.follow.get() != name:          # switched while we were fetching
+            return
+        if st is None:
+            self.song, self.lines = None, None
+            self.status = f"Waiting for {name}… (is their app open?)"
+        elif not st.get("title"):
+            self.song, self.lines = None, None
+            self.status = f"{name}: {st.get('status') or 'nothing playing'}"
+        else:
+            lines = [tuple(x) for x in st["lines"]] or None
+            if lines != self.lines:
+                self.rough = bool(lines) and lyrics.rough_timing(lines)
+            self.song = {"title": st["title"], "artist": st["artist"], "offset": 0.0, "static_lyrics": None}
+            self.lines = lines
+            if st.get("t0"):
+                self.t0 = st["t0"] - off + self._shift()
+            self.status = "" if lines else (st.get("status") or "No synced lyrics found")
+        self._publish()
+
+    def _publish(self):
+        share.publish(self.song, self.lines, self.t0, self.status)
+
+    def _share_window(self):
+        win = tk.Toplevel(self.root)
+        win.title("Share lyrics")
+        win.attributes("-topmost", True)
+        win.configure(bg="white", padx=20, pady=16)
+        if not self.share_url:
+            tk.Label(win, text=f"Sharing is off: port {share.PORT} is already in use.\n"
+                               "Close any other Lyrics Overlay and restart.", bg="white").pack()
+            return
+        tk.Label(win, text="Colleagues: scan with your phone camera\n(must be on the office Wi-Fi)",
+                 bg="white", font=("Segoe UI", 11)).pack()
+        path = os.path.join(os.environ.get("TEMP", "."), "lyrics_share_qr.png")
+        win.qr = tk.PhotoImage(file=share.qr_png(self.share_url, path))
+        if self.k > 1.4:
+            win.qr = win.qr.zoom(2)
+        tk.Label(win, image=win.qr, bg="white").pack(pady=8)
+        e = tk.Entry(win, font=("Segoe UI", 13), justify="center", relief="flat", bg="#f1f3f6")
+        e.insert(0, self.share_url)
+        e.configure(state="readonly")
+        e.pack(fill="x", ipady=4)
+
+        def copy():
+            win.clipboard_clear()
+            win.clipboard_append(self.share_url)
+            b.config(text="Copied ✓")
+        b = tk.Button(win, text="Copy link", command=copy)
+        b.pack(pady=(8, 0))
+
+    def _resize(self, d):
+        self.size = max(12, min(60, self.size + d))
+        self.font_main.config(size=self.size)
+        self.font_small.config(size=max(10, self.size // 2))
+        self.root.geometry(f"{self.root.winfo_width()}x{int(self.size * 5.5 * self.k)}")
+        self._save()
+
+    # ---------- updates (the app lives in a git repo; Start Lyrics Overlay.bat pulls before starting) ----------
+    def _update_loop(self):
+        """Every 30 min: is there a newer version on GitHub? Only looks - Restart does the update."""
+        import subprocess
+        repo = os.path.dirname(HERE)
+        if not os.path.isdir(os.path.join(repo, ".git")):
+            return
+        time.sleep(60)
+        while True:
+            try:
+                kw = dict(cwd=repo, capture_output=True, text=True, timeout=60,
+                          creationflags=0x08000000, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+                subprocess.run(["git", "fetch", "-q"], **kw)
+                behind = subprocess.run(["git", "rev-list", "--count", "HEAD..@{u}", "--", "lyrics-overlay"], **kw)
+                if behind.stdout.strip().isdigit() and int(behind.stdout.strip()) > 0:
+                    self.update_ready = True
+            except Exception:
+                pass
+            time.sleep(30 * 60)
+
+    def restart(self):
+        import subprocess
+        self._save()
+        subprocess.Popen(["cmd", "/c", os.path.join(HERE, "Start Lyrics Overlay.bat")], cwd=HERE,
+                         creationflags=0x08000000)       # it pulls the update, closes this copy, starts the new one
+
+    def quit(self):
+        self._save()
+        self.root.destroy()
+
+    # ---------- listening ----------
+    def _source_changed(self):
+        self._save()
+        self.song, self.lines, self.misses = None, None, 0
+        self.player_title, self.next_player, self.next_check = None, 0.0, 0.0
+        self.status = "Looking for the player…" if self._player_mode() else "Right-click for menu"
+        self._publish()
+
+    def _player_mode(self):
+        return self.source.get().startswith("Player:")
+
+    # ---------- follow a player on this PC (exact title + position from Windows, no listening) ----------
+    def _player_worker(self, which, last_app):
+        np = media.now_playing(None if which == "auto" else which)
+        if np is None and which == "auto" and last_app:   # paused: stay on the same player, don't jump
+            np = media.now_playing(last_app)
+        self.root.after(0, self._player_apply, which, np, time.time())
+
+    def _player_apply(self, which, np, read_at):
+        self.busy_player = False
+        if self.follow.get() or self.source.get() != "Player:" + which:
+            return
+        if not np:
+            if self.song or self.status != "Nothing playing on this PC":
+                self.song, self.lines, self.player_title = None, None, None
+                self.status = "Nothing playing on this PC"
+                self._publish()
+            return
+        self.player_paused = not np["playing"]
+        self.player_app = np["app"]
+        if np["title"] != self.player_title:      # new video / song -> look up its lyrics
+            self.player_title = np["title"]
+            self.song = {"title": lyrics.clean_title(np["title"])[:40], "artist": np["artist"],
+                         "offset": 0.0, "static_lyrics": None, "media": np["title"]}
+            self.lines, self.rough, self.status = None, False, "Finding lyrics…"
+            threading.Thread(target=self._player_lyrics, args=(np,), daemon=True).start()
+        if np["pos"] is not None:
+            t0 = read_at - np["pos"] + self._shift()
+            if abs(t0 - self.t0) > 0.3 or self.player_paused:   # small wobble ignored, skips/pauses followed
+                self.t0 = t0
+                self._publish()
+
+    def _player_lyrics(self, np):
+        title, lines = self._lyrics_from_media(np)
+        self.root.after(0, self._player_lyrics_done, np["title"], title, lines)
+
+    def _player_lyrics_done(self, media_title, title, lines):
+        if media_title != self.player_title or not self.song:
+            return                                 # the video changed while we were searching
+        old_shift = self._shift()
+        self.song["title"] = title
+        self.t0 += self._shift() - old_shift       # saved sync for this song (key is the title)
+        self.lines = lines
+        self.rough = bool(lines) and lyrics.rough_timing(lines)
+        self.status = "" if lines else "No synced lyrics found"
+        self._publish()
+
+    def listen(self):
+        if self.listening or self.follow.get() or self._player_mode():
+            return
+        self.listening = True
+        dev = dict(self.srcs)[self.source.get()]
+        self.status = "Listening…"
+        threading.Thread(target=self._listen_worker, args=(dev,), daemon=True).start()
+
+    def _listen_worker(self, dev):
+        try:
+            import ctypes
+            ctypes.windll.ole32.CoInitializeEx(None, 0)   # COM per thread for WASAPI
+            # what Windows says this PC is playing (Spotify / YouTube) - only meaningful for PC sound
+            np = media.now_playing() if dev.isloopback else None
+            started = time.time()
+            with dev.recorder(samplerate=RATE) as rec:
+                audio = rec.record(numframes=RATE * CLIP_SECONDS)
+            silent = abs(audio).max() < 0.0003
+            if silent and not np:
+                self.root.after(0, self._done, None, None, "No sound heard - check the source", started)
+                return
+            song = None if silent else lyrics.recognize(lyrics.to_wav_bytes(audio, RATE))
+            cur = self.song
+            if song:
+                same = cur and (song["title"], song["artist"]) == (cur["title"], cur["artist"])
+                lines = self.lines if same else lyrics.find_lyrics(song["title"], song["artist"])
+                if not lines and np:              # Shazam named it but no lyrics: try the YouTube/Spotify title
+                    lines = self._lyrics_from_media(np)[1]
+            elif np:                              # Shazam can't place it (cover / AI remix): use the title
+                same = cur and cur.get("media") == np["title"]
+                title, lines = (cur["title"], self.lines) if same else self._lyrics_from_media(np)
+                if np["pos"] is None:
+                    self.root.after(0, self._done, None, None, "Song not recognised", started)
+                    return
+                song = {"title": title, "artist": np["artist"], "offset": np["pos"], "static_lyrics": None}
+            else:
+                self.root.after(0, self._done, None, None, "Song not recognised", started)
+                return
+            if np:
+                song["media"] = np["title"]
+            self.root.after(0, self._done, song, lines, "", started)
+        except Exception as ex:
+            self.root.after(0, self._done, None, None, f"Error: {ex}", time.time())
+
+    @staticmethod
+    def _lyrics_from_media(np):
+        """(song title, lyrics) from the YouTube video / Spotify title."""
+        for title, artist in media.queries(np):
+            lines = lyrics.find_lyrics(title, artist)
+            if lines:
+                return title, lines
+        return lyrics.clean_title(np["title"])[:40], None
+
+    def _done(self, song, lines, msg, started):
+        self.listening = False
+        if self.follow.get():                     # user switched to Join while we were listening
+            return
+        self.next_check = time.time() + RECHECK_SECONDS
+        if song:
+            self.misses = 0
+            self.song, self.lines = song, lines
+            self.t0 = started - song["offset"] + self._shift()
+            self.rough = bool(lines) and lyrics.rough_timing(lines)
+            self.status = "" if lines else "No synced lyrics found"
+            self.last_media = song.get("media") or self.last_media
+        else:
+            self.misses += 1
+            if self.song and self.misses < 2:
+                self.next_check = time.time() + 5    # maybe a quiet bit - check again before giving up
+            else:                                    # song has changed to something we can't place
+                self.song, self.lines = None, None
+                self.status = msg
+                self.next_check = time.time() + 15
+        self._publish()
+
+    # ---------- spot song changes on this PC (Spotify / YouTube) ----------
+    def _media_worker(self):
+        np = media.now_playing()
+        self.root.after(0, self._media_apply, np)
+
+    def _media_apply(self, np):
+        self.busy_media = False
+        if self.follow.get() or self.listening or not np:
+            return
+        if np["title"] != self.last_media:          # new song / video started
+            self.last_media = np["title"]
+            self.next_check = 0.0                    # listen right away
+
+    # ---------- drawing ----------
+    def tick(self):
+        now = time.time()
+        if self.follow.get():
+            if not self.busy_follow and now >= self.next_follow:
+                self.busy_follow, self.next_follow = True, now + 2
+                threading.Thread(target=self._follow_worker, args=(self.follow.get(),), daemon=True).start()
+        elif self._player_mode():
+            if not self.busy_player and now >= self.next_player:
+                self.busy_player, self.next_player = True, now + 1.5
+                which = self.source.get()[len("Player:"):]
+                threading.Thread(target=self._player_worker, args=(which, self.player_app), daemon=True).start()
+        else:
+            if (self.auto.get() and not self.busy_media and now >= self.next_media_check
+                    and self.source.get().startswith("PC")):
+                self.busy_media, self.next_media_check = True, now + 3
+                threading.Thread(target=self._media_worker, daemon=True).start()
+            if self.auto.get() and not self.listening and now >= self.next_check:
+                self.listen()
+        self.draw()
+        self.root.after(100, self.tick)
+
+    def _text(self, x, y, s, font, fill):
+        wrap = max(200, self.canvas.winfo_width() - int(40 * self.k))
+        o = max(2, round(2 * self.k))
+        for dx, dy in ((-o, 0), (o, 0), (0, -o), (0, o), (-o, -o), (o, o), (-o, o), (o, -o)):
+            self.canvas.create_text(x + dx, y + dy, text=s, font=font, fill="#111111", width=wrap,
+                                    justify="center")
+        self.canvas.create_text(x, y, text=s, font=font, fill=fill, width=wrap, justify="center")
+
+    def draw(self):
+        c = self.canvas
+        c.delete("all")
+        w = c.winfo_width()
+        h = c.winfo_height()
+        cx = w // 2
+        top = ""
+        if self.song:
+            top = f"♪ {self.song['title']} — {self.song['artist']}"
+            if self.lines and self.rough:
+                top += "   ⚠ rough timing - right-click › sync"
+        if self.follow.get():
+            top = (top + "   " if top else "") + f"⇢ from {self.follow.get()}"
+        if self.update_ready:
+            top = (top + "   " if top else "") + "⬆ update ready (right-click › Restart)"
+        elif self._player_mode() and self.song and self.player_paused:
+            top += "   ⏸ paused"
+        elif self.listening:
+            top = (top + "   " if top else "") + "● listening"
+        if top:
+            self._text(cx, int(14 * self.k), top, self.font_small, "#9fe7ff")
+
+        cur, nxt = self.status, ""
+        if self.lines:
+            pos = time.time() - self.t0
+            i = -1
+            for k, (t, _) in enumerate(self.lines):
+                if t <= pos:
+                    i = k
+                else:
+                    break
+            cur = self.lines[i][1] if i >= 0 else "♪ ♪ ♪"
+            nxt = self.lines[i + 1][1] if i + 1 < len(self.lines) else ""
+        elif self.song and self.song.get("static_lyrics") and not self.status:
+            cur = "(lyrics not synced)"
+        self._text(cx, h * 0.45, cur, self.font_main, "#ffffff")
+        if nxt:
+            self._text(cx, h * 0.80, nxt, self.font_small, "#cccccc")
+
+
+if __name__ == "__main__":
+    Overlay().root.mainloop()
