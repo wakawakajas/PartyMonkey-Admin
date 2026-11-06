@@ -838,6 +838,12 @@ class Overlay:
                     diag["scan"] = f"{vid}: only a translation row readable"
                     continue
                 lines = [tuple(x) for x in ytvideo.fix_with(read, known)]
+                if known:
+                    # the lyric site's complete lines, each timed from the video (videos that show a line
+                    # in pieces, or two lines at once) - used when it times at least as many lines
+                    aligned = ytvideo.align_known(read, known)
+                    if aligned and len(aligned) >= len(lines) - 1:
+                        lines = aligned
                 diag["scan"] = f"reading {vid}: {len(lines)} lines"
                 if known and d.get("final") and len(lines) < 0.4 * len(known):
                     # the whole video gave only a few lines (titles, a bad read): don't trust it

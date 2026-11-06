@@ -443,6 +443,95 @@ def fix_with(lines, known):
     return out_lines
 
 
+def _piece_score(read, line):
+    """How much of a piece read from the video is in this lyric-site line (0..1)."""
+    a, b = plain(read), plain(line)
+    if len(a) < 2 or not b:
+        return 0.0
+    covered = sum(m.size for m in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
+    return covered / min(len(a), len(b))
+
+
+def align_known(read, known, min_score=0.6):
+    """Time every lyric-site line (`known`) from what was read off the video (`read`), keeping the
+    lyric site's complete lines. Works when the video shows lines in pieces (a few words at a time)
+    or two lines at once. Pieces are given to lines in order (dynamic programming, most text matched
+    wins); a line starts at its first piece. Lines with no piece of their own are placed by the line
+    before them, or left out when they don't fit (verses / choruses this version doesn't sing).
+    None if too few lines could be timed."""
+    n, m = len(known), len(read)
+    if not n or not m or n > 400 or m > 600:
+        return None
+    s = [[0.0] * m for _ in range(n)]
+    for i in range(n):
+        for j in range(m):
+            v = _piece_score(read[j][1], known[i][1])
+            if v >= min_score:
+                s[i][j] = v * min(len(plain(read[j][1])), len(plain(known[i][1])))   # more text counts more
+    NEG = float("-inf")
+    # f[j][i]: best with pieces[:j] given out, all to lines <= i
+    # g[j][i]: best with piece j given to line i (and maybe also to the line before: two lines at once)
+    f = [[0.0] * n for _ in range(m + 1)]
+    g = [[NEG] * n for _ in range(m)]
+    fhow = [[None] * n for _ in range(m + 1)]
+    ghow = [[None] * n for _ in range(m)]
+    for j in range(m):
+        for i in range(n):
+            if s[i][j] > 0:
+                best, why = f[j][i], "new"
+                if i and g[j][i - 1] > best:
+                    best, why = g[j][i - 1], "shared"
+                g[j][i], ghow[j][i] = best + s[i][j], why
+            best, why = f[j][i], "skip"
+            if g[j][i] > best:
+                best, why = g[j][i], "take"
+            if i and f[j + 1][i - 1] > best:
+                best, why = f[j + 1][i - 1], "up"
+            f[j + 1][i], fhow[j + 1][i] = best, why
+    first, together = {}, {}     # line -> its first piece of its own / first piece shown with the line before
+    j, i, in_g = m, n - 1, False
+    while i >= 0 and (j > 0 if not in_g else j >= 0):
+        if in_g:                                       # piece j belongs to line i
+            if ghow[j][i] == "shared":                 # (walking backwards: ends at the line's first piece)
+                together[i] = read[j][0]
+                i -= 1
+                continue
+            first[i] = read[j][0]
+            in_g = False
+            continue
+        why = fhow[j][i]
+        if why == "up":
+            i -= 1
+        elif why == "take":
+            j -= 1
+            in_g = True
+        else:
+            j -= 1
+    if len(first) < 0.75 * n:                       # not sure enough (mixed languages, another version)
+        return None
+    last_seen = max(t for t, _ in read)
+    out = []
+    anchors = sorted(first)
+    for i, (t, w) in enumerate(known):
+        prev = max((k for k in anchors if k < i), default=None)
+        nxt = min((k for k in anchors if k > i), default=None)
+        if i in first:
+            out.append((round(first[i], 2), w, i))
+            continue
+        if prev is None or not out:
+            continue                                   # before the first line seen in the video: not sung
+        # a line sharing a piece with the line before it, or with no piece: keep the lyric site's
+        # spacing from the line before
+        bt, _, bi = out[-1]
+        at = bt + (t - known[bi][0])
+        hi = first[nxt] - 0.5 if nxt is not None else last_seen + 1
+        if bt + 0.5 <= at <= hi:
+            out.append((round(at, 2), w, i))
+        elif i in together and bt + 0.5 <= hi:           # sung together with the line before: just after it
+            out.append((round(min(bt + 1.5, hi), 2), w, i))
+    return [(t, w) for t, w, _ in out]
+
+
 def offset_to(read, known, tol=1.5):
     """How many seconds the lyric-site lyrics (`known`) are early/late against the few lines already
     read from the video (`read`, texts already corrected by fix_with). None if not sure yet.
