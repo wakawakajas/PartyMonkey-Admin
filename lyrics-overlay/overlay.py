@@ -370,6 +370,8 @@ class Overlay:
         self._publish()
 
     def _publish(self):
+        share.DIAG["mode"] = "joined" if self.follow.get() else self.source.get()[:40]
+        share.DIAG["shift"] = round(self._shift(), 2) if self.song else 0
         paused = None
         if self._player_mode() and self.player_paused and self.song and not self.follow.get():
             paused = time.time() - self.t0             # where the song stands while paused
