@@ -158,6 +158,9 @@ class Overlay:
             join.add_radiobutton(label=label, value=p["name"], variable=self.follow, command=self._follow_changed)
         if not ps:
             join.add_command(label="(no other PCs found yet - is their app open?)", state="disabled")
+        if not share.nas_ok():
+            join.add_command(label="(can't reach the NAS - only PCs on this same network show up)",
+                             state="disabled")
         m.add_cascade(label="Join a colleague's lyrics", menu=join)
         m.add_separator()
         m.add_command(label="Listen now  (double-click)", command=self.listen)
@@ -267,7 +270,7 @@ class Overlay:
             if not host:
                 self.root.after(0, self._follow_apply, name, None, 0.0)
                 return
-            st, off = share.fetch_state(host["url"], lrev)
+            st, off = share.fetch_state(host, lrev)       # via the NAS file, or straight from that PC
             self.root.after(0, self._follow_apply, name, st, off)
         except Exception:
             self.root.after(0, self._follow_apply, name, None, 0.0)

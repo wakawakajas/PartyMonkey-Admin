@@ -3,6 +3,7 @@
 The overlay calls publish(); colleagues open http://<this-pc>:8765 and see the same song + lyrics in sync.
 """
 import json
+import os
 import re
 import socket
 import threading
@@ -90,19 +91,133 @@ def _listen_loop():
             pass
 
 
+# ---------- the NAS way: works through firewalls and Wi-Fi / cable splits ----------
+# Each PC writes ONLY its own "<PC name>.json" in a shared NAS folder (no file has two writers) and
+# reads the others'. Every PC only reaches OUT to the NAS, so no PC needs to accept connections.
+# Times are kept in NAS-clock seconds so lyrics stay in sync even if PC clocks differ a little.
+NAS_DIRS = (r"\\PARTYMONKEY-NAS\Partymonkey\Partymonkey NAS\Lyrics Overlay\now-playing",
+            r"P:\Lyrics Overlay\now-playing")
+NAS_FRESH = 15                # a file not rewritten for this long = that app is closed
+_nas = {"dir": None, "off": None, "offs": [], "files": {}, "peers": []}   # off = NAS clock - our clock
+
+
+def _nas_dir():
+    for d in NAS_DIRS:
+        try:
+            os.makedirs(d, exist_ok=True)
+            return d
+        except OSError:
+            continue
+    return None
+
+
+def _nas_write(d):
+    with _lock:
+        st = dict(_state)
+    off = _nas["off"]
+    data = {"app": "lyrics-overlay", "id": ID, "name": NAME, "title": st["title"], "artist": st["artist"],
+            "lines": st["lines"], "status": st["status"], "via": st["via"], "lrev": st["lrev"],
+            "t0_nas": (st["t0"] + off) if (st["t0"] is not None and off is not None) else None,
+            "t0_local": st["t0"]}
+    path = os.path.join(d, re.sub(r"[^\w.-]", "_", NAME) + ".json")
+    tmp = path + ".tmp"
+    t1 = time.time()
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    t2 = time.time()
+    os.replace(tmp, path)
+    # how far the NAS clock is from ours: the file's time stamp (NAS clock) vs when we wrote it
+    _nas["offs"] = (_nas["offs"] + [os.stat(path).st_mtime - (t1 + t2) / 2])[-7:]
+    _nas["off"] = sorted(_nas["offs"])[len(_nas["offs"]) // 2]
+    return st["rev"]
+
+
+def _nas_scan(d):
+    now_nas = time.time() + (_nas["off"] or 0.0)
+    own = re.sub(r"[^\w.-]", "_", NAME) + ".json"
+    found = []
+    for fn in os.listdir(d):
+        if not fn.endswith(".json") or fn == own:
+            continue
+        path = os.path.join(d, fn)
+        try:
+            mt = os.stat(path).st_mtime
+            if now_nas - mt > NAS_FRESH:
+                continue
+            cached = _nas["files"].get(path)
+            if not cached or cached[0] != mt:            # only re-read files that changed
+                with open(path, encoding="utf-8") as f:
+                    cached = (mt, json.load(f))
+                _nas["files"][path] = cached
+            m = cached[1]
+            if m.get("app") != "lyrics-overlay" or m.get("id") == ID:
+                continue
+            found.append({"id": str(m.get("id", ""))[:64], "name": str(m.get("name", "?"))[:64],
+                          "title": str(m.get("title") or "")[:200], "artist": str(m.get("artist") or "")[:200],
+                          "via": (str(m["via"])[:64] if m.get("via") else None), "file": path,
+                          "url": None, "seen": time.time()})
+        except (OSError, ValueError):
+            continue
+    with _lock:
+        _nas["peers"] = found
+
+
+def _nas_loop():
+    last_rev, last_write, last_scan, last_try = -1, 0.0, 0.0, 0.0
+    while True:
+        now = time.time()
+        if _nas["dir"] is None and now - last_try > 30:
+            last_try = now
+            _nas["dir"] = _nas_dir()
+        d = _nas["dir"]
+        if d:
+            try:
+                with _lock:
+                    rev = _state["rev"]
+                if rev != last_rev or now - last_write > 5:      # on every change + a heartbeat
+                    last_rev, last_write = _nas_write(d), now
+                if now - last_scan > 2:
+                    last_scan = now
+                    _nas_scan(d)
+            except OSError:
+                _nas["dir"] = None                                # NAS gone: look for it again later
+        time.sleep(0.5)
+
+
+def nas_ok():
+    return _nas["dir"] is not None
+
+
 def peers(hosts_only=False):
-    """Other PCs running the app, seen in the last 8 seconds. Ones playing a song come first.
+    """Other PCs running the app (found on the NAS or by network announcement). Playing ones first.
     hosts_only: leave out PCs that are themselves Joined to someone (they only pass a song on)."""
     now = time.time()
     with _lock:
-        live = [p for p in _peers.values() if now - p["seen"] < 8 and not (hosts_only and p.get("via"))]
+        lan = [p for p in _peers.values() if now - p["seen"] < 8]
+        nas = list(_nas["peers"])
+    by_id = {p["id"]: p for p in lan}
+    by_id.update({p["id"]: p for p in nas})           # same app seen both ways: use the NAS route
+    live = [p for p in by_id.values() if not (hosts_only and p.get("via"))]
     return sorted(live, key=lambda p: (not p.get("title"), p["name"]))
 
 
-def fetch_state(host_url, lrev=None):
-    """Read another PC's current song. Returns (state, clock_offset) where offset = their clock - ours.
-    With the lrev we already have, the reply leaves the lyrics out if they haven't changed."""
+def fetch_state(host, lrev=None):
+    """Read another PC's current song. host = a peers() entry (or a URL). Returns (state, clock_offset)
+    where offset = their clock - ours. With the lrev we already have, the lyrics are left out if unchanged."""
+    if isinstance(host, dict) and host.get("file"):
+        cached = _nas["files"].get(host["file"])
+        if not cached:
+            raise OSError("not read yet")
+        st = dict(cached[1])
+        if st.get("t0_nas") is not None and _nas["off"] is not None:
+            st["t0"] = st["t0_nas"] - _nas["off"]          # NAS clock -> our clock
+        else:
+            st["t0"] = st.get("t0_local")                   # no clock reference yet: assume clocks agree
+        if lrev is not None and st.get("lrev") == lrev:
+            st.pop("lines", None)
+        return st, 0.0
     import urllib.request
+    host_url = host["url"] if isinstance(host, dict) else host
     t1 = time.time()
     q = f"?lrev={lrev}" if lrev is not None else ""
     with urllib.request.urlopen(host_url + "/state" + q, timeout=3) as r:
@@ -212,6 +327,7 @@ def start():
     """Start the page server + network announcing. Returns the URL, or None if the port is busy."""
     global _my_url
     threading.Thread(target=_listen_loop, daemon=True).start()
+    threading.Thread(target=_nas_loop, daemon=True).start()
     class Server(ThreadingHTTPServer):
         allow_reuse_address = False          # on Windows, reuse would let two apps grab the same port
 
