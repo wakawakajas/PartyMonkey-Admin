@@ -1,7 +1,7 @@
 """Read the lyrics drawn into a YouTube video's picture (动态歌词 / AI-song videos), with their timing.
 
 Runs as its own process (so a crash or heavy CPU never touches the overlay):
-    python ytvideo.py VIDEO_ID START_SECONDS
+    python ytvideo.py VIDEO_ID START_SECONDS [zh|en]
 Prints JSON lines: {"lines": [[seconds, text], ...]} as the scan goes (starting near START_SECONDS so
 the part being played comes first), then {"done": true} - or {"none": true} if the video has no
 lyrics in its picture. Finished scans are kept in cache/ so a replay is instant.
@@ -82,13 +82,24 @@ class Reader:
         return found
 
 
-def lyric_row(samples):
-    """The height where lyric-looking text appears most often, or None if not clear yet."""
-    ys = [round(y / BAND) for _, found in samples for _, y, _ in found]
-    if len(ys) < 6:
-        return None
-    best = max(set(ys), key=ys.count)
-    return best * BAND if ys.count(best) >= 4 else None
+def is_cjk(text):
+    return sum(1 for c in text if "一" <= c <= "鿿") >= 2
+
+
+def lyric_row(samples, lang):
+    """The height where lyric-looking text appears most often, or None if not clear yet.
+    Videos often show two rows (Chinese + English translation): the row in the song's language
+    (`lang`, zh or en) wins; another language's row is used only if the song's never shows up."""
+    def row(ys):
+        if len(ys) < 6:
+            return None
+        best = max(set(ys), key=ys.count)
+        return best * BAND if ys.count(best) >= 4 else None
+    want = [round(y / BAND) for _, found in samples for text, y, _ in found if is_cjk(text) == (lang == "zh")]
+    best = row(want)
+    if best is None and len(samples) >= 60:
+        best = row([round(y / BAND) for _, found in samples for _, y, _ in found])
+    return best
 
 
 def group(samples, row):
@@ -139,9 +150,9 @@ def fix_with(lines, known):
     return out_lines
 
 
-def scan(video_id, start):
+def scan(video_id, start, lang="zh"):
     os.makedirs(CACHE, exist_ok=True)
-    cached = os.path.join(CACHE, f"video-{video_id}.json")
+    cached = os.path.join(CACHE, f"video2-{video_id}-{lang}.json")
     if os.path.exists(cached):
         with open(cached, encoding="utf-8") as f:
             d = json.load(f)
@@ -159,7 +170,7 @@ def scan(video_id, start):
         samples, row, sent = [], None, None
         for k, sec in enumerate(order):
             samples.append((sec, r.read(sec)))
-            row = row or lyric_row(samples)
+            row = row or lyric_row(samples, lang)
             if row is None and k >= GIVE_UP_AFTER:
                 break
             if row is not None and (k % 8 == 7 or k == len(order) - 1):
@@ -190,4 +201,4 @@ def scan(video_id, start):
 
 
 if __name__ == "__main__":
-    scan(sys.argv[1], float(sys.argv[2]) if len(sys.argv) > 2 else 0)
+    scan(sys.argv[1], float(sys.argv[2]) if len(sys.argv) > 2 else 0, sys.argv[3] if len(sys.argv) > 3 else "zh")

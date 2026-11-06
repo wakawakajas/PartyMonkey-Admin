@@ -511,7 +511,7 @@ class Overlay:
         self.rough = bool(lines) and lyrics.rough_timing(lines)
         self.status = "" if lines else "No synced lyrics found"
         self._publish()
-        if cc != "cc":                             # no subtitles in the song's language: read the picture
+        if cc not in ("cc", "retimed"):            # no exactly timed lyrics yet: read the video picture
             self._scan_video(self.player_np)
 
     def listen(self):
@@ -604,7 +604,7 @@ class Overlay:
         self.listening = False
         if self.follow.get():                     # user switched to Join while we were listening
             return
-        if song and np and song.get("cc") != "cc":
+        if song and np and song.get("cc") not in ("cc", "retimed"):
             self.root.after(0, self._scan_video, np)  # no subtitles in the song's language: read the picture
         self.next_check = time.time() + RECHECK_SECONDS
         if song:
@@ -657,7 +657,10 @@ class Overlay:
         err_path = os.path.join(tempfile.gettempdir(), "lyrics-overlay-video.log")
         try:
             err = open(err_path, "w", encoding="utf-8")
-            p = subprocess.Popen([sys.executable, os.path.join(HERE, "ytvideo.py"), vid, str(np["pos"] or 0)],
+            # which row to read when the video shows two languages: the lyric sites' language, else the title's
+            words = " ".join(w for _, w in known or []) or np["title"]
+            lang = "zh" if lyrics.has_cjk(words) else "en"
+            p = subprocess.Popen([sys.executable, os.path.join(HERE, "ytvideo.py"), vid, str(np["pos"] or 0), lang],
                                  cwd=HERE, stdout=subprocess.PIPE, stderr=err,
                                  creationflags=0x08000000 | 0x00004000)   # no window, below-normal priority
         except Exception as ex:
@@ -674,7 +677,14 @@ class Overlay:
             except ValueError:
                 continue
             if d.get("lines"):
-                lines = [tuple(x) for x in ytvideo.fix_with(d["lines"], known)]
+                read = [tuple(x) for x in d["lines"]]
+                cjk_read = sum(lyrics.has_cjk(w) for _, w in read) > len(read) / 2
+                if cjk_read != (lang == "zh") and known:
+                    # only a translation row was readable (e.g. Chinese written in vertical columns):
+                    # keep the lyric-site lyrics in the song's language rather than show the translation
+                    diag["scan"] = f"{vid}: only a translation row readable"
+                    continue
+                lines = [tuple(x) for x in ytvideo.fix_with(read, known)]
                 diag["scan"] = f"reading {vid}: {len(lines)} lines"
                 now = media.now_playing(np["app"])     # fresh position, to time lines to the video
                 self.root.after(0, self._scan_lines, np["title"], lines, now, time.time())
@@ -829,6 +839,12 @@ class Overlay:
                     break
             cur = self.lines[i][1] if i >= 0 else "♪ ♪ ♪"
             nxt = self.lines[i + 1][1] if i + 1 < len(self.lines) else ""
+            if i >= 0:
+                # instrumental break (or the song's end): don't leave the last sung line up the whole time
+                gap = (self.lines[i + 1][0] if nxt else float("inf")) - self.lines[i][0]
+                hold = min(8.0, max(5.0, 0.12 * len(cur) + 3))
+                if gap > hold + 4 and pos - self.lines[i][0] > hold:
+                    cur = "♪ ♪ ♪"
         elif self.song and self.song.get("static_lyrics") and not self.status:
             cur = "(lyrics not synced)"
         self._text(cx, h * self.LYRIC_Y, cur, self.font_main, "#ffffff")
