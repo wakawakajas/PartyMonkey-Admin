@@ -18,7 +18,7 @@ ID = uuid.uuid4().hex            # tells this copy of the app apart from others 
 # rev changes on any change; lrev only when the song or its lyrics change (so pollers can skip the lyrics)
 DIAG = {}          # how this PC's app is doing (version, video reading) - in the NAS file, for fixing problems
 _state = {"title": "", "artist": "", "lines": [], "t0": None, "status": "Waiting for a song…", "via": None,
-          "paused": None, "rev": 0, "lrev": 0}
+          "paused": None, "video": None, "rev": 0, "lrev": 0}
 WATCH = False      # True while this PC is Joined to someone: read the NAS folder often
 _lock = threading.Lock()
 _peers = {}                   # url -> {"name", "url", "title", "artist", "via", "seen"}
@@ -33,7 +33,8 @@ def publish(song, lines, t0, status, via=None, paused=None):
     with _lock:
         new = {"title": song["title"] if song else "", "artist": song["artist"] if song else "",
                "lines": [list(x) for x in lines or []], "t0": t0 if song else None, "status": status, "via": via,
-               "paused": round(paused, 1) if (paused is not None and song) else None}
+               "paused": round(paused, 1) if (paused is not None and song) else None,
+               "video": (song or {}).get("vid")}
         old_t0 = _state["t0"]
         if new["t0"] is not None and old_t0 is not None and (new["paused"] is not None or abs(new["t0"] - old_t0) < 0.5):
             new["t0"] = old_t0
@@ -139,7 +140,7 @@ def _nas_write(d):
     data = {"app": "lyrics-overlay", "id": ID, "name": NAME, "title": st["title"], "artist": st["artist"],
             "lines": st["lines"], "status": st["status"], "via": st["via"], "lrev": st["lrev"],
             "t0_nas": (st["t0"] + off) if (st["t0"] is not None and off is not None) else None,
-            "t0_local": st["t0"], "paused": st["paused"], "diag": dict(DIAG)}
+            "t0_local": st["t0"], "paused": st["paused"], "video": st["video"], "diag": dict(DIAG)}
     base = _safe_name()
     path = os.path.join(d, f"{base}.{int(time.time() * 1000)}.json")
     tmp = os.path.join(d, f"~{base}.tmp")

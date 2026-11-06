@@ -210,3 +210,67 @@ def find_lyrics(title, artist):
             if len(lines) > 3:
                 return lines
     return None
+
+
+# ---------- word-by-word timing (karaoke highlight) ----------
+KRC_KEY = bytes([64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105])
+KRC_LINE = re.compile(r"^\[(\d+),(\d+)\](.*)$")
+KRC_WORD = re.compile(r"<(\d+),(\d+),\d+>([^<]*)")
+
+
+def _plain(s):
+    return re.sub(r"[\W_]+", "", s or "").lower()
+
+
+def kugou_words(title, artist):
+    """Kugou's word timing for this song: {line text without spaces/punctuation: [(start_s, dur_s, word)]}
+    where start is from the line's own start. {} if Kugou doesn't have it."""
+    import zlib
+    r = requests.get("http://mobilecdn.kugou.com/api/v3/search/song",
+                     params={"keyword": f"{clean_title(title)} {artist}", "page": 1, "pagesize": 8,
+                             "format": "json"}, headers=UA, timeout=8).json()
+    items = [it for it in (r.get("data") or {}).get("info", []) if title_ok(it.get("songname", ""), title)]
+    items.sort(key=lambda it: not artist_ok(it.get("singername", ""), artist))
+    for it in items[:3]:
+        c = requests.get("http://krcs.kugou.com/search",
+                         params={"ver": 1, "man": "yes", "client": "mobi", "keyword": "", "duration": "",
+                                 "hash": it["hash"]}, headers=UA, timeout=8).json()
+        cands = c.get("candidates") or []
+        if not cands:
+            continue
+        d = requests.get("http://lyrics.kugou.com/download",
+                         params={"ver": 1, "client": "pc", "id": cands[0]["id"],
+                                 "accesskey": cands[0]["accesskey"], "fmt": "krc", "charset": "utf8"},
+                         headers=UA, timeout=8).json()
+        raw = base64.b64decode(d.get("content") or "")
+        if raw[:4] != b"krc1":
+            continue
+        text = zlib.decompress(bytes(b ^ KRC_KEY[i % 16] for i, b in enumerate(raw[4:]))).decode("utf-8", "ignore")
+        words = {}
+        for line in text.splitlines():
+            m = KRC_LINE.match(line.strip())
+            if not m:
+                continue
+            ws = [(int(a) / 1000, int(b) / 1000, w) for a, b, w in KRC_WORD.findall(m.group(3))]
+            key = _plain("".join(w for _, _, w in ws))
+            if key and ws and ws[-1][0] > 0:          # credit lines have no real timing (all 0)
+                words.setdefault(key, ws)
+        if words:
+            return words
+    return {}
+
+
+def sung_chars(words, elapsed):
+    """How many letters/characters of the line (counted without spaces/punctuation) have been sung
+    `elapsed` seconds after the line started."""
+    n = 0
+    for start, dur, w in words:
+        k = len(_plain(w))
+        if elapsed >= start + dur:
+            n += k
+        elif elapsed >= start:
+            n += round(k * (elapsed - start) / dur) if dur > 0 else k
+            break
+        else:
+            break
+    return n

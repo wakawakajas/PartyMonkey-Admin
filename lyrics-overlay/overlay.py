@@ -4,6 +4,7 @@ Right-click the bar for: sound source, Listen now, Auto, text size, quit. Drag t
 """
 import ctypes
 import json
+import re
 import os
 
 try:  # real pixel coordinates on scaled (125%/150%) displays, so the bar lands where expected
@@ -119,6 +120,11 @@ class Overlay:
         self.busy_player = False
         self.next_player = 0.0
         self.auto = tk.BooleanVar(value=self.cfg.get("auto", True))
+        # read YouTube videos ahead of time for everyone (this PC's spare power), saved on the NAS
+        self.read_ahead = tk.BooleanVar(value=self.cfg.get("read_ahead", False))
+        self.ahead_seeds, self.ahead_done, self.ahead_proc = [], {}, None
+        self.words, self.words_key = {}, None    # karaoke: Kugou word timing for the current song
+        self.edit_seen = None                    # (song key, edit file) last applied
 
         self.song = None              # dict from lyrics.recognize
         self.lines = None             # [(t, text)]
@@ -132,6 +138,8 @@ class Overlay:
         self.update_ready = False
         self.update_wait, self.restarting = None, False
         threading.Thread(target=self._update_loop, daemon=True).start()
+        threading.Thread(target=self._ahead_loop, daemon=True).start()
+        threading.Thread(target=self._edits_loop, daemon=True).start()
         follow = self.cfg.get("follow") or ""
         self.follow = tk.StringVar(value="" if follow == JOIN_OFF else follow)   # PC name we Join, "" = listen myself
         self.misses = 0                  # failed recognitions in a row
@@ -172,7 +180,7 @@ class Overlay:
 
     def _save(self):
         self.cfg.update(pos=(self.root.winfo_x(), self.root.winfo_y()), size=self.size,
-                        source=self.source.get(), auto=self.auto.get())
+                        source=self.source.get(), auto=self.auto.get(), read_ahead=self.read_ahead.get())
         with open(SETTINGS, "w", encoding="utf-8") as f:
             json.dump(self.cfg, f, ensure_ascii=False)
 
@@ -216,6 +224,10 @@ class Overlay:
         m.add_command(label="Lyrics earlier  (-0.5s)" + hk("early"), command=lambda: self._nudge(0.5))
         m.add_command(label="Lyrics later  (+0.5s)" + hk("late"), command=lambda: self._nudge(-0.5))
         m.add_command(label="Reset sync for this song", command=self._reset_shift)
+        m.add_command(label="Edit this song's lyrics…  (saved for everyone)", command=self._edit_window,
+                      state="normal" if self.song and self.lines else "disabled")
+        m.add_checkbutton(label="Read videos ahead for the team  (uses this PC's spare power)",
+                          variable=self.read_ahead, command=self._save)
         m.add_command(label="Bigger text", command=lambda: self._resize(+4))
         m.add_command(label="Smaller text", command=lambda: self._resize(-4))
         m.add_separator()
@@ -348,6 +360,8 @@ class Overlay:
             self.song = {"title": st["title"], "artist": st["artist"], "offset": 0.0, "static_lyrics": None}
             self.lines = lines
             self.follow_paused = st.get("paused")
+            if st.get("video"):
+                self._ahead_seed(st["video"])
             if self.follow_paused is not None:     # host paused: stand still at that spot (see tick)
                 self.t0 = time.time() - self.follow_paused + self._shift()
             elif st.get("t0"):
@@ -403,6 +417,7 @@ class Overlay:
         import subprocess
         repo = os.path.dirname(HERE)
         if not os.path.isdir(os.path.join(repo, ".git")):
+            self._update_loop_files()
             return
         time.sleep(60)
         while True:
@@ -417,6 +432,20 @@ class Overlay:
                 pass
             time.sleep(10 * 60)
 
+    def _update_loop_files(self):
+        """No git on this copy: compare the app's files with GitHub's and download changed ones."""
+        import updater
+        time.sleep(60)
+        while True:
+            try:
+                files = updater.changed_files()
+                if files:
+                    updater.apply(files)
+                    self.update_ready = True
+            except Exception:
+                pass
+            time.sleep(10 * 60)
+
     def restart(self):
         import subprocess
         self._save()
@@ -425,6 +454,9 @@ class Overlay:
 
     def quit(self):
         self._stop_scan()
+        p = self.ahead_proc
+        if p and p.poll() is None:
+            p.kill()
         share.stop()
         self._save()
         self.root.destroy()
@@ -570,7 +602,7 @@ class Overlay:
             np_at = time.time()
             cur = self.song
             if (np and np["pos"] is not None and cur and cur.get("media") == np["title"]
-                    and cur.get("cc") in ("cc", "video", "retimed")):
+                    and cur.get("cc") in ("cc", "video", "retimed", "edited")):
                 # same video, lyrics already timed to it: just follow the video's position
                 self.root.after(0, self._done, dict(cur, offset=np["pos"]), self.lines, "", np_at, np)
                 return
@@ -709,6 +741,7 @@ class Overlay:
             return
         self.scan_proc = p
         diag["scan"] = f"reading {vid}"
+        self.root.after(0, self._got_video_id, np["title"], vid)
         for raw in p.stdout:
             try:
                 d = json.loads(raw)
@@ -754,8 +787,16 @@ class Overlay:
                 tail = ""
             diag["scan"] = f"{vid}: failed ({code}) {tail}"
 
+    def _got_video_id(self, media_title, vid):
+        if self.song and self.song.get("media") == media_title:
+            self.song["vid"] = vid
+            self._publish()
+        self._ahead_seed(vid)
+
     def _scan_lines(self, media_title, lines, now, read_at):
         if not self.song or self.song.get("media") != media_title or len(lines) < 3:
+            return
+        if self.song.get("cc") == "edited":        # someone fixed this song's lyrics by hand
             return
         old_shift = self._shift()
         self.song["cc"] = "video"
@@ -765,6 +806,201 @@ class Overlay:
         else:
             self.t0 = read_at - now["pos"] + self._shift()
         self._publish()
+
+    # ---------- read videos ahead for the team ----------
+    def _ahead_seed(self, vid):
+        if vid and vid not in self.ahead_done and vid not in self.ahead_seeds:
+            self.ahead_seeds.append(vid)
+
+    def _ahead_list(self, vid):
+        """Videos likely to be played next: the channel's newest uploads + YouTube's mix for this video."""
+        import yt_dlp
+        opts = {**ytcc.OPTS, "extract_flat": True, "playlistend": 30}
+        found = []
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info("https://www.youtube.com/watch?v=" + vid, download=False, process=False)
+            urls = []
+            if info.get("channel_url"):
+                urls.append(info["channel_url"].rstrip("/") + "/videos")
+            urls.append(f"https://www.youtube.com/watch?v={vid}&list=RD{vid}")
+            for url in urls:
+                try:
+                    res = ydl.extract_info(url, download=False)
+                except Exception:
+                    continue
+                for e in res.get("entries") or []:
+                    if e and e.get("id") and 60 <= (e.get("duration") or 0) <= 600 and e["id"] not in found:
+                        found.append(e["id"])
+        return found
+
+    def _ahead_loop(self):
+        import subprocess
+        time.sleep(30)
+        queue = []
+        while True:
+            time.sleep(5)
+            if not self.read_ahead.get():
+                continue
+            if self.scan_proc and self.scan_proc.poll() is None:
+                continue                           # this PC is reading the playing video: wait
+            if self.ahead_seeds:
+                seed = self.ahead_seeds.pop(0)
+                self.ahead_done[seed] = time.time()
+                try:
+                    queue = [v for v in self._ahead_list(seed) if v not in queue] + queue
+                except Exception:
+                    pass
+            while queue and ytvideo.load_cached(queue[0], "zh") is not None:
+                self.ahead_done[queue.pop(0)] = time.time()
+            if not queue:
+                continue
+            vid = queue.pop(0)
+            self.ahead_done[vid] = time.time()
+            share.DIAG["ahead"] = f"reading {vid}, {len(queue)} more queued"
+            try:
+                self.ahead_proc = subprocess.Popen(
+                    [sys.executable, os.path.join(HERE, "ytvideo.py"), vid, "0", "zh", "ahead"], cwd=HERE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=0x08000000 | 0x00000040)   # no window, lowest priority
+                while self.ahead_proc.poll() is None:
+                    time.sleep(2)
+                    if not self.read_ahead.get():
+                        self.ahead_proc.kill()
+            except Exception:
+                pass
+            share.DIAG["ahead"] = f"{len(queue)} queued"
+
+    # ---------- lyrics fixed by hand (saved on the NAS, used by every PC) ----------
+    def _edits_dir(self):
+        d = ytvideo.nas_dir()
+        d = os.path.join(os.path.dirname(d), "lyrics-edits") if d else os.path.join(HERE, "cache", "edits")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    @staticmethod
+    def _edit_id(title, artist):
+        import hashlib
+        return hashlib.md5(f"{title}|{artist}".encode("utf-8")).hexdigest()[:16]
+
+    def _edit_latest(self, title, artist):
+        """(file name, data) of the newest saved edit for this song, or (None, None).
+        Each save is a new file (the NAS can serve an old copy of a rewritten file)."""
+        d = self._edits_dir()
+        eid = self._edit_id(title, artist)
+        names = sorted(fn for fn in os.listdir(d) if fn.startswith(eid + ".") and fn.endswith(".json"))
+        if not names:
+            return None, None
+        with open(os.path.join(d, names[-1]), encoding="utf-8") as f:
+            return names[-1], json.load(f)
+
+    def _edits_loop(self):
+        while True:
+            time.sleep(8)
+            song = self.song
+            if not song or self.follow.get():      # Joined: the host applies edits and passes them on
+                continue
+            try:
+                name, data = self._edit_latest(song["title"], song["artist"])
+            except (OSError, ValueError):
+                continue
+            key = (song["title"], song["artist"], name)
+            if not name:
+                continue
+            new = key != self.edit_seen
+            if new or (not data.get("removed") and song.get("cc") != "edited"):   # re-apply after a re-lookup
+                self.root.after(0, self._edit_apply, key, data)
+
+    def _edit_apply(self, key, data):
+        if not self.song or (self.song["title"], self.song["artist"]) != key[:2]:
+            return
+        self.edit_seen = key
+        if data.get("removed"):
+            if self.song.get("cc") == "edited":    # edit taken back: find the lyrics again
+                self.song["cc"] = None
+                if self._player_mode():
+                    self.player_title = None
+                else:
+                    self.next_check = 0.0
+            return
+        self.lines = [tuple(x) for x in data["lines"]]
+        self.song["cc"], self.rough, self.status = "edited", False, ""
+        self._publish()
+
+    def _edit_window(self):
+        if not self.song or not self.lines:
+            return
+        title, artist = self.song["title"], self.song["artist"]
+        win = tk.Toplevel(self.root)
+        win.title(f"Edit lyrics - {title}")
+        win.attributes("-topmost", True)
+        tk.Label(win, justify="left", text=(
+            "One line per lyric:  [minutes:seconds] words.  Fix wrong words, add or delete lines.\n"
+            "Timing: click a line, then press 'Line starts NOW' at the moment it's sung.\n"
+            "Save puts it on the NAS: every PC shows your version of this song from now on.")).pack(
+            anchor="w", padx=10, pady=(10, 4))
+        txt = tk.Text(win, width=70, height=24, font=("Microsoft YaHei UI", 11), undo=True)
+        txt.pack(fill="both", expand=True, padx=10)
+
+        def fmt(t):
+            return f"[{int(t // 60):02d}:{t % 60:05.2f}]"
+        txt.insert("1.0", "\n".join(f"{fmt(t)} {w}" for t, w in self.lines))
+        row = tk.Frame(win)
+        row.pack(fill="x", padx=10, pady=10)
+        note = tk.Label(row, text="")
+
+        def now_here():
+            line = txt.index("insert").split(".")[0]
+            body = txt.get(f"{line}.0", f"{line}.end")
+            m = re.match(r"^\s*\[\d+:\d+(?:\.\d+)?\]\s*(.*)$", body)
+            words = m.group(1) if m else body.strip()
+            txt.delete(f"{line}.0", f"{line}.end")
+            txt.insert(f"{line}.0", f"{fmt(max(0.0, time.time() - self.t0))} {words}")
+            txt.mark_set("insert", f"{int(line) + 1}.0")    # ready for the next line
+
+        def parse():
+            lines = []
+            for body in txt.get("1.0", "end").splitlines():
+                m = re.match(r"^\s*\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*?)\s*$", body)
+                if m and m.group(3):
+                    lines.append((int(m.group(1)) * 60 + float(m.group(2)), m.group(3)))
+            return sorted(lines)
+
+        def save(data):
+            d = self._edits_dir()
+            name = f"{self._edit_id(title, artist)}.{int(time.time() * 1000)}.json"
+            tmp = os.path.join(d, "~" + name)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"title": title, "artist": artist, "by": share.NAME, "at": time.time(), **data}, f,
+                          ensure_ascii=False)
+            os.rename(tmp, os.path.join(d, name))
+
+        def do_save():
+            lines = parse()
+            if len(lines) < 2:
+                note.config(text="Need at least 2 lines like  [01:23.40] words")
+                return
+            try:
+                save({"lines": lines})
+            except OSError as ex:
+                note.config(text=f"Couldn't save: {ex}")
+                return
+            if not self.follow.get():
+                self._edit_apply((title, artist, None), {"lines": lines})
+            win.destroy()
+
+        def do_remove():
+            try:
+                save({"removed": True})
+            except OSError:
+                pass
+            if not self.follow.get():
+                self._edit_apply((title, artist, None), {"removed": True})
+            win.destroy()
+        tk.Button(row, text="Line starts NOW", command=now_here).pack(side="left")
+        tk.Button(row, text="Save for everyone", command=do_save).pack(side="left", padx=8)
+        tk.Button(row, text="Undo my fix (use found lyrics)", command=do_remove).pack(side="left")
+        tk.Button(row, text="Cancel", command=win.destroy).pack(side="right")
+        note.pack(side="left", padx=8)
 
     # ---------- spot song changes on this PC (Spotify / YouTube) ----------
     def _media_worker(self):
@@ -792,8 +1028,27 @@ class Overlay:
             self.cfg["auto_update_from"] = share.DIAG.get("ver")
             self.restart()
 
+    def _words_check(self):
+        key = (self.song["title"], self.song["artist"]) if self.song else None
+        if key != self.words_key:
+            self.words_key, self.words = key, {}
+            if key:
+                threading.Thread(target=self._words_worker, args=(key,), daemon=True).start()
+
+    def _words_worker(self, key):
+        try:
+            words = lyrics.kugou_words(*key)
+        except Exception:
+            words = {}
+        self.root.after(0, self._words_apply, key, words)
+
+    def _words_apply(self, key, words):
+        if key == self.words_key:
+            self.words = words
+
     def tick(self):
         now = time.time()
+        self._words_check()
         if self.update_ready and not self.restarting:
             self._auto_update()
         share.WATCH = bool(self.follow.get())
@@ -818,6 +1073,30 @@ class Overlay:
                 self.listen()
         self.draw()
         self.root.after(100, self.tick)
+
+    def _text_sung(self, x, y, s, sung):
+        """Karaoke: the sung part of the line in gold, the rest white. False if the line is too long
+        for one row (then it's drawn the normal way)."""
+        font = self.font_main
+        width = font.measure(s)
+        if width > self.canvas.winfo_width() - int(40 * self.k):
+            return False
+        n, cut = 0, len(s)                       # `sung` counts letters/characters, not spaces/punctuation
+        for k, ch in enumerate(s):
+            if n >= sung:
+                cut = k
+                break
+            if lyrics._plain(ch):
+                n += 1
+        left = x - width / 2
+        o = max(2, round(2 * self.k))
+        for part, px, fill in ((s[:cut], left, "#ffd34d"), (s[cut:], left + font.measure(s[:cut]), "#ffffff")):
+            if not part:
+                continue
+            for dx, dy in ((-o, 0), (o, 0), (0, -o), (0, o), (-o, -o), (o, o), (-o, o), (o, -o)):
+                self.canvas.create_text(px + dx, y + dy, text=part, font=font, fill="#111111", anchor="w")
+            self.canvas.create_text(px, y, text=part, font=font, fill=fill, anchor="w")
+        return True
 
     def _text(self, x, y, s, font, fill):
         wrap = max(200, self.canvas.winfo_width() - int(40 * self.k))
@@ -862,7 +1141,8 @@ class Overlay:
             if self.lines and self.song.get("cc"):
                 top += {"cc": "   ▶ video subtitles", "translation": "   ▶ video subtitles (translation)",
                         "retimed": "   ▶ timed to the video",
-                        "video": "   ▶ read from the video"}.get(self.song["cc"], "")
+                        "video": "   ▶ read from the video",
+                        "edited": "   ✎ fixed by hand"}.get(self.song["cc"], "")
             elif self.lines and self.rough:
                 top += "   ⚠ rough timing - right-click › sync"
             if self.scan_proc and self.scan_proc.poll() is None and self.song.get("cc") != "video":
@@ -883,7 +1163,7 @@ class Overlay:
         if self.lines:
             self._draw_buttons()
 
-        cur, nxt = self.status, ""
+        cur, nxt, i, pos = self.status, "", -1, 0.0
         if self.lines and self.no_pos and self._player_mode():
             cur = "This player doesn't share its position - try Sound source › PC sound"
         elif self.lines:
@@ -904,7 +1184,13 @@ class Overlay:
                     cur = "♪ ♪ ♪"
         elif self.song and self.song.get("static_lyrics") and not self.status:
             cur = "(lyrics not synced)"
-        self._text(cx, h * self.LYRIC_Y, cur, self.font_main, "#ffffff")
+        sung = None
+        if self.lines and i >= 0 and cur == self.lines[i][1] and self.words:
+            ws = self.words.get(lyrics._plain(cur))
+            if ws:
+                sung = lyrics.sung_chars(ws, pos - self.lines[i][0])
+        if sung is None or not self._text_sung(cx, h * self.LYRIC_Y, cur, sung):
+            self._text(cx, h * self.LYRIC_Y, cur, self.font_main, "#ffffff")
         if nxt:
             self._text(cx, h * self.NEXT_Y, nxt, self.font_small, "#cccccc")
 
