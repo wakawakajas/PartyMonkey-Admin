@@ -11704,7 +11704,13 @@ function pcMissingFonts(){
   (state.cats||[]).forEach(c=>[c.font,c.cjk].forEach(k=>{ const n=pcFontMissing(k); if(n) out.add(n); }));
   // and a library text's own font, where a category on this sheet fills it
   const names=new Set((state.cats||[]).map(c=>pcCatKey(c.name)));
-  Object.values((typeof pcLib!=='undefined'&&pcLib&&pcLib.boxes)||{}).forEach(b=>
+  const on=new Set(), add=d=>{ const b=d&&pcLibBoxOf(d); if(b) on.add(b); };
+  if(typeof pcLib!=='undefined'&&pcLib){
+    (state.designs||[]).forEach(add);
+    try{ (finalSplitList('front')||[]).forEach(add); }catch(e){}
+    add(state.final&&state.final.front);
+  }
+  on.forEach(b=>
     pcLibTexts(b).forEach(t=>{ if(t.font&&(!t.cat||names.has(pcCatKey(t.cat)))){
       const n=pcFontMissing(t.font); if(n) out.add(n); } }));
   return [...out];
@@ -11736,6 +11742,7 @@ function pcCjkFamily(key){
   if(typeof key==='string'&&key.startsWith('file:')){
     const f=(loadDesignFonts||[]).find(x=>x.key===key);
     if(f) return `"${f.family}"`;
+    if(pcFontReg.has(key)) return `"pcf-${pcHash(key.slice(5))}"`;
   }
   return PC_CJK_FONTS[key]||PC_CJK_FONTS.yahei;
 }
@@ -11752,8 +11759,11 @@ function pcCatValue(c,k){
   if(!c||k<0) return '';
   const count=Math.max(0,Math.floor(Number(c.count)||0));
   if(k>=count) return '';
-  // one card's words changed on the card itself (clicked on the sheet)
-  const own=c.cardText;
+  // one card's words changed on the card itself (clicked on the sheet) - kept
+  // only while the group has the same boxes: a box added or taken off
+  // renumbers every card, and the words would land on a different one
+  let own=c.cardText;
+  if(own&&c.cardSig!=null&&c.cardSig!==pcCatSig(c)){ delete c.cardText; delete c.cardSig; own=null; }
   if(own&&Object.prototype.hasOwnProperty.call(own,k)) return String(own[k]);
   const lines=c.lines||[];
   // more cards wanted than lines: the list runs again from the top — one word
@@ -11796,7 +11806,9 @@ const pcCardSpaces=v=>String(v).replace(/ {2,}/g,m=>' '+' '.repeat(m.length-1))
 const pcCardSpacesBack=v=>String(v).replace(/ /g,' ');
 function pcSetCardText(c,k,v,old){
   v=pcCardSpaces(v);
+  if(c.cardSig!=null&&c.cardSig!==pcCatSig(c)) delete c.cardText;
   c.cardText={...(c.cardText||{}),[k]:v};
+  c.cardSig=pcCatSig(c);
   const m=c.nameSize, ok=String(old||'').trim(), nk=String(v).trim();
   if(m&&ok!==nk&&Object.prototype.hasOwnProperty.call(m,ok)){
     c.nameSize={...m,[nk]:m[ok]};
@@ -11810,6 +11822,8 @@ const pcCatById=id=>(state.cats||[]).find(c=>c.id===id)||null;
 // the box it was copied from, so its numbers start again from 1 rather than
 // carrying on from the first set
 const pcCatSlots=c=>c?fillOrder().filter(ph=>ph.cat===c.id&&!phTwinSrc(ph)):[];
+// the group's boxes in fill order, as one string: what per-card words are tied to
+const pcCatSig=c=>pcCatSlots(c).map(p=>p.id).join(',');
 // the box a duplicate takes its words from, while both are in one group
 function phTwinSrc(ph){
   if(!ph||!ph.twin) return null;
@@ -11823,8 +11837,16 @@ const pcCatTint=c=>{
 // how many sheets the categories need between them
 function pcSheetCount(){
   let n=1;
+  let boxed;
   (state.cats||[]).forEach(c=>{
-    const per=pcCatSlots(c).length;
+    let per=pcCatSlots(c).length;
+    // no words boxes of its own: a design's saved text that names it fills it,
+    // one card at a time as the artwork goes
+    if(!per){
+      if(boxed===undefined) boxed=pcLibBoxedCards(0);
+      const k=pcCatKey(c.name);
+      if(k&&boxed&&boxed.some(o=>pcLibTexts(o.b).some(t=>pcCatKey(t.cat)===k))) per=artOrder().length;
+    }
     if(!per) return;
     n=Math.max(n,Math.ceil(Math.max(0,Math.floor(Number(c.count)||0))/per));
   });
@@ -14108,8 +14130,9 @@ function pcLibBoxOf(d){
   // a different path, and its texts were silently left off
   const base=String(d.name||'').replace(/ · p\d+$/,'');
   const file=String(path||'').split('/').pop();
+  const live=pcLibLivePaths();
   for(const k in B){
-    const r=B[k]; if(!r) continue;
+    const r=B[k]; if(!r||live.has(k)) continue;
     if((base&&r.name===base)||(file&&k.split('/').pop()===file)) return r;
   }
   return null;
@@ -14616,6 +14639,7 @@ var pcNlOn=false;
 var pcNlHome=[];
 var pcNlMode='';
 var pcNlSide='lib';
+var pcNlKeep={};
 // a right-hand tab opened from code, as a press on it would
 function pcNlShowTab(t){
   const b=document.querySelector(`#pcNlTabs [data-pctab="${t}"]`);
@@ -14683,8 +14707,7 @@ function pcNlParts(){
     [$('artworkCard'),'pcNlArt'],
     [$('pcTextPanel'),'pcNlWords'],[$('pcCatsCard'),'pcNlWords'],
     [$('cutLineCard'),'pcNlCut'],
-    [$('layoutCard'),'pcNlPh'],[$('sheetSizeCard'),'pcNlPh'],[$('alignPanel'),'pcNlPh'],
-    ...[...S.querySelectorAll(':scope > .preview-wrap .sheet-actions')].map(n=>[n,'pcNlPh'])];
+    [$('layoutCard'),'pcNlPh'],[$('sheetSizeCard'),'pcNlPh'],[$('alignPanel'),'pcNlPh']];
   return [
     [$('pcTitle'),'pcNlTitle'],
     [$('pcJobBar'),'pcNlJob'],
@@ -14708,6 +14731,11 @@ function pcNlSync(){
   // Place Card and Custom Template put the parts in different places: going
   // from one to the other with the frame up, everything goes home first
   const mode=pcMode==='placecard'?'placecard':'custom';
+  const switched=pcNlMode&&pcNlMode!==mode;
+  if(switched){
+    const on=document.querySelector('#pcNlTabs .on');
+    pcNlKeep[pcNlMode]={side:pcNlSide,tab:on?on.dataset.pctab:'art'};
+  }
   if(pcNlOn&&want&&pcNlMode!==mode){
     while(pcNlHome.length){ const [n,c]=pcNlHome.pop(); if(c.parentNode){ c.parentNode.insertBefore(n,c); c.remove(); } }
     pcNlOn=false;
@@ -14739,6 +14767,11 @@ function pcNlSync(){
   if(em) em.textContent=pc?'Pick a design from the Library, or upload one under Order.':'Upload a front, or add design lines under Artwork.';
   // Templates and Setup are Place Card's own panels: Custom Template goes back to the Library
   if(!pc&&!/^(lib|mc)$/.test(pcNlSide)) pcNlLeftTab('lib');
+  const kept=switched&&pcNlKeep[mode];
+  if(kept){
+    if(kept.side!==pcNlSide&&(pc||/^(lib|mc)$/.test(kept.side))&&(kept.side!=='mc'||document.body.classList.contains('mc-rail'))) pcNlLeftTab(kept.side);
+    pcNlShowTab(kept.tab);
+  }
   if(currentScreen==='tool-custom'){
     document.body.classList.toggle('lt',want);
     document.body.classList.toggle('gtnl-bg',want);
@@ -15184,7 +15217,7 @@ function nlMagnifier(mag,lens,lc,sheet,active,zoomTo){
           document.addEventListener('click',eat,true); setTimeout(()=>document.removeEventListener('click',eat,true),0);
           const o=others(); if(slot>=0) o.splice(slot,0,k);
           // Place Card moved its three: Rearrange keeps its place beside the sheet for Custom Template
-          if(pcpc()) o.splice(o.indexOf('sheet'),0,'rearr');
+          if(pcpc()){ const ri=st.order.indexOf('rearr'); o.splice(ri<0?o.indexOf('sheet'):Math.min(ri,o.length),0,'rearr'); }
           if(slot>=0&&o.join()!==st.order.join()){ st.order=o; save(); apply(); refit(); } else apply();
         };
         document.addEventListener('pointermove',move,true); document.addEventListener('pointerup',up,true);
@@ -15961,7 +15994,7 @@ pcCatRoots.forEach(r=>r.addEventListener('input',e=>{
   const el=e.target.closest('[data-cf]'); if(!el) return;
   const c=pcCatOf(el); if(!c) return;
   const f=el.dataset.cf;
-  if(f==='name'){ c.name=el.value; drawAll(); return; }
+  if(f==='name'){ c.name=el.value; try{ pcBulkCatOptions(); }catch(e){} drawAll(); return; }
   // words typed on single cards (pcSetCardText) go when the words they were
   // made from are changed here: they would sit on whichever card is now there
   if(f==='pattern'||f==='lines'||f==='start'||f==='digits') delete c.cardText;
@@ -15979,7 +16012,7 @@ pcCatRoots.forEach(r=>r.addEventListener('input',e=>{
   }
   const n=Number(el.value);
   if(f==='count'){ c.count=Math.max(0,Math.floor(n)||0); pcCatTallyOnly(c); }
-  else if(f==='start') c.start=isFinite(n)?Math.floor(n):1;
+  else if(f==='start') c.start=(el.value===''||!isFinite(n))?1:Math.floor(n);
   else if(f==='digits') c.digits=el.value===''?0:Math.min(20,Math.max(0,Math.floor(n)||0));
   else if(f==='sizeMm') c.sizeMm=Math.max(0.5,n||6);
   else if(f==='rot') c.rot=isFinite(n)?n:0;
@@ -16004,7 +16037,7 @@ pcCatRoots.forEach(r=>r.addEventListener('change',e=>{
     if(pcCatListOn(ph.closest('[data-cid]'))||lines.length>1){
       c.lines=[...(c.lines||[]),...lines]; c.count=c.lines.length;
       pcListMode[c.id]=true;
-    }else c.pattern=lines[0];
+    }else{ c.pattern=lines[0]; delete c.cardText; }
     pcRenderCats(); drawAll();
     return;
   }
@@ -20034,6 +20067,7 @@ function pcFoldSheetsDefault(){
 // was last left on — Back picked once left the pager on the back for good.
 function pcPlaceSheetNav(){
   const nav=document.getElementById('sheetNav'); if(!nav) return;
+  if(typeof pcNlOn!=='undefined'&&pcNlOn) return;
   const card=s=>document.querySelector(`#appScreen .preview-card[data-side="${s}"]`);
   const shown=el=>!!el&&getComputedStyle(el).display!=='none';
   const side=shown(card('front'))||!shown(card('back'))?'front':'back';
@@ -32874,8 +32908,11 @@ async function pcRefreshTemplateList(){
     .eq('kind','place-card')
     .order('sort_order',{ascending:true});
   if(error){
-    pcKindReady=false;
-    pcTemplateRows=[]; el.innerHTML=pcKindMissingHtml;
+    // a network blip is not a missing migration: that would block Save and the
+    // library until a reload
+    if(error.code==='42703'||/\bkind\b/i.test(error.message||'')){ pcKindReady=false; el.innerHTML=pcKindMissingHtml; }
+    else el.innerHTML='<p class="hint" style="margin:4px 0 0;">Could not load the templates - check your connection and open the list again.</p>';
+    pcTemplateRows=[];
     return;
   }
   if(pcKindReady===null) pcKindReady=true;
@@ -32991,7 +33028,9 @@ async function pcLoadTemplate(id){
   const msg=pcMsg();
   if(!sb||!id) return;
   const row=pcTemplateById(id); const name=row?row.name:'';
+  const seq=++pcLoadSeq;
   const {data,error}=await sb.from('templates').select('data').eq('id',id).single();
+  if(seq!==pcLoadSeq) return;                 // another template was picked meanwhile
   if(error||!data){showMsg(msg,'Could not find that template.',false);return;}
   // no name: that fills the Custom Template's name and folder boxes, and a
   // Place Card template is not the one they describe
@@ -32999,10 +33038,14 @@ async function pcLoadTemplate(id){
   document.getElementById('pcTemplateName').value=name;
   // the template's text may name folder fonts — make sure they are scanned and
   // registered (the folder could have been connected since entering Place Card)
-  const dir=await loadDesignDirGet();
-  if(dir&&await loadDesignDirOk(dir,false)){ await loadDesignRescan(); drawAll(); }
   showMsg(msg,'✓ Loaded "'+name+'"',true);
+  if(loadDesignFiles.length) return;
+  try{
+    const dir=await loadDesignDirGet();
+    if(seq===pcLoadSeq&&dir&&await loadDesignDirOk(dir,false)){ await loadDesignRescan(); drawAll(); }
+  }catch(e){}
 }
+let pcLoadSeq=0;
 async function pcDeleteTemplate(id){
   const msg=pcMsg();
   if(!sb||!id) return;
@@ -33011,9 +33054,10 @@ async function pcDeleteTemplate(id){
     await loadTemplateOwners();
     const who=templateOwners[row.user_id]||'someone else';
     if(!confirm('Delete "'+name+'"?\n\nThis one was saved by '+who+', and deleting it removes it for everybody.')) return;
-  }
-  const {error}=await sb.from('templates').delete().eq('id',id);
+  }else if(!confirm('Delete "'+name+'"?\n\nIt goes for everybody using Place Card.')) return;
+  const {data:gone,error}=await sb.from('templates').delete().eq('id',id).select('id');
   if(error){showMsg(msg,'Could not delete: '+error.message,false);return;}
+  if(!gone||!gone.length){ await pcRefreshTemplateList(); showMsg(msg,'Nothing was deleted - it may be gone already, or not yours to delete.',false); return; }
   await pcRefreshTemplateList();
   showMsg(msg,'✓ Deleted "'+name+'"',true);
 }
@@ -33079,19 +33123,37 @@ async function pcLibLoad(){
 // name under another path. The folder connected a level up or down, or moved to
 // another drive, changes every path but not the file — and the texts were
 // listed as gone though they were still saved. Built once per list, not per row.
+// the paths of the designs in the folder now - a saved box under one of these
+// is that design's, never another file's of the same name
+let pcLibLiveOf=null, pcLibLiveSet=new Set();
+function pcLibLivePaths(){
+  const f=typeof loadDesignFiles!=='undefined'?loadDesignFiles:null;
+  if(f!==pcLibLiveOf){ pcLibLiveOf=f; pcLibLiveSet=new Set((f||[]).map(x=>x&&x.path).filter(Boolean)); }
+  return pcLibLiveSet;
+}
 function pcLibKeyFinder(){
-  const B=(pcLib&&pcLib.boxes)||{}, byFile=new Map();
-  for(const k in B){ const f=k.split('/').pop(); if(!byFile.has(f)) byFile.set(f,k); }
+  const B=(pcLib&&pcLib.boxes)||{}, byFile=new Map(), live=pcLibLivePaths();
+  for(const k in B){ if(live.has(k)) continue; const f=k.split('/').pop(); if(!byFile.has(f)) byFile.set(f,k); }
   return it=>B[it.path]?it.path:(byFile.get(String(it.path).split('/').pop())||null);
 }
-async function pcLibWrite(change){
+// one write at a time: each reloads the library first, so two at once lost one
+let pcLibQ=Promise.resolve();
+function pcLibWrite(change){
+  const run=pcLibQ.then(()=>pcLibWriteNow(change));
+  pcLibQ=run.catch(()=>{});
+  return run;
+}
+async function pcLibWriteNow(change){
   if(!sb) throw new Error('Sync unavailable — check your connection.');
   if(pcKindReady===false) throw new Error('Run supabase-migration-PLACE-CARD-TEMPLATES.sql first.');
   const {data:{session}}=await sb.auth.getSession();
   if(!session) throw new Error('Sign in first.');
   await pcLibLoad();
-  change(pcLib);
-  const data={name:PC_LIB_NAME,kind:'place-card',lib:pcLib};
+  // the change goes on a copy: kept only once it is written
+  const next=JSON.parse(JSON.stringify(pcLib||{}));
+  if(!next.boxes) next.boxes={};
+  change(next);
+  const data={name:PC_LIB_NAME,kind:'place-card',lib:next};
   const stamp=new Date().toISOString();
   let error;
   if(pcLibRowId){
@@ -33102,6 +33164,7 @@ async function pcLibWrite(change){
     if(!error) await pcLibLoad();
   }
   if(error) throw error;
+  if(pcLibRowId) pcLib=next;
   drawAll();
 }
 function pcPhraseOptions(){
@@ -33206,7 +33269,8 @@ function pcLibRenderList(){
     : '';
   el.__items=items;
   if(!items.length){
-    el.innerHTML=`<p class="hint" style="margin:4px 0 0;">${all.length?'— no matches —':'— choose a folder to see designs —'}</p>`;
+    el.innerHTML=`<p class="hint" style="margin:4px 0 0;">${all.length?'— no matches —'
+      :pcNlOn?'— no designs yet: <a href="#" data-lib-setup>choose or reconnect the folder in Setup</a> —':'— choose a folder to see designs —'}</p>`;
     return;
   }
   el.innerHTML=items.map((it,i)=>{
@@ -33264,6 +33328,7 @@ document.getElementById('pcLibSearch').addEventListener('input',()=>{
 });
 document.getElementById('pcLibList').addEventListener('click',async e=>{
   const items=document.getElementById('pcLibList').__items||[];
+  if(e.target.closest('[data-lib-setup]')){ e.preventDefault(); pcNlLeftTab('setup'); return; }
   const box=e.target.closest('[data-lib-box]');
   if(box){ const it=items[+box.dataset.libBox]; if(it) pcBoxOpen(it); return; }
   // on the new layout the picture adds it too
@@ -33687,6 +33752,9 @@ async function pcBoxStore(texts){
     if(String(t.sample||'').trim()) o.sample=String(t.sample).trim();
     return o;
   });
+  const btns=['pcBoxSaveBtn','pcBoxClearBtn'].map(id=>document.getElementById(id));
+  if(btns[0].disabled) return;
+  btns.forEach(b=>{ b.disabled=true; });
   try{
     await pcLibWrite(l=>{
       // texts found under the file's old path move to the new one, not copied
@@ -33698,13 +33766,14 @@ async function pcBoxStore(texts){
       const f=list.find(t=>!t.cat)||list[0];
       l.boxes[it.path]={name:it.name,x:f.x,y:f.y,w:f.w,h:f.h,texts:list};
     });
-    pcBoxClose(); pcLibRenderList();
+    if(pcBoxFor===it) pcBoxClose();
+    pcLibRenderList();
     showMsg(document.getElementById('pcLibMsg'),list.length
       ?`✓ ${list.length} text${list.length===1?'':'s'} saved for ${it.name}.`
       :`✓ Texts cleared for ${it.name}.`,true);
   }catch(err){
     showMsg(msg,'Could not save: '+((err&&err.message)||'unknown error'),false);
-  }
+  }finally{ btns.forEach(b=>{ b.disabled=false; }); }
 }
 document.getElementById('pcBoxSaveBtn').addEventListener('click',()=>{
   if(!pcBoxTexts.some(t=>t.w>=0.03&&t.h>=0.03)){
@@ -39312,6 +39381,7 @@ async function loadDesignFileByPath(path){
   return await under(await gtIdbGet(otherKey).catch(()=>null));
 }
 async function loadDesignRescan(onProgress){
+  const m0=ldActiveMode();
   loadDesignFiles=[]; loadDesignFonts=[];
   const dir=await loadDesignDirGet();
   if(!dir||!await loadDesignDirOk(dir,false)) return;
@@ -39322,6 +39392,8 @@ async function loadDesignRescan(onProgress){
   ldScanTick=onProgress?(n=>{ folders++; found+=n; onProgress(folders,found); }):null;
   let out;
   try{ out=await loadDesignScan(dir,'',fonts); } finally { ldScanTick=null; }
+  // Place Card <-> Custom Template while it read: these files are the other folder's
+  if(ldActiveMode()!==m0) return;
   out.sort((a,b)=>a.path.localeCompare(b.path,undefined,{numeric:true,sensitivity:'base'}));
   loadDesignFiles=out;
   if(wantFonts){
@@ -64074,6 +64146,7 @@ async function mcShowPlanEntry(i,page){
           // the face this line was built on, or a place card proofs as empty
           // boxes — the same rule the render itself follows
           pcMode=mcPcOf(e.it);
+          if(pcMode==='placecard'&&!pcLibLoaded) await pcLibLoad().catch(()=>{});
           applyPrintState(e.it.design);
           state.orderId=e.it.order_id;
           await mcApplyArt(e.it);
@@ -72611,6 +72684,9 @@ async function mcRenderLine(it,side){
     applyPrintState(it.design);
     state.orderId=it.order_id;
     state.paperType=it.paper_type||''; state.gsm=it.gsm||'';
+    // the designs' own text boxes are in the library, read only when the Place
+    // Card screen was opened - a batch printed straight from the list needs it too
+    if(pcMode==='placecard'&&!pcLibLoaded) await pcLibLoad().catch(()=>{});
     // names in a folder font that is not loaded would print in the fallback
     if(side==='front'&&pcMode==='placecard'&&pcMissingFonts().length) await pcEnsureFolderFonts();
     const missFonts=side==='front'&&pcMode==='placecard'?pcMissingFonts():[];
