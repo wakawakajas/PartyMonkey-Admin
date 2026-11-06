@@ -33,6 +33,9 @@ SETTINGS = os.path.join(HERE, "settings.json")
 KEY = "#010101"               # transparent colour
 
 
+JOIN_OFF = "Off - use my own listening"
+
+
 def load_settings():
     try:
         with open(SETTINGS, encoding="utf-8") as f:
@@ -105,7 +108,8 @@ class Overlay:
         self.share_url = share.start()   # live lyrics page for colleagues on the office network
         self.update_ready = False
         threading.Thread(target=self._update_loop, daemon=True).start()
-        self.follow = tk.StringVar(value=self.cfg.get("follow") or "")   # PC name we Join, "" = listen myself
+        follow = self.cfg.get("follow") or ""
+        self.follow = tk.StringVar(value="" if follow == JOIN_OFF else follow)   # PC name we Join, "" = listen myself
         self.misses = 0                  # failed recognitions in a row
         self.last_media = None           # title Windows says is playing (to spot song changes)
         self.next_media_check = 0.0
@@ -149,7 +153,8 @@ class Overlay:
     def _menu(self, e):
         m = tk.Menu(self.root, tearoff=0)
         join = tk.Menu(m, tearoff=0)
-        join.add_radiobutton(label="Off - use my own listening", value="", variable=self.follow,
+        # Tk gives a radiobutton with value "" its label as the value, so "Off" is turned back into ""
+        join.add_radiobutton(label=JOIN_OFF, value=JOIN_OFF, variable=self.follow,
                              command=self._follow_changed)
         ps = share.peers(hosts_only=True)    # PCs that are themselves Joined to someone aren't listed
         if ps:
@@ -259,6 +264,8 @@ class Overlay:
 
     # ---------- join a colleague ----------
     def _follow_changed(self):
+        if self.follow.get() == JOIN_OFF:
+            self.follow.set("")
         self.cfg["follow"] = self.follow.get()
         self._save()
         self.song, self.lines, self.misses = None, None, 0
