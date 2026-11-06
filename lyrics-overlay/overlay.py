@@ -106,6 +106,7 @@ class Overlay:
         self.player_title = None       # Player mode: the title we last looked up lyrics for
         self.player_paused = False
         self.player_np = None
+        self.follow_paused = None              # Joined and the host has paused: the position it stopped at
         self.player_app = None         # app id of the player we're following
         self.busy_player = False
         self.next_player = 0.0
@@ -172,6 +173,7 @@ class Overlay:
         # Tk gives a radiobutton with value "" its label as the value, so "Off" is turned back into ""
         join.add_radiobutton(label=JOIN_OFF, value=JOIN_OFF, variable=self.follow,
                              command=self._follow_changed)
+        share.refresh()                      # the folder is only read every 20s when not Joined
         ps = share.peers(hosts_only=True)    # PCs that are themselves Joined to someone aren't listed
         if ps:
             join.add_separator()
@@ -294,6 +296,7 @@ class Overlay:
         self.song, self.lines, self.misses = None, None, 0
         self.status = f"Joining {self.follow.get()}…" if self.follow.get() else "Right-click for menu"
         self.follow_fails, self.follow_lrev = 0, None
+        self.follow_paused = None
         self.next_follow = 0.0
         self.next_check = 0.0
         self._publish()
@@ -335,13 +338,19 @@ class Overlay:
                 self.rough = bool(lines) and lyrics.rough_timing(lines)
             self.song = {"title": st["title"], "artist": st["artist"], "offset": 0.0, "static_lyrics": None}
             self.lines = lines
-            if st.get("t0"):
+            self.follow_paused = st.get("paused")
+            if self.follow_paused is not None:     # host paused: stand still at that spot (see tick)
+                self.t0 = time.time() - self.follow_paused + self._shift()
+            elif st.get("t0"):
                 self.t0 = st["t0"] - off + self._shift()
             self.status = "" if lines else (st.get("status") or "No synced lyrics found")
         self._publish()
 
     def _publish(self):
-        share.publish(self.song, self.lines, self.t0, self.status, via=self.follow.get() or None)
+        paused = None
+        if self._player_mode() and self.player_paused and self.song and not self.follow.get():
+            paused = time.time() - self.t0             # where the song stands while paused
+        share.publish(self.song, self.lines, self.t0, self.status, via=self.follow.get() or None, paused=paused)
 
     def _share_window(self):
         win = tk.Toplevel(self.root)
@@ -407,6 +416,7 @@ class Overlay:
 
     def quit(self):
         self._stop_scan()
+        share.stop()
         self._save()
         self.root.destroy()
 
@@ -750,7 +760,10 @@ class Overlay:
         now = time.time()
         if self.update_ready and not self.restarting:
             self._auto_update()
+        share.WATCH = bool(self.follow.get())
         if self.follow.get():
+            if self.follow_paused is not None and self.song:
+                self.t0 = now - self.follow_paused + self._shift()
             if not self.busy_follow and now >= self.next_follow:
                 self.busy_follow, self.next_follow = True, now + 2
                 threading.Thread(target=self._follow_worker, args=(self.follow.get(), self.follow_lrev),
@@ -820,7 +833,8 @@ class Overlay:
                 top += "   ⏳ reading lyrics from the video…"
         if self.follow.get():
             top = (top + "   " if top else "") + f"⇢ from {self.follow.get()}"
-        if self._player_mode() and self.song and self.player_paused:
+        if self.song and ((self._player_mode() and self.player_paused and not self.follow.get())
+                          or (self.follow.get() and self.follow_paused is not None)):
             top += "   ⏸ paused"
         elif self.listening:
             top = (top + "   " if top else "") + "● listening"

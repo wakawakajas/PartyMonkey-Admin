@@ -18,18 +18,25 @@ ID = uuid.uuid4().hex            # tells this copy of the app apart from others 
 # rev changes on any change; lrev only when the song or its lyrics change (so pollers can skip the lyrics)
 DIAG = {}          # how this PC's app is doing (version, video reading) - in the NAS file, for fixing problems
 _state = {"title": "", "artist": "", "lines": [], "t0": None, "status": "Waiting for a song…", "via": None,
-          "rev": 0, "lrev": 0}
+          "paused": None, "rev": 0, "lrev": 0}
+WATCH = False      # True while this PC is Joined to someone: read the NAS folder often
 _lock = threading.Lock()
 _peers = {}                   # url -> {"name", "url", "title", "artist", "via", "seen"}
 _my_url = None
 URL_OK = re.compile(r"^http://\d{1,3}(\.\d{1,3}){3}:\d{1,5}$")   # beacons come from the open network: check them
 
 
-def publish(song, lines, t0, status, via=None):
-    """via = the PC we're Joined to (we only pass its song on), None if this PC finds songs itself."""
+def publish(song, lines, t0, status, via=None, paused=None):
+    """via = the PC we're Joined to (we only pass its song on), None if this PC finds songs itself.
+    paused = the song position while the player is paused (joiners freeze there), else None.
+    Tiny timing wobbles (< 0.5s) don't count as a change, so the NAS is only written when it matters."""
     with _lock:
         new = {"title": song["title"] if song else "", "artist": song["artist"] if song else "",
-               "lines": [list(x) for x in lines or []], "t0": t0 if song else None, "status": status, "via": via}
+               "lines": [list(x) for x in lines or []], "t0": t0 if song else None, "status": status, "via": via,
+               "paused": round(paused, 1) if (paused is not None and song) else None}
+        old_t0 = _state["t0"]
+        if new["t0"] is not None and old_t0 is not None and (new["paused"] is not None or abs(new["t0"] - old_t0) < 0.5):
+            new["t0"] = old_t0
         if any(new[k] != _state[k] for k in ("title", "artist", "lines")):
             _state["lrev"] += 1
         if any(new[k] != _state[k] for k in new):
@@ -98,7 +105,9 @@ def _listen_loop():
 # Times are kept in NAS-clock seconds so lyrics stay in sync even if PC clocks differ a little.
 NAS_DIRS = (r"\\PARTYMONKEY-NAS\Partymonkey\Partymonkey NAS\Lyrics Overlay\now-playing",
             r"P:\Lyrics Overlay\now-playing")
-NAS_FRESH = 15                # a file not rewritten for this long = that app is closed
+HEARTBEAT = 60                # write at least this often, so others know the app is still open
+NAS_FRESH = 140               # a PC's newest file older than this = that app is closed
+SCAN_JOINED, SCAN_IDLE = 2, 20   # seconds between reads of the folder: while Joined / otherwise
 _nas = {"dir": None, "off": None, "offs": [], "files": {}, "peers": []}   # off = NAS clock - our clock
 
 
@@ -130,7 +139,7 @@ def _nas_write(d):
     data = {"app": "lyrics-overlay", "id": ID, "name": NAME, "title": st["title"], "artist": st["artist"],
             "lines": st["lines"], "status": st["status"], "via": st["via"], "lrev": st["lrev"],
             "t0_nas": (st["t0"] + off) if (st["t0"] is not None and off is not None) else None,
-            "t0_local": st["t0"], "diag": dict(DIAG)}
+            "t0_local": st["t0"], "paused": st["paused"], "diag": dict(DIAG)}
     base = _safe_name()
     path = os.path.join(d, f"{base}.{int(time.time() * 1000)}.json")
     tmp = os.path.join(d, f"~{base}.tmp")
@@ -164,7 +173,7 @@ def _nas_scan(d):
         for seq, fn in sorted(files, reverse=True):
             path = os.path.join(d, fn)
             try:
-                if now_nas - seq / 1000 > NAS_FRESH + 10:     # newest file is old: that app is closed
+                if now_nas - seq / 1000 > NAS_FRESH:          # newest file is old: that app is closed
                     break
                 cached = _nas["files"].get(path)
                 if not cached:                                # each name is read once - it never changes
@@ -201,14 +210,39 @@ def _nas_loop():
             try:
                 with _lock:
                     rev = _state["rev"]
-                if rev != last_rev or now - last_write > 5:      # on every change + a heartbeat
+                if rev != last_rev or now - last_write > HEARTBEAT:   # on a real change + a heartbeat
                     last_rev, last_write = _nas_write(d), now
-                if now - last_scan > 2:
+                if now - last_scan > (SCAN_JOINED if WATCH else SCAN_IDLE) or _nas.get("scan_now"):
+                    _nas["scan_now"] = False
                     last_scan = now
                     _nas_scan(d)
             except OSError:
                 _nas["dir"] = None                                # NAS gone: look for it again later
         time.sleep(0.5)
+
+
+def refresh():
+    """Read the NAS folder now (e.g. the Join menu is opening). Quick; errors are ignored."""
+    d = _nas["dir"]
+    if d:
+        try:
+            _nas_scan(d)
+        except OSError:
+            pass
+
+
+def stop():
+    """App closing: remove this PC's files so others stop listing it straight away."""
+    d = _nas["dir"]
+    if not d:
+        return
+    try:
+        for fn in os.listdir(d):
+            m = NAS_FILE.match(fn)
+            if m and m.group(1) == _safe_name():
+                os.remove(os.path.join(d, fn))
+    except OSError:
+        pass
 
 
 def nas_ok():
