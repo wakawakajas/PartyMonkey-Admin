@@ -60,7 +60,8 @@ class Overlay:
         self.root.config(bg=KEY)
         self.root.attributes("-transparentcolor", KEY)
         self.k = max(1.0, self.root.winfo_fpixels("1i") / 96)   # display scaling (2.0 at 200%)
-        w, h = int(1000 * self.k), int(150 * self.k)
+        w = int(1000 * self.k)
+        h = int(self.cfg.get("size", 26) * self.HEIGHT_PER_PT * self.k)   # room for the sync buttons row
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         x, y = self.cfg.get("pos", ((sw - w) // 2, sh - h - int(80 * self.k)))
         vx, vy = self.root.winfo_vrootx(), self.root.winfo_vrooty()
@@ -337,7 +338,7 @@ class Overlay:
         self.size = max(12, min(60, self.size + d))
         self.font_main.config(size=self.size)
         self.font_small.config(size=max(10, self.size // 2))
-        self.root.geometry(f"{self.root.winfo_width()}x{int(self.size * 5.5 * self.k)}")
+        self.root.geometry(f"{self.root.winfo_width()}x{int(self.size * self.HEIGHT_PER_PT * self.k)}")
         self._save()
 
     # ---------- updates (the app lives in a git repo; Start Lyrics Overlay.bat pulls before starting) ----------
@@ -583,17 +584,26 @@ class Overlay:
                                     justify="center")
         self.canvas.create_text(x, y, text=s, font=font, fill=fill, width=wrap, justify="center")
 
+    # layout, as parts of the bar's height: song name on top, sync buttons, lyric line, next line
+    BTN_Y, LYRIC_Y, NEXT_Y = 0.17, 0.57, 0.87
+    HEIGHT_PER_PT = 7.1                       # bar height = text size x this (x display scaling)
+
     def _draw_buttons(self):
-        """Three small pills in the top-left corner. They need a solid background: the see-through
-        parts of the bar let clicks fall through to the window underneath."""
+        """Three small pills in a row right above the lyric line. They need a solid background: the
+        see-through parts of the bar let clicks fall through to the window underneath."""
         c, k = self.canvas, self.k
-        x, y, gap = int(6 * k), int(4 * k), int(4 * k)
+        gap, pad_x, pad_y = int(6 * k), int(7 * k), int(3 * k)
+        items = []
         for tag, label in (("btn_early", "◀ earlier"), ("btn_sync", "next line NOW"), ("btn_late", "later ▶")):
             t = c.create_text(0, 0, text=label, font=self.font_btn, fill="#ffffff", anchor="nw", tags=tag)
             x1, y1, x2, y2 = c.bbox(t)
-            w, h = x2 - x1 + int(14 * k), y2 - y1 + int(6 * k)
+            items.append((tag, t, x2 - x1 + 2 * pad_x, y2 - y1 + 2 * pad_y))
+        total = sum(w for _, _, w, _ in items) + gap * (len(items) - 1)
+        x = (c.winfo_width() - total) // 2                       # centred over the lyric
+        y = int(self.canvas.winfo_height() * self.BTN_Y)
+        for tag, t, w, h in items:
             r = c.create_rectangle(x, y, x + w, y + h, fill="#2b2f3a", outline="#5d6675", tags=tag)
-            c.coords(t, x + int(7 * k), y + int(3 * k))
+            c.coords(t, x + pad_x, y + pad_y)
             c.tag_raise(t, r)
             x += w + gap
 
@@ -638,9 +648,9 @@ class Overlay:
             nxt = self.lines[i + 1][1] if i + 1 < len(self.lines) else ""
         elif self.song and self.song.get("static_lyrics") and not self.status:
             cur = "(lyrics not synced)"
-        self._text(cx, h * 0.45, cur, self.font_main, "#ffffff")
+        self._text(cx, h * self.LYRIC_Y, cur, self.font_main, "#ffffff")
         if nxt:
-            self._text(cx, h * 0.80, nxt, self.font_small, "#cccccc")
+            self._text(cx, h * self.NEXT_Y, nxt, self.font_small, "#cccccc")
 
 
 if __name__ == "__main__":
