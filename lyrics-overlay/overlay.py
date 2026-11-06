@@ -21,6 +21,7 @@ import soundcard as sc
 import lyrics
 import media
 import share
+import ytcc
 
 warnings.filterwarnings("ignore", category=sc.SoundcardRuntimeWarning)
 
@@ -193,7 +194,10 @@ class Overlay:
 
     # ---------- sync (remembered per song, so badly timed lyric files only need fixing once) ----------
     def _song_key(self):
-        return f"{self.song['title']}|{self.song['artist']}" if self.song else None
+        if not self.song:
+            return None
+        key = f"{self.song['title']}|{self.song['artist']}"
+        return key + "|video" if self.song.get("cc") else key   # video-timed lyrics need their own sync
 
     def _shift(self):
         return self.cfg.get("shifts", {}).get(self._song_key(), 0.0)
@@ -418,8 +422,17 @@ class Overlay:
                 self._publish()
 
     def _player_lyrics(self, np):
+        cc, cc_translation = ytcc.captions(np)       # the YouTube video's own subtitles: exact timing
+        if cc and not cc_translation:
+            self.root.after(0, self._player_lyrics_done, np["title"], self._media_title(np), cc, None, "cc")
+            return
         title, lines = self._lyrics_from_media(np)
         shazam = None
+        if lines and cc and np["pos"] is not None:     # translated subtitles: borrow their exact timing
+            timed = ytcc.retime(lines, cc)
+            if timed:
+                self.root.after(0, self._player_lyrics_done, np["title"], title, timed, None, "retimed")
+                return
         if not lines:
             # the video title didn't lead to lyrics (odd title, cover...): listen to this PC's sound and ask
             # Shazam for the real song name, then look that up
@@ -428,6 +441,14 @@ class Overlay:
                 lines = lyrics.find_lyrics(shazam["title"], shazam["artist"])
                 if lines:
                     title = shazam["title"]
+                    timed = cc and np["pos"] is not None and ytcc.retime(lines, cc)
+                    if timed:
+                        self.root.after(0, self._player_lyrics_done, np["title"], title, timed, None, "retimed")
+                        return
+        if not lines and cc:                         # nothing else: the video's translated subtitles
+            shazam, lines, title = None, cc, self._media_title(np)
+            self.root.after(0, self._player_lyrics_done, np["title"], title, lines, None, "translation")
+            return
         self.root.after(0, self._player_lyrics_done, np["title"], title, lines, shazam)
 
     def _shazam_pc_sound(self):
@@ -448,11 +469,12 @@ class Overlay:
         except Exception:
             return None
 
-    def _player_lyrics_done(self, media_title, title, lines, shazam=None):
+    def _player_lyrics_done(self, media_title, title, lines, shazam=None, cc=None):
         if media_title != self.player_title or not self.song:
             return                                 # the video changed while we were searching
         old_shift = self._shift()
         self.song["title"] = title
+        self.song["cc"] = cc
         if shazam and lines and self.no_pos:       # no position from the player: time it from Shazam
             self.song["artist"] = shazam["artist"]
             self.song["from_shazam"] = True
@@ -482,6 +504,15 @@ class Overlay:
             ctypes.windll.ole32.CoInitializeEx(None, 0)   # COM per thread for WASAPI
             # what Windows says this PC is playing (Spotify / YouTube) - only meaningful for PC sound
             np = media.now_playing() if dev.isloopback else None
+            np_at = time.time()
+            if np and np["pos"] is not None:
+                # the YouTube video's own subtitles in the song's language: exact timing, no Shazam needed
+                cc, cc_translation = ytcc.captions(np)
+                if cc and not cc_translation:
+                    song = {"title": self._media_title(np), "artist": np["artist"], "offset": np["pos"],
+                            "static_lyrics": None, "media": np["title"], "cc": "cc"}
+                    self.root.after(0, self._done, song, cc, "", np_at)
+                    return
             started = time.time()
             with dev.recorder(samplerate=RATE) as rec:
                 audio = rec.record(numframes=RATE * CLIP_SECONDS)
@@ -508,9 +539,24 @@ class Overlay:
                 return
             if np:
                 song["media"] = np["title"]
+                if np["pos"] is not None:
+                    cc, cc_translation = ytcc.captions(np)
+                    timed = cc and lines and ytcc.retime(lines, cc)
+                    if timed:                     # translated subtitles: borrow their exact timing
+                        song.update(offset=np["pos"], cc="retimed")
+                        lines, started = timed, np_at
+                    elif cc and not lines:        # nothing else: the video's translated subtitles
+                        song.update(offset=np["pos"], cc="translation")
+                        lines, started = cc, np_at
             self.root.after(0, self._done, song, lines, "", started)
         except Exception as ex:
             self.root.after(0, self._done, None, None, f"Error: {ex}", time.time())
+
+    @staticmethod
+    def _media_title(np):
+        """Short song name from the video title."""
+        q = media.queries(np)
+        return (q[0][0] if q else lyrics.clean_title(np["title"]))[:40]
 
     @staticmethod
     def _lyrics_from_media(np):
@@ -619,7 +665,10 @@ class Overlay:
         top = ""
         if self.song:
             top = f"♪ {self.song['title']} — {self.song['artist']}"
-            if self.lines and self.rough:
+            if self.lines and self.song.get("cc"):
+                top += {"cc": "   ▶ video subtitles", "translation": "   ▶ video subtitles (translation)",
+                        "retimed": "   ▶ timed to the video"}.get(self.song["cc"], "")
+            elif self.lines and self.rough:
                 top += "   ⚠ rough timing - right-click › sync"
         if self.follow.get():
             top = (top + "   " if top else "") + f"⇢ from {self.follow.get()}"
