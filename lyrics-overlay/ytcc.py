@@ -22,23 +22,30 @@ def _norm(s):
     return re.sub(r"[\W_]+", "", s or "").lower()
 
 
-def find_video(title, duration=0):
+def find_video(title, duration=0, channel=""):
     """(video info) for this exact title and length, or None.
     YouTube search can return a translated title, so a same-length result is opened to read its
-    original title too."""
-    with yt_dlp.YoutubeDL({**OPTS, "extract_flat": True}) as ydl:
-        res = ydl.extract_info("ytsearch8:" + title, download=False)
+    original title too. Emoji and odd symbols make YouTube search return nothing, so they're
+    turned into spaces; the channel name is added as a second try."""
+    plain = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", title)).strip()
     want = _norm(title)
-    with yt_dlp.YoutubeDL(OPTS) as ydl:
-        for e in res.get("entries") or []:
-            if duration and (not e.get("duration") or abs(e["duration"] - duration) > 2):
-                continue
-            flat_ok = _norm(e.get("title")) == want
-            if not duration and not flat_ok:
-                continue
-            info = ydl.extract_info("https://www.youtube.com/watch?v=" + e["id"], download=False)
-            if flat_ok or _norm(info.get("title")) == want:
-                return info
+    tried = set()
+    for q in (plain, f"{plain} {channel}".strip()):
+        if not q or q in tried:
+            continue
+        tried.add(q)
+        with yt_dlp.YoutubeDL({**OPTS, "extract_flat": True}) as ydl:
+            res = ydl.extract_info("ytsearch8:" + q, download=False)
+        with yt_dlp.YoutubeDL(OPTS) as ydl:
+            for e in res.get("entries") or []:
+                if duration and (not e.get("duration") or abs(e["duration"] - duration) > 2):
+                    continue
+                flat_ok = _norm(e.get("title")) == want
+                if not duration and not flat_ok:
+                    continue
+                info = ydl.extract_info("https://www.youtube.com/watch?v=" + e["id"], download=False)
+                if flat_ok or _norm(info.get("title")) == want:
+                    return info
     return None
 
 
@@ -152,6 +159,21 @@ def retime(lines, sub):
 
 
 _cache = {}
+_ids = {}
+
+
+def video_id(np):
+    """The YouTube video id for what Windows says is playing in a browser, or None."""
+    if yt_dlp is None or not np or not np.get("browser") or not np.get("title"):
+        return None
+    key = (np["title"], round(np.get("duration") or 0))
+    if key not in _ids:
+        try:
+            info = find_video(np["title"], np.get("duration") or 0, np.get("artist") or "")
+        except Exception:
+            return None
+        _ids[key] = info and info.get("id")
+    return _ids[key]
 
 
 def captions(np):
@@ -162,7 +184,8 @@ def captions(np):
     key = (np["title"], round(np.get("duration") or 0))
     if key not in _cache:
         try:
-            info = find_video(np["title"], np.get("duration") or 0)
+            info = find_video(np["title"], np.get("duration") or 0, np.get("artist") or "")
+            _ids[key] = info and info.get("id")
             _cache[key] = captions_for(info) if info else (None, False)
         except Exception:
             return None, False                       # network hiccup: try again next time

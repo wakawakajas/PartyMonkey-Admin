@@ -10,6 +10,7 @@ try:  # real pixel coordinates on scaled (125%/150%) displays, so the bar lands 
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
     pass
+import sys
 import threading
 import time
 import tkinter as tk
@@ -22,6 +23,7 @@ import lyrics
 import media
 import share
 import ytcc
+import ytvideo
 
 warnings.filterwarnings("ignore", category=sc.SoundcardRuntimeWarning)
 
@@ -93,6 +95,7 @@ class Overlay:
         self.hotkeys = {}
         self.player_title = None       # Player mode: the title we last looked up lyrics for
         self.player_paused = False
+        self.player_np = None
         self.player_app = None         # app id of the player we're following
         self.busy_player = False
         self.next_player = 0.0
@@ -130,6 +133,7 @@ class Overlay:
             self.canvas.tag_bind(tag, "<Button-1>", lambda e, fn=fn: self._button(fn))
             self.canvas.tag_bind(tag, "<Enter>", lambda e: self.canvas.config(cursor="hand2"))
             self.canvas.tag_bind(tag, "<Leave>", lambda e: self.canvas.config(cursor=""))
+        self.scan_proc, self.scan_media = None, None   # reading lyrics from the video picture (ytvideo.py)
         self.flash = ("", 0.0)                 # short note after a sync ("lyrics 0.5s earlier")
         threading.Thread(target=self._hotkey_loop, daemon=True).start()
 
@@ -382,6 +386,7 @@ class Overlay:
                          creationflags=0x08000000)       # it pulls the update, closes this copy, starts the new one
 
     def quit(self):
+        self._stop_scan()
         self._save()
         self.root.destroy()
 
@@ -416,7 +421,7 @@ class Overlay:
         self.player_paused = not np["playing"]
         self.player_app = np["app"]
         if np["title"] != self.player_title:      # new video / song -> look up its lyrics
-            self.player_title = np["title"]
+            self.player_title, self.player_np = np["title"], np
             self.song = {"title": lyrics.clean_title(np["title"])[:40], "artist": np["artist"],
                          "offset": 0.0, "static_lyrics": None, "media": np["title"]}
             self.lines, self.rough, self.status = None, False, "Finding lyrics…"
@@ -493,6 +498,8 @@ class Overlay:
         self.rough = bool(lines) and lyrics.rough_timing(lines)
         self.status = "" if lines else "No synced lyrics found"
         self._publish()
+        if cc != "cc":                             # no subtitles in the song's language: read the picture
+            self._scan_video(self.player_np)
 
     def listen(self):
         if self.listening or self.follow.get() or self._player_mode():
@@ -512,13 +519,19 @@ class Overlay:
             # what Windows says this PC is playing (Spotify / YouTube) - only meaningful for PC sound
             np = media.now_playing() if dev.isloopback else None
             np_at = time.time()
+            cur = self.song
+            if (np and np["pos"] is not None and cur and cur.get("media") == np["title"]
+                    and cur.get("cc") in ("cc", "video", "retimed")):
+                # same video, lyrics already timed to it: just follow the video's position
+                self.root.after(0, self._done, dict(cur, offset=np["pos"]), self.lines, "", np_at, np)
+                return
             if np and np["pos"] is not None:
                 # the YouTube video's own subtitles in the song's language: exact timing, no Shazam needed
                 cc, cc_translation = ytcc.captions(np)
                 if cc and not cc_translation:
                     song = {"title": self._media_title(np), "artist": np["artist"], "offset": np["pos"],
                             "static_lyrics": None, "media": np["title"], "cc": "cc"}
-                    self.root.after(0, self._done, song, cc, "", np_at)
+                    self.root.after(0, self._done, song, cc, "", np_at, np)
                     return
             started = time.time()
             with dev.recorder(samplerate=RATE) as rec:
@@ -555,7 +568,7 @@ class Overlay:
                     elif cc and not lines:        # nothing else: the video's translated subtitles
                         song.update(offset=np["pos"], cc="translation")
                         lines, started = cc, np_at
-            self.root.after(0, self._done, song, lines, "", started)
+            self.root.after(0, self._done, song, lines, "", started, np)
         except Exception as ex:
             self.root.after(0, self._done, None, None, f"Error: {ex}", time.time())
 
@@ -574,10 +587,12 @@ class Overlay:
                 return title, lines
         return lyrics.clean_title(np["title"])[:40], None
 
-    def _done(self, song, lines, msg, started):
+    def _done(self, song, lines, msg, started, np=None):
         self.listening = False
         if self.follow.get():                     # user switched to Join while we were listening
             return
+        if song and np and song.get("cc") != "cc":
+            self.root.after(0, self._scan_video, np)  # no subtitles in the song's language: read the picture
         self.next_check = time.time() + RECHECK_SECONDS
         if song:
             self.misses = 0
@@ -594,6 +609,61 @@ class Overlay:
                 self.song, self.lines = None, None
                 self.status = msg
                 self.next_check = time.time() + 15
+        self._publish()
+
+    # ---------- lyrics drawn into the video picture (ytvideo.py, own process) ----------
+    def _scan_video(self, np):
+        if not np or not np.get("browser") or np["title"] == self.scan_media or (np.get("duration") or 999) < 60:
+            return                                 # not a browser video, an ad, or already reading this one
+        self._stop_scan()
+        self.scan_media = np["title"]
+        known = None if (self.song or {}).get("cc") == "translation" else self.lines
+        threading.Thread(target=self._scan_worker, args=(np, known), daemon=True).start()
+
+    def _stop_scan(self):
+        p, self.scan_proc = self.scan_proc, None
+        if p and p.poll() is None:
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+    def _scan_worker(self, np, known):
+        import subprocess
+        vid = ytcc.video_id(np)
+        if not vid or self.scan_media != np["title"]:
+            return
+        try:
+            p = subprocess.Popen([sys.executable, os.path.join(HERE, "ytvideo.py"), vid, str(np["pos"] or 0)],
+                                 cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 creationflags=0x08000000 | 0x00004000)   # no window, below-normal priority
+        except Exception:
+            return
+        if self.scan_media != np["title"]:
+            p.kill()
+            return
+        self.scan_proc = p
+        for raw in p.stdout:
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                continue
+            if d.get("lines"):
+                lines = [tuple(x) for x in ytvideo.fix_with(d["lines"], known)]
+                now = media.now_playing(np["app"])     # fresh position, to time lines to the video
+                self.root.after(0, self._scan_lines, np["title"], lines, now, time.time())
+        p.wait()
+
+    def _scan_lines(self, media_title, lines, now, read_at):
+        if not self.song or self.song.get("media") != media_title or len(lines) < 3:
+            return
+        old_shift = self._shift()
+        self.song["cc"] = "video"
+        self.lines, self.rough, self.status = lines, False, ""
+        if self._player_mode() or not now or now["pos"] is None:
+            self.t0 += self._shift() - old_shift
+        else:
+            self.t0 = read_at - now["pos"] + self._shift()
         self._publish()
 
     # ---------- spot song changes on this PC (Spotify / YouTube) ----------
@@ -674,9 +744,12 @@ class Overlay:
             top = f"♪ {self.song['title']} — {self.song['artist']}"
             if self.lines and self.song.get("cc"):
                 top += {"cc": "   ▶ video subtitles", "translation": "   ▶ video subtitles (translation)",
-                        "retimed": "   ▶ timed to the video"}.get(self.song["cc"], "")
+                        "retimed": "   ▶ timed to the video",
+                        "video": "   ▶ read from the video"}.get(self.song["cc"], "")
             elif self.lines and self.rough:
                 top += "   ⚠ rough timing - right-click › sync"
+            if self.scan_proc and self.scan_proc.poll() is None and self.song.get("cc") != "video":
+                top += "   ⏳ reading lyrics from the video…"
         if self.follow.get():
             top = (top + "   " if top else "") + f"⇢ from {self.follow.get()}"
         if self._player_mode() and self.song and self.player_paused:
