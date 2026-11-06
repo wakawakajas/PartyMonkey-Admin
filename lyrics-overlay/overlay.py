@@ -284,6 +284,9 @@ class Overlay:
             self.follow.set("")
         self.cfg["follow"] = self.follow.get()
         self._save()
+        if self.follow.get():                      # joining: this PC's own video reading isn't needed
+            self._stop_scan()
+            self.scan_media = None
         self.song, self.lines, self.misses = None, None, 0
         self.status = f"Joining {self.follow.get()}…" if self.follow.get() else "Right-click for menu"
         self.follow_fails, self.follow_lrev = 0, None
