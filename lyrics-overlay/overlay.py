@@ -147,6 +147,7 @@ class Overlay:
             self.canvas.tag_bind(tag, "<Enter>", lambda e: self.canvas.config(cursor="hand2"))
             self.canvas.tag_bind(tag, "<Leave>", lambda e: self.canvas.config(cursor=""))
         self.scan_proc, self.scan_media = None, None   # reading lyrics from the video picture (ytvideo.py)
+        self.scan_known = None                 # lyric-site lyrics of the video being read (to correct / align)
         self.flash = ("", 0.0)                 # short note after a sync ("lyrics 0.5s earlier")
         threading.Thread(target=self._hotkey_loop, daemon=True).start()
 
@@ -456,6 +457,8 @@ class Overlay:
                          "offset": 0.0, "static_lyrics": None, "media": np["title"]}
             self.lines, self.rough, self.status = None, False, "Finding lyrics…"
             threading.Thread(target=self._player_lyrics, args=(np,), daemon=True).start()
+            self.scan_known = None
+            self._scan_video(np)                   # start reading the video picture straight away
         self.no_pos = np["pos"] is None and not self.song.get("from_shazam")
         if np["pos"] is not None and not self.song.get("from_shazam"):
             t0 = read_at - np["pos"] + self._shift()
@@ -514,6 +517,14 @@ class Overlay:
     def _player_lyrics_done(self, media_title, title, lines, shazam=None, cc=None):
         if media_title != self.player_title or not self.song:
             return                                 # the video changed while we were searching
+        if cc not in ("cc", "retimed"):
+            self.scan_known = lines if cc != "translation" else None
+        if self.song.get("cc") == "video":         # the video reader got there first: keep its lines
+            self.song["title"] = title
+            self._publish()
+            return
+        if cc in ("cc", "retimed"):                # exact timing from subtitles: no need to read the picture
+            self._stop_scan()
         old_shift = self._shift()
         self.song["title"] = title
         self.song["cc"] = cc
@@ -529,7 +540,7 @@ class Overlay:
         self.status = "" if lines else "No synced lyrics found"
         self._publish()
         if cc not in ("cc", "retimed"):            # no exactly timed lyrics yet: read the video picture
-            self._scan_video(self.player_np)
+            self._scan_video(self.player_np)       # (already running since the video started)
 
     def listen(self):
         if self.listening or self.follow.get() or self._player_mode():
@@ -622,6 +633,8 @@ class Overlay:
         if self.follow.get():                     # user switched to Join while we were listening
             return
         if song and np and song.get("cc") not in ("cc", "retimed"):
+            if song.get("cc") != "video":
+                self.scan_known = lines if song.get("cc") != "translation" else None
             self.root.after(0, self._scan_video, np)  # no subtitles in the song's language: read the picture
         self.next_check = time.time() + RECHECK_SECONDS
         if song:
@@ -647,8 +660,7 @@ class Overlay:
             return                                 # not a browser video, an ad, or already reading this one
         self._stop_scan()
         self.scan_media = np["title"]
-        known = None if (self.song or {}).get("cc") == "translation" else self.lines
-        threading.Thread(target=self._scan_worker, args=(np, known), daemon=True).start()
+        threading.Thread(target=self._scan_worker, args=(np,), daemon=True).start()
 
     def _stop_scan(self):
         p, self.scan_proc = self.scan_proc, None
@@ -658,7 +670,7 @@ class Overlay:
             except Exception:
                 pass
 
-    def _scan_worker(self, np, known):
+    def _scan_worker(self, np):
         import subprocess
         diag = share.DIAG
         if ytcc.yt_dlp is None:
@@ -675,8 +687,9 @@ class Overlay:
         try:
             err = open(err_path, "w", encoding="utf-8")
             # which row to read when the video shows two languages: the lyric sites' language, else the title's
-            words = " ".join(w for _, w in known or []) or np["title"]
-            lang = "zh" if lyrics.has_cjk(words) else "en"
+            known = self.scan_known
+            words = " ".join(w for _, w in known or [])
+            lang = "en" if words and not lyrics.has_cjk(words) else "zh"   # mostly Chinese songs here
             p = subprocess.Popen([sys.executable, os.path.join(HERE, "ytvideo.py"), vid, str(np["pos"] or 0), lang],
                                  cwd=HERE, stdout=subprocess.PIPE, stderr=err,
                                  creationflags=0x08000000 | 0x00004000)   # no window, below-normal priority
@@ -694,6 +707,9 @@ class Overlay:
             except ValueError:
                 continue
             if d.get("lines"):
+                if self.scan_media != np["title"]:
+                    break
+                known = self.scan_known                # may have arrived since the reading started
                 read = [tuple(x) for x in d["lines"]]
                 cjk_read = sum(lyrics.has_cjk(w) for _, w in read) > len(read) / 2
                 if cjk_read != (lang == "zh") and known:
@@ -703,6 +719,14 @@ class Overlay:
                     continue
                 lines = [tuple(x) for x in ytvideo.fix_with(read, known)]
                 diag["scan"] = f"reading {vid}: {len(lines)} lines"
+                if known and not d.get("final") and len(lines) < 0.7 * len(known):
+                    # only part of the video read so far: shift the lyric-site lyrics to match the lines
+                    # already read, so they're right within seconds instead of after the whole video
+                    off = ytvideo.offset_to(lines, known)
+                    if off is None:
+                        continue
+                    lines = [(round(t + off, 2), w) for t, w in known]
+                    diag["scan"] += f" (lyrics shifted {off:+.1f}s)"
                 now = media.now_playing(np["app"])     # fresh position, to time lines to the video
                 self.root.after(0, self._scan_lines, np["title"], lines, now, time.time())
             elif d.get("none"):

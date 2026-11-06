@@ -88,18 +88,23 @@ def is_cjk(text):
 
 
 def lyric_row(samples, lang):
-    """The height where lyric-looking text appears most often, or None if not clear yet.
+    """The height of the lyric row, or None if not clear yet: the height where the most DIFFERENT
+    texts appear (lyrics change all the time; name captions and logos repeat the same few words).
     Videos often show two rows (Chinese + English translation): the row in the song's language
     (`lang`, zh or en) wins; another language's row is used only if the song's never shows up."""
-    def row(ys):
-        if len(ys) < 6:
+    def row(items):
+        texts = {}
+        for y, text in items:
+            texts.setdefault(round(y / BAND), set()).add(text)
+        if not texts:
             return None
-        best = max(set(ys), key=ys.count)
-        return best * BAND if ys.count(best) >= 4 else None
-    want = [round(y / BAND) for _, found in samples for text, y, _ in found if is_cjk(text) == (lang == "zh")]
+        best = max(texts, key=lambda b: len(texts[b]))
+        return best * BAND if len(texts[best]) >= 3 else None
+    every = [(y, text) for _, found in samples for text, y, _ in found]
+    want = [(y, text) for y, text in every if is_cjk(text) == (lang == "zh")]
     best = row(want)
-    if best is None and len(samples) >= 60:
-        best = row([round(y / BAND) for _, found in samples for _, y, _ in found])
+    if best is None and (len(samples) >= 60 or (not want and len(samples) >= 20)):
+        best = row(every)
     return best
 
 
@@ -153,13 +158,34 @@ def fix_with(lines, known):
     return out_lines
 
 
+def offset_to(read, known, tol=1.5):
+    """How many seconds the lyric-site lyrics (`known`) are early/late against the few lines already
+    read from the video (`read`, texts already corrected by fix_with). None if not sure yet.
+    A repeated line (chorus) could pair with any of its repeats: the shift most lines agree on wins."""
+    diffs = []
+    for t, w in read:
+        ds = [t - kt for kt, kw in known if kw == w]
+        if ds:
+            diffs.append(ds)
+    if len(diffs) < 2:
+        return None
+
+    def support(c):
+        return [min(ds, key=lambda d: abs(d - c)) for ds in diffs if min(abs(d - c) for d in ds) <= tol]
+    best = max((d for ds in diffs for d in ds), key=lambda c: len(support(c)))
+    agree = sorted(support(best))
+    if len(agree) < 2 or len(agree) < 0.6 * len(diffs):
+        return None
+    return agree[len(agree) // 2]
+
+
 def scan(video_id, start, lang="zh"):
     os.makedirs(CACHE, exist_ok=True)
     cached = os.path.join(CACHE, f"video2-{video_id}-{lang}.json")
     if os.path.exists(cached):
         with open(cached, encoding="utf-8") as f:
             d = json.load(f)
-        out(**({"lines": d["lines"]} if d["lines"] else {"none": True}))
+        out(**({"lines": d["lines"], "final": True} if d["lines"] else {"none": True}))
         out(done=True)
         return
     folder = tempfile.mkdtemp(prefix="lyrics-video-")
@@ -173,10 +199,10 @@ def scan(video_id, start, lang="zh"):
         samples, row, sent = [], None, None
         for k, sec in enumerate(order):
             samples.append((sec, r.read(sec)))
-            row = row or lyric_row(samples, lang)
+            row = lyric_row(samples, lang)       # re-checked as more of the video is read
             if row is None and k >= GIVE_UP_AFTER:
                 break
-            if row is not None and (k % 8 == 7 or k == len(order) - 1):
+            if row is not None and (k % 4 == 3 or k == len(order) - 1):
                 lines = group(samples, row)
                 if lines and lines != sent:
                     out(lines=lines)
@@ -190,7 +216,7 @@ def scan(video_id, start, lang="zh"):
                 if t >= 0.5 and any(abs(y - row) <= BAND and similar(x, text) >= 0.5
                                     for x, y, _ in r.read(t - 0.5)):
                     final[i] = (t - 0.5, text)
-        out(**({"lines": final} if final else {"none": True}))
+        out(**({"lines": final, "final": True} if final else {"none": True}))
         with open(cached, "w", encoding="utf-8") as f:
             json.dump({"lines": final, "at": time.time()}, f, ensure_ascii=False)
         out(done=True)
