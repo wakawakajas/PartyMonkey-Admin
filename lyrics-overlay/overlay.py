@@ -218,6 +218,10 @@ class Overlay:
         if not self.song:
             return None
         key = f"{self.song['title']}|{self.song['artist']}"
+        if self.follow.get():
+            # Joined: the host's timing already has the host's sync in it - this PC's own fixes for
+            # the song (made while listening itself) must not be added on top
+            return "join|" + key
         return key + "|video" if self.song.get("cc") else key   # video-timed lyrics need their own sync
 
     def _shift(self):
