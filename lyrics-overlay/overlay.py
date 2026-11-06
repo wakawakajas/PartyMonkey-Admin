@@ -1022,8 +1022,9 @@ class Overlay:
         """Restart onto a new version at a quiet moment: nothing playing, paused, or a new song started."""
         cur = self.song["title"] if self.song else ""
         if self.update_wait is None:
-            self.update_wait = cur                 # the song playing when the update arrived
-        if not cur or self.player_paused or cur != self.update_wait:
+            self.update_wait = (cur, self.t0)      # the song playing when the update arrived
+        replayed = self.t0 - self.update_wait[1] > 30   # same song started again (repeat / loop)
+        if not cur or self.player_paused or cur != self.update_wait[0] or replayed:
             self.restarting = True
             if self.cfg.get("auto_update_from") == share.DIAG.get("ver"):
                 return                             # tried before and the update didn't arrive: no restart loop
