@@ -188,6 +188,7 @@ def _nas_scan(d):
                                   "title": str(m.get("title") or "")[:200],
                                   "artist": str(m.get("artist") or "")[:200],
                                   "via": (str(m["via"])[:64] if m.get("via") else None), "file": path,
+                                  "helps": bool((m.get("diag") or {}).get("helper")),
                                   "url": None, "seen": time.time()})
                 break                                         # got this PC's newest readable file
             except (OSError, ValueError):

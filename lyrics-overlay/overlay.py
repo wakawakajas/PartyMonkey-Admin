@@ -130,6 +130,7 @@ class Overlay:
         # read YouTube videos ahead of time for everyone (this PC's spare power), saved on the NAS
         self.read_ahead = tk.BooleanVar(value=self.cfg.get("read_ahead", False))
         self.ahead_seeds, self.ahead_done, self.ahead_proc = [], {}, None
+        self.help_vid, self.help_proc = None, None   # Joined: the host's video, read here for it
         self.words, self.words_key = {}, None    # karaoke: Kugou word timing for the current song
         self.edit_seen = None                    # (song key, edit file) last applied
 
@@ -140,7 +141,7 @@ class Overlay:
         self.status = "Right-click for menu"
         self.listening = False
         self.next_check = 0.0
-        share.DIAG.update(ver=app_version(), scan="")
+        share.DIAG.update(ver=app_version(), scan="", helper=bool(self.read_ahead.get()))
         share.on_sync = lambda req: self.root.after(0, self._remote_sync, req)
         self.share_url = share.start()   # live lyrics page for colleagues on the office network
         self.update_ready = False
@@ -404,6 +405,7 @@ class Overlay:
             self.follow_paused = st.get("paused")
             if st.get("video"):
                 self._ahead_seed(st["video"])
+                self._help_read(st["video"], lines)
             if self.follow_paused is not None:     # host paused: stand still at that spot (see tick)
                 self.t0 = time.time() - self.follow_paused
             elif st.get("t0"):
@@ -516,9 +518,9 @@ class Overlay:
 
     def quit(self):
         self._stop_scan()
-        p = self.ahead_proc
-        if p and p.poll() is None:
-            p.kill()
+        for p in (self.ahead_proc, self.help_proc):
+            if p and p.poll() is None:
+                p.kill()
         share.stop()
         self._save()
         self.root.destroy()
@@ -795,7 +797,10 @@ class Overlay:
             known = self.scan_known
             words = " ".join(w for _, w in known or [])
             lang = "en" if words and not lyrics.has_cjk(words) else "zh"   # mostly Chinese songs here
-            p = subprocess.Popen([sys.executable, os.path.join(HERE, "ytvideo.py"), vid, str(np["pos"] or 0), lang],
+            # a faster PC Joined to this one reads videos for us: give it a moment to start
+            helped = any(p.get("via") == share.NAME and p.get("helps") for p in share.peers())
+            p = subprocess.Popen([sys.executable, os.path.join(HERE, "ytvideo.py"), vid, str(np["pos"] or 0), lang]
+                                 + (["wait"] if helped else []),
                                  cwd=HERE, stdout=subprocess.PIPE, stderr=err,
                                  creationflags=0x08000000 | 0x00004000)   # no window, below-normal priority
         except Exception as ex:
@@ -898,16 +903,50 @@ class Overlay:
                         found.append(e["id"])
         return found
 
+    def _help_read(self, vid, lines):
+        """Joined: read the host's video here (this PC may be faster) and share it through the NAS.
+        The host shows the lines as they come instead of reading the video itself."""
+        if not self.read_ahead.get() or vid == self.help_vid:
+            return
+        self.help_vid = vid
+        words = " ".join(w for _, w in lines or [])
+        lang = "en" if words and not lyrics.has_cjk(words) else "zh"
+        pos = max(0.0, time.time() - self.t0) if self.t0 else 0.0
+        threading.Thread(target=self._help_worker, args=(vid, pos, lang, self.follow.get()), daemon=True).start()
+
+    def _help_worker(self, vid, pos, lang, host):
+        import subprocess
+        if ytvideo.load_cached(vid, lang) is not None:
+            return
+        for old in (self.help_proc, self.ahead_proc):  # the host's song comes first
+            if old and old.poll() is None:
+                old.kill()
+        share.DIAG["help"] = f"reading {vid} for {host}"
+        try:
+            p = subprocess.Popen([sys.executable, os.path.join(HERE, "ytvideo.py"), vid, str(round(pos)), lang, "help"],
+                                 cwd=HERE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=0x08000000 | 0x00004000)   # no window, below-normal priority
+        except Exception as ex:
+            share.DIAG["help"] = f"could not start: {ex}"
+            return
+        self.help_proc = p
+        code = p.wait()
+        if self.help_proc is p:
+            share.DIAG["help"] = f"{vid}: {'done' if code == 0 else f'failed ({code})'}"
+
     def _ahead_loop(self):
         import subprocess
         time.sleep(30)
         queue = []
         while True:
             time.sleep(5)
+            share.DIAG["helper"] = bool(self.read_ahead.get())
             if not self.read_ahead.get():
                 continue
             if self.scan_proc and self.scan_proc.poll() is None:
                 continue                           # this PC is reading the playing video: wait
+            if self.help_proc and self.help_proc.poll() is None:
+                continue                           # reading the host's video for it: wait
             if self.ahead_seeds:
                 seed = self.ahead_seeds.pop(0)
                 self.ahead_done[seed] = time.time()

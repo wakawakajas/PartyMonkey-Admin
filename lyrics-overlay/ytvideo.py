@@ -150,6 +150,108 @@ def drop_lock(video_id, lang):
             os.remove(os.path.join(d, f"~reading-{video_id}-{lang}"))
         except OSError:
             pass
+    for path in _my_parts:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+# ---------- one PC reads, the others pass its lines on ----------
+# The PC reading a video for someone else (a faster Joined PC) keeps its lock file "alive" and writes
+# the lines read so far as small new files (~part-<id>-<lang>.<millis>.json). The playing PC shows those
+# instead of reading the video itself. Times are compared on this PC's own clock only (PC clocks differ).
+LOCK_TOUCH, PART_EVERY = 10, 8          # seconds between "still reading" marks / shared partial lines
+READER_GONE = 45                         # no sign of the other reader for this long: read it ourselves
+_my_parts = []
+
+
+def touch_lock(video_id, lang):
+    d = nas_dir()
+    if d:
+        try:
+            os.utime(os.path.join(d, f"~reading-{video_id}-{lang}"))
+        except OSError:
+            pass
+
+
+def _lock_mark(d, video_id, lang):
+    try:
+        return os.path.getmtime(os.path.join(d, f"~reading-{video_id}-{lang}"))
+    except OSError:
+        return None
+
+
+def save_part(video_id, lang, lines):
+    d = nas_dir()
+    if not d:
+        return
+    name = f"~part-{video_id}-{lang}.{int(time.time() * 1000)}.json"
+    tmp = os.path.join(d, f"~{name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"lines": lines}, f, ensure_ascii=False)
+        os.rename(tmp, os.path.join(d, name))
+        _my_parts.append(os.path.join(d, name))
+    except OSError:
+        return
+    while len(_my_parts) > 2:                         # keep the newest two
+        try:
+            os.remove(_my_parts.pop(0))
+        except OSError:
+            pass
+
+
+def _newest_part(d, video_id, lang):
+    pre = f"~part-{video_id}-{lang}."
+    try:
+        names = [n for n in os.listdir(d) if n.startswith(pre) and n.endswith(".json")]
+    except OSError:
+        return None, None
+    for n in sorted(names, key=lambda n: int(n[len(pre):-5] or 0) if n[len(pre):-5].isdigit() else 0,
+                    reverse=True):
+        try:
+            with open(os.path.join(d, n), encoding="utf-8") as f:
+                return n, json.load(f).get("lines")
+        except (OSError, ValueError):
+            continue
+    return None, None
+
+
+def follow(video_id, lang, first_wait=0):
+    """Another PC is reading this video (or is about to, within first_wait seconds): pass its lines on
+    as they come. True when its finished read arrived; False = nobody is reading it, read it here."""
+    d = nas_dir()
+    if not d:
+        return False
+    start = last_change = time.time()
+    last_sig, sent, seen_lock, gone_at = None, None, False, None
+    while True:
+        data = load_cached(video_id, lang)
+        if data is not None:
+            out(**({"lines": data["lines"], "final": True} if data["lines"] else {"none": True}))
+            out(done=True)
+            return True
+        mark = _lock_mark(d, video_id, lang)
+        part, lines = _newest_part(d, video_id, lang)
+        if lines and lines != sent:
+            out(lines=lines)
+            sent = lines
+        if (mark, part) != last_sig:
+            last_sig, last_change = (mark, part), time.time()
+        now = time.time()
+        if mark is None:
+            if seen_lock:                              # reader finished: its result may take a moment to show
+                gone_at = gone_at or now
+                if now - gone_at > 12:
+                    return False
+            elif now - start >= first_wait:
+                return False
+        else:
+            seen_lock, gone_at = True, None
+            if now - last_change > READER_GONE:        # the other PC stopped (closed, crashed)
+                return False
+        time.sleep(2)
 
 
 # ---------- reading the picture ----------
@@ -361,13 +463,18 @@ def offset_to(read, known, tol=1.5):
 
 
 # ---------- the whole read ----------
-def scan(video_id, start, lang="zh", ahead=False):
+def scan(video_id, start, lang="zh", mode=""):
+    """mode: "" = the playing PC; "wait" = the playing PC, a faster Joined PC will read it for us;
+    "help" = reading the host's video for it; "ahead" = reading a likely next video in the background."""
+    ahead = mode == "ahead"
     data = load_cached(video_id, lang)
     if data is not None:
         out(**({"lines": data["lines"], "final": True} if data["lines"] else {"none": True}))
         out(done=True)
         return
-    if not take_lock(video_id, lang) and ahead:
+    if mode in ("", "wait") and follow(video_id, lang, 20 if mode == "wait" else 0):
+        return                                    # another PC read it for us
+    if not take_lock(video_id, lang) and mode in ("ahead", "help"):
         out(skip=True)                            # another PC is reading it right now
         return
     folder = tempfile.mkdtemp(prefix="lyrics-video-")
@@ -379,8 +486,12 @@ def scan(video_id, start, lang="zh", ahead=False):
         first = max(0, int(start) - 10)
         order = list(range(first, end)) + list(range(0, first))   # what's playing now comes first
         samples, row, sent, tried_vertical = [], None, None, False
+        touched = parted = time.time()
         k = 0
         while k < len(order):
+            if time.time() - touched > LOCK_TOUCH:  # tell waiting PCs this read is still going
+                touch_lock(video_id, lang)
+                touched = time.time()
             sec = order[k]
             samples.append((sec, r.read(sec)))
             row = lyric_row(samples, lang, r.vertical)   # re-checked as more of the video is read
@@ -400,6 +511,9 @@ def scan(video_id, start, lang="zh", ahead=False):
                 if lines and lines != sent:
                     out(lines=lines)
                     sent = lines
+                    if time.time() - parted > PART_EVERY:   # share the lines so far with waiting PCs
+                        save_part(video_id, lang, lines)
+                        parted = time.time()
             k += 1
         if row is None:
             final = []
@@ -426,4 +540,4 @@ def scan(video_id, start, lang="zh", ahead=False):
 
 if __name__ == "__main__":
     a = sys.argv
-    scan(a[1], float(a[2]) if len(a) > 2 else 0, a[3] if len(a) > 3 else "zh", len(a) > 4 and a[4] == "ahead")
+    scan(a[1], float(a[2]) if len(a) > 2 else 0, a[3] if len(a) > 3 else "zh", a[4] if len(a) > 4 else "")
