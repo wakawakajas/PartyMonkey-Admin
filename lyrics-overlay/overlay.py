@@ -122,6 +122,7 @@ class Overlay:
         self.player_paused = False
         self.player_np = None
         self.follow_paused = None              # Joined and the host has paused: the position it stopped at
+        self.pending_sync, self.host_t0 = None, None   # Joined: sync sent to the host, not applied there yet
         self.player_app = None         # app id of the player we're following
         self.busy_player = False
         self.next_player = 0.0
@@ -140,6 +141,7 @@ class Overlay:
         self.listening = False
         self.next_check = 0.0
         share.DIAG.update(ver=app_version(), scan="")
+        share.on_sync = lambda req: self.root.after(0, self._remote_sync, req)
         self.share_url = share.start()   # live lyrics page for colleagues on the office network
         self.update_ready = False
         self.update_wait, self.restarting = None, False
@@ -259,13 +261,30 @@ class Overlay:
         return key + "|video" if self.song.get("cc") else key   # video-timed lyrics need their own sync
 
     def _shift(self):
+        if self.follow.get():
+            return 0.0                             # Joined: the host's timing is everyone's timing
         return self.cfg.get("shifts", {}).get(self._song_key(), 0.0)
 
-    def _set_shift(self, value):
+    def _set_shift(self, value, reset=False):
         key = self._song_key()
         if not key:
             return
         old = self._shift()
+        if self.follow.get():
+            # Joined: ask the host to move the lyrics, so every PC on this song moves together.
+            # Shown here straight away; the host's new timing takes over when it arrives.
+            delta = value - old
+            song = f"{self.song['title']}|{self.song['artist']}"
+            if share.send_sync(self.follow.get(), song, delta, reset):
+                if not reset:
+                    self.pending_sync = (self.pending_sync[0] + delta if self.pending_sync else delta,
+                                         time.time() + 10, self.host_t0)
+                    self.t0 += delta
+                self.flash = (f"sent to {self.follow.get()} - everyone moves", time.time() + 2)
+                return
+            self.flash = ("can't reach the NAS - only moved on this PC", time.time() + 2)
+            self.t0 += delta
+            return
         self.cfg.setdefault("shifts", {})[key] = round(value, 2)
         self.t0 += value - old
         self._save()
@@ -278,7 +297,19 @@ class Overlay:
         self.flash = (f"lyrics {abs(s):g}s {'earlier' if s > 0 else 'later'}", time.time() + 1.5)
 
     def _reset_shift(self):
-        self._set_shift(0.0)
+        self._set_shift(0.0, reset=True)
+
+    def _remote_sync(self, req):
+        """A Joined PC moved the lyrics: apply it here (the host), everyone follows."""
+        if self.follow.get() or not self.song:
+            return
+        if req.get("song") != f"{self.song['title']}|{self.song['artist']}":
+            return                                 # meant for a song that has finished
+        if req.get("reset"):
+            self._set_shift(0.0)
+        else:
+            self._set_shift(self._shift() + float(req.get("delta") or 0))
+        self.flash = (f"sync from {str(req.get('from'))[:20]}", time.time() + 2)
 
     def _sync_next(self):
         """The line shown underneath is being sung right now -> line up the lyrics to it."""
@@ -374,9 +405,16 @@ class Overlay:
             if st.get("video"):
                 self._ahead_seed(st["video"])
             if self.follow_paused is not None:     # host paused: stand still at that spot (see tick)
-                self.t0 = time.time() - self.follow_paused + self._shift()
+                self.t0 = time.time() - self.follow_paused
             elif st.get("t0"):
-                self.t0 = st["t0"] - off + self._shift()
+                host_t0 = st["t0"] - off
+                p = self.pending_sync
+                if p and time.time() < p[1] and p[2] is not None and abs(host_t0 - p[2]) < 0.1:
+                    self.t0 = host_t0 + p[0]       # our sync request hasn't reached the host yet
+                else:
+                    self.pending_sync = None
+                    self.t0 = host_t0
+                self.host_t0 = host_t0
             self.status = "" if lines else (st.get("status") or "No synced lyrics found")
         self._publish()
 

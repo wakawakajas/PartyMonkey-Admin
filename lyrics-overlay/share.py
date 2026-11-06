@@ -36,7 +36,7 @@ def publish(song, lines, t0, status, via=None, paused=None):
                "paused": round(paused, 1) if (paused is not None and song) else None,
                "video": (song or {}).get("vid")}
         old_t0 = _state["t0"]
-        if new["t0"] is not None and old_t0 is not None and (new["paused"] is not None or abs(new["t0"] - old_t0) < 0.5):
+        if new["t0"] is not None and old_t0 is not None and (new["paused"] is not None or abs(new["t0"] - old_t0) < 0.2):
             new["t0"] = old_t0
         if any(new[k] != _state[k] for k in ("title", "artist", "lines")):
             _state["lrev"] += 1
@@ -200,7 +200,7 @@ def _nas_scan(d):
 
 
 def _nas_loop():
-    last_rev, last_write, last_scan, last_try = -1, 0.0, 0.0, 0.0
+    last_rev, last_write, last_scan, last_try, last_req = -1, 0.0, 0.0, 0.0, 0.0
     while True:
         now = time.time()
         if _nas["dir"] is None and now - last_try > 30:
@@ -217,9 +217,70 @@ def _nas_loop():
                     _nas["scan_now"] = False
                     last_scan = now
                     _nas_scan(d)
+                # sync requests: every 2s while someone is Joined to this PC, else now and then
+                joined_to_me = any(p.get("via") == NAME for p in _nas["peers"])
+                if now - last_req > (SCAN_JOINED if joined_to_me else SCAN_IDLE):
+                    last_req = now
+                    _check_requests(d)
             except OSError:
                 _nas["dir"] = None                                # NAS gone: look for it again later
         time.sleep(0.5)
+
+
+# ---------- shared sync: a Joined PC's "earlier / later / next line NOW" goes to the host ----------
+# The Joined PC writes a small request file "<host>.<millis>.<from>.json" in sync-requests/; the host
+# reads it, applies the shift to its own timing and deletes it - so every Joined PC follows the change.
+on_sync = None                 # the app sets this: called with each request meant for this PC
+REQUEST_MAX_AGE = 120
+
+
+def _req_dir(d):
+    rd = os.path.join(os.path.dirname(d), "sync-requests")
+    os.makedirs(rd, exist_ok=True)
+    return rd
+
+
+def send_sync(host, song, delta=0.0, reset=False):
+    """Ask PC `host` to move the lyrics of `song` ("title|artist") by `delta` seconds (or reset).
+    False if the NAS can't be reached."""
+    d = _nas["dir"]
+    if not d:
+        return False
+    try:
+        rd = _req_dir(d)
+        name = f"{re.sub(r'[^\w-]', '_', host)}.{int(time.time() * 1000)}.{_safe_name()}.json"
+        tmp = os.path.join(rd, "~" + name)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"host": host, "song": song, "delta": round(delta, 2), "reset": bool(reset),
+                       "from": NAME, "at": time.time()}, f, ensure_ascii=False)
+        os.rename(tmp, os.path.join(rd, name))
+        return True
+    except OSError:
+        return False
+
+
+def _check_requests(d):
+    rd = _req_dir(d)
+    mine = re.compile(r"^" + re.escape(_safe_name()) + r"\.(\d+)\..+\.json$")
+    for fn in sorted(os.listdir(rd)):
+        m = mine.match(fn)
+        path = os.path.join(rd, fn)
+        if not m:
+            # someone's request nobody picked up (that PC closed): tidy up after a while
+            try:
+                if fn.endswith(".json") and time.time() - os.path.getmtime(path) > 3600:
+                    os.remove(path)
+            except OSError:
+                pass
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                req = json.load(f)
+            os.remove(path)
+        except (OSError, ValueError):
+            continue
+        if time.time() + (_nas["off"] or 0) - int(m.group(1)) / 1000 < REQUEST_MAX_AGE and on_sync:
+            on_sync(req)
 
 
 def refresh():
