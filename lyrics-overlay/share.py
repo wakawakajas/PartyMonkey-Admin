@@ -111,6 +111,17 @@ def _nas_dir():
     return None
 
 
+# Each update is a NEW file "<PC>.<millis>.json" (the writer then deletes its older ones). Replacing one
+# fixed file doesn't work on this NAS: other PCs' Windows keeps serving them the old cached copy for
+# minutes. A file name nobody has opened before can't be stale. Readers take each PC's newest file.
+NAS_FILE = re.compile(r"^(.+)\.(\d{10,})\.json$")
+KEEP_OWN = 3                  # keep a few: a reader's folder listing can be up to ~10s old
+
+
+def _safe_name():
+    return re.sub(r"[^\w-]", "_", NAME)
+
+
 def _nas_write(d):
     with _lock:
         st = dict(_state)
@@ -119,45 +130,60 @@ def _nas_write(d):
             "lines": st["lines"], "status": st["status"], "via": st["via"], "lrev": st["lrev"],
             "t0_nas": (st["t0"] + off) if (st["t0"] is not None and off is not None) else None,
             "t0_local": st["t0"]}
-    path = os.path.join(d, re.sub(r"[^\w.-]", "_", NAME) + ".json")
-    tmp = path + ".tmp"
+    base = _safe_name()
+    path = os.path.join(d, f"{base}.{int(time.time() * 1000)}.json")
+    tmp = os.path.join(d, f"~{base}.tmp")
     t1 = time.time()
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
     t2 = time.time()
-    os.replace(tmp, path)
-    # how far the NAS clock is from ours: the file's time stamp (NAS clock) vs when we wrote it
+    os.rename(tmp, path)                       # a brand-new name, so it never lands on a cached file
+    # how far the NAS clock is from ours: the new file's time stamp (NAS clock) vs when we wrote it
     _nas["offs"] = (_nas["offs"] + [os.stat(path).st_mtime - (t1 + t2) / 2])[-7:]
     _nas["off"] = sorted(_nas["offs"])[len(_nas["offs"]) // 2]
+    # tidy up our own older files (and the single-file name the previous version used)
+    mine = sorted(fn for fn in os.listdir(d) if (m := NAS_FILE.match(fn)) and m.group(1) == base)
+    for fn in mine[:-KEEP_OWN] + ([base + ".json"] if os.path.exists(os.path.join(d, base + ".json")) else []):
+        try:
+            os.remove(os.path.join(d, fn))
+        except OSError:
+            pass
     return st["rev"]
 
 
 def _nas_scan(d):
     now_nas = time.time() + (_nas["off"] or 0.0)
-    own = re.sub(r"[^\w.-]", "_", NAME) + ".json"
-    found = []
+    newest = {}                                # PC -> its file names, newest first
     for fn in os.listdir(d):
-        if not fn.endswith(".json") or fn == own:
-            continue
-        path = os.path.join(d, fn)
-        try:
-            mt = os.stat(path).st_mtime
-            if now_nas - mt > NAS_FRESH:
-                continue
-            cached = _nas["files"].get(path)
-            if not cached or cached[0] != mt:            # only re-read files that changed
-                with open(path, encoding="utf-8") as f:
-                    cached = (mt, json.load(f))
-                _nas["files"][path] = cached
-            m = cached[1]
-            if m.get("app") != "lyrics-overlay" or m.get("id") == ID:
-                continue
-            found.append({"id": str(m.get("id", ""))[:64], "name": str(m.get("name", "?"))[:64],
-                          "title": str(m.get("title") or "")[:200], "artist": str(m.get("artist") or "")[:200],
-                          "via": (str(m["via"])[:64] if m.get("via") else None), "file": path,
-                          "url": None, "seen": time.time()})
-        except (OSError, ValueError):
-            continue
+        m = NAS_FILE.match(fn)
+        if m and m.group(1) != _safe_name():
+            newest.setdefault(m.group(1), []).append((int(m.group(2)), fn))
+    found, keep = [], set()
+    for pc, files in newest.items():
+        for seq, fn in sorted(files, reverse=True):
+            path = os.path.join(d, fn)
+            try:
+                if now_nas - seq / 1000 > NAS_FRESH + 10:     # newest file is old: that app is closed
+                    break
+                cached = _nas["files"].get(path)
+                if not cached:                                # each name is read once - it never changes
+                    with open(path, encoding="utf-8") as f:
+                        cached = (seq, json.load(f))
+                    _nas["files"][path] = cached
+                keep.add(path)
+                m = cached[1]
+                if m.get("app") == "lyrics-overlay" and m.get("id") != ID:
+                    found.append({"id": str(m.get("id", ""))[:64], "name": str(m.get("name", "?"))[:64],
+                                  "title": str(m.get("title") or "")[:200],
+                                  "artist": str(m.get("artist") or "")[:200],
+                                  "via": (str(m["via"])[:64] if m.get("via") else None), "file": path,
+                                  "url": None, "seen": time.time()})
+                break                                         # got this PC's newest readable file
+            except (OSError, ValueError):
+                continue                                      # just deleted / half-written: try the older one
+    for path in list(_nas["files"]):
+        if path not in keep:
+            del _nas["files"][path]
     with _lock:
         _nas["peers"] = found
 
