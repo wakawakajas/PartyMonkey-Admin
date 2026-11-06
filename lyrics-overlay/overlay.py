@@ -40,12 +40,20 @@ JOIN_OFF = "Off - use my own listening"
 
 
 def app_version():
+    """Short git commit of this copy, or why there isn't one (shown in the NAS diag, to spot PCs that
+    can't update themselves)."""
+    import shutil
     import subprocess
+    if not os.path.isdir(os.path.join(os.path.dirname(HERE), ".git")):
+        return "no git folder: " + HERE[:120]
+    if not shutil.which("git"):
+        return "git not installed"
     try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=HERE, capture_output=True, text=True,
-                              timeout=10, creationflags=0x08000000).stdout.strip()
-    except Exception:
-        return "?"
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=HERE, capture_output=True, text=True,
+                           timeout=10, creationflags=0x08000000)
+        return r.stdout.strip() or ("git error: " + r.stderr.strip()[:120])
+    except Exception as ex:
+        return f"git error: {ex}"[:120]
 
 
 def load_settings():
@@ -719,6 +727,10 @@ class Overlay:
                     continue
                 lines = [tuple(x) for x in ytvideo.fix_with(read, known)]
                 diag["scan"] = f"reading {vid}: {len(lines)} lines"
+                if known and d.get("final") and len(lines) < 0.4 * len(known):
+                    # the whole video gave only a few lines (titles, a bad read): don't trust it
+                    diag["scan"] = f"{vid}: only {len(lines)} lines read - kept the lyric-site lyrics"
+                    continue
                 if known and not d.get("final") and len(lines) < 0.7 * len(known):
                     # only part of the video read so far: shift the lyric-site lyrics to match the lines
                     # already read, so they're right within seconds instead of after the whole video
