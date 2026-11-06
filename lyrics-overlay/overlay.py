@@ -11,6 +11,7 @@ try:  # real pixel coordinates on scaled (125%/150%) displays, so the bar lands 
 except Exception:
     pass
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -36,6 +37,15 @@ KEY = "#010101"               # transparent colour
 
 
 JOIN_OFF = "Off - use my own listening"
+
+
+def app_version():
+    import subprocess
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=HERE, capture_output=True, text=True,
+                              timeout=10, creationflags=0x08000000).stdout.strip()
+    except Exception:
+        return "?"
 
 
 def load_settings():
@@ -108,8 +118,10 @@ class Overlay:
         self.status = "Right-click for menu"
         self.listening = False
         self.next_check = 0.0
+        share.DIAG.update(ver=app_version(), scan="")
         self.share_url = share.start()   # live lyrics page for colleagues on the office network
         self.update_ready = False
+        self.update_wait, self.restarting = None, False
         threading.Thread(target=self._update_loop, daemon=True).start()
         follow = self.cfg.get("follow") or ""
         self.follow = tk.StringVar(value="" if follow == JOIN_OFF else follow)   # PC name we Join, "" = listen myself
@@ -361,7 +373,8 @@ class Overlay:
 
     # ---------- updates (the app lives in a git repo; Start Lyrics Overlay.bat pulls before starting) ----------
     def _update_loop(self):
-        """Every 30 min: is there a newer version on GitHub? Only looks - Restart does the update."""
+        """Every 10 min: is there a newer version on GitHub? If so the app restarts itself at the next
+        song change / pause (see _auto_update), so colleagues never have to click Restart."""
         import subprocess
         repo = os.path.dirname(HERE)
         if not os.path.isdir(os.path.join(repo, ".git")):
@@ -377,7 +390,7 @@ class Overlay:
                     self.update_ready = True
             except Exception:
                 pass
-            time.sleep(30 * 60)
+            time.sleep(10 * 60)
 
     def restart(self):
         import subprocess
@@ -630,19 +643,31 @@ class Overlay:
 
     def _scan_worker(self, np, known):
         import subprocess
-        vid = ytcc.video_id(np)
-        if not vid or self.scan_media != np["title"]:
+        diag = share.DIAG
+        if ytcc.yt_dlp is None:
+            diag["scan"] = "yt-dlp not installed"
             return
+        diag["scan"] = "finding the video: " + np["title"][:40]
+        vid = ytcc.video_id(np)
+        if self.scan_media != np["title"]:
+            return
+        if not vid:
+            diag["scan"] = "video not found on YouTube: " + np["title"][:40]
+            return
+        err_path = os.path.join(tempfile.gettempdir(), "lyrics-overlay-video.log")
         try:
+            err = open(err_path, "w", encoding="utf-8")
             p = subprocess.Popen([sys.executable, os.path.join(HERE, "ytvideo.py"), vid, str(np["pos"] or 0)],
-                                 cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 cwd=HERE, stdout=subprocess.PIPE, stderr=err,
                                  creationflags=0x08000000 | 0x00004000)   # no window, below-normal priority
-        except Exception:
+        except Exception as ex:
+            diag["scan"] = f"could not start: {ex}"
             return
         if self.scan_media != np["title"]:
             p.kill()
             return
         self.scan_proc = p
+        diag["scan"] = f"reading {vid}"
         for raw in p.stdout:
             try:
                 d = json.loads(raw)
@@ -650,9 +675,21 @@ class Overlay:
                 continue
             if d.get("lines"):
                 lines = [tuple(x) for x in ytvideo.fix_with(d["lines"], known)]
+                diag["scan"] = f"reading {vid}: {len(lines)} lines"
                 now = media.now_playing(np["app"])     # fresh position, to time lines to the video
                 self.root.after(0, self._scan_lines, np["title"], lines, now, time.time())
-        p.wait()
+            elif d.get("none"):
+                diag["scan"] = f"{vid}: no lyrics in the picture"
+            elif d.get("done") and "no lyrics" not in diag["scan"]:
+                diag["scan"] = diag["scan"].replace("reading", "done")
+        code = p.wait()
+        err.close()
+        if code not in (0, None) and self.scan_proc is p:
+            try:
+                tail = open(err_path, encoding="utf-8", errors="ignore").read()[-300:]
+            except OSError:
+                tail = ""
+            diag["scan"] = f"{vid}: failed ({code}) {tail}"
 
     def _scan_lines(self, media_title, lines, now, read_at):
         if not self.song or self.song.get("media") != media_title or len(lines) < 3:
@@ -680,8 +717,22 @@ class Overlay:
             self.next_check = 0.0                    # listen right away
 
     # ---------- drawing ----------
+    def _auto_update(self):
+        """Restart onto a new version at a quiet moment: nothing playing, paused, or a new song started."""
+        cur = self.song["title"] if self.song else ""
+        if self.update_wait is None:
+            self.update_wait = cur                 # the song playing when the update arrived
+        if not cur or self.player_paused or cur != self.update_wait:
+            self.restarting = True
+            if self.cfg.get("auto_update_from") == share.DIAG.get("ver"):
+                return                             # tried before and the update didn't arrive: no restart loop
+            self.cfg["auto_update_from"] = share.DIAG.get("ver")
+            self.restart()
+
     def tick(self):
         now = time.time()
+        if self.update_ready and not self.restarting:
+            self._auto_update()
         if self.follow.get():
             if not self.busy_follow and now >= self.next_follow:
                 self.busy_follow, self.next_follow = True, now + 2

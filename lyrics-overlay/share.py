@@ -16,6 +16,7 @@ BEACON_PORT = 8766            # every running app announces itself here so other
 NAME = socket.gethostname()
 ID = uuid.uuid4().hex            # tells this copy of the app apart from others (even on the same PC)
 # rev changes on any change; lrev only when the song or its lyrics change (so pollers can skip the lyrics)
+DIAG = {}          # how this PC's app is doing (version, video reading) - in the NAS file, for fixing problems
 _state = {"title": "", "artist": "", "lines": [], "t0": None, "status": "Waiting for a song…", "via": None,
           "rev": 0, "lrev": 0}
 _lock = threading.Lock()
@@ -129,7 +130,7 @@ def _nas_write(d):
     data = {"app": "lyrics-overlay", "id": ID, "name": NAME, "title": st["title"], "artist": st["artist"],
             "lines": st["lines"], "status": st["status"], "via": st["via"], "lrev": st["lrev"],
             "t0_nas": (st["t0"] + off) if (st["t0"] is not None and off is not None) else None,
-            "t0_local": st["t0"]}
+            "t0_local": st["t0"], "diag": dict(DIAG)}
     base = _safe_name()
     path = os.path.join(d, f"{base}.{int(time.time() * 1000)}.json")
     tmp = os.path.join(d, f"~{base}.tmp")
