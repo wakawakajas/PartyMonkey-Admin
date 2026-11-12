@@ -165,8 +165,82 @@ def render(spec_path):
         d.text((xv - 24, STRIP_Y), "|", font=INF, fill=(150, 150, 150))
     layers.append((B.layer(info), 0, 99999))
 
+    # ---- keep the words off the action: how much the picture changes in each spot, 4 times a second
+    import numpy as np
+    AW, AH = 128, 77
+    adir = os.path.join(work, "act"); os.makedirs(adir, exist_ok=True)
+    run([FFMPEG, "-v", "error", "-y", "-i", src, "-t", str(src_len), "-vf",
+         f"fps=4,crop=iw*{area['w']}:ih*{area['h']}:iw*{area['x']}:ih*{area['y']},scale={AW}:{AH},format=gray",
+         os.path.join(adir, "a%05d.png")])
+    frs = [np.asarray(Image.open(os.path.join(adir, f)), dtype=np.int16) for f in sorted(os.listdir(adir))]
+    act = np.zeros((max(1, len(frs)), AH, AW), np.float32)
+    for i in range(1, len(frs)):
+        m = Image.fromarray(((np.abs(frs[i] - frs[i - 1]) > 14) * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(7))
+        act[i] = np.asarray(m, np.float32) / 255
+    taken = [((x0 - 4, STRIP_Y - 12, W, H), 0, 99999)]           # the info strip
+    cnt_ = s.get("counter")
+    if cnt_:
+        ct = f"{cnt_.get('label', 'ITEMS PACKED')}  {cnt_['total']} / {cnt_['total']}"
+        taken.append(((W - tw(probe, ct, CNT) - 50, 0, W, 76), 0, 99999))
+    keep = [(int(k[0] * W), int(k[1] * H), int((k[0] + k[2]) * W), int((k[1] + k[3]) * H)) for k in s.get("keep_clear", [])]
+
+    def hit(a, b):
+        return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
+
+    def busy(rect, t0, t1):
+        x0_, y0_, x1_, y1_ = rect
+        if x0_ < 0 or y0_ < 56 or x1_ > W or y1_ > H:
+            return 1e9
+        i0 = max(0, int(t0 * 4) - 2); i1 = min(len(act), int(t1 * 4) + 3)
+        ax0, ay0 = int(x0_ * AW / W), int(y0_ * AH / H)
+        a = act[i0:i1, ay0:max(ay0 + 1, int(y1_ * AH / H)), ax0:max(ax0 + 1, int(x1_ * AW / W))]
+        sc = float(a.sum()) / max(1, i1 - i0)
+        sc += sum(1e6 for (rc, a0, a1) in taken if a0 < t1 and t0 < a1 and hit(rect, rc))
+        sc += sum(1e6 for k in keep if hit(rect, k))
+        return sc
+
+    def rect_of(text, xy, font=BOLD):
+        l, t_, r_, b_ = probe.textbbox(xy, text, font=font)
+        return (l - 12, t_ - 8, r_ + 12, b_ + 8)
+
+    def place_banner(text, t0, t1):
+        w = tw(probe, text, BOLD)
+        cands = [((W - w) // 2, 62)] + [(x, y) for y in (62, 120, H - 136, H - 196) for x in (26, (W - w) // 2, W - w - 26)]
+        best = min(cands, key=lambda p: busy(rect_of(text, p), t0, t1) + 0.02 * abs(p[1] - 62) / H)
+        taken.append((rect_of(text, best), t0, t1))
+        return best
+
+    def place_tag(text, to, t0, t1):
+        """Label for an arrow: the quietest spot 120-330 px away from what it points at."""
+        tx, ty = P(to); w = tw(probe, text, BOLD)
+        best, bs = None, None
+        for dist in (130, 200, 270, 330):
+            for k in range(12):
+                ang = k * math.pi / 6
+                cx, cy = tx + dist * math.cos(ang), ty + dist * math.sin(ang)
+                xy = (int(cx - w / 2), int(cy - 20))
+                sc = busy(rect_of(text, xy), t0, t1) + dist / 2000
+                if bs is None or sc < bs:
+                    best, bs = xy, sc
+        taken.append((rect_of(text, best), t0, t1))
+        return (best[0] / W, best[1] / H)
+
+    def check_tag(text, at, t0, t1):
+        rc = rect_of(text, P(at))
+        sc = busy(rc, t0, t1) - sum(1e6 for (q, a0, a1) in taken if a0 < t1 and t0 < a1 and hit(rc, q))
+        if sc > 0.15 * (rc[2] - rc[0]) * (rc[3] - rc[1]) * AW * AH / (W * H):
+            print(f"WARNING: '{text}' sits over movement at {t0}-{t1}s; use \"label_at\": \"auto\" or move it",
+                  file=sys.stderr)
+        taken.append((rc, t0, t1))
+
     flat = s.get("flat")
     if flat:
+        for t_ in flat["tags"]:
+            if t_.get("label_at") == "auto" and t_.get("arrow_to"):
+                t_["label_at"] = place_tag(t_["text"], t_["arrow_to"], flat["start"], flat["end"])
+            else:
+                check_tag(t_["text"], t_["label_at"], flat["start"], flat["end"])
+
         def fl(d):
             for t_ in flat["tags"]:
                 if t_.get("box"):
@@ -199,12 +273,17 @@ def render(spec_path):
 
     for bn in s.get("banners", []):
         c = COL[bn.get("color", "blue")]
-        def bf(d, bn=bn, c=c):
-            label(d, bn["text"], ((W - tw(d, bn["text"], BOLD)) // 2, 62), c, BLK if c in (YEL, ORG) else WHT)
+        at = P(bn["at"]) if bn.get("at") else place_banner(bn["text"], bn["start"], min(bn["end"], src_len))
+        def bf(d, bn=bn, c=c, at=at):
+            label(d, bn["text"], at, c, BLK if c in (YEL, ORG) else WHT)
         layers.append((B.layer(bf), bn["start"], bn["end"]))
 
     for co in s.get("callouts", []):
         c = COL[co.get("color", "green")]
+        if co.get("label_at") == "auto" and co.get("arrow_to"):
+            co["label_at"] = place_tag(co["text"], co["arrow_to"], co["start"], min(co["end"], src_len))
+        elif co.get("label_at") != "auto":
+            check_tag(co["text"], co["label_at"], co["start"], min(co["end"], src_len))
         def cof(d, co=co, c=c):
             if co.get("box"):
                 box(d, co["box"], c)
@@ -306,7 +385,10 @@ def render(spec_path):
         card.paste(lab, (40, 200)); cd.rectangle((36, 196, 664, 575), outline=YEL, width=6)
         cd.text((40, 150), "WAYBILL CLOSE-UP", font=MID, fill=YEL)
     cd.text((700, 120), "ORDER ID", font=BOLD, fill=(200, 200, 210))
-    cd.text((700, 170), order[:7], font=HUGE, fill=WHT); cd.text((700, 260), order[7:], font=HUGE, fill=WHT)
+    size = 78  # the order ID on one line, as big as fits (it used to break in two and read as two numbers)
+    while size > 30 and cd.textlength(order, font=F(size)) > W - 700 - 30:
+        size -= 2
+    cd.text((700, 170), order, font=F(size), fill=WHT)
     for i, ln in enumerate(s.get("card_lines", [])):
         cd.text((700, 380 + i * 62), ln, font=MID, fill=(110, 220, 130) if i >= 2 else WHT)
     card_png = os.path.join(work, "card.png"); card.save(card_png)

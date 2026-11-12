@@ -101,6 +101,39 @@ def hhmm(s):
 
 
 # ---------------------------------------------------------------- unboxing
+def retime(src, dst):
+    """The cameras send frames in bursts over the network (10 at once, then nothing for ~0.5 s), so a live
+    recording plays jerky. Every frame is there, so space them evenly over the same length of time.
+    Falls back to the recording as it is if anything goes wrong."""
+    try:
+        fp = os.path.join(os.path.dirname(FFMPEG), "ffprobe.exe" if os.name == "nt" else "ffprobe")
+        r = subprocess.run([fp, "-v", "error", "-select_streams", "v", "-count_packets", "-show_entries",
+                            "stream=codec_name,nb_read_packets:format=duration", "-of", "json", src],
+                           capture_output=True, text=True, timeout=120, creationflags=NOWIN)
+        info = json.loads(r.stdout)
+        codec = info["streams"][0]["codec_name"]
+        frames = int(info["streams"][0]["nb_read_packets"])
+        secs = float(info["format"]["duration"])
+        if codec not in ("hevc", "h264") or frames < 10 or secs <= 0:
+            raise ValueError(f"cannot retime {codec}")
+        es = src + "." + codec
+        subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-map", "0:v", "-c", "copy",
+                        "-bsf:v", f"{codec}_mp4toannexb", "-f", codec, es], check=True, timeout=600, creationflags=NOWIN)
+        subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-r", f"{frames}/{secs:.4f}", "-i", es,
+                        "-c", "copy", "-movflags", "+faststart", dst], check=True, timeout=600, creationflags=NOWIN)
+        os.remove(es)
+        if os.path.getsize(dst) < 10000:
+            raise ValueError("retimed file is empty")
+        os.remove(src)
+        return True
+    except Exception as e:
+        log(f"Could not smooth the recording ({clean(e)}); keeping it as recorded")
+        if os.path.exists(dst):
+            os.remove(dst)
+        shutil.move(src, dst)
+        return False
+
+
 class Unboxer:
     def __init__(self):
         self.proc = None
@@ -151,7 +184,7 @@ class Unboxer:
             if not os.path.exists(info["tmp"]) or os.path.getsize(info["tmp"]) < 10000:
                 log(f"Unboxing for {info['order']} failed: {err.strip()}")
                 raise RuntimeError("The recording is empty. Check the camera login and that the returns camera is online. " + err.strip()[:200])
-            shutil.move(info["tmp"], info["final"])
+            retime(info["tmp"], info["final"])
             secs = int(time.time() - info["started"])
             meta = os.path.join(os.path.dirname(info["final"]), "evidence-log.txt")
             with open(meta, "a", encoding="utf8") as f:

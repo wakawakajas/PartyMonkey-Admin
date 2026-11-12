@@ -30,6 +30,14 @@ Make it the same way as a packing video, with these differences:
   zoom for the return waybill, and a second zoom-and-freeze on the scale when `highlight_weight` is on.
 - Use findings.json (below) and the customer's words in returns.json to know what to point at.
 - Basename `<OrderID>_unboxing_labelled`; set the request to done/problem exactly like packing requests.
+- **Name what is missing.** Compare the order's items with what comes out and say it by name in the
+  banner, e.g. "MATTE HONEY NOT RETURNED" (or "ONLY 1 OF 2 RETURNED: MATTE HONEY MISSING"), not just a count.
+- **Every arrow tip must touch its item.** Before rendering, draw the planned arrow tips and boxes on the
+  frame at that moment (with the 0.1 grid) and look: the tip sits on the item itself, not next to it
+  (bubble wrap, box, hands). Check again on the rendered video; move it if it is off.
+- **Waybill close-up must be readable.** Pick the frame where the waybill is closest to the camera and
+  sharpest (score several with an edge filter, not just the first second). If no frame shows readable
+  text, leave the waybill zoom out and rely on the info strip and end card for the order ID.
 
 ## What staff found (findings.json)
 
@@ -70,6 +78,10 @@ moments to point at.
 
 ## Rules (from the owner)
 
+- **Never cover the action.** Words, boxes and arrows must not sit over the hands, the parcel or the item
+  being handled. Banners are placed automatically where nothing moves; give every tag and callout
+  `"label_at": "auto"` (it picks the quietest spot near `arrow_to`) unless you have checked a frame.
+  If render.py prints a WARNING about a label over movement, fix it and render again.
 - Only show what helps us. **Never** show a negative ("not seen", "missing"): if something cannot
   be seen, leave it out of the video.
 - Every item gets a name tag and an arrow, when flat on the table and again when it goes in.
@@ -114,4 +126,7 @@ Fractions (0-1) of the cropped table view; times in seconds from the first frame
 `waybill.center` and `width` are fractions of the **full** camera frame (not the table view).
 `rotate` turns the frozen close-up so the order ID reads left to right (0, 90, 180, 270).
 `sharp_t`: pick the sharpest frame while the label is still (score a few with an edge filter).
+`label_at` may be `"auto"` for flat tags and callouts. Banners take an optional `"at": [x, y]`; without it
+they go where nothing moves. `"keep_clear": [[x, y, w, h], ...]` (fractions of the table view) are areas
+nothing may cover, e.g. the brown label box on the packing mat.
 Colours: yellow, orange, green, blue, pink. The last segment's end is where the video stops.
