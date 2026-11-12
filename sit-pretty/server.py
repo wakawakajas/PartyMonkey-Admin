@@ -226,6 +226,99 @@ def snapshot(cam):
 
 
 # ---------------------------------------------------------------- data for the page
+# ---------------------------------------------------------------- packing area + Shopee copies
+LOCAL = os.path.join(HERE, "sitpretty-local.json")   # this PC's own settings, git-ignored
+DEFAULT_AREAS = {  # fractions of the picture: the table only, not people or the walkway
+    "returns": {"x": 0.06, "y": 0.17, "w": 0.90, "h": 0.80},
+    "pack-183": {"x": 0.22, "y": 0.24, "w": 0.64, "h": 0.68},
+    "pack-121": {"x": 0.20, "y": 0.22, "w": 0.50, "h": 0.78},
+}
+SHOPEE_MAX_MB = 29.0   # Seller Centre: 1 minute and 30 MB per video, MP4/MOV
+SHOPEE_SECS = 59
+
+
+def local_cfg():
+    try:
+        return json.load(open(LOCAL, encoding="utf8"))
+    except Exception:
+        return {}
+
+
+def areas():
+    a = dict(DEFAULT_AREAS)
+    a.update(local_cfg().get("areas", {}))
+    return a
+
+
+def save_area(cam, box):
+    if cam not in CFG["cameras"]:
+        raise ValueError("unknown camera")
+    box = {k: round(min(1, max(0, float(box[k]))), 4) for k in ("x", "y", "w", "h")}
+    if box["w"] < 0.1 or box["h"] < 0.1:
+        raise ValueError("The box is too small")
+    c = local_cfg()
+    c.setdefault("areas", {})[cam] = box
+    json.dump(c, open(LOCAL, "w", encoding="utf8"), indent=2)
+    return box
+
+
+def cam_of(fname):
+    m = re.search(r"_packing_([a-z0-9-]+)_\d{8}", fname)
+    if m and m.group(1) in CFG["cameras"]:
+        return m.group(1)
+    return CFG["returns_camera"]
+
+
+def duration(p):
+    probe = os.path.join(os.path.dirname(FFMPEG), "ffprobe.exe" if os.name == "nt" else "ffprobe")
+    r = subprocess.run([probe if os.path.exists(probe) else "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "csv=p=0", p], capture_output=True, text=True, creationflags=NOWIN)
+    return float(r.stdout.strip() or 0)
+
+
+def shopee_copy(order, fname, mode, start=0.0):
+    """A copy Seller Centre accepts: one minute or less, under 30 MB, H.264 MP4, cropped to the packing area.
+    mode "from": the minute starting at `start` seconds; "fast": the whole video sped up into one minute."""
+    order = safe_id(order)
+    src = os.path.join(SAVE, order, os.path.basename(fname))
+    if not os.path.isfile(src):
+        raise RuntimeError("Video not found")
+    a = areas()[cam_of(fname)]
+    crop = f"crop=iw*{a['w']}:ih*{a['h']}:iw*{a['x']}:ih*{a['y']},scale=-2:'min(1080,ih)'"
+    base = os.path.splitext(os.path.basename(fname))[0]
+    total = duration(src)
+    if mode == "fast":
+        factor = max(1.0, total / SHOPEE_SECS)
+        out = os.path.join(SAVE, order, f"{base}_shopee_fast{int(round(factor))}x.mp4")
+        pre, vf, audio = [], f"{crop},setpts=PTS/{factor:.3f},fps=30", ["-an"]
+    else:
+        start = max(0.0, min(float(start), max(0.0, total - 5)))
+        out = os.path.join(SAVE, order, f"{base}_shopee_{int(start)//60:02d}m{int(start)%60:02d}s.mp4")
+        pre, vf, audio = ["-ss", f"{start:.1f}"], crop, ["-c:a", "aac", "-b:a", "96k"]
+    for kbps in (3500, 2000, 1200):
+        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", *pre, "-i", src, "-t", str(SHOPEE_SECS),
+               "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{kbps}k", "-maxrate", f"{kbps}k",
+               "-bufsize", f"{kbps * 2}k", "-pix_fmt", "yuv420p", *audio, "-movflags", "+faststart", out]
+        r = subprocess.run(cmd, capture_output=True, creationflags=NOWIN, timeout=900)
+        if r.returncode:
+            raise RuntimeError("Could not make the Shopee copy: " + r.stderr.decode("utf8", "replace")[-200:])
+        if os.path.getsize(out) <= SHOPEE_MAX_MB * 1e6:
+            break
+    mb = round(os.path.getsize(out) / 1e6, 1)
+    with open(os.path.join(SAVE, order, "evidence-log.txt"), "a", encoding="utf8") as f:
+        f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  shopee copy  {os.path.basename(out)}  {mb} MB  from {os.path.basename(fname)}\n")
+    EV_CACHE[0] = 0
+    log(f"Shopee copy saved: {out} ({mb} MB)")
+    return {"file": os.path.basename(out), "mb": mb}
+
+
+def overview():
+    try:
+        return json.load(open(os.path.join(SAVE, "_sitpretty", "overview.json"), encoding="utf8"))
+    except Exception:
+        return None
+
+
 def returns_list():
     p = os.path.join(SAVE, "_sitpretty", "returns.json")
     try:
@@ -306,7 +399,7 @@ class H(BaseHTTPRequestHandler):
                     "packing_cameras": CFG["packing_cameras"], "save_dir": SAVE,
                     "login_ok": all(all(cam_login(c, s)) for c in CFG["cameras"]),
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
-                    "pack_before": CFG["default_pack_minutes_before_scan"], "log": LOGS[-30:]})
+                    "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "log": LOGS[-30:]})
             if u.path == "/api/snapshot.jpg":
                 try:
                     return self.send(200, snapshot(q.get("cam", CFG["returns_camera"])), "image/jpeg")
@@ -374,6 +467,10 @@ class H(BaseHTTPRequestHandler):
                 if not made:
                     raise RuntimeError("; ".join(errs))
                 return self.send(200, {"files": made, "errors": errs})
+            if u.path == "/api/shopee":
+                return self.send(200, shopee_copy(b.get("order"), b.get("file", ""), b.get("mode", "from"), b.get("start", 0)))
+            if u.path == "/api/area":
+                return self.send(200, save_area(b.get("cam"), b.get("box") or {}))
             if u.path == "/api/sdcheck":
                 cam = b.get("cam")
                 out = sd(cam, "list", datetime.now().strftime("%Y%m%d"), timeout=60)
