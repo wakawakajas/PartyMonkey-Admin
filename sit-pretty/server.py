@@ -241,7 +241,8 @@ LOCAL = os.path.join(HERE, "sitpretty-local.json")   # this PC's own settings, g
 DEFAULT_AREAS = {  # fractions of the picture: the table only, not people or the walkway
     "returns": {"x": 0.06, "y": 0.17, "w": 0.90, "h": 0.80},
     "pack-183": {"x": 0.22, "y": 0.24, "w": 0.64, "h": 0.68},
-    "pack-121": {"x": 0.20, "y": 0.22, "w": 0.50, "h": 0.78},
+    "pack-121": {"x": 0.20, "y": 0.22, "w": 0.40, "h": 0.78},     # Party table left
+    "pack-121-r": {"x": 0.55, "y": 0.22, "w": 0.40, "h": 0.78},   # Party table right (same camera)
 }
 SHOPEE_MAX_MB = 29.0   # Seller Centre: 1 minute and 30 MB per video, MP4/MOV
 SHOPEE_SECS = 59
@@ -607,10 +608,19 @@ class H(BaseHTTPRequestHandler):
                 end = datetime.strptime(b["end"], "%Y-%m-%dT%H:%M")
                 if end <= start or end - start > timedelta(hours=2):
                     raise ValueError("Pick an end time after the start, at most 2 hours later")
-                made, errs = [], []
+                made, errs, by_ip = [], [], {}
                 for cam in b.get("cams") or CFG["packing_cameras"]:
                     try:
-                        made.append(sd_clip(b["order"], cam, start, end))
+                        ip = CFG["cameras"][cam]["ip"]
+                        if ip in by_ip:  # two table views of one camera: download once, copy for the second view
+                            first_cam, first = by_ip[ip]
+                            name = first.replace(f"_packing_{first_cam}_", f"_packing_{cam}_")
+                            shutil.copy(os.path.join(order_dir(b["order"]), first), os.path.join(order_dir(b["order"]), name))
+                            made.append(name)
+                            continue
+                        name = sd_clip(b["order"], cam, start, end)
+                        by_ip[ip] = (cam, name)
+                        made.append(name)
                     except Exception as e:
                         errs.append(f"{CFG['cameras'][cam]['label']}: {clean(e)}")
                 if not made:
