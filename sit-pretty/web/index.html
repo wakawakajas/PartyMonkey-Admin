@@ -81,6 +81,10 @@ video{width:100%;border-radius:14px;background:#000}
 .wl{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--rust)}.wl i{display:block;background:var(--ok)}
 td.r{text-align:right;font-variant-numeric:tabular-nums}
 @media (max-width:900px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.items{width:100%;border-collapse:collapse;font-size:14px}.items td{padding:7px 8px;border-bottom:1px solid var(--line)}
+.items td.q{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.due{display:inline-block;font-size:12px;font-weight:700;border-radius:8px;padding:2px 8px;white-space:nowrap}
+.due.red{background:var(--rust-soft);color:var(--rust)}.due.amber{background:var(--amber-soft);color:var(--amber)}.due.grey{background:rgba(0,0,0,.05);color:var(--muted)}
 .pin{position:fixed;inset:0;display:grid;place-items:center;background:rgba(246,244,248,.8);backdrop-filter:blur(8px)}
 .pin[hidden]{display:none}
 :focus-visible{outline:2px solid var(--violet);outline-offset:2px}
@@ -131,6 +135,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
             <button class="btn big stop" id="stop" hidden>Stop and save</button>
           </div>
           <div class="msg" id="umsg"></div>
+          <div id="selitems"></div>
           <p class="sub">Hold the return waybill up to the camera first, then open the parcel in one take. The video is saved as <span class="mono">OrderID_unboxing_date-time.mp4</span> in that order's folder.</p>
         </div>
         <div class="card glass">
@@ -207,6 +212,14 @@ function renderOverview(){const O=S.overview;if(!O){$('#o-note').textContent='No
   $('#o-months').innerHTML=M.map(x=>`<tr><td><b>${MON[+x.m.slice(5)-1]} ${x.m.slice(0,4)}</b></td><td class="r">${x.total}</td><td class="r">${x.refunded}</td><td class="r">${x.won}</td><td class="r">${x.rejected}</td><td class="r">${x.open}</td><td class="r" style="color:var(--rust);font-weight:600">${money(x.lost)}</td><td class="r">${money((x.shipFwd||0)+(x.shipRev||0))}</td><td class="r">${money(x.wonRefund)}<div class="sub">paid ${money(x.wonPaid)}</div></td></tr>`).join('');
   $('#o-note').textContent='Returns from '+O.from+' · updated '+O.updated+'. Appeals and the case list are in the Claims Desk.';
   $('#o-reasons').innerHTML=Object.entries(O.disputeByReason||{}).sort((a,b)=>(b[1][0]+b[1][1])-(a[1][0]+a[1][1])).map(([k,[w,l]])=>`<div class="reason"><span>${esc(k)}</span><div class="wl"><i style="width:${(w/(w+l)*100).toFixed(0)}%"></i></div><span style="text-align:right">${w}/${w+l}</span></div>`).join('')}
+function left(r){
+  if(!r||!r.due)return r&&r.todo?{cls:'grey',t:r.todo}:null;
+  const s=Math.floor(r.due-Date.now()/1000);
+  if(s<=0)return{cls:'red',t:'Deadline passed'};
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),sec=s%60;
+  const t=d?`${d}d ${h}h ${m}m left`:h?`${h}h ${m}m left`:`${m}m ${String(sec).padStart(2,'0')}s left`;
+  return{cls:s<86400?'red':s<259200?'amber':'grey',t:t+' to act'}}
+function dueTag(r){const l=left(r);return l?`<span class="due ${l.cls}">${esc(l.t)}</span>`:''}
 function fmtSecs(s){return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')}
 function render(){
   if(!S)return;
@@ -218,13 +231,15 @@ function render(){
   const rec=S.unbox.recording;
   $('#rec').hidden=!rec;$('#timer').hidden=!rec;$('#start').hidden=rec;$('#stop').hidden=!rec;
   if(rec){$('#timer').textContent=fmtSecs(S.unbox.seconds);$('#selected').innerHTML='Recording order <b>'+esc(S.unbox.order)+'</b>'}
-  else if(sel){$('#selected').innerHTML='Order <b>'+esc(sel.order)+'</b>'+(sel.product?' · '+esc(sel.product):'')}
+  else if(sel){$('#selected').innerHTML='Order <b>'+esc(sel.order)+'</b> '+dueTag(sel)}
+  const cur=rec?(S.returns||[]).find(x=>x.order===S.unbox.order):sel;
+  $('#selitems').innerHTML=cur&&cur.items&&cur.items.length?`<p class="sub" style="margin:4px 0">Items in this order (check each one in the parcel):</p><table class="items">${cur.items.map((it,i)=>`<tr><td>${i+1}</td><td>${esc(it.model||'')}<div class="sub">${esc(it.name||'')}</div></td><td class="q">x ${it.qty}</td></tr>`).join('')}</table>`:(cur?'<p class="sub">No item list for this order yet.</p>':'');
   $('#start').disabled=!sel||!S.login_ok;
   if(S.unbox.error)$('#umsg').className='msg err',$('#umsg').textContent=S.unbox.error;
   const q=$('#q').value.trim().toLowerCase();
   const R=(S.returns||[]).filter(r=>!q||hay(r).includes(q));
   if(page==='overview')renderOverview();
-  let html=R.slice(0,80).map(r=>`<button class="ret" data-o="${esc(r.order)}" aria-pressed="${sel&&sel.order===r.order}"><b>${esc(r.order)}</b><span class="sub">${esc(r.status||'')}</span><small>${esc(r.product||'')}${r.reason?' · '+esc(r.reason):''}</small></button>`).join('');
+  let html=R.slice(0,80).map(r=>`<button class="ret" data-o="${esc(r.order)}" aria-pressed="${sel&&sel.order===r.order}"><b>${esc(r.order)}</b><span class="sub">${esc(r.status||'')}</span><small>${esc(r.product||'')}${r.reason?' · '+esc(r.reason):''}</small><small>${dueTag(r)}</small></button>`).join('');
   const typed=$('#q').value.trim().toUpperCase().replace(/[^A-Z0-9]/g,'');
   if(typed.length>=10&&!R.some(r=>r.order===typed))html=`<button class="ret" data-o="${typed}" aria-pressed="${sel&&sel.order===typed}"><b>${typed}</b><small>Use this order ID</small></button>`+html;
   $('#returns').innerHTML=html||'<p class="sub">No returns listed yet. Type the order ID above.</p>';
