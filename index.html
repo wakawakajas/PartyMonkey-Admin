@@ -21523,6 +21523,42 @@ function spCopyPick(r,copyFn,done){
   document.body.appendChild(box);
   box.querySelector('[data-k=copy]').focus();
 }
+// After Stop and save: ask whether Claude should make a labelled unboxing video, and what to show
+function spUnboxPick(info,sendFn,done){
+  const e=x=>String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const old=document.getElementById('spUnboxPickBox'); if(old) old.remove();
+  const row=(k,label,hint,on)=>`<label style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid #eee;cursor:pointer"><input type="checkbox" data-o="${k}"${on?' checked':''} style="margin:3px 0 0;width:17px;height:17px;min-width:17px;flex:none;padding:0"><span style="min-width:0"><b>${label}</b><br><span style="color:#6b6b78;font-size:12.5px">${hint}</span></span></label>`;
+  const inp='width:100%;box-sizing:border-box;border:1px solid #ccc;border-radius:10px;padding:8px;font:inherit;color:#1d1d1f;background:#fff';
+  const box=document.createElement('div'); box.id='spUnboxPickBox';
+  box.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;padding:16px';
+  box.innerHTML=`<div role="dialog" aria-label="Unboxing video" style="background:#fff;color:#1d1d1f;border-radius:16px;padding:16px;width:100%;max-width:420px;max-height:90vh;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;box-shadow:0 20px 50px rgba(0,0,0,.25);font:14px/1.4 system-ui,sans-serif">
+    <div style="font-weight:700;font-size:16px">Make a labelled unboxing video?</div>
+    <div style="color:#6b6b78;font-size:12.5px;margin:2px 0 6px">Order ${e(info.order)}. Claude adds the labels and saves it next to the recording. Pick what it should show:</div>
+    ${row('count','Count the items','A big ITEMS RECEIVED counter, e.g. 1 / 2',true)}
+    ${row('highlight_items','Highlight each item','Name tag and arrow on every item as it comes out',true)}
+    ${row('highlight_weight','Highlight the weight','Zoom in on the scale reading',false)}
+    ${row('missing','Say what is missing','A clear banner, e.g. ONLY 1 OF 2 PUMPS RETURNED',!!info.missing_text)}
+    <input type="text" data-o="missing_text" placeholder="What is missing, e.g. 1 of 2 balloon pumps" value="${e(info.missing_text||'')}" style="${inp};margin:2px 0 8px">
+    <textarea data-o="note" rows="2" placeholder="Anything else Claude should point out (optional)" style="${inp};resize:vertical"></textarea>
+    <div data-o="msg" style="font-size:13px;color:#B42318;min-height:0;margin-top:6px"></div>
+    <div style="display:flex;gap:8px;margin-top:8px"><button type="button" data-k="skip" style="flex:1;height:40px;border-radius:10px;border:1px solid #ccc;background:#fff;color:#1d1d1f;font:inherit;cursor:pointer">No thanks</button><button type="button" data-k="go" style="flex:1;height:40px;border-radius:10px;border:0;background:#1d1d1f;color:#fff;font:inherit;font-weight:700;cursor:pointer">Make the video</button></div></div>`;
+  const q=k=>box.querySelector(`[data-o="${k}"]`);
+  q('missing_text').addEventListener('input',()=>{ if(q('missing_text').value.trim()) q('missing').checked=true; });
+  const close=msg=>{ box.remove(); done&&done(msg); };
+  box.addEventListener('click',async ev=>{
+    const k=ev.target.closest('[data-k]');
+    if(ev.target===box||(k&&k.dataset.k==='skip')) return close('');
+    if(!k||k.dataset.k!=='go') return;
+    const b={order:info.order,request:info.request||'',video:info.file||'',cam:info.cam||'',
+      count:q('count').checked,highlight_items:q('highlight_items').checked,highlight_weight:q('highlight_weight').checked,
+      missing:q('missing').checked,missing_text:q('missing_text').value.trim(),note:q('note').value.trim()};
+    if(!b.count&&!b.highlight_items&&!b.highlight_weight&&!b.missing){ q('msg').textContent='Tick at least one thing to show.'; return; }
+    k.disabled=true; k.textContent='Sending…';
+    try{ await sendFn(b); close('Unboxing video asked for. Claude makes it within the hour (see Evidence video in the full Sit Pretty).'); }
+    catch(err){ q('msg').textContent=err.message||String(err); k.disabled=false; k.textContent='Make the video'; }
+  });
+  document.body.appendChild(box);
+}
 let spFoundKey='';
 function spCopy(t){
   try{ if(navigator.clipboard&&window.isSecureContext){ navigator.clipboard.writeText(t); return; } }catch(e){}
@@ -21606,6 +21642,9 @@ spEl('spStop').addEventListener('click',async()=>{
   const b=spEl('spStop'); b.disabled=true; spMsg('spRecMsg','Saving…');
   try{ const d=await spCmd('stop',{},45000);
     spMsg('spSelMsg','Saved '+d.file+' ('+d.seconds+' s) in the order folder. Now tick what you found below.','ok'); spMsg('spRecMsg','');
+    const fd=(spSel&&spSel.order===d.order&&spSel.found)||{};
+    spUnboxPick({order:d.order,request:d.request||'',file:d.file,cam:d.cam,missing_text:(fd.issues||[]).includes('missing')?fd.note:''},
+      b=>spCmd('unboxvideo',b),m=>{ if(m) spMsg('spSelMsg',m,'ok'); });
   }catch(e){ spMsg('spRecMsg',e.message,'err'); }
   b.disabled=false;
 });

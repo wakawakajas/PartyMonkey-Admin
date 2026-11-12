@@ -159,7 +159,8 @@ class Unboxer:
                         f"  request={info['request']}  note={info['note']}\n")
             EV_CACHE[0] = 0
             log(f"Unboxing saved: {info['final']} ({secs}s)")
-            return {"order": info["order"], "file": info["final"], "seconds": secs}
+            return {"order": info["order"], "file": info["final"], "seconds": secs, "request": info["request"],
+                    "cam": info["cam"]}
 
     def state(self):
         if self.proc and self.proc.poll() is None:
@@ -351,20 +352,47 @@ def request_video(b):
     return job
 
 
+def request_unbox_video(b):
+    """Staff want a labelled copy of an unboxing recording (made by Claude, like the packing videos)."""
+    order = safe_id(b.get("order"))
+    d = order_dir(order)
+    video = os.path.basename(str(b.get("video") or ""))
+    if not video or not os.path.isfile(os.path.join(d, video)):
+        vids = sorted(n for n in os.listdir(d) if "_unboxing_" in n and n.endswith(".mp4"))
+        if not vids:
+            raise ValueError("There is no unboxing recording for this order yet")
+        video = vids[-1]
+    opts = {k: bool(b.get(k)) for k in ("count", "highlight_items", "highlight_weight", "missing")}
+    if not any(opts.values()):
+        raise ValueError("Tick at least one thing to show")
+    cam = b.get("cam") if b.get("cam") in CFG["cameras"] else CFG["returns_camera"]
+    job = {"kind": "unboxing", "order": order, "request": b.get("request", ""), "video": video, "cams": [cam],
+           **opts, "missing_text": str(b.get("missing_text") or "")[:300], "note": str(b.get("note") or "")[:300],
+           "areas": {cam: areas()[cam]}, "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+           "status": "queued"}
+    json.dump(job, open(os.path.join(d, "unboxing-video-request.json"), "w", encoding="utf8"), indent=1,
+              ensure_ascii=False)
+    JOB_CACHE[0] = 0
+    log(f"Unboxing video requested for {order}")
+    return job
+
+
 def jobs():
     if time.time() - JOB_CACHE[0] < 5:
         return JOB_CACHE[1]
     out = []
     if os.path.isdir(SAVE):
         for name in os.listdir(SAVE):
-            p = os.path.join(SAVE, name, "evidence-request.json")
-            if os.path.isfile(p):
-                try:
-                    j = json.load(open(p, encoding="utf8"))
-                    j["mtime"] = os.path.getmtime(p)
-                    out.append(j)
-                except Exception:
-                    pass
+            for fname in ("evidence-request.json", "unboxing-video-request.json"):
+                p = os.path.join(SAVE, name, fname)
+                if os.path.isfile(p):
+                    try:
+                        j = json.load(open(p, encoding="utf8"))
+                        j["mtime"] = os.path.getmtime(p)
+                        j.setdefault("kind", "packing")
+                        out.append(j)
+                    except Exception:
+                        pass
     out.sort(key=lambda j: -j["mtime"])
     JOB_CACHE[:] = [time.time(), out[:100]]
     return JOB_CACHE[1]
@@ -588,6 +616,8 @@ class H(BaseHTTPRequestHandler):
                 if not made:
                     raise RuntimeError("; ".join(errs))
                 return self.send(200, {"files": made, "errors": errs})
+            if u.path == "/api/unbox-video":
+                return self.send(200, request_unbox_video(b))
             if u.path == "/api/finding":
                 return self.send(200, save_finding(b.get("order"), b.get("issues"), b.get("note"), b.get("by")))
             if u.path == "/api/refresh-returns":
@@ -619,7 +649,7 @@ def main():
     LINK = pigulink.start(CFG, secrets().get("pin", ""), {
         "cfg": CFG, "unbox_state": UNBOX.state, "start": UNBOX.start, "stop": UNBOX.stop,
         "snapshot": snapshot, "returns": returns_list, "returns_info": returns_info,
-        "ask_refresh": ask_refresh, "clean": clean, "save_finding": save_finding, "found_opts": FOUND_OPTS}, log)
+        "ask_refresh": ask_refresh, "clean": clean, "save_finding": save_finding, "unbox_video": request_unbox_video, "found_opts": FOUND_OPTS}, log)
     srv = ThreadingHTTPServer(("0.0.0.0", CFG["port"]), H)
     log(f"Sit Pretty on http://localhost:{CFG['port']}  (saving to {SAVE})")
     srv.serve_forever()

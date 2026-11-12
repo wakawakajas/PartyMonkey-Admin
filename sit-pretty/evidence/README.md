@@ -14,6 +14,23 @@ delete `refresh-request.json`. Do this before making videos.
 Include the customer's words (`buyer_text`, `buyer_videos`, `buyer_photos`) and Shopee's latest request
 (`shopee_ask`, `shopee_ask_at`), as described in that task.
 
+## Unboxing videos (unboxing-video-request.json)
+
+After Stop and save, staff can ask for a labelled copy of a return's unboxing. That writes
+`<OrderID>\unboxing-video-request.json` (`"kind": "unboxing"`, `"status": "queued"`) with:
+`video` (the recording in the same folder), `cams`/`areas` (camera and its table area), and what to show:
+`count` (big **ITEMS RECEIVED n / N** counter, N = what the order says was returned), `highlight_items`
+(name tag + arrow on each item as it comes out), `highlight_weight` (zoom into the scale reading and hold
+it 2 s), `missing` + `missing_text` (a clear banner such as "ONLY 1 OF 2 PUMPS RETURNED"), and `note`.
+
+Make it the same way as a packing video, with these differences:
+- No memory-card download: the source is `video` itself. Contact-sheet it, find each item coming out.
+- Spec: `counter.label` = "ITEMS RECEIVED"; use `banners` / `callouts` for missing, used or wrong items
+  (here showing what is wrong **helps** us, so say it plainly and in big words); use the `waybill`
+  zoom for the return waybill, and a second zoom-and-freeze on the scale when `highlight_weight` is on.
+- Use findings.json (below) and the customer's words in returns.json to know what to point at.
+- Basename `<OrderID>_unboxing_labelled`; set the request to done/problem exactly like packing requests.
+
 ## What staff found (findings.json)
 
 After an unboxing, staff tick what they saw in Sit Pretty or Pigu (item used, seal opened, items missing,
