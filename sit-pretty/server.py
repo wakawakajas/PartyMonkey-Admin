@@ -350,7 +350,73 @@ def request_video(b):
     json.dump(job, open(p, "w", encoding="utf8"), indent=1)
     JOB_CACHE[0] = 0
     log(f"Evidence video requested for {order} ({', '.join(cams)})")
+    job["now"] = kick_claude()
     return job
+
+
+# ---------------------------------------------------------------- Claude Code makes the videos straight away
+REPO = os.path.dirname(HERE)
+CLAUDE_EXE = shutil.which("claude") or os.path.join(os.path.expanduser("~"), ".local", "bin", "claude.exe")
+AUTO = {"proc": None, "again": False, "state": "idle"}   # idle / running / signin / missing
+AUTO_LOCK = threading.Lock()
+AUTO_PROMPT = (
+    "Make the queued Sit Pretty video requests now. Read sit-pretty/evidence/README.md and follow it exactly for "
+    "every N:\\Yong Chuan\\Dispute\\*\\unboxing-video-request.json and evidence-request.json whose status is "
+    "\"queued\" (oldest first; skip any that say \"working\"). Use sit-pretty\\.venv\\Scripts\\python.exe for Python. "
+    "Never type passwords. In Shopee Seller Centre and BigSeller only read: never click Refund, Dispute, Accept, Ship "
+    "or anything that changes an order. If a packing request needs the BigSeller scan time and Chrome is not "
+    "available, leave that request queued for the hourly task. Delete temporary files when done. "
+    "Finish with one line per request.")
+
+
+def auto_state():
+    if not os.path.isfile(CLAUDE_EXE):
+        return "missing"
+    return AUTO["state"]
+
+
+def _run_claude():
+    while True:
+        AUTO["again"] = False
+        out_p = os.path.join(HERE, "tmp", "claude-run.log")
+        with open(out_p, "w", encoding="utf8") as out:
+            cmd = [CLAUDE_EXE, "-p", AUTO_PROMPT, "--chrome", "--permission-mode", "acceptEdits",
+                   "--add-dir", SAVE, "--allowedTools", "Bash", "Read", "Write", "Edit", "Glob", "Grep",
+                   "mcp__claude-in-chrome"]
+            try:
+                p = subprocess.Popen(cmd, cwd=REPO, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                     creationflags=NOWIN)
+            except Exception as e:
+                AUTO["state"] = "missing"
+                log(f"Could not start Claude Code: {e}")
+                return
+            AUTO["proc"], AUTO["state"] = p, "running"
+            log("Claude Code started making the requested videos")
+            rc = p.wait()
+        tail = open(out_p, encoding="utf8", errors="replace").read()[-3000:]
+        JOB_CACHE[0] = 0
+        if "Not logged in" in tail or "/login" in tail:
+            AUTO["state"] = "signin"
+            log("Claude Code is not signed in on this PC, so the hourly task will make the video. "
+                "Sign in once: open a terminal, run claude, type /login")
+            return
+        AUTO["state"] = "idle"
+        log(f"Claude Code finished the video requests (exit {rc}). " + clean(tail.strip().splitlines()[-1][:200] if tail.strip() else ""))
+        if not AUTO["again"]:
+            return
+
+
+def kick_claude():
+    """Start Claude Code now for queued requests. Returns True if it should be making them right away."""
+    if not os.path.isfile(CLAUDE_EXE):
+        return False
+    with AUTO_LOCK:
+        if AUTO["proc"] and AUTO["proc"].poll() is None:
+            AUTO["again"] = True
+            return True
+        was = AUTO["state"]
+        threading.Thread(target=_run_claude, daemon=True).start()
+        return was != "signin"
 
 
 def request_unbox_video(b):
@@ -375,6 +441,7 @@ def request_unbox_video(b):
               ensure_ascii=False)
     JOB_CACHE[0] = 0
     log(f"Unboxing video requested for {order}")
+    job["now"] = kick_claude()
     return job
 
 
@@ -549,7 +616,7 @@ class H(BaseHTTPRequestHandler):
                     "packing_cameras": CFG["packing_cameras"], "save_dir": SAVE,
                     "login_ok": all(all(cam_login(c, s)) for c in CFG["cameras"]),
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
-                    "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "log": LOGS[-30:]})
+                    "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "auto_videos": auto_state(), "log": LOGS[-30:]})
             if u.path == "/api/snapshot.jpg":
                 try:
                     return self.send(200, snapshot(q.get("cam", CFG["returns_camera"])), "image/jpeg")
