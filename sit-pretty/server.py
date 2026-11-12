@@ -359,10 +359,13 @@ REPO = os.path.dirname(HERE)
 CLAUDE_EXE = shutil.which("claude") or os.path.join(os.path.expanduser("~"), ".local", "bin", "claude.exe")
 AUTO = {"proc": None, "again": False, "state": "idle"}   # idle / running / signin / missing
 AUTO_LOCK = threading.Lock()
+# Unboxing videos are simpler (no BigSeller lookup, no packing count), so they use the cheaper Sonnet model;
+# packing videos keep the default (stronger) model because the item counting needs care.
+AUTO_KINDS = [("unboxing-video-request.json", "sonnet"), ("evidence-request.json", None)]
 AUTO_PROMPT = (
     "Make the queued Sit Pretty video requests now. Read sit-pretty/evidence/README.md and follow it exactly for "
-    "every N:\\Yong Chuan\\Dispute\\*\\unboxing-video-request.json and evidence-request.json whose status is "
-    "\"queued\" (oldest first; skip any that say \"working\"). Use sit-pretty\\.venv\\Scripts\\python.exe for Python. "
+    "every N:\\Yong Chuan\\Dispute\\*\\{fname} whose status is "
+    "\"queued\" (oldest first; skip any that say \"working\"; leave every other kind of request alone). Use sit-pretty\\.venv\\Scripts\\python.exe for Python. "
     "Never type passwords. In Shopee Seller Centre and BigSeller only read: never click Refund, Dispute, Accept, Ship "
     "or anything that changes an order. If a packing request needs the BigSeller scan time and Chrome is not "
     "available, leave that request queued for the hourly task. Delete temporary files when done. "
@@ -375,23 +378,50 @@ def auto_state():
     return AUTO["state"]
 
 
+def queued(fname):
+    if not os.path.isdir(SAVE):
+        return False
+    for name in os.listdir(SAVE):
+        p = os.path.join(SAVE, name, fname)
+        if os.path.isfile(p):
+            try:
+                if json.load(open(p, encoding="utf8")).get("status") == "queued":
+                    return True
+            except Exception:
+                pass
+    return False
+
+
 def _run_claude():
     while True:
         AUTO["again"] = False
+        for fname, model in AUTO_KINDS:
+            if queued(fname) and not _run_claude_once(fname, model):
+                return
+        if not AUTO["again"]:
+            AUTO["state"] = "idle"
+            return
+
+
+def _run_claude_once(fname, model):
+    if True:
         out_p = os.path.join(HERE, "tmp", "claude-run.log")
         with open(out_p, "w", encoding="utf8") as out:
-            cmd = [CLAUDE_EXE, "-p", AUTO_PROMPT, "--chrome", "--permission-mode", "acceptEdits",
-                   "--add-dir", SAVE, "--allowedTools", "Bash", "Read", "Write", "Edit", "Glob", "Grep",
-                   "mcp__claude-in-chrome"]
+            cmd = [CLAUDE_EXE, "-p", AUTO_PROMPT.replace("{fname}", fname), "--chrome", "--permission-mode", "acceptEdits",
+                   "--add-dir", SAVE]
+            if model:
+                cmd += ["--model", model]
+            cmd += ["--allowedTools", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "mcp__claude-in-chrome"]
             try:
                 p = subprocess.Popen(cmd, cwd=REPO, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                      creationflags=NOWIN)
             except Exception as e:
                 AUTO["state"] = "missing"
                 log(f"Could not start Claude Code: {e}")
-                return
+                return False
             AUTO["proc"], AUTO["state"] = p, "running"
-            log("Claude Code started making the requested videos")
+            kind = "unboxing" if fname.startswith("unboxing") else "packing"
+            log(f"Claude Code started making the {kind} videos ({model or 'default model'})")
             rc = p.wait()
         tail = open(out_p, encoding="utf8", errors="replace").read()[-3000:]
         JOB_CACHE[0] = 0
@@ -399,11 +429,9 @@ def _run_claude():
             AUTO["state"] = "signin"
             log("Claude Code is not signed in on this PC, so the hourly task will make the video. "
                 "Sign in once: open a terminal, run claude, type /login")
-            return
-        AUTO["state"] = "idle"
-        log(f"Claude Code finished the video requests (exit {rc}). " + clean(tail.strip().splitlines()[-1][:200] if tail.strip() else ""))
-        if not AUTO["again"]:
-            return
+            return False
+        log(f"Claude Code finished the {kind} requests (exit {rc}). " + clean(tail.strip().splitlines()[-1][:200] if tail.strip() else ""))
+        return True
 
 
 def kick_claude():
