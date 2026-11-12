@@ -12456,6 +12456,11 @@ async function pdfSheetPieces(file){
     const base=String(file.name||'sheet.pdf').replace(/\.(pdf|ai)$/i,'');
     const piece=new File(parts,`${base} (${String(k+1).padStart(2,'0')}).pdf`,{type:'application/pdf'});
     piece.sheetUV=uvOf(p.b);
+    // and the box its page is cut from, the same way: words typed on the whole
+    // sheet go on the sticker they sit over (gtSetSheetWords)
+    { const uvPt=(px,py)=>{ const X=ma*px+mc*py+me, Y=mb*px+md*py+mf; return [(X-em.x)/em.w,1-(Y-em.y)/em.h]; };
+      const a=uvPt(box[0],box[1]), c=uvPt(box[2],box[3]);
+      piece.sheetBox=[Math.min(a[0],c[0]),Math.min(a[1],c[1]),Math.max(a[0],c[0]),Math.max(a[1],c[1])]; }
     out.push(piece);
   }
   return out.length?out:null;
@@ -40058,10 +40063,44 @@ function gtSetPiecesOf(d){
       had.list.forEach(x=>{ if(x.bleedOf===null) return;
         if(JSON.stringify(x.bleed||null)!==x.bleedOf){ x.bleedOf=null; return; }
         if(now!==x.bleedOf){ x.bleed=d.bleed?{...d.bleed}:null; x.bleedOf=now; } }); }
-    return had.list;
+    return gtSetSheetWords(d,had.list);
   }
   gtSetBuild(d);
   return null;
+}
+// Words typed on a broken-up sheet as a whole go on the sticker they sit over
+// (its middle inside that sticker's box, or else the nearest one), where they
+// were on the sheet. On 2026-11-12 a cake topper's "Happy Birthday" and name,
+// saved on the whole sheet, showed nowhere once it was broken up: only words
+// put on a sticker opened on its own were drawn. These follow the sheet's
+// words - changed there, changed here - and are not the sticker's own, so
+// gtPieceEditOf never saves them onto it.
+function gtSetSheetWords(d,list){
+  if(!d||!list||!list.length) return list;
+  const tn=gtTurnOf(d), sig=JSON.stringify([d.fields||[],tn]);
+  if(list._sheetWords===sig) return list;
+  const again=list._sheetWords!==undefined;
+  list._sheetWords=sig;
+  list.forEach(x=>{ x.fields=(x.fields||[]).filter(f=>!f.fromSheet); });
+  // the box in the sheet as it is drawn: a turned sheet's stickers go round with it
+  const boxOf=x=>{ const b=x.sheetBox; if(!b) return null; if(!tn) return b;
+    const p=gtTurnPt([b[0],b[1]],tn), q=gtTurnPt([b[2],b[3]],tn);
+    return [Math.min(p[0],q[0]),Math.min(p[1],q[1]),Math.max(p[0],q[0]),Math.max(p[1],q[1])]; };
+  (d.fields||[]).forEach(f=>{
+    const fx=Number(f.x)||0, fy=Number(f.y)||0, fw=Number(f.w)||0, fh=Number(f.h)||0;
+    const cx=fx+fw/2, cy=fy+fh/2;
+    let best=null, bb=null, bd=Infinity;
+    list.forEach(x=>{ const b=boxOf(x); if(!b) return;
+      const ox=Math.max(b[0]-cx,0,cx-b[2]), oy=Math.max(b[1]-cy,0,cy-b[3]);
+      const mx=(b[0]+b[2])/2-cx, my=(b[1]+b[3])/2-cy;
+      const dd=(ox*ox+oy*oy)*1e3+mx*mx+my*my;
+      if(dd<bd){ bd=dd; best=x; bb=b; } });
+    if(!best) return;
+    const bw=(bb[2]-bb[0])||1, bh=(bb[3]-bb[1])||1;
+    best.fields.push({...f,x:(fx-bb[0])/bw,y:(fy-bb[1])/bh,w:fw/bw,h:fh/bh,fromSheet:true});
+  });
+  if(again){ try{ gtNestCache=null; }catch(e){} }
+  return list;
 }
 // the stickers of every nest-each sheet on the order, made and drawn: what
 // printing waits on, so a sheet is never printed as one block for want of them
@@ -40099,7 +40138,8 @@ function gtPieceEditOf(d){
     const art=gtArtKept(x), artOwn=art&&(Number(art.s)!==1||Number(art.dx)||Number(art.dy)||art.kx!=null||art.ks!=null);
     const e={...(x.wordsCut?{wordsCut:true}:{}),...(own?{trace:own}:{}),...(bl?{bleed:x.bleed||null}:{}),
       ...(x.hole&&x.hole.on?{hole:x.hole}:{}),...(artOwn?{art}:{}),...(x.turn?{turn:x.turn}:{})};
-    if(k&&((x.fields||[]).length||Object.keys(e).length)) out[k]={fields:x.fields||[],...e};
+    const ownF=(x.fields||[]).filter(f=>!f.fromSheet);   // not the sheet's (gtSetSheetWords)
+    if(k&&(ownF.length||Object.keys(e).length)) out[k]={fields:ownF,...e};
   });
   if(Object.keys(out).length<=2){ d.pieceEdit={}; return {}; }
   d.pieceEdit=out;
@@ -40144,6 +40184,7 @@ function gtSetBuild(d){
         hole:pe&&pe.hole,artV:2,art:pe&&pe.art,turn:pe&&pe.turn});
       x.setOf=d.id;
       x.sheetUV=files[k].sheetUV||null;
+      x.sheetBox=files[k].sheetBox||null;
       // the sheet's bleed, followed until one of its own is set on the sticker
       x.bleedOf=pe&&pe.bleed!==undefined?null:JSON.stringify(d.bleed||null);
       if(pe&&pe.wordsCut) x.wordsCut=true;
@@ -40163,6 +40204,7 @@ function gtSetBuild(d){
     }
     if(!live()) return undo();
     rec.list=list;
+    gtSetSheetWords(d,list);
     try{ gtNestCache=null; gtDraw(); }catch(e){}
     return list;
   })();
