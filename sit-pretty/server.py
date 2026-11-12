@@ -235,6 +235,39 @@ def snapshot(cam):
         return r.stdout
 
 
+def read_waybill(cam):
+    """Staff hold the return waybill up to a table camera; read every barcode in a full-size frame."""
+    cam = cam if cam in CFG["cameras"] else CFG["returns_camera"]
+    try:
+        import zxingcpp
+        from PIL import Image
+    except ImportError:
+        raise RuntimeError("The barcode reader is missing: run start-sit-pretty.bat once")
+    r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
+                        "-i", rtsp(cam, "stream1"), "-frames:v", "1", "-q:v", "2", "-f", "image2", "-"],
+                       capture_output=True, timeout=25, creationflags=NOWIN)
+    if r.returncode or not r.stdout:
+        raise RuntimeError("Could not get a picture from the camera. " + clean(r.stderr.decode("utf8", "replace")[-150:]))
+    import io
+    im = Image.open(io.BytesIO(r.stdout)).convert("L")
+    codes = []
+
+    def take(img):
+        for bc in zxingcpp.read_barcodes(img):
+            t = (bc.text or "").strip()
+            if t and t not in codes:
+                codes.append(t)
+
+    take(im)
+    if not codes:  # small barcode: look at overlapping tiles, each enlarged 2x
+        tw, th = im.width // 3, im.height // 2
+        for x in range(0, im.width - tw + 1, tw // 2):
+            for y in range(0, im.height - th + 1, th // 2):
+                take(im.crop((x, y, x + tw, y + th)).resize((tw * 2, th * 2), Image.LANCZOS))
+    log(f"Waybill scan on {CFG['cameras'][cam]['label']}: {', '.join(codes) or 'no barcode found'}")
+    return {"codes": codes}
+
+
 # ---------------------------------------------------------------- data for the page
 # ---------------------------------------------------------------- packing area + Shopee copies
 LOCAL = os.path.join(HERE, "sitpretty-local.json")   # this PC's own settings, git-ignored
@@ -721,6 +754,8 @@ class H(BaseHTTPRequestHandler):
                 if not made:
                     raise RuntimeError("; ".join(errs))
                 return self.send(200, {"files": made, "errors": errs})
+            if u.path == "/api/readwb":
+                return self.send(200, read_waybill(b.get("cam")))
             if u.path == "/api/unbox-video":
                 return self.send(200, request_unbox_video(b))
             if u.path == "/api/finding":
@@ -754,7 +789,7 @@ def main():
     LINK = pigulink.start(CFG, secrets().get("pin", ""), {
         "cfg": CFG, "unbox_state": UNBOX.state, "start": UNBOX.start, "stop": UNBOX.stop,
         "snapshot": snapshot, "returns": returns_list, "returns_info": returns_info,
-        "ask_refresh": ask_refresh, "clean": clean, "save_finding": save_finding, "unbox_video": request_unbox_video, "found_opts": FOUND_OPTS}, log)
+        "ask_refresh": ask_refresh, "clean": clean, "save_finding": save_finding, "read_waybill": read_waybill, "unbox_video": request_unbox_video, "found_opts": FOUND_OPTS}, log)
     srv = ThreadingHTTPServer(("0.0.0.0", CFG["port"]), H)
     log(f"Sit Pretty on http://localhost:{CFG['port']}  (saving to {SAVE})")
     srv.serve_forever()

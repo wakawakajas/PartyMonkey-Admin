@@ -88,6 +88,8 @@ class PiguLink(threading.Thread):
                 data["file"] = data["file"].rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
             elif cmd == "snap":
                 data = {"jpg": self.small_jpg(self.api["snapshot"](p.get("cam")))}
+            elif cmd == "readwb":
+                data = self.api["read_waybill"](p.get("cam"))
             elif cmd == "unboxvideo":
                 data = self.api["unbox_video"](p)
             elif cmd == "finding":
