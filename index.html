@@ -40511,15 +40511,21 @@ async function gtWouldEmpty(man){
 let gtWouldEmptyWhat='';
 // saves under way, however they were asked for (most call gtSaveLib straight)
 var gtSaveInFlight=0;
+// Every save says whether the library really reached its folder (or, with no
+// folder, this browser): {ok:true}, or {ok:false, why}. On 2026-11-11 Save
+// design said "Saved" over a save that had stopped early and written nothing,
+// and the words on a new design were lost on the next reload. The buttons that
+// say Saved go by this, not by the save merely not throwing.
 async function gtSaveLib(){
   try{ gtNlSavedNote(true); }catch(e){}
-  try{ return await gtSaveLibInner(); }finally{ try{ gtNlSavedNote(false); }catch(e){} }
+  let r;
+  try{ r=await gtSaveLibInner(); return r; }finally{ try{ gtNlSavedNote(false,r); }catch(e){} }
 }
 async function gtSaveLibInner(){
   try{ gtSavedSyncSoon(); }catch(e){}
   // Never with a batch's other paper swapped in (mcGtOnFinish): put off until
   // the swap is over, whichever of the many ways the save was asked for
-  try{ if(mcGtSwapping>0){ gtSaveSoon(); return; } }catch(e){}
+  try{ if(mcGtSwapping>0){ gtSaveSoon(); return {ok:false,why:'a Magic Create batch is busy with the sheet - press Save again in a moment'}; } }catch(e){}
   // and a swap waits for this one to finish (it awaits the folder before it
   // reads the sheet, and read the swapped-in paper's)
   gtSaveInFlight++;
@@ -40534,12 +40540,12 @@ async function gtSaveLibRun(){
       if(m) showMsg(m,'Not saving: the library folder could not be read, and writing now '
         +'would put an empty library over it. Reconnect the folder under Choose folder.',false);
     }
-    return;
+    return {ok:false,why:'the library folder could not be read - reconnect it under Choose folder, then save again'};
   }
-  if(gtModeSwitching){ gtSaveSoon(); return; }
+  if(gtModeSwitching){ gtSaveSoon(); return {ok:false,why:'the page is changing over - press Save again in a moment'}; }
   if(!await gtLibDirIsHere()){
     console.warn('gift tag library not saved: it was read from another folder than the one now chosen');
-    return;
+    return {ok:false,why:'the library was read from another folder than the one now chosen - reload the page, then save again'};
   }
   try{ await gtPiguFieldsSave(); }catch(e){}
   // somebody else's computer may have written the library since it was read
@@ -40552,7 +40558,7 @@ async function gtSaveLibRun(){
       +'library folder, and what is on screen has not got them. Reload the page — nothing '
       +'on the folder has been touched. If they are still missing after that, the folder '
       +'holds library.backup-… files, each the whole library as it was then.',false);
-    return;
+    return {ok:false,why:'it would take '+gtWouldEmptyWhat+' off the library folder - reload the page'};
   }
   // Die Cut is the one page whose folder is meant to hold them
   if(gtMode!=='combo'&&gtDir&&await gtDirOk(gtDir)&&await gtDirIsPiguRoot(gtDir)){
@@ -40560,7 +40566,7 @@ async function gtSaveLibRun(){
     if(m) showMsg(m,`Not saving: “${escapeHtml(gtDir.name)}” holds the page folders (Festive Gift Tag, `
       +'Custom Gift Tag, Sticker) — it is not this page’s own folder. Choose this page’s own folder under '
       +'Choose folder, or type its name in the box beside it. Nothing was written.',false);
-    return;
+    return {ok:false,why:'the chosen folder is not this page\u2019s own folder'};
   }
   if(gtDir&&await gtDirOk(gtDir)){
     // A folder that will not take the write — permission dropped, the drive
@@ -40596,12 +40602,17 @@ async function gtSaveLibRun(){
       const m=document.getElementById('gtLibMsg');
       if(m) showMsg(m,'Could not write to the library folder ('+((e&&e.message)||e)
         +') — what is on screen is not saved. Reconnect it under Choose folder.',false);
+      return {ok:false,why:'could not write to the library folder ('+((e&&e.message)||e)+') - reconnect it under Choose folder'};
     }
-    return;
+    return {ok:true};
   }
   await gtIdbPut(gtLibKey(),{manifest:man,
     assets:Object.fromEntries([...gtAssets].filter(([k])=>!gtIsAdhoc(k)
       &&!(GT_LIVE_PATH.test(k)&&!(man.designs||[]).some(x=>x&&(x.file===k||(x.back&&x.back.file===k))))))});
+  // no folder in hand: kept in this browser only. Die Cut's library is its
+  // folder, so there it is not counted as saved
+  if(gtMode==='combo') return {ok:false,why:gtDir?'the library folder needs permission again - press \u21bb Read the folders again (or Choose folder), then save again':'no library folder is chosen - press Choose folder, then save again'};
+  return {ok:true};
 }
 // The sheet, the layout and the placeholders are changed a keystroke at a time,
 // and writing the library on every one of those would be a file write per digit.
@@ -43330,11 +43341,14 @@ function gtNlOpenPrint(){
 
 // ---------- Die Cut and Sticker: saved note, checks, sheets, search, drag ----------
 let gtNlSavedT=null;
-function gtNlSavedNote(busy){
+function gtNlSavedNote(busy,res){
   const n=document.getElementById('gtNlSaved'); if(!n) return;
   clearTimeout(gtNlSavedT);
   if(busy){ n.textContent='Saving…'; n.classList.add('busy'); return; }
-  gtNlSavedT=setTimeout(()=>{ n.textContent='✓ Saved'; n.classList.remove('busy'); },350);
+  // only "Saved" when it was (see gtSaveLib); otherwise it says so, and why
+  const bad=res&&res.ok===false;
+  gtNlSavedT=setTimeout(()=>{ n.textContent=bad?'⚠ Not saved':'✓ Saved'; n.classList.remove('busy');
+    n.style.color=bad?'#c0392b':''; n.title=bad?'Not saved: '+(res.why||'nothing was written'):''; },350);
 }
 // after every redraw: the warnings button, the marks on the lines, the sheets
 // The order's three figures, as the mock-up has them under the order - tags,
@@ -51047,7 +51061,8 @@ async function gtSavePhrase(text,style){
   const set=gtPhraseStyleOf(style);
   if(had){ had.text=words; GT_PHRASE_STYLE.forEach(k=>{ had[k]=set[k]; }); }
   else gtLib.texts.push({id:gtId('x'),name,text:words,...set});
-  await gtSaveLib();
+  const r=await gtSaveLib();
+  if(r&&r.ok===false) alert('Phrase not saved to the library: '+r.why+'.');
   gtRenderTextList();
   gtRenderOrder();
   if(currentScreen==='tool-gift-tag-design') gtRenderFields();
@@ -55044,13 +55059,14 @@ document.getElementById('gtSaveDesignBtn').addEventListener('click',async()=>{
   const say=(a,c)=>{ if(pt) pt.textContent=a; if(ps) ps.textContent=c; };
   if(pill){ pill._svPill=true; saveBtnFlash(pill,null); say('Saving…','design & cut line'); }
   try{
-    await gtSaveLib();
+    const r=await gtSaveLib();
+    if(r&&r.ok===false) throw new Error(r.why||'nothing was written');
     gtRefreshLibraryUi(); gtRenderOrder(); gtDraw();
     showMsg(msg,'✓ Saved',true);
     if(pill){ saveBtnFlash(pill,true); say('✓ Saved','to the library');
       clearTimeout(pill._svW); pill._svW=setTimeout(()=>say('Save','design & cut line'),2200); }
-  }catch(err){ showMsg(msg,'Could not save: '+((err&&err.message)||'unknown error'),false);
-    if(pill){ saveBtnFlash(pill,false); say('Not saved','see the message above');
+  }catch(err){ showMsg(msg,'Not saved: '+((err&&err.message)||'unknown error'),false);
+    if(pill){ saveBtnFlash(pill,false); say('Not saved',(err&&err.message)||'see the message above');
       clearTimeout(pill._svW); pill._svW=setTimeout(()=>say('Save','design & cut line'),3500); } }
 });
 document.getElementById('gtDeleteDesignBtn').addEventListener('click',async()=>{
