@@ -326,6 +326,48 @@ def overview():
         return None
 
 
+# ---------------------------------------------------------------- evidence video requests (Claude Code makes them)
+JOB_CACHE = [0, []]
+
+
+def request_video(b):
+    order = safe_id(b.get("order"))
+    cams = [c for c in (b.get("cams") or []) if c in CFG["cameras"]]
+    if not cams:
+        raise ValueError("Tick at least one camera that filmed the packing")
+    scan = (b.get("scan_time") or "").strip()
+    if scan:
+        datetime.strptime(scan, "%Y-%m-%dT%H:%M")
+    p = os.path.join(order_dir(order), "evidence-request.json")
+    job = {"order": order, "request": b.get("request", ""), "cams": cams,
+           "camera_ips": {c: CFG["cameras"][c]["ip"] for c in cams}, "scan_time": scan,
+           "note": (b.get("note") or "")[:300], "areas": {c: areas()[c] for c in cams},
+           "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "status": "queued"}
+    json.dump(job, open(p, "w", encoding="utf8"), indent=1)
+    JOB_CACHE[0] = 0
+    log(f"Evidence video requested for {order} ({', '.join(cams)})")
+    return job
+
+
+def jobs():
+    if time.time() - JOB_CACHE[0] < 5:
+        return JOB_CACHE[1]
+    out = []
+    if os.path.isdir(SAVE):
+        for name in os.listdir(SAVE):
+            p = os.path.join(SAVE, name, "evidence-request.json")
+            if os.path.isfile(p):
+                try:
+                    j = json.load(open(p, encoding="utf8"))
+                    j["mtime"] = os.path.getmtime(p)
+                    out.append(j)
+                except Exception:
+                    pass
+    out.sort(key=lambda j: -j["mtime"])
+    JOB_CACHE[:] = [time.time(), out[:100]]
+    return JOB_CACHE[1]
+
+
 def returns_list():
     p = os.path.join(SAVE, "_sitpretty", "returns.json")
     try:
@@ -406,7 +448,7 @@ class H(BaseHTTPRequestHandler):
                     "packing_cameras": CFG["packing_cameras"], "save_dir": SAVE,
                     "login_ok": all(all(cam_login(c, s)) for c in CFG["cameras"]),
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
-                    "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "log": LOGS[-30:]})
+                    "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "jobs": jobs(), "log": LOGS[-30:]})
             if u.path == "/api/snapshot.jpg":
                 try:
                     return self.send(200, snapshot(q.get("cam", CFG["returns_camera"])), "image/jpeg")
@@ -474,6 +516,8 @@ class H(BaseHTTPRequestHandler):
                 if not made:
                     raise RuntimeError("; ".join(errs))
                 return self.send(200, {"files": made, "errors": errs})
+            if u.path == "/api/evidence":
+                return self.send(200, request_video(b))
             if u.path == "/api/shopee":
                 return self.send(200, shopee_copy(b.get("order"), b.get("file", ""), b.get("mode", "from"), b.get("start", 0)))
             if u.path == "/api/area":

@@ -85,6 +85,14 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
 .items td.q{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
 .due{display:inline-block;font-size:12px;font-weight:700;border-radius:8px;padding:2px 8px;white-space:nowrap}
 .due.red{background:var(--rust-soft);color:var(--rust)}.due.amber{background:var(--amber-soft);color:var(--amber)}.due.grey{background:rgba(0,0,0,.05);color:var(--muted)}
+.camopt{border:2px solid var(--line);border-radius:14px;padding:8px;cursor:pointer;display:grid;gap:6px;background:rgba(255,255,255,.6)}
+.camopt.on{border-color:var(--violet);background:linear-gradient(150deg,var(--on1),var(--on2))}
+.camopt img{width:100%;aspect-ratio:16/9;max-height:170px;object-fit:cover;border-radius:10px;background:#1c1c1e}
+.mid{overflow-x:hidden}
+#ev-order{flex:1;min-width:0;max-width:100%}
+.st{display:inline-block;font-size:12px;font-weight:700;border-radius:8px;padding:2px 8px}
+.st.queued{background:var(--amber-soft);color:var(--amber)}.st.working{background:var(--on1);color:var(--on-ink)}
+.st.done{background:var(--ok-soft);color:var(--ok)}.st.problem{background:var(--rust-soft);color:var(--rust)}
 .pin{position:fixed;inset:0;display:grid;place-items:center;background:rgba(246,244,248,.8);backdrop-filter:blur(8px)}
 .pin[hidden]{display:none}
 :focus-visible{outline:2px solid var(--violet);outline-offset:2px}
@@ -103,6 +111,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
     <div class="lbl">Sit Pretty</div>
     <button class="nav" data-page="overview"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Overview</button>
     <button class="nav" data-page="unbox" aria-current="page"><svg viewBox="0 0 24 24"><path d="M3 8l9-5 9 5v8l-9 5-9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg>Unbox a return</button>
+    <button class="nav" data-page="evid"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H4z"/><path d="M9 20h6M12 16v4"/><path d="M10 8.5l4 2-4 2z"/></svg>Evidence video<span class="n" id="n-jobs"></span></button>
     <button class="nav" data-page="pack"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/></svg>Packing clip</button>
     <button class="nav" data-page="saved"><svg viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Saved evidence<span class="n" id="n-saved"></span></button>
     <div class="sep"></div>
@@ -145,6 +154,25 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
           <div class="list" id="returns"></div>
           <p class="sub" id="retnote"></p>
         </div>
+      </div>
+    </section>
+
+    <section class="page" id="p-evid" hidden>
+      <div class="card glass">
+        <h2>Ask Claude to make a packing evidence video</h2>
+        <p class="sub">Pick the return and tick the camera(s) that filmed the packing. Claude downloads that footage from the camera's memory card, labels every item, the counting, taping and waybill, and saves Shopee-ready videos (VIDEO 1/2 ...) into the order's folder. It checks for new requests every hour from 9am to 9pm.</p>
+        <div class="row"><select id="ev-order" class="wide"></select></div>
+        <div class="camgrid" id="ev-cams"></div>
+        <div class="row">
+          <label class="sub">BigSeller "Scan to ship" time (optional) <input type="datetime-local" id="ev-scan"></label>
+          <input class="wide" id="ev-note" placeholder="Note for Claude (optional), e.g. packed on table A after lunch">
+        </div>
+        <div class="row"><button class="btn" id="ev-go">Ask Claude to make the video</button></div>
+        <div class="msg" id="ev-msg"></div>
+      </div>
+      <div class="card glass">
+        <h2>Requests</h2>
+        <table><thead><tr><th>Order</th><th>Cameras</th><th>Asked</th><th>Status</th></tr></thead><tbody id="ev-jobs"></tbody></table>
       </div>
     </section>
 
@@ -199,7 +227,7 @@ async function api(path,body){
 $('#pinok').onclick=()=>{PIN=$('#pin').value.trim();try{localStorage.setItem('sp-pin',PIN)}catch(e){}$('#pinbox').hidden=true;refresh()};
 
 function go(p){page=p;document.querySelectorAll('.nav').forEach(b=>b.dataset.page===p?b.setAttribute('aria-current','page'):b.removeAttribute('aria-current'));
-  ['overview','unbox','pack','saved','cams'].forEach(k=>$('#p-'+k).hidden=k!==p);if(location.hash.slice(1)!==p)history.replaceState(null,'','#'+p);render()}
+  ['overview','unbox','evid','pack','saved','cams'].forEach(k=>$('#p-'+k).hidden=k!==p);if(location.hash.slice(1)!==p)history.replaceState(null,'','#'+p);render()}
 document.querySelectorAll('.nav').forEach(b=>b.onclick=()=>go(b.dataset.page));
 
 function hay(r){return (r.order+' '+(r.request||'')+' '+(r.product||'')+' '+(r.return_tracking||[]).join(' ')+' '+(r.ship_tracking||[]).join(' ')).toLowerCase()}
@@ -251,6 +279,15 @@ function render(){
   // pack
   $('#pbefore').textContent=S.pack_before;
   if(!$('#pcams').children.length)$('#pcams').innerHTML=S.packing_cameras.map(c=>`<label class="sub"><input type="checkbox" value="${c}" checked> ${esc(S.cameras[c].label)} (${esc(S.cameras[c].ip)})</label>`).join('');
+  // evidence requests
+  const J=S.jobs||[];$('#n-jobs').textContent=J.filter(j=>j.status==='queued'||j.status==='working').length||'';
+  if(page==='evid'){
+    const sel_=$('#ev-order'),cur_=sel_.value;
+    sel_.innerHTML='<option value="">Choose the return...</option>'+(S.returns||[]).map(r=>{const l=left(r);return `<option value="${esc(r.order)}">${esc(r.order)}  ·  ${esc((r.items&&r.items[0]&&r.items[0].model)||r.product||'')}${l?'  ·  '+esc(l.t):''}</option>`}).join('');
+    if(cur_)sel_.value=cur_;
+    if(!$('#ev-cams').children.length)$('#ev-cams').innerHTML=S.packing_cameras.map(c=>`<div class="camopt" data-cam="${c}"><img alt="" src="/api/snapshot.jpg?cam=${c}&t=${Date.now()}&pin=${encodeURIComponent(PIN)}"><b>${esc(S.cameras[c].label)}</b><span class="sub mono">${esc(S.cameras[c].ip)}</span></div>`).join('');
+    $('#ev-jobs').innerHTML=J.map(j=>`<tr><td class="mono">${esc(j.order)}</td><td>${(j.cams||[]).map(c=>esc((S.cameras[c]||{}).label||c)).join(', ')}</td><td class="sub">${esc(j.requested_at||'')}</td><td><span class="st ${esc(j.status)}">${esc({queued:'Waiting for Claude',working:'Claude is making it',done:'Done',problem:'Needs you'}[j.status]||j.status)}</span>${j.summary?`<div class="sub">${esc(j.summary)}</div>`:''}${j.problem?`<div class="sub" style="color:var(--rust)">${esc(j.problem)}</div>`:''}${(j.videos||[]).map(v=>`<div><a href="#" data-play="${esc(j.order)}|${esc(v)}">${esc(v)}</a></div>`).join('')}</td></tr>`).join('')||'<tr><td colspan="4" class="sub">No requests yet.</td></tr>';
+  }
   // cams
   if(page==='cams'){
     $('#sdnote').textContent=S.sd_ready?"Check that a camera's memory card has today's video.":'To download packing clips, fill in tapo_app_password= in sitpretty-secrets.txt on this PC.';
@@ -259,6 +296,18 @@ function render(){
   }
 }
 $('#q').oninput=render;
+document.addEventListener('click',e=>{const c=e.target.closest('.camopt');if(c)c.classList.toggle('on')});
+$('#ev-go').onclick=async()=>{const m=$('#ev-msg');const order=$('#ev-order').value;const cams=[...document.querySelectorAll('.camopt.on')].map(x=>x.dataset.cam);
+  if(!order){m.className='msg err';m.textContent='Choose the return first.';return}
+  const r_=(S.returns||[]).find(x=>x.order===order)||{};
+  try{await api('/api/evidence',{order,request:r_.request||'',cams,scan_time:$('#ev-scan').value,note:$('#ev-note').value});
+    m.className='msg ok';m.textContent='Asked. Claude will make the video at its next hourly check and save it in the order folder.';
+    document.querySelectorAll('.camopt.on').forEach(x=>x.classList.remove('on'));$('#ev-note').value='';refresh()}
+  catch(err){m.className='msg err';m.textContent=err.message}};
+// play a finished video from the Requests table
+document.addEventListener('click',e=>{const a=e.target.closest('#ev-jobs [data-play]');if(!a)return;e.preventDefault();go('saved');
+  const [o,f]=a.dataset.play.split('|');$('#playerCard').hidden=false;$('#playerTitle').textContent=f;CUR={order:o,file:f};
+  $('#player').src='/media?order='+encodeURIComponent(o)+'&file='+encodeURIComponent(f)+'&pin='+encodeURIComponent(PIN);$('#player').play().catch(()=>{})});
 function pickFromScan(){const q=$('#q').value.trim().toLowerCase();if(!q)return;const R=(S.returns||[]).filter(r=>hay(r).includes(q));
   if(R.length===1){sel=R[0];$('#umsg').className='msg ok';$('#umsg').textContent='Found order '+sel.order+' from the waybill.';$('#q').value='';render()}
   else if(!R.length){$('#umsg').className='msg err';$('#umsg').textContent='No open return has the number '+$('#q').value.trim()+'. Type the order ID instead.'}}
@@ -305,7 +354,7 @@ function live(){if(page==='unbox'&&S&&S.login_ok&&!document.hidden){const img=ne
   clearTimeout(liveT);liveT=setTimeout(live,page==='cams'?8000:1500)}
 async function refresh(){try{S=await api('/api/state');render()}catch(e){if(e.message!=='PIN needed'){$('#health').className='pill bad';$('#health').innerHTML='<i></i>Server not reachable'}}}
 setInterval(refresh,1000);
-const PAGES=['overview','unbox','pack','saved','cams'];
+const PAGES=['overview','unbox','evid','pack','saved','cams'];
 addEventListener('hashchange',()=>{const h=location.hash.slice(1);if(PAGES.includes(h)&&h!==page)go(h)});
 go(PAGES.includes(location.hash.slice(1))?location.hash.slice(1):'unbox');
 refresh().then(live);
