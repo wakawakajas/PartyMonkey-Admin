@@ -121,7 +121,7 @@ class Unboxer:
             prev = os.path.join(tmpdir, "preview_rec.jpg")
             cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
                    "-i", rtsp(CFG["returns_camera"]),
-                   "-map", "0:v", "-map", "0:a?", "-c:v", "copy", "-c:a", "aac", "-b:a", "64k",
+                   "-map", "0:v", "-c:v", "copy", "-an",
                    "-movflags", "+faststart", tmp,
                    "-map", "0:v", "-vf", "fps=1,scale=640:-2", "-update", "1", "-q:v", "6", "-y", prev]
             self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=NOWIN)
@@ -194,7 +194,14 @@ def sd(cam, *args, timeout=900):
 def sd_clip(order, cam, start, end):
     name = f"{safe_id(order)}_packing_{cam}_{start:%Y%m%d-%H%M}.mp4"
     out = os.path.join(order_dir(order), name)
-    sd(cam, "get", str(int(start.timestamp())), str(int(end.timestamp())), out)
+    tmp = os.path.join(HERE, "tmp", "sd_" + name)
+    os.makedirs(os.path.dirname(tmp), exist_ok=True)
+    sd(cam, "get", str(int(start.timestamp())), str(int(end.timestamp())), tmp)
+    r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", tmp, "-map", "0:v", "-c", "copy", "-an",
+                        "-movflags", "+faststart", out], capture_output=True, creationflags=NOWIN, timeout=600)
+    os.remove(tmp)
+    if r.returncode:
+        raise RuntimeError("Could not save the clip: " + r.stderr.decode("utf8", "replace")[-200:])
     with open(os.path.join(order_dir(order), "evidence-log.txt"), "a", encoding="utf8") as f:
         f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  packing  {name}  {start:%Y-%m-%d %H:%M} to {end:%H:%M} (memory card)\n")
     EV_CACHE[0] = 0
@@ -294,7 +301,7 @@ def shopee_copy(order, fname, mode, start=0.0):
     else:
         start = max(0.0, min(float(start), max(0.0, total - 5)))
         out = os.path.join(SAVE, order, f"{base}_shopee_{int(start)//60:02d}m{int(start)%60:02d}s.mp4")
-        pre, vf, audio = ["-ss", f"{start:.1f}"], crop, ["-c:a", "aac", "-b:a", "96k"]
+        pre, vf, audio = ["-ss", f"{start:.1f}"], crop, ["-an"]
     for kbps in (3500, 2000, 1200):
         cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", *pre, "-i", src, "-t", str(SHOPEE_SECS),
                "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{kbps}k", "-maxrate", f"{kbps}k",
