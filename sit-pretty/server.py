@@ -107,7 +107,7 @@ class Unboxer:
         self.info = None
         self.lock = threading.Lock()
 
-    def start(self, order, request="", note=""):
+    def start(self, order, request="", note="", cam=None):
         with self.lock:
             if self.proc and self.proc.poll() is None:
                 raise RuntimeError(f"Already recording order {self.info['order']}")
@@ -119,15 +119,16 @@ class Unboxer:
             os.makedirs(tmpdir, exist_ok=True)
             tmp = os.path.join(tmpdir, f"{order}_{stamp}.mp4")
             prev = os.path.join(tmpdir, "preview_rec.jpg")
+            cam = cam if cam in CFG["cameras"] else CFG["returns_camera"]
             cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
-                   "-i", rtsp(CFG["returns_camera"]),
+                   "-i", rtsp(cam),
                    "-map", "0:v", "-c:v", "copy", "-an",
                    "-movflags", "+faststart", tmp,
                    "-map", "0:v", "-vf", "fps=1,scale=640:-2", "-update", "1", "-q:v", "6", "-y", prev]
             self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=NOWIN)
-            self.info = {"order": order, "request": request, "note": note, "tmp": tmp, "final": final,
+            self.info = {"order": order, "request": request, "note": note, "tmp": tmp, "final": final, "cam": cam,
                          "started": time.time()}
-            log(f"Unboxing started for {order}")
+            log(f"Unboxing started for {order} on {CFG['cameras'][cam]['label']}")
             return {"order": order, "file": os.path.basename(final)}
 
     def stop(self):
@@ -162,7 +163,7 @@ class Unboxer:
 
     def state(self):
         if self.proc and self.proc.poll() is None:
-            return {"recording": True, "order": self.info["order"], "request": self.info["request"],
+            return {"recording": True, "order": self.info["order"], "request": self.info["request"], "cam": self.info["cam"],
                     "seconds": int(time.time() - self.info["started"])}
         if self.proc and self.proc.poll() is not None:
             err = (self.proc.stderr.read() or b"").decode("utf8", "replace")[-300:]
@@ -215,7 +216,8 @@ SNAPS = {}
 
 
 def snapshot(cam):
-    if cam == CFG["returns_camera"] and UNBOX.state().get("recording"):
+    st = UNBOX.state()
+    if st.get("recording") and cam == st.get("cam"):
         p = os.path.join(HERE, "tmp", "preview_rec.jpg")
         if os.path.exists(p):
             return open(p, "rb").read()
@@ -521,7 +523,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(401, {"error": "PIN needed"})
             b = self.body()
             if u.path == "/api/unbox/start":
-                return self.send(200, UNBOX.start(b.get("order"), b.get("request", ""), b.get("note", "")))
+                return self.send(200, UNBOX.start(b.get("order"), b.get("request", ""), b.get("note", ""), b.get("cam")))
             if u.path == "/api/unbox/stop":
                 return self.send(200, UNBOX.stop())
             if u.path == "/api/packclip":
