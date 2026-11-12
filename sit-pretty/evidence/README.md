@@ -82,6 +82,10 @@ moments to point at.
   being handled. Banners are placed automatically where nothing moves; give every tag and callout
   `"label_at": "auto"` (it picks the quietest spot near `arrow_to`) unless you have checked a frame.
   If render.py prints a WARNING about a label over movement, fix it and render again.
+- **Keep it calm: one label per item at a time.** Don't chase a moving item with a string of short
+  callouts. Tag it once as it comes out or goes in (one callout, 3-5 s), then again when it lies still
+  (`flat`). Never show the same item's name twice at once. A callout pointing at a place (e.g. the empty
+  box) ends before something else moves into that place.
 - Only show what helps us. **Never** show a negative ("not seen", "missing"): if something cannot
   be seen, leave it out of the video.
 - Every item gets a name tag and an arrow, when flat on the table and again when it goes in.

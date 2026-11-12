@@ -394,7 +394,7 @@ def render(spec_path):
     card_png = os.path.join(work, "card.png"); card.save(card_png)
 
     # ---- pass B: speed, zoom, card ----
-    ffx = B.layer(lambda d: label(d, "FAST FORWARD 4x", (26, H - 62), (245, 192, 68)))
+    ffx = B.layer(lambda d: label(d, "FAST FORWARD 4x", (26, 12), (245, 192, 68)))
     inB = ["-i", stageA, "-i", ffx, "-loop", "1", "-t", str(CARD_S), "-i", card_png]
     if nz:
         inB += ["-framerate", "30", "-i", os.path.join(zdir, "z%04d.png")]
@@ -423,10 +423,30 @@ def render(spec_path):
             d.rounded_rectangle((xv - 6, STRIP_Y - 4, W - 18, H - 14), 6, fill=(0, 0, 0, 255))
             d.text((xv, STRIP_Y), t, font=INF, fill=WHT)
 
-        def ef(d, pn=pn):
+        def out_to_src(t):  # time in the sped-up video -> time in the recording
+            acc = 0.0
+            for a, b_, sp in segs:
+                ln = (b_ - a) / sp
+                if t <= acc + ln:
+                    return a + (t - acc) * sp
+                acc += ln
+            return segs[-1][1]
+
+        cont_at = None
+        if pn < parts:  # the quietest place for the last 3 s of this part, away from hands and parcel
+            t = f"CONTINUES IN VIDEO {pn + 1} / {parts}  >>"
+            wct = tw(probe, t, ENDF)
+            s0, s1 = out_to_src(pn * plen - 3), out_to_src(pn * plen)
+            cands = [((W - wct) // 2, 230)] + [(x, y) for y in (90, 230, 380, H - 200) for x in (26, (W - wct) // 2, W - wct - 26)]
+            def rc(p_):
+                l, t_, r_, b_ = probe.textbbox(p_, t, font=ENDF)
+                return (l - 12, t_ - 8, r_ + 12, b_ + 8)
+            cont_at = min(cands, key=lambda p_: busy(rc(p_), s0, s1))
+
+        def ef(d, pn=pn, cont_at=cont_at):
             if pn < parts:
                 t = f"CONTINUES IN VIDEO {pn + 1} / {parts}  >>"
-                label(d, t, ((W - tw(d, t, ENDF)) // 2, 230), DRK, WHT, ENDF)
+                label(d, t, cont_at, DRK, WHT, ENDF)
         hdr, end = B.layer(hf), B.layer(ef)
         out = os.path.join(out_dir, f"{base}_video{pn}of{parts}.mp4")
         gg = f"[0:v][1:v]overlay=0:0[a];[a][2:v]overlay=0:0:enable='gte(t,{plen - 3:.2f})'[o]"
