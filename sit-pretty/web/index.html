@@ -82,6 +82,13 @@ video{width:100%;border-radius:14px;background:#000}
 td.r{text-align:right;font-variant-numeric:tabular-nums}
 @media (max-width:900px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .items{width:100%;border-collapse:collapse;font-size:14px}.items td{padding:7px 8px;border-bottom:1px solid var(--line)}
+.ctx{border-radius:12px;padding:10px 12px;margin:0 0 8px;font-size:14px;line-height:1.45}
+.ctx p{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.ctx.buyer{background:#FFF6E0;border:1px solid #F1D48A}.ctx.ask{background:#EAF1FF;border:1px solid #B7CBF5}
+.found{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-top:10px;display:grid;gap:6px}
+.found .chk{display:flex;gap:8px;align-items:flex-start;font-size:14px;cursor:pointer}
+.found .chk input{margin-top:3px;width:16px;height:16px}
+.found textarea{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit;resize:vertical}
 .items td.q{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
 .due{display:inline-block;font-size:12px;font-weight:700;border-radius:8px;padding:2px 8px;white-space:nowrap}
 .due.red{background:var(--rust-soft);color:var(--rust)}.due.amber{background:var(--amber-soft);color:var(--amber)}.due.grey{background:rgba(0,0,0,.05);color:var(--muted)}
@@ -136,6 +143,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
         <div class="card glass">
           <div class="row"><label class="sub" for="ucam">Camera</label><select id="ucam" class="wide"></select></div>
           <div class="cam"><img id="live" alt="Selected camera"><span class="tag" id="camtag">Returns table</span><span class="rec" id="rec" hidden>● REC</span></div>
+          <div id="selctx"></div>
           <div class="row">
             <div class="grow sel" id="selected">Pick a return on the right, or type the order ID.</div>
             <div class="timer" id="timer" hidden>0:00</div>
@@ -146,6 +154,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
           </div>
           <div class="msg" id="umsg"></div>
           <div id="selitems"></div>
+          <div id="found"></div>
           <p class="sub">Hold the return waybill up to the camera first, then open the parcel in one take. The video is saved as <span class="mono">OrderID_unboxing_date-time.mp4</span> in that order's folder.</p>
         </div>
         <div class="card glass">
@@ -220,7 +229,19 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
 <script>
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let S=null,page='unbox',sel=null,PIN='';
+let S=null,page='unbox',sel=null,PIN='',foundKey='';
+function copyText(t){try{if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(t)}catch(e){}
+  const a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();try{document.execCommand('copy')}catch(e){}a.remove()}
+function ctxHTML(r){if(!r)return '';let h='';
+  const media=[r.buyer_photos?r.buyer_photos+' photo'+(r.buyer_photos>1?'s':''):'',r.buyer_videos?r.buyer_videos+' video'+(r.buyer_videos>1?'s':''):''].filter(Boolean).join(' + ');
+  if(r.buyer_text||media)h+=`<div class="ctx buyer"><b>Customer says</b>${media?` <span class="sub">(also sent ${esc(media)}, see Seller Centre)</span>`:''}<p>${esc(r.buyer_text||'(no words)')}</p></div>`;
+  if(r.shopee_ask)h+=`<div class="ctx ask"><b>Shopee asks</b>${r.shopee_ask_at?` <span class="sub">${esc(r.shopee_ask_at)}</span>`:''}<p>${esc(r.shopee_ask)}</p></div>`;
+  return h}
+function foundHTML(r,opts){const f=r.found||{},on=f.issues||[];
+  return `<div class="found"><b>What we found when unboxing</b><p class="sub">Tick what you saw. Claude uses this to write the appeal to Shopee.</p>`+
+    Object.entries(opts).map(([k,l])=>`<label class="chk"><input type="checkbox" value="${esc(k)}"${on.includes(k)?' checked':''}> <span>${esc(l)}</span></label>`).join('')+
+    `<textarea id="fnote" rows="2" placeholder="Details, e.g. 2 of 5 missing, balloon already blown up, buyer's photo shows a different colour">${esc(f.note||'')}</textarea>`+
+    `<div class="row"><button class="btn" id="fsave">Save what we found</button><span class="sub" id="fmsg">${f.at?'Saved '+esc(f.at):''}</span></div></div>`}
 try{PIN=localStorage.getItem('sp-pin')||''}catch(e){}
 async function api(path,body){
   const r=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json','X-Pin':PIN},body:body?JSON.stringify(body):undefined});
@@ -267,6 +288,9 @@ function render(){
   else if(sel){$('#selected').innerHTML='Order <b>'+esc(sel.order)+'</b> '+dueTag(sel)}
   const cur=rec?(S.returns||[]).find(x=>x.order===S.unbox.order):sel;
   $('#selitems').innerHTML=cur&&cur.items&&cur.items.length?`<p class="sub" style="margin:4px 0">Items in this order (check each one in the parcel):</p><table class="items">${cur.items.map((it,i)=>`<tr><td>${i+1}</td><td>${esc(it.model||'')}<div class="sub">${esc(it.name||'')}</div></td><td class="q">x ${it.qty}</td></tr>`).join('')}</table>`:(cur?'<p class="sub">No item list for this order yet.</p>':'');
+  $('#selctx').innerHTML=ctxHTML(cur);
+  const fk=cur&&!rec?cur.order+'|'+JSON.stringify(cur.found||null):'';
+  if(fk!==foundKey){foundKey=fk;$('#found').innerHTML=fk?foundHTML(cur,S.found_opts||{}):''}
   $('#start').disabled=!sel||!S.login_ok;
   if(S.unbox.error)$('#umsg').className='msg err',$('#umsg').textContent=S.unbox.error;
   const q=$('#q').value.trim().toLowerCase();
@@ -330,9 +354,15 @@ if('BarcodeDetector' in window&&window.isSecureContext&&navigator.mediaDevices){
     catch(e){$('#umsg').className='msg err';$('#umsg').textContent='The camera could not be opened: '+e.message}}}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-sd]');if(!b)return;const c=b.dataset.sd,o=$('#sd-'+c);o.textContent='Checking…';b.disabled=true;
   try{const r=await api('/api/sdcheck',{cam:c});o.textContent=r.count?`${r.count} recordings today, from ${r.first}`:'No video on the card for today';}catch(err){o.textContent=err.message}b.disabled=false});$('#sq').oninput=render;
-$('#returns').onclick=e=>{const b=e.target.closest('[data-o]');if(!b)return;const o=b.dataset.o;sel=(S.returns||[]).find(r=>r.order===o)||{order:o};$('#umsg').textContent='';render()};
+$('#returns').onclick=e=>{const b=e.target.closest('[data-o]');if(!b)return;const o=b.dataset.o;sel=(S.returns||[]).find(r=>r.order===o)||{order:o};
+  copyText(o);$('#umsg').className='msg ok';$('#umsg').textContent='Order ID '+o+' copied';render()};
+$('#found').onclick=async e=>{if(!e.target.closest('#fsave'))return;const cur=S.unbox.recording?null:sel;if(!cur)return;
+  const issues=[...$('#found').querySelectorAll('input:checked')].map(i=>i.value);
+  $('#fmsg').textContent='Saving…';
+  try{const f=await api('/api/finding',{order:cur.order,issues,note:$('#fnote').value});cur.found=f;foundKey=cur.order+'|'+JSON.stringify(f);$('#fmsg').textContent='Saved '+f.at}
+  catch(err){$('#fmsg').textContent=err.message}};
 $('#start').onclick=async()=>{if(!sel)return;$('#start').disabled=true;try{await api('/api/unbox/start',{order:sel.order,request:sel.request||'',cam:$('#ucam').value});$('#umsg').className='msg';$('#umsg').textContent='';await refresh()}catch(e){$('#umsg').className='msg err';$('#umsg').textContent=e.message;$('#start').disabled=false}};
-$('#stop').onclick=async()=>{$('#stop').disabled=true;$('#stop').textContent='Saving…';try{const r=await api('/api/unbox/stop',{});$('#umsg').className='msg ok';$('#umsg').textContent='Saved '+r.file.split(/[\\/]/).pop()+' ('+fmtSecs(r.seconds)+')';sel=null}catch(e){$('#umsg').className='msg err';$('#umsg').textContent=e.message}$('#stop').disabled=false;$('#stop').textContent='Stop and save';refresh()};
+$('#stop').onclick=async()=>{$('#stop').disabled=true;$('#stop').textContent='Saving…';try{const r=await api('/api/unbox/stop',{});$('#umsg').className='msg ok';$('#umsg').textContent='Saved '+r.file.split(/[\\/]/).pop()+' ('+fmtSecs(r.seconds)+'). Now tick what you found below.'}catch(e){$('#umsg').className='msg err';$('#umsg').textContent=e.message}$('#stop').disabled=false;$('#stop').textContent='Stop and save';refresh()};
 $('#saved').onclick=e=>{const a=e.target.closest('[data-play]');if(!a)return;e.preventDefault();const [o,f]=a.dataset.play.split('|');$('#playerCard').hidden=false;$('#playerTitle').textContent=f;CUR={order:o,file:f};$('#shmsg').textContent='';$('#player').src='/media?order='+encodeURIComponent(o)+'&file='+encodeURIComponent(f)+'&pin='+encodeURIComponent(PIN);$('#player').play().catch(()=>{})};
 function local(d){const p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`}
 $('#pscan').onchange=()=>{const d=new Date($('#pscan').value);if(isNaN(d))return;$('#pend').value=local(new Date(d.getTime()+60000));$('#pstart').value=local(new Date(d.getTime()-(S?.pack_before||15)*60000))};

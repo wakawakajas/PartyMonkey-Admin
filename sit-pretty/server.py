@@ -392,12 +392,60 @@ def returns_info():
     return {"updated": upd, "refresh_pending": pending}
 
 
+FOUND_OPTS = {  # what staff saw when the return was unboxed (used by Claude for the appeal)
+    "used": "Item has been used",
+    "opened": "Seal or packaging opened (buyer said sealed)",
+    "missing": "Items missing from the return",
+    "wrong_item": "Wrong item sent back (not ours)",
+    "damaged": "Damaged after delivery (by the buyer)",
+    "dirty": "Dirty, stained or smells",
+    "photo_mismatch": "Buyer's photo or video is not our item / not this order",
+    "fine": "Came back fine, nothing wrong",
+}
+FOUND_CACHE = {}
+
+
+def finding(order):
+    p = os.path.join(SAVE, safe_id(order), "findings.json")
+    try:
+        m = os.path.getmtime(p)
+    except OSError:
+        return None
+    c = FOUND_CACHE.get(p)
+    if not c or c[0] != m:
+        try:
+            c = (m, json.load(open(p, encoding="utf8")))
+        except Exception:
+            c = (m, None)
+        FOUND_CACHE[p] = c
+    return c[1]
+
+
+def save_finding(order, issues, note="", by=""):
+    order = safe_id(order)
+    issues = [i for i in (issues or []) if i in FOUND_OPTS]
+    note = str(note or "").strip()[:1000]
+    if not issues and not note:
+        raise RuntimeError("Tick what you found, or write a note")
+    f = {"order": order, "issues": issues, "labels": [FOUND_OPTS[i] for i in issues], "note": note,
+         "by": str(by or "")[:40], "at": datetime.now().strftime("%Y-%m-%d %H:%M")}
+    d = order_dir(order)
+    json.dump(f, open(os.path.join(d, "findings.json"), "w", encoding="utf8"), ensure_ascii=False, indent=1)
+    with open(os.path.join(d, "evidence-log.txt"), "a", encoding="utf8") as fh:
+        fh.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  found  {', '.join(f['labels'])}  note={note}\n")
+    log(f"Findings saved for {order}: {', '.join(f['labels']) or note[:40]}")
+    return f
+
+
 def returns_list():
     p = os.path.join(SAVE, "_sitpretty", "returns.json")
     try:
-        return json.load(open(p, encoding="utf8"))
+        rows = json.load(open(p, encoding="utf8"))
     except Exception:
         return []
+    for row in rows:
+        row["found"] = finding(row.get("order", ""))
+    return rows
 
 
 EV_CACHE = [0, []]
@@ -472,7 +520,7 @@ class H(BaseHTTPRequestHandler):
                     "packing_cameras": CFG["packing_cameras"], "save_dir": SAVE,
                     "login_ok": all(all(cam_login(c, s)) for c in CFG["cameras"]),
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
-                    "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "log": LOGS[-30:]})
+                    "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "log": LOGS[-30:]})
             if u.path == "/api/snapshot.jpg":
                 try:
                     return self.send(200, snapshot(q.get("cam", CFG["returns_camera"])), "image/jpeg")
@@ -540,6 +588,8 @@ class H(BaseHTTPRequestHandler):
                 if not made:
                     raise RuntimeError("; ".join(errs))
                 return self.send(200, {"files": made, "errors": errs})
+            if u.path == "/api/finding":
+                return self.send(200, save_finding(b.get("order"), b.get("issues"), b.get("note"), b.get("by")))
             if u.path == "/api/refresh-returns":
                 return self.send(200, ask_refresh())
             if u.path == "/api/evidence":
@@ -559,8 +609,17 @@ class H(BaseHTTPRequestHandler):
             return self.send(400, {"error": str(e)})
 
 
+LINK = None
+
+
 def main():
+    global LINK
     os.makedirs(os.path.join(HERE, "tmp"), exist_ok=True)
+    import pigulink
+    LINK = pigulink.start(CFG, secrets().get("pin", ""), {
+        "cfg": CFG, "unbox_state": UNBOX.state, "start": UNBOX.start, "stop": UNBOX.stop,
+        "snapshot": snapshot, "returns": returns_list, "returns_info": returns_info,
+        "ask_refresh": ask_refresh, "clean": clean, "save_finding": save_finding, "found_opts": FOUND_OPTS}, log)
     srv = ThreadingHTTPServer(("0.0.0.0", CFG["port"]), H)
     log(f"Sit Pretty on http://localhost:{CFG['port']}  (saving to {SAVE})")
     srv.serve_forever()

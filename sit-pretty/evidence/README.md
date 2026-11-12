@@ -11,6 +11,15 @@ If `N:\Yong Chuan\Dispute\_sitpretty\refresh-request.json` exists, staff pressed
 Rebuild `_sitpretty\returns.json` exactly as the daily task `shopee-return-claims-refresh` does (open
 returns with items, due, todo and tracking numbers, read from Seller Centre in Claude in Chrome), then
 delete `refresh-request.json`. Do this before making videos.
+Include the customer's words (`buyer_text`, `buyer_videos`, `buyer_photos`) and Shopee's latest request
+(`shopee_ask`, `shopee_ask_at`), as described in that task.
+
+## What staff found (findings.json)
+
+After an unboxing, staff tick what they saw in Sit Pretty or Pigu (item used, seal opened, items missing,
+wrong item, damaged by buyer, dirty, buyer's photo not our item, came back fine) and add a note. It is
+saved as `<OrderID>indings.json`. Use it when writing the appeal text and when choosing which unboxing
+moments to point at.
 
 ## For each queued request (Claude)
 
