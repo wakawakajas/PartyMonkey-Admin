@@ -40805,6 +40805,11 @@ async function gtDirRead(dir,path){
   const target=folder?await dir.getDirectoryHandle(folder):dir;
   return (await (await target.getFileHandle(name)).getFile());
 }
+// Design files already seen on a folder this session. Every save looked each
+// one up on the folder again (one NAS round trip per design, hundreds of them)
+// to find the few new ones, and Save crawled (2026-11-12).
+const gtOnDisk=new WeakMap();
+const gtOnDiskOf=dir=>{ let s=gtOnDisk.get(dir); if(!s) gtOnDisk.set(dir,s=new Set()); return s; };
 // A folder handle survives a reload but the permission to write to it does
 // not: the browser hands it back saying "ask again", and asking has to come off
 // a tap. Every upload is a tap, so this is called at the top of one — before
@@ -41027,8 +41032,10 @@ async function gtSaveLibRun(){
         if(GT_LIVE_PATH.test(file)) continue;   // a page folder's file, read live from there (gtComboLive) - never copied in
         if(blob&&blob.size===0) continue;        // nothing to write; an empty file would only be left behind
         // already on disk is the normal case — only what is new gets written
-        try{ await gtDirRead(gtDir,file); continue; }catch(e){}
-        await gtDirWrite(gtDir,file,blob);
+        const seen=gtOnDiskOf(gtDir);
+        if(seen.has(file)) continue;
+        try{ await gtDirRead(gtDir,file); seen.add(file); continue; }catch(e){}
+        await gtDirWrite(gtDir,file,blob); seen.add(file);
       }
       // this computer's own file, and only that — see gtReadAll
       const {stamps,gone}=gtStampForWrite(man);
@@ -50568,8 +50575,14 @@ document.getElementById('gtOrderList').addEventListener('click',e=>{
   const card=e.target.closest('[data-gt-line]');
   if(card) gtMarkLine(card);
 });
+// Typing redraws the sheet once the keys stop for a moment: the whole sheet
+// drawn and proofed for print on every letter made the box lag behind the
+// fingers on a big design (2026-11-12). Any real draw takes the waiting one.
+let gtDrawSoonT=null;
+function gtDrawSoon(){ clearTimeout(gtDrawSoonT); gtDrawSoonT=setTimeout(()=>{ gtDrawSoonT=null; gtDraw(); },140); }
 let gtFixingShape=false;
 function gtDraw(){
+  if(gtDrawSoonT){ clearTimeout(gtDrawSoonT); gtDrawSoonT=null; }
   if(gtNlOn) setTimeout(()=>{ gtNlPull(); gtNlAfterDraw(); },0);
   // the base picture's dots can turn up after the boxes were written
   try{ gtMarginUiSync(); }catch(e){}
@@ -52095,12 +52108,12 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
     const NL=gtNamesOf(line);
     if(NL) line.qty=NL.total;
     const q=card.querySelector('[data-gtl="qty"]'); if(q) q.value=line.qty;
-    gtNestCache=null; gtDraw();
+    gtNestCache=null; gtDrawSoon();
     const out=card.querySelector('[data-gt-names-out]'); if(out) out.innerHTML=gtNamesTable(line);
     gtWorkSaveSoon();
     return;
   }
-  gtDraw();
+  if(key==='text') gtDrawSoon(); else gtDraw();
 });
 document.getElementById('gtOrderList').addEventListener('click',async e=>{
   const card=e.target.closest('[data-gt-line]'); if(!card) return;
