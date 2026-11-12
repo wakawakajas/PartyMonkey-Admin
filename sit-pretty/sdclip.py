@@ -24,8 +24,23 @@ def connect(ip):
     pw = secret("tapo_app_password")
     if not pw:
         raise RuntimeError("Tapo app password missing: fill in tapo_app_password= in sitpretty-secrets.txt")
-    # memory-card playback signs in as the camera's built-in "admin" with the Tapo app password
-    return Tapo(ip, "admin", pw, pw, printWarnInformation=False)
+    # These cameras use Tapo's newest sign-in (TPAP): always "admin" with the password
+    # of the Tapo account that OWNS the camera. One try only: refusals count toward
+    # the camera's lockout.
+    return Tapo(ip, "admin", pw, pw, printWarnInformation=False, hass=BgLoop())
+
+
+class BgLoop:
+    """Stands in for Home Assistant: pytapo's blocking calls run on their own loop in a
+    background thread, so they can be made while the download's own loop is running."""
+
+    def __init__(self):
+        import threading
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True).start()
+
+    async def async_add_executor_job(self, func, *args):
+        return await asyncio.get_running_loop().run_in_executor(None, func, *args)
 
 
 def main():
@@ -54,8 +69,9 @@ def main():
 
 
 if __name__ == "__main__":
-    ffbin = os.path.dirname(json.load(open(os.path.join(HERE, "config.json"), encoding="utf8"))["ffmpeg"])
-    os.environ["PATH"] = ffbin + os.pathsep + os.environ.get("PATH", "")
+    sys.path.insert(0, HERE)
+    from server import FFMPEG  # same ffmpeg search as the server (config, PATH, winget, repo copy)
+    os.environ["PATH"] = os.path.dirname(FFMPEG) + os.pathsep + os.environ.get("PATH", "")
     try:
         main()
     except Exception as e:
