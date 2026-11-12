@@ -368,6 +368,28 @@ def jobs():
     return JOB_CACHE[1]
 
 
+REFRESH_REQ = os.path.join(SAVE, "_sitpretty", "refresh-request.json")
+
+
+def ask_refresh():
+    os.makedirs(os.path.dirname(REFRESH_REQ), exist_ok=True)
+    json.dump({"requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, open(REFRESH_REQ, "w", encoding="utf8"))
+    log("Returns list refresh requested")
+    return {"ok": True}
+
+
+def returns_info():
+    p = os.path.join(SAVE, "_sitpretty", "returns.json")
+    upd = datetime.fromtimestamp(os.path.getmtime(p)).strftime("%d %b %H:%M") if os.path.exists(p) else None
+    pending = None
+    if os.path.exists(REFRESH_REQ):
+        try:
+            pending = json.load(open(REFRESH_REQ, encoding="utf8")).get("requested_at")
+        except Exception:
+            pending = "yes"
+    return {"updated": upd, "refresh_pending": pending}
+
+
 def returns_list():
     p = os.path.join(SAVE, "_sitpretty", "returns.json")
     try:
@@ -448,7 +470,7 @@ class H(BaseHTTPRequestHandler):
                     "packing_cameras": CFG["packing_cameras"], "save_dir": SAVE,
                     "login_ok": all(all(cam_login(c, s)) for c in CFG["cameras"]),
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
-                    "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "jobs": jobs(), "log": LOGS[-30:]})
+                    "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "log": LOGS[-30:]})
             if u.path == "/api/snapshot.jpg":
                 try:
                     return self.send(200, snapshot(q.get("cam", CFG["returns_camera"])), "image/jpeg")
@@ -516,6 +538,8 @@ class H(BaseHTTPRequestHandler):
                 if not made:
                     raise RuntimeError("; ".join(errs))
                 return self.send(200, {"files": made, "errors": errs})
+            if u.path == "/api/refresh-returns":
+                return self.send(200, ask_refresh())
             if u.path == "/api/evidence":
                 return self.send(200, request_video(b))
             if u.path == "/api/shopee":

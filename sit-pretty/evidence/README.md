@@ -5,6 +5,13 @@ camera(s) that filmed the packing and, if they know it, BigSeller's "Scan to shi
 That writes `N:\Yong Chuan\Dispute\<OrderID>\evidence-request.json` with `"status": "queued"`.
 The hourly Claude Code task `sit-pretty-evidence-videos` picks these up.
 
+## Returns list refresh
+
+If `N:\Yong Chuan\Dispute\_sitpretty\refresh-request.json` exists, staff pressed "Refresh from Shopee".
+Rebuild `_sitpretty\returns.json` exactly as the daily task `shopee-return-claims-refresh` does (open
+returns with items, due, todo and tracking numbers, read from Seller Centre in Claude in Chrome), then
+delete `refresh-request.json`. Do this before making videos.
+
 ## For each queued request (Claude)
 
 1. Set `"status": "working"` in the request file.
