@@ -8,7 +8,7 @@ and records Tapo cameras over RTSP with ffmpeg:
     own memory cards (sdclip.py, via pytapo) for the minutes it was packed.
 Nothing is recorded in between. Standard library plus ffmpeg; pytapo for clips.
 """
-import json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
+import json, os, re, shutil, socket, subprocess, sys, threading, time, urllib.parse
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import footage
@@ -1517,13 +1517,39 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def do_OPTIONS(self):   # Chrome asks before a web page may reach a program on this PC
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(u.query))
         apply_cameras()
         try:
+            if u.path in ("/", "/index.html") and q.get("stay") != "1" and own_sitpretty(self.client_address[0]):
+                # opened from a PC that runs its own Sit Pretty: use that one (its own live view, its own load)
+                self.send_response(302)
+                self.send_header("Location", "http://localhost:8787/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if u.path in ("/", "/index.html"):
                 return self.send(200, open(os.path.join(HERE, "web", "index.html"), "rb").read(), "text/html; charset=utf-8")
+            if u.path == "/api/hello":   # Pigu on this same PC asks which Sit Pretty is its own
+                body = json.dumps({"host": socket.gethostname()}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Private-Network", "true")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if u.path == "/order":   # the pop-up the BigSeller extension opens
                 return self.send(200, open(os.path.join(HERE, "web", "order.html"), "rb").read(), "text/html; charset=utf-8")
             if not self.authed():
@@ -1681,6 +1707,30 @@ class H(BaseHTTPRequestHandler):
 
 
 LINK = None
+OWN_SP = {}   # ip -> (checked at, runs Sit Pretty)
+
+
+def own_sitpretty(ip):
+    """True when the PC at ip (not this one) answers as a Sit Pretty itself."""
+    if ip.startswith("127.") or ip in ("::1", "localhost"):
+        return False
+    t, ok = OWN_SP.get(ip, (0, False))
+    if time.time() - t < 120:
+        return ok
+    ok = False
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"http://{ip}:8787/api/hello", timeout=0.8) as r:
+            ok = json.loads(r.read()).get("host", "") not in ("", socket.gethostname())
+    except urllib.error.HTTPError as e:   # an older Sit Pretty: it asks for the PIN
+        try:
+            ok = e.code == 401 and "PIN needed" in e.read().decode("utf8", "replace")
+        except Exception:
+            ok = False
+    except Exception:
+        pass
+    OWN_SP[ip] = (time.time(), ok)
+    return ok
 
 
 def main():
