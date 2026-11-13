@@ -65,6 +65,38 @@ const media=(f,dl,view)=>`/media?order=${encodeURIComponent(ORDER)}&file=${encod
 const vinfo=f=>(D&&D.videos.find(v=>v.file===f))||{};
 const playSrc=f=>{const v=vinfo(f);return v.view==='ready'?media(f,0,1):media(f)};
 let asked={}, livei=0;
+// Instant packing view: the all-day NAS footage around the BigSeller scan, played straight away (no download)
+let NAS=null, NASK='', packAt='', nasErr='';
+let nascam=(()=>{try{return localStorage.getItem('sp-nascam')||''}catch(e){return ''}})();
+const scanT=()=>SCAN||packAt;
+const HEVC=(()=>{try{return !!document.createElement('video').canPlayType('video/mp4; codecs="hvc1.1.6.L153.B0"')}catch(e){return false}})();
+const nasMins=()=>{let b=5,a=1;try{b=+(localStorage.getItem('sp-nasb')||5);a=+(localStorage.getItem('sp-nasa')||1)}catch(e){}return [b,a]};
+async function nasLoad(){const t=scanT();if(!t)return;const [b,a]=nasMins(),k=t+'|'+b+'|'+a;if(k===NASK)return;NASK=k;NAS=null;nasErr='';
+  try{NAS=await api(`/api/nascheck?scan=${encodeURIComponent(t)}&before=${b}&after=${a}`)}catch(e){nasErr=e.message}render()}
+function nasHTML(){
+  if(!scanT()) return `<div class="card"><h2>Watch the packing</h2><div class="sub">When was it packed? (Opened from BigSeller, this is filled in for you.)</div>
+    <div class="ctrl"><input type="datetime-local" id="packat" value="${/^\d{6}/.test(ORDER)?'20'+ORDER.slice(0,2)+'-'+ORDER.slice(2,4)+'-'+ORDER.slice(4,6)+'T12:00':''}" style="height:36px;border:1px solid #ccc;border-radius:8px;padding:0 8px;font:inherit"><button class="btn main" id="packgo">Show the packing</button></div></div>`;
+  if(!HEVC) return `<div class="card"><h2>Watch the packing</h2><div class="sub">This browser can't play the camera's 4K video. Use Chrome on a shop PC, or get the packing clip below.</div></div>`;
+  if(nasErr) return `<div class="card"><div class="msg err">${esc(nasErr)}</div></div>`;
+  if(!NAS) return `<div class="card" style="text-align:center;padding:24px"><span class="spin"></span> Looking for the NAS footage…</div>`;
+  const ok=NAS.cams.filter(c=>c[2]), [b,a]=nasMins();
+  const chips=(key,vals,on,unit)=>vals.map(v=>`<button class="btn chip${v===on?' on':''}" data-${key}="${v}">${v}${unit}</button>`).join('');
+  const minsRow=`<div class="ctrl"><span class="sub">Minutes before the scan</span>${chips('nasb',[2,5,10,15],b,'')}<span class="sub">after</span>${chips('nasa',[1,3,5],a,'')}</div>`;
+  if(!ok.length) return `<div class="card"><h2>Watch the packing</h2><div class="sub">No NAS footage for ${esc(NAS.start)}–${esc(NAS.end.slice(11))} (all-day recording runs Mon–Sat 8:00–18:00 and keeps 45 days). Get the packing clip below instead; it comes from the camera's memory card.</div>${minsRow}</div>`;
+  if(!ok.some(c=>c[0]===nascam)) nascam=ok[0][0];
+  const src=`/nasview.mp4?cam=${encodeURIComponent(nascam)}&scan=${encodeURIComponent(scanT())}&before=${b}&after=${a}&pin=${encodeURIComponent(PIN)}`;
+  return `<div class="player"><video id="v" controls autoplay muted playsinline preload="auto" src="${src}"></video></div>
+    <div class="ctrl"><b>Packing table</b>${ok.map(c=>`<button class="btn chip${c[0]===nascam?' on':''}" data-nascam="${esc(c[0])}">${esc(c[1])}</button>`).join('')}
+    <span class="sub">${esc(NAS.start.slice(11))}–${esc(NAS.end.slice(11))}, ${esc(NAS.start.slice(0,10))} · starts in a few seconds</span></div>
+    <div class="ctrl"><span class="sub">Speed</span>${[1,2,4,8,16].map(s=>`<button class="btn sp${s===speed?' on':''}" data-sp="${s}">${s}×</button>`).join('')}
+    <button class="btn" data-skip="-10">−10 s</button><button class="btn" data-skip="10">+10 s</button></div>${minsRow}`;
+}
+document.addEventListener('click',e=>{
+  const c=e.target.closest('[data-nascam]');if(c){nascam=c.dataset.nascam;try{localStorage.setItem('sp-nascam',nascam)}catch(_){}render();return}
+  const nb=e.target.closest('[data-nasb]'),na=e.target.closest('[data-nasa]');
+  if(nb||na){try{if(nb)localStorage.setItem('sp-nasb',nb.dataset.nasb);if(na)localStorage.setItem('sp-nasa',na.dataset.nasa)}catch(_){}nasLoad();return}
+  if(e.target.closest('#packgo')){const v=($('#packat')||{}).value;if(v){packAt=v;nasLoad();render()}}
+});
 const phsrc=(f,dl)=>`/photo?order=${encodeURIComponent(ORDER)}&file=${encodeURIComponent(f)}&pin=${encodeURIComponent(PIN)}${dl?'&dl=1':''}`;
 const mins=()=>{let b=5,a=1;try{b=+(localStorage.getItem('sp-before')||5);a=+(localStorage.getItem('sp-after1')||1)}catch(e){}return [b,a]};
 // minutes-before buttons (1 2 5 8 10 15): the chosen one is dark
@@ -113,7 +145,8 @@ function render(){
       <a class="btn" href="${media(cur,1)}" download>Download</a></div>`;
   }
   if(list.length>1||(!cur&&list.length)) h+=`<div class="list">${list.map(v=>`<div class="vid" data-f="${esc(v.file)}" aria-current="${v.file===cur}"><div class="grow"><b>${esc(v.label)}</b><div class="meta">${esc(v.at)} · ${v.mb} MB</div></div><a class="btn" href="${media(v.file,1)}" download onclick="event.stopPropagation()">Download</a></div>`).join('')}</div>`;
-  if(!list.length) h+=`<div class="empty">${tab==='unboxing'?'No unboxing video for this order yet. Record one on Sit Pretty\'s Unbox page.':tab==='detailed'?'No detailed packing video yet.':'No packing clip yet.'}</div>`;
+  if(!list.length&&tab==='simple') h+=nasHTML();
+  else if(!list.length) h+=`<div class="empty">${tab==='unboxing'?'No unboxing video for this order yet. Record one on Sit Pretty\'s Unbox page.':tab==='detailed'?'No detailed packing video yet.':'No packing clip yet.'}</div>`;
 
   const lj=(D.jobs||[]).find(j=>j.kind==='clip'&&j.live&&j.live.length&&['downloading','time_found'].includes(j.status));
   if(tab==='simple'&&lj&&!list.some(v=>v.kind==='simple')){
@@ -194,7 +227,7 @@ async function load(){
   try{ D=await api('/api/order?order='+encodeURIComponent(ORDER)); }catch(e){ if(e.message!=='PIN needed') $('#main').innerHTML='<div class="empty">'+esc(e.message)+'</div>'; return; }
   $('#ord').textContent=ORDER; document.title=ORDER+' videos';
   const r=D.return; $('#hdr').textContent=[r&&r.status?'Return: '+r.status:'',SCAN?'Scanned to ship '+fmtScan(SCAN):''].filter(Boolean).join(' · ');
-  render();
+  render(); nasLoad();
   clearTimeout(timer);
   if(busy(['clip','count','packing','unboxing'])||D.videos.some(v=>v.view==='making'||(v.view==='none'&&v.file===cur))) timer=setTimeout(load,4000);
 }

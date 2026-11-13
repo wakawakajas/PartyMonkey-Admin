@@ -1227,6 +1227,68 @@ def _view_worker():
             VIEW_BUSY.discard((order, name))
 
 
+# ---- Instant packing view: the NAS footage around the BigSeller scan, played straight in the browser
+NASVIEW_DIR = os.path.join(HERE, "tmp", "nasview")
+NASVIEW_LOCK = threading.Lock()
+NASVIEW_BUSY = {}
+
+
+def _scan_window(scan, before, after):
+    t = datetime.strptime((scan or "")[:16].replace(" ", "T"), "%Y-%m-%dT%H:%M")
+    return t - timedelta(minutes=float(before)), t + timedelta(minutes=float(after))
+
+
+def nas_check(scan, before, after):
+    """Which packing cameras have NAS footage for the minutes around the scan."""
+    start, end = _scan_window(scan, before, after)
+    cams, seen = [], set()
+    for c in CFG["packing_cameras"]:   # one button per camera (Party table Latex / Drawer / Full are one camera)
+        k = footage.key_of(CFG["cameras"][c]["ip"])
+        if k not in seen:
+            seen.add(k)
+            cams.append([c, re.sub(r"\s*\(\d+\)$", "", footage.folder_name(k)), footage.has(c, start, end)])
+    return {"cams": cams,
+            "start": start.strftime("%Y-%m-%d %H:%M"), "end": end.strftime("%Y-%m-%d %H:%M")}
+
+
+def nas_view(cam, scan, before, after):
+    """A playable cut of the NAS footage (stream copy: about 2-3 seconds for 10 minutes). Kept a few hours."""
+    if cam not in CFG["cameras"]:
+        raise ValueError("Unknown camera")
+    start, end = _scan_window(scan, before, after)
+    os.makedirs(NASVIEW_DIR, exist_ok=True)
+    out = os.path.join(NASVIEW_DIR, f"{cam}_{start:%Y%m%d-%H%M}_{end:%Y%m%d-%H%M}.mp4")
+    with NASVIEW_LOCK:
+        ev = NASVIEW_BUSY.get(out)
+        mine = ev is None and not os.path.isfile(out)
+        if mine:
+            ev = NASVIEW_BUSY[out] = threading.Event()
+    if mine:
+        try:
+            now = time.time()
+            for n in os.listdir(NASVIEW_DIR):   # old cuts
+                p = os.path.join(NASVIEW_DIR, n)
+                if now - os.path.getmtime(p) > 6 * 3600:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            if not footage.has(cam, start, end):
+                raise RuntimeError("No NAS footage for that time")
+            tmp = out[:-4] + ".part.mp4"
+            footage.clip(cam, start, end, tmp, playable=True)
+            os.replace(tmp, out)
+        finally:
+            with NASVIEW_LOCK:
+                NASVIEW_BUSY.pop(out, None)
+            ev.set()
+    elif ev:
+        ev.wait(60)
+    if not os.path.isfile(out):
+        raise RuntimeError("No NAS footage for that time")
+    return out
+
+
 def tidy_views():
     """Remove playable copies whose original was deleted (staff delete order folders on the NAS)."""
     try:
@@ -1568,6 +1630,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, footage.status())
             if u.path == "/api/discover":
                 return self.send(200, discover(q.get("again") == "1"))
+            if u.path == "/api/nascheck":
+                return self.send(200, nas_check(q.get("scan", ""), q.get("before", "5"), q.get("after", "1")))
             if u.path == "/api/order":
                 return self.send(200, order_info(q.get("order")))
             if u.path == "/api/live.ws":
@@ -1612,6 +1676,12 @@ class H(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if u.path == "/nasview.mp4":   # the packing minutes from the NAS, straight away
+                try:
+                    p = nas_view(q.get("cam", ""), q.get("scan", ""), q.get("before", "5"), q.get("after", "1"))
+                except Exception as e:
+                    return self.send(404, {"error": clean(str(e))})
+                return self.stream(p)
             if u.path == "/media":
                 order, name = safe_id(q.get("order")), os.path.basename(q.get("file", ""))
                 p = view_path(order, name) if q.get("view") == "1" else os.path.join(SAVE, order, name)

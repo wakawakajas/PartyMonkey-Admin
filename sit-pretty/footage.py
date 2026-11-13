@@ -388,7 +388,7 @@ def has(cam, start, end):
     return covered >= 0.8 * (end - start).total_seconds()
 
 
-def clip(cam, start, end, out):
+def clip(cam, start, end, out, playable=False):
     """Cut start..end of one camera's NAS footage into out (stream copy: seconds, not minutes)."""
     f = _files(key_of(H["cfg"]["cameras"][cam]["ip"]), start, end)
     if not f:
@@ -402,7 +402,7 @@ def clip(cam, start, end, out):
     try:
         r = subprocess.run([H["ffmpeg"], "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
                             "-ss", f"{off:.2f}", "-i", lst, "-t", f"{dur:.2f}", "-map", "0:v", "-c", "copy", "-an",
-                            "-movflags", "+faststart", out], capture_output=True, timeout=600, creationflags=H["nowin"])
+                            *(["-tag:v", "hvc1"] if playable else []), "-movflags", "+faststart", out], capture_output=True, timeout=600, creationflags=H["nowin"])
     finally:
         try:
             os.remove(lst)
