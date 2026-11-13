@@ -36,12 +36,21 @@ def key_of(ip):
     return ip.rsplit(".", 1)[1]
 
 
-def cams_by_ip():
-    """One stream per physical camera; the other table boxes on it share the footage."""
-    out = {}
+def cams_by_ip(all_cams=False):
+    """One stream per physical camera; the other table boxes on it share the footage.
+    Cameras switched to "live only" (e.g. Front Door) are not recorded."""
+    out, rec = {}, set()
     for cam, v in H["cfg"]["cameras"].items():
         out.setdefault(key_of(v["ip"]), cam)
-    return out
+        if v.get("record", True) is not False:
+            rec.add(key_of(v["ip"]))
+    return out if all_cams else {k: c for k, c in out.items() if k in rec}
+
+
+def live_list():
+    """One tile per physical camera for the Live page."""
+    return [{"cam": cam, "key": k, "name": folder_name(k)[:-len(f" ({k})")],
+             "record": k in cams_by_ip()} for k, cam in cams_by_ip(True).items()]
 
 
 def folder_name(k):

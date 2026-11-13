@@ -12,6 +12,7 @@ import json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import footage
+import live
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG = json.load(open(os.path.join(HERE, "config.json"), encoding="utf8"))
@@ -263,6 +264,9 @@ SNAP_CAM_LOCKS = {}
 
 
 def snapshot(cam):
+    lf = live.recent(cam)   # already streaming live: no extra connection to the camera
+    if lf:
+        return lf
     st = UNBOX.state()
     if st.get("recording") and cam == st.get("cam"):
         p = os.path.join(HERE, "tmp", "preview_rec.jpg")
@@ -1301,6 +1305,8 @@ def edit_cameras(b):
             if 0 <= j < len(order):
                 order[i], order[j] = order[j], order[i]
             s["order"] = order
+        elif act == "record":   # all-day NAS recording for this camera (off = live view only)
+            s.setdefault("cameras", {}).setdefault(cam, {})["record"] = bool(b.get("on"))
         elif act == "packing":
             pk = set(CFG["packing_cameras"])
             pk.add(cam) if b.get("on") else pk.discard(cam)
@@ -1315,6 +1321,8 @@ def edit_cameras(b):
             while new in CFG["cameras"] or new in BASE_CAMS["cameras"]:
                 new, n = f"{base}-{n}", n + 1
             s.setdefault("cameras", {})[new] = {"ip": ip, "label": label}
+            if b.get("record") is False:
+                s["cameras"][new]["record"] = False
             s["removed"] = [k for k in s.get("removed") or [] if k != new]
             s["order"] = order + [new]
             if b.get("packing", True):
@@ -1521,13 +1529,29 @@ class H(BaseHTTPRequestHandler):
                     "login_ok": all(cam_login(CFG["returns_camera"], s)),
                     "cam_login": {c: all(cam_login(c, s)) for c in CFG["cameras"]},
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
-                    "pack_before": CFG["default_pack_minutes_before_scan"], "pack_after": CFG.get("default_pack_minutes_after_scan", 2), "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "auto_videos": auto_state(), "log": LOGS[-30:]})
+                    "pack_before": CFG["default_pack_minutes_before_scan"], "pack_after": CFG.get("default_pack_minutes_after_scan", 2), "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "auto_videos": auto_state(), "live": footage.live_list(), "log": LOGS[-30:]})
             if u.path == "/api/footage":
                 return self.send(200, footage.status())
             if u.path == "/api/discover":
                 return self.send(200, discover(q.get("again") == "1"))
             if u.path == "/api/order":
                 return self.send(200, order_info(q.get("order")))
+            if u.path == "/api/live.jpg":
+                cam = q.get("cam")
+                if cam not in CFG["cameras"]:
+                    return self.send(404, {"error": "Unknown camera"})
+                try:
+                    data, seq = live.frame(cam, int(q.get("after") or 0))
+                except Exception as e:
+                    return self.send(503, {"error": clean(e)})
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Seq", str(seq))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if u.path == "/api/snapshot.jpg":
                 try:
                     return self.send(200, snapshot(q.get("cam", CFG["returns_camera"])), "image/jpeg")
@@ -1652,6 +1676,7 @@ def main():
     threading.Thread(target=tidy_views, daemon=True).start()
     footage.start(cfg=CFG, rtsp=rtsp, log=log, ffmpeg=FFMPEG, local_cfg=local_cfg, local_path=LOCAL, nowin=NOWIN,
                   clean=clean)
+    live.start(cfg=CFG, rtsp=rtsp, log=log, ffmpeg=FFMPEG, nowin=NOWIN, clean=clean, in_job=footage._in_job)
     try:   # clip downloads cut off by a restart start again
         for nm in os.listdir(SAVE):
             rp = os.path.join(SAVE, nm, CLIP_REQ)

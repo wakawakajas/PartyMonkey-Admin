@@ -122,6 +122,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
     <button class="nav" data-page="pack"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/></svg>Packing clip</button>
     <button class="nav" data-page="saved"><svg viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Saved evidence<span class="n" id="n-saved"></span></button>
     <div class="sep"></div>
+    <button class="nav" data-page="live"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14M8 8a5.5 5.5 0 0 0 0 8M16 8a5.5 5.5 0 0 1 0 8"/></svg>Live</button>
     <button class="nav" data-page="cams"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-2.7-1.1l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3 14.4H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.1-2.7l-.1-.1A2 2 0 1 1 6.9 4.8l.1.1a1.6 1.6 0 0 0 2.7-1.1V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0 1.1 2.7H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>Cameras</button>
   </nav>
   <main class="mid">
@@ -224,6 +225,16 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
         <div class="msg" id="shmsg"></div></div>
     </section>
 
+    <section class="page" id="p-live" hidden>
+      <div class="card glass"><h2>Live</h2><p class="sub">Every camera, live (about a second behind). Click a camera to make it big; Esc to go back. The video stops when you leave this page.</p></div>
+      <div id="livegrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px"></div>
+    </section>
+    <style>#livebig[hidden]{display:none!important}</style>
+    <div id="livebig" hidden style="position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:16px">
+      <div style="color:#fff;font-weight:600" id="livebigname"></div>
+      <img id="livebigimg" alt="" style="max-width:100%;max-height:calc(100vh - 90px);border-radius:10px;background:#111">
+      <button class="btn" id="livebigx">Close</button>
+    </div>
     <section class="page" id="p-cams" hidden>
       <div class="card glass"><h2>Cameras</h2><p class="sub">Rename, reorder (the order is used everywhere) and choose which ones film packing. Changes show on every shop PC.</p>
         <div id="camlist"></div>
@@ -373,7 +384,7 @@ async function api(path,body){
 $('#pinok').onclick=()=>{PIN=$('#pin').value.trim();try{localStorage.setItem('sp-pin',PIN)}catch(e){}$('#pinbox').hidden=true;refresh()};
 
 function go(p){page=p;document.querySelectorAll('.nav').forEach(b=>b.dataset.page===p?b.setAttribute('aria-current','page'):b.removeAttribute('aria-current'));
-  ['overview','unbox','evid','pack','saved','cams'].forEach(k=>$('#p-'+k).hidden=k!==p);if(location.hash.slice(1)!==p)history.replaceState(null,'','#'+p);render()}
+  ['overview','unbox','evid','pack','saved','live','cams'].forEach(k=>$('#p-'+k).hidden=k!==p);if(location.hash.slice(1)!==p)history.replaceState(null,'','#'+p);render();if(S)liveStart()}
 document.querySelectorAll('.nav').forEach(b=>b.onclick=()=>go(b.dataset.page));
 
 function hay(r){return (r.order+' '+(r.request||'')+' '+(r.product||'')+' '+(r.return_tracking||[]).join(' ')+' '+(r.ship_tracking||[]).join(' ')).toLowerCase()}
@@ -452,6 +463,24 @@ function render(){
     $('#log').textContent=(S.log||[]).join('\n');buildAreas();camList();if(!$('#ftbtn').dataset.on)ftLoad();
   }
 }
+// ---- Live page: each tile asks for the newest frame again as soon as it has one
+const LV={on:false,big:null,loops:{}};
+function liveTiles(){const g=$('#livegrid');const L=S.live||[];
+  if(g.dataset.k===L.map(x=>x.cam+x.name).join()) return; g.dataset.k=L.map(x=>x.cam+x.name).join();
+  g.innerHTML=L.map(x=>`<div class="card glass" style="padding:10px;cursor:zoom-in" data-live="${x.cam}"><div class="row" style="margin-bottom:6px"><b class="grow">${esc(x.name)}</b><span class="sub" data-lvst="${x.cam}">Connecting…</span>${x.record?'':'<span class="sub">· live only</span>'}</div><img data-lvimg="${x.cam}" alt="" style="width:100%;aspect-ratio:16/9;object-fit:contain;background:#111;border-radius:8px;display:block"></div>`).join('')||'<p class="sub">No cameras yet. Add them on the Cameras page.</p>';}
+async function liveLoop(cam){if(LV.loops[cam])return;LV.loops[cam]=1;let seq=0,url='',fails=0;
+  while(LV.on){const imgs=[...document.querySelectorAll(`[data-lvimg="${cam}"]`)];if(LV.big===cam)imgs.push($('#livebigimg'));
+    const st=document.querySelector(`[data-lvst="${cam}"]`);
+    try{const r=await fetch(`/api/live.jpg?cam=${encodeURIComponent(cam)}&after=${seq}&pin=${encodeURIComponent(PIN)}`,{cache:'no-store'});
+      if(!r.ok){let m='No picture';try{m=(await r.json()).error||m}catch(e){}throw new Error(m)}
+      seq=+r.headers.get('X-Seq')||0;const u=URL.createObjectURL(await r.blob());imgs.forEach(i=>i.src=u);if(url)URL.revokeObjectURL(url);url=u;fails=0;if(st){st.textContent='● Live';st.style.color='#c0392b'}}
+    catch(e){fails++;if(st){st.textContent=e.message.slice(0,90);st.style.color='var(--rust)'}await new Promise(r=>setTimeout(r,Math.min(10000,2000*fails)))}}
+  delete LV.loops[cam];}
+function liveStart(){if(document.hidden||$('#p-live').hidden){LV.on=false;return}liveTiles();LV.on=true;(S.live||[]).forEach(x=>liveLoop(x.cam));}
+document.addEventListener('visibilitychange',liveStart);
+document.addEventListener('click',e=>{const t=e.target.closest('[data-live]');if(!t)return;LV.big=t.dataset.live;const x=(S.live||[]).find(y=>y.cam===LV.big);$('#livebigname').textContent=x?x.name:'';$('#livebig').hidden=false;});
+$('#livebigx').onclick=()=>{LV.big=null;$('#livebig').hidden=true};
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('#livebig').hidden){LV.big=null;$('#livebig').hidden=true}});
 // ---- all-day recording to the NAS (one PC records; every PC cuts clips from it)
 const DAYN=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 async function ftLoad(){try{const f=await api('/api/footage');const days=f.days.join()==='0,1,2,3,4,5'?'Mon–Sat':f.days.map(d=>DAYN[d]).join(', ');
@@ -472,6 +501,7 @@ function camList(){
     <button class="btn ghost" data-cm="up" data-cam="${c}" ${i?'':'disabled'} title="Move up">↑</button><button class="btn ghost" data-cm="down" data-cam="${c}" ${i<ids.length-1?'':'disabled'} title="Move down">↓</button>
     <input class="grow" data-cname="${c}" value="${esc(v.label)}" style="min-width:160px">
     <label class="sub"><input type="checkbox" data-cpack="${c}" ${S.packing_cameras.includes(c)?'checked':''}> Packing</label>
+    <label class="sub" title="All-day recording to the NAS. Off = live view only"><input type="checkbox" data-crec="${c}" ${v.record===false?'':'checked'}> Record</label>
     <span class="sub mono">${esc(v.ip)}${S.cam_login&&!S.cam_login[c]?' · <span style="color:var(--rust)">no live view: add cam'+esc(v.ip.split('.').pop())+'.username / .password to sitpretty-secrets.txt</span>':''}</span>
     <button class="btn ghost" data-cm="duplicate" data-cam="${c}" title="Another table box on the same camera">Duplicate</button>
     ${c===S.returns_camera?'<span class="sub">Unbox camera</span>':`<button class="btn ghost" data-cm="remove" data-cam="${c}">Remove</button>`}</div>`}).join('');
@@ -480,7 +510,8 @@ async function camEdit(b){try{await api('/api/cameras',b);$('#cammsg').textConte
 document.addEventListener('click',e=>{const b=e.target.closest('[data-cm]');if(!b)return;
   if(b.dataset.cm==='remove'&&!confirm('Remove '+S.cameras[b.dataset.cam].label+' from Sit Pretty? Its videos stay.'))return;
   camEdit({action:['remove','duplicate'].includes(b.dataset.cm)?b.dataset.cm:'move',dir:b.dataset.cm,cam:b.dataset.cam})});
-document.addEventListener('change',e=>{const n=e.target.closest('[data-cname]'),p=e.target.closest('[data-cpack]');
+document.addEventListener('change',e=>{const n=e.target.closest('[data-cname]'),p=e.target.closest('[data-cpack]'),rc=e.target.closest('[data-crec]');
+  if(rc)camEdit({action:'record',cam:rc.dataset.crec,on:rc.checked});
   if(n)camEdit({action:'rename',cam:n.dataset.cname,label:n.value});
   if(p)camEdit({action:'packing',cam:p.dataset.cpack,on:p.checked})});
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.closest('[data-cname]'))e.target.blur()});
@@ -604,9 +635,9 @@ function live(){if(page==='unbox'&&S&&S.login_ok&&!document.hidden){const img=ne
     (async()=>{for(const el of g.querySelectorAll('img[data-snap]')){const c=el.dataset.snap;if(S.cam_login&&!S.cam_login[c])continue;
       await new Promise(ok=>{const im=new Image();im.onload=()=>{el.src=im.src;ok()};im.onerror=ok;im.src='/api/snapshot.jpg?cam='+c+'&t='+Date.now()+'&pin='+encodeURIComponent(PIN)})}})()}
   clearTimeout(liveT);liveT=setTimeout(live,page==='cams'?12000:1500)}
-async function refresh(){try{S=await api('/api/state');render()}catch(e){if(e.message!=='PIN needed'){$('#health').className='pill bad';$('#health').innerHTML='<i></i>Server not reachable'}}}
+async function refresh(){try{S=await api('/api/state');render();liveStart()}catch(e){if(e.message!=='PIN needed'){$('#health').className='pill bad';$('#health').innerHTML='<i></i>Server not reachable'}}}
 setInterval(refresh,1000);
-const PAGES=['overview','unbox','evid','pack','saved','cams'];
+const PAGES=['overview','unbox','evid','pack','saved','live','cams'];
 addEventListener('hashchange',()=>{const h=location.hash.slice(1);if(PAGES.includes(h)&&h!==page)go(h)});
 go(PAGES.includes(location.hash.slice(1))?location.hash.slice(1):'unbox');
 refresh().then(live);
