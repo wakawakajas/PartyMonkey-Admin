@@ -962,50 +962,33 @@ def appeal_text(row):
     unbox, pack = _videos(d)
     miss = _missing_items(row, d)
 
-    claim = f'as "{row["reason"]}"' if row.get("reason") else ""
-    said = f', saying: "{row["buyer_text"].strip()}"' if (row.get("buyer_text") or "").strip() else ""
-    lines = [f"The buyer returned this order {claim}{said}.".replace("order  ", "order ").replace(" ,", ",")]
-    facts = []
+    # Short on purpose: Shopee's dispute box takes only a few hundred characters, and Shopee already has the
+    # buyer's words, so only our facts, the videos and the ask.
+    sealed = any(w in (row.get("reason") or "").lower() for w in ("sealed", "original"))
+    lines = []
     if "opened" in issues:
-        sealed = "sealed" in (row.get("reason") or "").lower() or "original" in (row.get("reason") or "").lower()
-        facts.append("The return parcel arrived already opened" + (", although the buyer said it was in original / sealed condition." if sealed else "."))
+        lines.append("Buyer claimed sealed/original condition, but the parcel arrived opened." if sealed else "Parcel arrived opened.")
     if "missing" in issues:
         if miss:
             got = [n for n in names if n and n not in miss]
-            facts.append(f"Only {n_sent - len(miss)} of {n_sent} items came back"
-                         + (f" ({', '.join(got)} returned)" if got else "") + f". Missing: {', '.join(miss)}.")
+            lines.append(f"Only {n_sent - len(miss)} of {n_sent} items returned" + (f" ({', '.join(got)})" if got else "")
+                         + f"; {', '.join(miss)} missing.")
         else:
-            facts.append("Not every item came back: " + (f.get("note") or "items were missing from the return parcel") + ".")
-    if "used" in issues:
-        facts.append("The item came back used, so it is not in the original condition required for a return.")
-    if "damaged" in issues:
-        facts.append("The item came back damaged. It left us in good condition, as our packing video shows.")
-    if "dirty" in issues:
-        facts.append("The item came back dirty, stained or smelling, so it cannot be resold.")
-    if "wrong_item" in issues:
-        facts.append("The item sent back is not the item we sent.")
-    if "photo_mismatch" in issues:
-        facts.append("The buyer's photos / videos do not show our item or this order.")
-    if f.get("note") and "missing" not in issues:
-        facts.append(f"We also found: {f['note'].strip().rstrip('.')}.")
-    lines += facts
-    ev = []
+            lines.append("Items missing from the return.")
+    for k, t in (("used", "Item returned used."), ("damaged", "Item returned damaged."), ("dirty", "Item returned dirty/stained."),
+                 ("wrong_item", "Item returned is not what we sent."), ("photo_mismatch", "Buyer's photos are not our item/order.")):
+        if k in issues:
+            lines.append(t)
     if unbox:
-        ev.append("Our unboxing video shows the return parcel opened in one take, from the waybill to the end"
-                  + (", with " + ", ".join(miss) + " not inside" if miss else "") + ".")
+        lines.append("Unboxing video: opened in one take" + (f", {', '.join(miss)} not inside." if miss else "."))
     if pack:
-        ev.append(f"Our packing video shows all {n_sent} item{'s' if n_sent != 1 else ''}"
-                  + (f" ({', '.join(n for n in names if n)})" if 1 < len(names) <= 4 else "")
-                  + " packed and sealed before shipping.")
-    lines += ev
+        lines.append(f"Packing video: all {n_sent} item{'s' if n_sent != 1 else ''} packed.")
     if "wrong_item" in issues or "photo_mismatch" in issues:
-        ask = "We request that the refund be rejected."
+        lines.append("Please reject the refund.")
     elif "missing" in issues and not set(issues) & {"used", "damaged", "dirty"}:
-        ask = ("We request that the refund be limited to the item actually returned, or that the buyer returns "
-               + (", ".join(miss) if miss else "the missing item") + ".")
+        lines.append("Please refund only the returned item" + (f", or the buyer returns {', '.join(miss)}." if miss else "."))
     else:
-        ask = "We request that the refund be rejected or reduced, as the item was not returned in the condition it was sent."
-    lines.append(ask)
+        lines.append("Please reject or reduce the refund.")
     text = " ".join(lines)
     APPEAL_CACHE[order] = (key, text)
     return text
