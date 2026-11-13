@@ -69,6 +69,7 @@ class PiguLink(threading.Thread):
             cfg = self.api["cfg"]
             s["cameras"] = {c: v["label"] for c, v in cfg["cameras"].items()}
             s["returns_camera"] = cfg["returns_camera"]
+            s["packing_cameras"] = cfg["packing_cameras"]
             s["found_opts"] = list(self.api["found_opts"].items())  # a list keeps the order
             s["returns"] = trim_returns(self.api["returns"]())
             s["returns_info"] = self.api["returns_info"]()
@@ -90,6 +91,8 @@ class PiguLink(threading.Thread):
                 data = {"jpg": self.small_jpg(self.api["snapshot"](p.get("cam")))}
             elif cmd == "readwb":
                 data = self.api["read_waybill"](p.get("cam"))
+            elif cmd == "packvideo":
+                data = self.api["pack_video"](p)
             elif cmd == "unboxvideo":
                 data = self.api["unbox_video"](p)
             elif cmd == "finding":

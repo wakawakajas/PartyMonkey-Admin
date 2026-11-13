@@ -833,7 +833,7 @@ def main():
     LINK = pigulink.start(CFG, secrets().get("pin", ""), {
         "cfg": CFG, "unbox_state": UNBOX.state, "start": UNBOX.start, "stop": UNBOX.stop,
         "snapshot": snapshot, "returns": returns_list, "returns_info": returns_info,
-        "ask_refresh": ask_refresh, "clean": clean, "save_finding": save_finding, "read_waybill": read_waybill, "unbox_video": request_unbox_video, "found_opts": FOUND_OPTS}, log)
+        "ask_refresh": ask_refresh, "clean": clean, "save_finding": save_finding, "read_waybill": read_waybill, "unbox_video": request_unbox_video, "pack_video": request_video, "found_opts": FOUND_OPTS}, log)
     srv = ThreadingHTTPServer(("0.0.0.0", CFG["port"]), H)
     log(f"Sit Pretty on http://localhost:{CFG['port']}  (saving to {SAVE})")
     srv.serve_forever()
