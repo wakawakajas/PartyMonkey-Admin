@@ -2,13 +2,14 @@
 
 One PC records (the one with "Record on this PC" switched on). Every camera is streamed as it is
 (4K HEVC, no re-encoding) into 5-minute files:
-    <dir>\\cam183\\2026-11-13\\cam183_20261113-080000.mp4
+    <dir>\\Flower table (183)\\2026-11-13\\2026-11-13 08-00-00.mp4   (the folder follows the camera name)
 Files are fragmented MP4, so a file being written can already be read, and a crash loses seconds, not
 the file. Footage older than keep_days is deleted; the oldest day goes first if the NAS gets full.
 Other PCs only read the folder: packing clips come from here first, the memory card only for gaps.
 """
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -32,7 +33,7 @@ def conf():
 
 
 def key_of(ip):
-    return "cam" + ip.rsplit(".", 1)[1]
+    return ip.rsplit(".", 1)[1]
 
 
 def cams_by_ip():
@@ -41,6 +42,30 @@ def cams_by_ip():
     for cam, v in H["cfg"]["cameras"].items():
         out.setdefault(key_of(v["ip"]), cam)
     return out
+
+
+def folder_name(k):
+    """The camera's name as staff call it, e.g. "Flower table (183)". Table boxes on one camera share
+    their common start ("Party table Latex" + "Party table Drawer" -> "Party table")."""
+    labels = [v["label"] for v in H["cfg"]["cameras"].values() if key_of(v["ip"]) == k]
+    name = os.path.commonprefix(labels).strip() if len(labels) > 1 else (labels[0] if labels else "")
+    if len(name) < 3:
+        name = labels[0] if labels else "Camera"
+    name = re.sub(r'[<>:"/\\|?*%]+', " ", name)
+    return " ".join(name.split())[:40] + f" ({k})"
+
+
+def cam_dir(k):
+    """Where this camera records now: its current name. (A renamed camera starts a new folder; the NAS
+    refuses to rename folders it is indexing, and the old one empties itself after keep_days.)"""
+    return os.path.join(conf()["dir"], folder_name(k))
+
+
+def cam_dirs(k):
+    """Every folder with this camera's footage, under any name it has had."""
+    root = conf()["dir"]
+    return [os.path.join(root, n) for n in os.listdir(root)
+            if n.endswith(f"({k})") and os.path.isdir(os.path.join(root, n))]
 
 
 def in_hours(now=None):
@@ -88,11 +113,66 @@ def _beat():
         pass
 
 
+def _job():
+    """A Windows job object: the recordings end when Sit Pretty ends (closed window, crash or restart)."""
+    if "job" in H or os.name != "nt":
+        return H.get("job")
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+
+    class BASIC(ctypes.Structure):
+        _fields_ = [("a", ctypes.c_int64), ("b", ctypes.c_int64), ("LimitFlags", wintypes.DWORD),
+                    ("c", ctypes.c_size_t), ("d", ctypes.c_size_t), ("e", wintypes.DWORD),
+                    ("f", ctypes.c_size_t), ("g", wintypes.DWORD), ("h", wintypes.DWORD)]
+
+    class IO(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_uint64) for n in "abcdef"]
+
+    class EXT(ctypes.Structure):
+        _fields_ = [("basic", BASIC), ("io", IO), ("p", ctypes.c_size_t), ("j", ctypes.c_size_t),
+                    ("pp", ctypes.c_size_t), ("pj", ctypes.c_size_t)]
+    h = k32.CreateJobObjectW(None, None)
+    info = EXT()
+    info.basic.LimitFlags = 0x2000   # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    k32.SetInformationJobObject(wintypes.HANDLE(h), 9, ctypes.byref(info), ctypes.sizeof(info))
+    H["job"] = (k32, h)
+    return H["job"]
+
+
+def _in_job(p):
+    try:
+        j = _job()
+        if j:
+            from ctypes import wintypes
+            j[0].AssignProcessToJobObject(wintypes.HANDLE(j[1]), wintypes.HANDLE(int(p._handle)))
+    except Exception as e:
+        H["log"](f"Recorder: could not tie the recording to Sit Pretty ({e})")
+
+
+def _kill_leftovers():
+    """Recordings left running by an earlier Sit Pretty on this PC (they would hold the camera and files)."""
+    if os.name != "nt":
+        return
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\" | "
+                            "? CommandLine -match 'segment_atclocktime' | % { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }"],
+                           capture_output=True, text=True, timeout=60, creationflags=H["nowin"])
+        n = len(r.stdout.split())
+        if n:
+            H["log"](f"Stopped {n} recording(s) left over from before")
+    except Exception:
+        pass
+
+
 def _start(k, cam):
     c = conf()
-    day = os.path.join(c["dir"], k, datetime.now().strftime("%Y-%m-%d"))
+    base = cam_dir(k)
+    day = os.path.join(base, datetime.now().strftime("%Y-%m-%d"))
     os.makedirs(day, exist_ok=True)
-    pattern = os.path.join(c["dir"], k, "%Y-%m-%d", k + "_%Y%m%d-%H%M%S.mp4")
+    pattern = os.path.join(base, "%Y-%m-%d", "%Y-%m-%d %H-%M-%S.mp4")
     cmd = [H["ffmpeg"], "-hide_banner", "-loglevel", "error", "-nostdin", "-rtsp_transport", "tcp",
            "-timeout", "15000000", "-i", H["rtsp"](cam, "stream1"), "-map", "0:v", "-c", "copy", "-an",
            "-f", "segment", "-segment_time", str(int(c["segment_minutes"]) * 60), "-segment_atclocktime", "1",
@@ -100,6 +180,7 @@ def _start(k, cam):
            "-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof", pattern]
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                          creationflags=H["nowin"])
+    _in_job(p)
     PROCS[k] = dict(PROCS.get(k, {}), p=p, since=datetime.now(), cam=cam, day=day, err="")
     threading.Thread(target=_read_err, args=(k, p), daemon=True).start()
     H["log"](f"Recording {H['cfg']['cameras'][cam]['label']} to the NAS")
@@ -154,11 +235,11 @@ def tick():
         for k, cam in live.items():
             r = PROCS.get(k) or {}
             p = r.get("p")
-            day = os.path.join(c["dir"], k, now.strftime("%Y-%m-%d"))
+            day = os.path.join(cam_dir(k), now.strftime("%Y-%m-%d"))
             if p and p.poll() is None and r.get("day") == day:
                 r["fails"] = 0 if (now - r["since"]).total_seconds() > 120 else r.get("fails", 0)
                 continue
-            if p and p.poll() is None:   # a new day: start a fresh folder
+            if p and p.poll() is None:   # a new day, or the camera was renamed: start a fresh folder
                 _stop(k)
             elif p:
                 r["fails"] = r.get("fails", 0) + 1
@@ -186,7 +267,7 @@ def tidy():
     days = []
     for k in os.listdir(root):
         kd = os.path.join(root, k)
-        if not (k.startswith("cam") and os.path.isdir(kd)):
+        if not (re.search(r"\(\d+\)$", k) and os.path.isdir(kd)):
             continue
         for d in os.listdir(kd):
             if len(d) == 10 and d[4] == "-":
@@ -208,6 +289,13 @@ def tidy():
             shutil.rmtree(p, ignore_errors=True)
         H["log"](f"NAS nearly full: deleted the oldest footage ({d0})")
         days = [x for x in days if x[0] != d0]
+    for k in os.listdir(root):   # a renamed camera's old folder, once its last day is gone
+        kd = os.path.join(root, k)
+        if re.search(r"\(\d+\)$", k) and os.path.isdir(kd) and not os.listdir(kd):
+            try:
+                os.rmdir(kd)
+            except OSError:
+                pass
     try:
         STATE["free_gb"] = round(shutil.disk_usage(root).free / 1e9)
     except OSError:
@@ -215,6 +303,7 @@ def tidy():
 
 
 def _loop():
+    _kill_leftovers()
     last_tidy = 0
     while True:
         try:
@@ -241,7 +330,7 @@ def status():
     for k, cam in cams_by_ip().items():
         r = PROCS.get(k) or {}
         p = r.get("p")
-        cams[k] = {"label": H["cfg"]["cameras"][cam]["label"], "on": bool(p and p.poll() is None),
+        cams[k] = {"label": H["cfg"]["cameras"][cam]["label"], "folder": folder_name(k), "on": bool(p and p.poll() is None),
                    "since": r["since"].strftime("%H:%M") if p and p.poll() is None else "", "err": r.get("err", "")}
     return {"pc": PC, "wanted": wanted(), "recording": STATE["recording"], "why": STATE["why"],
             "other_pc": STATE["other_pc"] or _other_recorder(), "free_gb": STATE["free_gb"], "cams": cams,
@@ -251,16 +340,15 @@ def status():
 # ---------------------------------------------------------------- clips from the NAS footage
 def _files(k, start, end):
     """The footage files of one camera that overlap start..end, with their start times."""
-    root = os.path.join(conf()["dir"], k)
     out = []
     d = start.date() - timedelta(days=1)
     while d <= end.date():
-        dd = os.path.join(root, d.strftime("%Y-%m-%d"))
-        if os.path.isdir(dd):
-            for n in os.listdir(dd):
-                if n.startswith(k + "_") and n.endswith(".mp4"):
+        for root in cam_dirs(k):
+            dd = os.path.join(root, d.strftime("%Y-%m-%d"))
+            for n in (os.listdir(dd) if os.path.isdir(dd) else []):
+                if n.endswith(".mp4"):
                     try:
-                        out.append((datetime.strptime(n[len(k) + 1:-4], "%Y%m%d-%H%M%S"), os.path.join(dd, n)))
+                        out.append((datetime.strptime(n[:-4], "%Y-%m-%d %H-%M-%S"), os.path.join(dd, n)))
                     except ValueError:
                         pass
         d += timedelta(days=1)
