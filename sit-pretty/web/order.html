@@ -17,6 +17,10 @@ header .sub{color:var(--sub);font-size:12.5px}
 .tab .n{opacity:.6;margin-left:4px}
 main{padding:12px 16px 24px;max-width:1100px}
 .player{background:#000;border-radius:12px;overflow:hidden;position:relative}
+.tl{position:relative;height:16px;background:#e3e3e8;border-radius:8px;margin:10px 0 4px;cursor:pointer}
+.tl .tlp{position:absolute;left:0;top:0;bottom:0;background:#9a9aa6;border-radius:8px;pointer-events:none}
+.tl .tlm{position:absolute;top:-5px;bottom:-5px;width:4px;margin-left:-2px;background:#e0302a;border-radius:2px;pointer-events:none}
+.tl .tlt{position:absolute;top:-20px;font-size:11px;color:#e0302a;transform:translateX(-50%);white-space:nowrap;pointer-events:none}
 #zoomc{position:absolute;cursor:grab;clip-path:inset(0 0 52px 0);touch-action:none}
 #zoomc.drag{cursor:grabbing}
 #zoomtag{position:absolute;top:8px;right:8px;background:rgba(0,0,0,.6);color:#fff;font-size:12px;padding:3px 8px;border-radius:8px;pointer-events:none}
@@ -90,13 +94,19 @@ function nasHTML(){
   return `<div class="player"><video id="v" controls autoplay muted playsinline preload="auto" src="${src}"></video></div>
     <div class="ctrl"><b>Packing table</b>${ok.map(c=>`<button class="btn chip${c[0]===nascam?' on':''}" data-nascam="${esc(c[0])}">${esc(c[1])}</button>`).join('')}
     <span class="sub">${esc(NAS.start.slice(11))}–${esc(NAS.end.slice(11))}, ${esc(NAS.start.slice(0,10))} · ${HEVC?'starts in a few seconds':'phone copy, ready in about 20-30 seconds'}</span></div>
-    <div class="ctrl"><span class="sub">Speed</span>${[1,2,4,8,16].map(s=>`<button class="btn sp${s===speed?' on':''}" data-sp="${s}">${s}×</button>`).join('')}
-    <button class="btn" data-skip="-10">−10 s</button><button class="btn" data-skip="10">+10 s</button></div>${minsRow}`;
+    <div class="tl" id="tl" data-at="${b*60}"><div class="tlp" id="tlp"></div><div class="tlm" id="tlm"></div><div class="tlt" id="tlt">Scan ${esc(scanT().slice(11,16))}</div></div>
+    <div class="ctrl"><button class="btn main" data-jumpscan="1">Jump to the scan (${esc(scanT().slice(11,16))})</button><span class="sub">Speed</span>${[1,2,4,8,16].map(s=>`<button class="btn sp${s===speed?' on':''}" data-sp="${s}">${s}×</button>`).join('')}
+    <button class="btn" data-skip="-10">−10 s</button><button class="btn" data-skip="10">+10 s</button></div>${minsRow}
+    <div class="ctrl"><span class="sub">Pause where it's clearest, then save a 4K photo:</span><button class="btn" data-nphoto="waybill">Waybill photo</button><button class="btn" data-nphoto="packaging">Box photo</button><button class="btn" data-nphoto="item">Item photo</button></div><div class="msg" id="nphmsg"></div>`;
 }
 document.addEventListener('click',e=>{
   const c=e.target.closest('[data-nascam]');if(c){nascam=c.dataset.nascam;try{localStorage.setItem('sp-nascam',nascam)}catch(_){}render();return}
   const nb=e.target.closest('[data-nasb]'),na=e.target.closest('[data-nasa]');
   if(nb||na){try{if(nb)localStorage.setItem('sp-nasb',nb.dataset.nasb);if(na)localStorage.setItem('sp-nasa',na.dataset.nasa)}catch(_){}nasLoad();return}
+  const js=e.target.closest('[data-jumpscan]');if(js){const v=$('#v'),tl=$('#tl');if(v&&tl){v.currentTime=Math.max(0,+tl.dataset.at-5);v.play().catch(()=>{})}return}
+  const tlc=e.target.closest('#tl');if(tlc){const v=$('#v');if(v&&v.duration){const r=tlc.getBoundingClientRect();v.currentTime=(e.clientX-r.left)/r.width*v.duration}return}
+  const np=e.target.closest('[data-nphoto]');if(np){const v=$('#v'),m=$('#nphmsg'),[b,a]=nasMins();if(!v)return;v.pause();m.className='msg';m.textContent='Saving the 4K photo…';
+    api('/api/photo',{order:ORDER,kind:np.dataset.nphoto,t:v.currentTime,nas:{cam:nascam,scan:scanT(),before:b,after:a}}).then(r=>{m.className='msg ok';m.textContent='Saved in the order folder: '+r.file}).catch(err=>{m.className='msg err';m.textContent=err.message});return}
   if(e.target.closest('#packgo')){const v=($('#packat')||{}).value;if(v){packAt=v;nasLoad();render()}}
 });
 const phsrc=(f,dl)=>`/photo?order=${encodeURIComponent(ORDER)}&file=${encodeURIComponent(f)}&pin=${encodeURIComponent(PIN)}${dl?'&dl=1':''}`;
@@ -226,7 +236,7 @@ document.addEventListener('click',async e=>{
 
 async function load(){
   if(!ORDER){$('#main').innerHTML='<div class="empty">No order ID.</div>';return}
-  try{ D=await api('/api/order?order='+encodeURIComponent(ORDER)); }catch(e){ if(e.message!=='PIN needed') $('#main').innerHTML='<div class="empty">'+esc(e.message)+'</div>'; return; }
+  try{ D=await api('/api/order?order='+encodeURIComponent(ORDER)+(SCAN?'&scan='+encodeURIComponent(SCAN):'')); if(!SCAN&&!packAt&&D.scan) packAt=D.scan; }catch(e){ if(e.message!=='PIN needed') $('#main').innerHTML='<div class="empty">'+esc(e.message)+'</div>'; return; }
   $('#ord').textContent=ORDER; document.title=ORDER+' videos';
   const r=D.return; $('#hdr').textContent=[r&&r.status?'Return: '+r.status:'',SCAN?'Scanned to ship '+fmtScan(SCAN):''].filter(Boolean).join(' · ');
   render(); nasLoad();
@@ -244,6 +254,8 @@ function zEls(){const v=$('#v');if(!v||!v.videoWidth)return null;const p=v.close
   return {v,c,t:$('#zoomtag'),vw,vh,cw:vw*k,ch:vh*k,ox:r.left-pr.left+(r.width-vw*k)/2,oy:r.top-pr.top+(r.height-vh*k)/2}}
 function zClamp(e){const sw=e.vw/Z.s,sh=e.vh/Z.s;Z.sx=Math.min(Math.max(0,Z.sx),e.vw-sw);Z.sy=Math.min(Math.max(0,Z.sy),e.vh-sh)}
 function zReset(){Z.s=1;const c=$('#zoomc'),t=$('#zoomtag');if(c)c.hidden=true;if(t)t.hidden=true}
+setInterval(()=>{const v=$('#v'),tl=$('#tl');if(!v||!tl||!v.duration)return;const at=+tl.dataset.at;
+  $('#tlp').style.width=(v.currentTime/v.duration*100)+'%';const x=Math.min(100,at/v.duration*100)+'%';$('#tlm').style.left=x;$('#tlt').style.left=x},250);
 (function zLoop(){const e=zEls();
   if(e){if(Z.src!==e.v.currentSrc){Z.src=e.v.currentSrc;zReset()}
     if(Z.s>1){const c=e.c,d=devicePixelRatio||1;c.hidden=false;e.t.hidden=false;e.t.textContent=Z.s.toFixed(1)+'× · double-click to reset';

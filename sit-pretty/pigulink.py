@@ -77,6 +77,10 @@ class PiguLink(threading.Thread):
     # ------------------------------------------------------------ what Pigu sees
     def state(self, full=False):
         s = {"host": HOST, "ip": lan_ip(), "unbox": self.api["unbox_state"](), "at": int(time.time())}
+        try:
+            s["rec_alert"] = "; ".join(self.api["health"]()["problems"]) if "health" in self.api else ""
+        except Exception:
+            s["rec_alert"] = ""
         if full:
             cfg = self.api["cfg"]
             s["cameras"] = {c: v["label"] for c, v in cfg["cameras"].items()}

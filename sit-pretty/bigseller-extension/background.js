@@ -36,7 +36,24 @@ async function open(order, scan) {
 
 chrome.windows.onRemoved.addListener(id => { if (id === popupId) popupId = null; });
 
+async function scanWant() {
+  const { host, pin } = await cfg();
+  const r = await fetch(`http://${host}/api/scanwant`, { headers: { 'X-Pin': pin } });
+  if (!r.ok) return { orders: [] };
+  return await r.json();
+}
+
+async function scansPut(scans, tried) {
+  const { host, pin } = await cfg();
+  const r = await fetch(`http://${host}/api/scans`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pin': pin }, body: JSON.stringify({ scans, tried })
+  });
+  return r.ok ? await r.json() : { error: 'http ' + r.status };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  if (msg.type === 'scanwant') { scanWant().then(reply, e => reply({ error: String(e.message || e) })); return true; }
+  if (msg.type === 'scans') { scansPut(msg.scans, msg.tried).then(reply, e => reply({ error: String(e.message || e) })); return true; }
   if (msg.type === 'have') { have(msg.orders).then(reply, e => reply({ error: String(e.message || e) })); return true; }
   if (msg.type === 'open') { open(msg.order, msg.scan).then(() => reply({ ok: true }), e => reply({ error: String(e.message || e) })); return true; }
   if (msg.type === 'test') { have([]).then(reply, e => reply({ error: String(e.message || e) })); return true; }

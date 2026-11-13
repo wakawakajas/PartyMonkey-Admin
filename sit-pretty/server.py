@@ -1157,7 +1157,7 @@ def order_info(order):
             reqs.append({k: j.get(k) for k in ("kind", "status", "progress", "problem", "summary", "requested_at", "scan_time", "cams", "clip",
                                                "live", "live_total")})
     row = next((r for r in returns_list() if r.get("order") == order), None)
-    return {"order": order, "videos": vids, "photos": photos, "jobs": reqs, "return": {k: row.get(k) for k in ("request", "status", "reason", "due", "todo", "appeal")} if row else None,
+    return {"order": order, "scan": scans_all()["scans"].get(order, ""), "videos": vids, "photos": photos, "jobs": reqs, "return": {k: row.get(k) for k in ("request", "status", "reason", "due", "todo", "appeal")} if row else None,
             "packing_cameras": [[c, CFG["cameras"][c]["label"]] for c in CFG["packing_cameras"]], "auto_videos": auto_state()}
 
 
@@ -1236,6 +1236,115 @@ NASVIEW_BUSY = {}
 def _scan_window(scan, before, after):
     t = datetime.strptime((scan or "")[:16].replace(" ", "T"), "%Y-%m-%dT%H:%M")
     return t - timedelta(minutes=float(before)), t + timedelta(minutes=float(after))
+
+
+# ---- BigSeller ship-scan times, remembered for every order (the extension sends them; shared on the NAS)
+SCANS_LOCK = threading.Lock()
+SCANS = {"m": None, "v": {"scans": {}, "tried": {}}}
+SCAN_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d$")
+
+
+def _scans_path():
+    return os.path.join(SAVE, "_sitpretty", "scans.json")
+
+
+def scans_all():
+    p = _scans_path()
+    try:
+        m = os.path.getmtime(p)
+    except OSError:
+        return SCANS["v"]
+    if m != SCANS["m"]:
+        try:
+            v = json.load(open(p, encoding="utf8"))
+            SCANS.update(m=m, v={"scans": v.get("scans") or {}, "tried": v.get("tried") or {}})
+        except Exception:
+            pass
+    return SCANS["v"]
+
+
+def scans_put(scans=None, tried=None):
+    with SCANS_LOCK:
+        v = scans_all()
+        new = {safe_id(o): s for o, s in (scans or {}).items() if SCAN_RE.match(str(s or ""))}
+        if not new and not tried:
+            return 0
+        v["scans"].update(new)
+        now = int(time.time())
+        for o in tried or []:
+            v["tried"][safe_id(o)] = now
+        p = _scans_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        json.dump(v, open(p + ".tmp", "w", encoding="utf8"), indent=0)
+        os.replace(p + ".tmp", p)
+        SCANS["m"] = None
+        return len(new)
+
+
+def scan_want():
+    """Returns whose ship-scan time Sit Pretty doesn't know yet (the extension looks them up in BigSeller)."""
+    v, now = scans_all(), time.time()
+    return [r["order"] for r in returns_list() if r.get("order") and r["order"] not in v["scans"]
+            and now - v["tried"].get(r["order"], 0) > 12 * 3600][:20]
+
+
+# ---- Packing clips cut by themselves: once a return's ship scan is known, the recording PC cuts the clip
+#      from the NAS footage of the table that was busy in the minutes before the scan.
+AUTO_CLIP = "autoclip.json"
+
+
+def auto_clips_once(limit=3):
+    v = scans_all()["scans"]
+    b4, af = CFG.get("default_pack_minutes_before_scan", 5), CFG.get("default_pack_minutes_after_scan", 1)
+    keep = int(footage.conf()["keep_days"])
+    done = 0
+    for r in returns_list():
+        o, s = r.get("order"), v.get(r.get("order") or "")
+        if not (o and s):
+            continue
+        d = os.path.join(SAVE, safe_id(o))
+        if os.path.isfile(os.path.join(d, AUTO_CLIP)):
+            continue
+        if os.path.isdir(d) and any("_packing_" in n and n.endswith(".mp4") for n in os.listdir(d)):
+            continue
+        start, end = _scan_window(s, b4, af)
+        cams, seen = [], set()
+        for c in CFG["packing_cameras"]:
+            k = footage.key_of(CFG["cameras"][c]["ip"])
+            if k not in seen:
+                seen.add(k)
+                if footage.has(c, start, end):
+                    cams.append(c)
+        if not cams:
+            if (datetime.now() - end).days >= 1 or (datetime.now() - end).days > keep:
+                os.makedirs(d, exist_ok=True)
+                json.dump({"status": "no NAS footage", "scan": s, "at": f"{datetime.now():%Y-%m-%d %H:%M}"},
+                          open(os.path.join(d, AUTO_CLIP), "w", encoding="utf8"), indent=1)
+            continue
+        scan_t = _scan_window(s, 0, 0)[0]
+        score = {c: footage.motion(c, scan_t - timedelta(minutes=3), scan_t + timedelta(seconds=30)) for c in cams}
+        best = max(score.values())
+        # every table with people working before the scan (idle is about 0.4, packing about 4); the busiest if none
+        pick = [c for c in cams if score[c] >= 1.2] or [max(cams, key=lambda c: score[c])]
+        for c in pick:
+            sd_clip(o, c, start, end)
+        json.dump({"status": "done", "cams": pick, "motion": {c: round(x, 2) for c, x in score.items()}, "scan": s,
+                   "at": f"{datetime.now():%Y-%m-%d %H:%M}"}, open(os.path.join(d, AUTO_CLIP), "w", encoding="utf8"), indent=1)
+        log(f"Packing clip cut by itself for {o}: " + ", ".join(CFG["cameras"][c]["label"] for c in pick))
+        done += 1
+        if done >= limit:
+            break
+
+
+def auto_clips_loop():
+    time.sleep(90)
+    while True:
+        try:
+            if footage.STATE.get("recording"):   # only the recording PC cuts, so clips aren't made twice
+                auto_clips_once()
+        except Exception as e:
+            log(f"Automatic packing clips: {clean(str(e))}")
+        time.sleep(300)
 
 
 def nas_check(scan, before, after):
@@ -1521,6 +1630,12 @@ def save_photo(b):
             raise ValueError("Video not found")
         t = max(0.0, float(b.get("t") or 0))
         cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.3f}", "-i", src, "-frames:v", "1", "-q:v", "1", out]
+    elif b.get("nas"):   # a moment of the NAS footage, at the camera's full 4K
+        n_ = b["nas"]
+        src = nas_view(n_.get("cam", ""), n_.get("scan", ""), n_.get("before", 5), n_.get("after", 1))
+        t = max(0.0, float(b.get("t") or 0))
+        b["file"] = f"NAS footage {n_.get('cam')}"
+        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.3f}", "-i", src, "-frames:v", "1", "-q:v", "1", out]
     else:
         cam = b.get("cam") if b.get("cam") in CFG["cameras"] else CFG["returns_camera"]
         cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-rtsp_transport", "tcp", "-i", rtsp(cam, "stream1"),
@@ -1657,14 +1772,21 @@ class H(BaseHTTPRequestHandler):
                     "login_ok": all(cam_login(CFG["returns_camera"], s)),
                     "cam_login": {c: all(cam_login(c, s)) for c in CFG["cameras"]},
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
-                    "pack_before": CFG["default_pack_minutes_before_scan"], "pack_after": CFG.get("default_pack_minutes_after_scan", 2), "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "auto_videos": auto_state(), "live": footage.live_list(), "log": LOGS[-30:]})
+                    "pack_before": CFG["default_pack_minutes_before_scan"], "pack_after": CFG.get("default_pack_minutes_after_scan", 2), "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "auto_videos": auto_state(), "live": footage.live_list(), "rec_health": footage.health(), "log": LOGS[-30:]})
             if u.path == "/api/footage":
                 return self.send(200, footage.status())
             if u.path == "/api/discover":
                 return self.send(200, discover(q.get("again") == "1"))
+            if u.path == "/api/scanwant":
+                return self.send(200, {"orders": scan_want()})
             if u.path == "/api/nascheck":
                 return self.send(200, nas_check(q.get("scan", ""), q.get("before", "5"), q.get("after", "1")))
             if u.path == "/api/order":
+                if SCAN_RE.match(q.get("scan") or "") and q.get("order"):
+                    try:
+                        scans_put({q["order"]: q["scan"]})
+                    except Exception:
+                        pass
                 return self.send(200, order_info(q.get("order")))
             if u.path == "/api/live.ws":
                 if self.headers.get("Upgrade", "").lower() != "websocket":
@@ -1775,6 +1897,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, footage.set_wanted(b.get("on")))
             if u.path == "/api/cameras":
                 return self.send(200, edit_cameras(b))
+            if u.path == "/api/scans":
+                return self.send(200, {"saved": scans_put(b.get("scans"), b.get("tried"))})
             if u.path == "/api/have":
                 return self.send(200, have(b.get("orders")))
             if u.path == "/api/photo":
@@ -1841,6 +1965,7 @@ def main():
     import pigulink
     apply_cameras()
     threading.Thread(target=tidy_views, daemon=True).start()
+    threading.Thread(target=auto_clips_loop, daemon=True).start()
     footage.start(cfg=CFG, rtsp=rtsp, log=log, ffmpeg=FFMPEG, local_cfg=local_cfg, local_path=LOCAL, nowin=NOWIN,
                   clean=clean)
     live.start(cfg=CFG, rtsp=rtsp, log=log, ffmpeg=FFMPEG, nowin=NOWIN, clean=clean, in_job=footage._in_job)
@@ -1857,7 +1982,7 @@ def main():
     LINK = pigulink.start(CFG, secrets().get("pin", ""), {
         "cfg": CFG, "unbox_state": UNBOX.state, "start": UNBOX.start, "stop": UNBOX.stop,
         "snapshot": snapshot, "returns": returns_list, "returns_info": returns_info,
-        "ask_refresh": ask_refresh, "clean": clean, "save_finding": save_finding, "read_waybill": read_waybill, "unbox_video": request_unbox_video, "pack_video": request_video, "found_opts": FOUND_OPTS}, log)
+        "ask_refresh": ask_refresh, "clean": clean, "save_finding": save_finding, "read_waybill": read_waybill, "unbox_video": request_unbox_video, "pack_video": request_video, "found_opts": FOUND_OPTS, "health": footage.health}, log)
     srv = ThreadingHTTPServer(("0.0.0.0", CFG["port"]), H)
     log(f"Sit Pretty on http://localhost:{CFG['port']}  (saving to {SAVE})")
     srv.serve_forever()

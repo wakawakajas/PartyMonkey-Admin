@@ -110,6 +110,22 @@
     });
   }
 
+  // Returns' ship-scan times, looked up in BigSeller's own Order Log (read only) and sent to Sit Pretty,
+  // so packing clips get cut by themselves and phones open the packing without typing a time.
+  function syncScans() {
+    chrome.runtime.sendMessage({ type: 'scanwant' }, async res => {
+      if (chrome.runtime.lastError || !res || !res.orders || !res.orders.length) return;
+      const scans = {}, tried = [];
+      for (const o of res.orders.slice(0, 15)) {
+        const s = await scanTime(o);
+        if (s) scans[o] = s; else tried.push(o);
+        await new Promise(r => setTimeout(r, 1500));
+      }
+      chrome.runtime.sendMessage({ type: 'scans', scans, tried }, () => void chrome.runtime.lastError);
+    });
+  }
+  if (window === window.top) { setTimeout(syncScans, 8000); setInterval(syncScans, 15 * 60000); }
+
   new MutationObserver(() => { if (!timer) timer = setTimeout(scan, 500); })
     .observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   scan();

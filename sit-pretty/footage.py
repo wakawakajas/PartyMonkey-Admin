@@ -347,7 +347,8 @@ def status():
                    "since": r["since"].strftime("%H:%M") if p and p.poll() is None else "", "err": r.get("err", "")}
     return {"pc": PC, "wanted": wanted(), "recording": STATE["recording"], "why": STATE["why"],
             "other_pc": STATE["other_pc"] or _other_recorder(), "free_gb": STATE["free_gb"], "cams": cams,
-            "dir": c["dir"], "hours": f"{c['start']}-{c['end']}", "days": c["days"], "keep_days": c["keep_days"]}
+            "dir": c["dir"], "hours": f"{c['start']}-{c['end']}", "days": c["days"], "keep_days": c["keep_days"],
+            "health": health()}
 
 
 # ---------------------------------------------------------------- clips from the NAS footage
@@ -373,6 +374,91 @@ def _files(k, start, end):
         if t < end and min(t_end, t + seg) > start:
             keep.append((t, p))
     return keep
+
+
+def motion(cam, start, end):
+    """How much moves in front of this camera between start and end (keyframes only, tiny grey frames).
+    The table that packed an order is the busy one in the minutes before its ship scan."""
+    f = _files(key_of(H["cfg"]["cameras"][cam]["ip"]), start, end)
+    if not f:
+        return 0.0
+    lst = os.path.join(os.environ.get("TEMP", "."), f"sp_motion_{cam}_{threading.get_ident()}.txt")
+    with open(lst, "w", encoding="utf8") as fh:
+        for _, p in f:
+            fh.write("file '" + p.replace("\\", "/").replace("'", "'\\''") + "'\n")
+    off = max(0.0, (start - f[0][0]).total_seconds())
+    dur = (end - max(start, f[0][0])).total_seconds()
+    try:
+        r = subprocess.run([H["ffmpeg"], "-hide_banner", "-loglevel", "error", "-skip_frame", "nokey", "-f", "concat", "-safe", "0",
+                            "-ss", f"{off:.2f}", "-i", lst, "-t", f"{dur:.2f}", "-vf", "scale=64:36,format=gray",
+                            "-fps_mode", "passthrough", "-f", "rawvideo", "-"], capture_output=True, timeout=300, creationflags=H["nowin"])
+    finally:
+        try:
+            os.remove(lst)
+        except OSError:
+            pass
+    n, b = 64 * 36, r.stdout
+    frames = [b[i:i + n] for i in range(0, len(b) - n + 1, n)]
+    if len(frames) < 2:
+        return 0.0
+    tot = 0
+    for a, c in zip(frames, frames[1:]):
+        tot += sum(abs(x - y) for x, y in zip(a, c))
+    return tot / (n * (len(frames) - 1))
+
+
+HEALTH = {"at": 0, "v": None}
+
+
+def health():
+    """Is the all-day recording healthy? Problems now (no recorder, a camera not writing) and today's gaps."""
+    if time.time() - HEALTH["at"] < 60 and HEALTH["v"]:
+        return HEALTH["v"]
+    c, now = conf(), datetime.now()
+    seg = int(c["segment_minutes"]) * 60
+    sh, sm = (int(x) for x in c["start"].split(":"))
+    eh, em = (int(x) for x in c["end"].split(":"))
+    day0, day1 = now.replace(hour=sh, minute=sm, second=0, microsecond=0), now.replace(hour=eh, minute=em, second=0, microsecond=0)
+    work = now.weekday() in c["days"]
+    problems, gaps = [], {}
+    if in_hours(now):
+        try:
+            j = json.load(open(os.path.join(c["dir"], "recorder.json"), encoding="utf8"))
+        except Exception:
+            j = {}
+        if time.time() - float(j.get("at") or 0) > 180:
+            problems.append("No PC is recording to the NAS" + (f" (last: {j.get('pc')} at {datetime.fromtimestamp(float(j['at'])):%H:%M})" if j.get("at") else ""))
+    for k, cam in cams_by_ip().items():
+        name = re.sub(r"\s*\(\d+\)$", "", folder_name(k))
+        files = []
+        for root in cam_dirs(k):
+            dd = os.path.join(root, now.strftime("%Y-%m-%d"))
+            for n in (os.listdir(dd) if os.path.isdir(dd) else []):
+                try:
+                    files.append((datetime.strptime(n[:-4], "%Y-%m-%d %H-%M-%S"), os.path.join(dd, n)))
+                except ValueError:
+                    pass
+        files.sort()
+        g, t = [], day0
+        for ts, _ in files:
+            if ts > day1:
+                break
+            if (ts - t).total_seconds() > 120:
+                g.append([t.strftime("%H:%M"), ts.strftime("%H:%M")])
+            t = max(t, ts + timedelta(seconds=seg))
+        # the NAS doesn't update a file's time while it is written: judge by when the newest file started
+        last = min(files[-1][0] + timedelta(seconds=seg), now) if files else None
+        if work and min(now, day1) > t + timedelta(minutes=3) and (not last or (now - last).total_seconds() > 180):
+            end = min(now, day1)
+            if (end - t).total_seconds() > 120:
+                g.append([t.strftime("%H:%M"), end.strftime("%H:%M") + ("" if end == day1 else " (now)")])
+        if work and in_hours(now) and (not last or (now - last).total_seconds() > 180):
+            problems.append(f"{name}: no new footage since " + (last.strftime("%H:%M") if last else "this morning"))
+        if g and work:
+            gaps[name] = g
+    v = {"ok": not problems, "problems": problems, "gaps": gaps, "at": now.strftime("%H:%M")}
+    HEALTH.update(at=time.time(), v=v)
+    return v
 
 
 def has(cam, start, end):
