@@ -493,11 +493,13 @@ def fetch_found_clips():
             json.dump(j, open(p, "w", encoding="utf8"), indent=1)
             JOB_CACHE[0] = 0
             r = pack_clips(j["order"], start, scan + timedelta(minutes=2), j.get("cams"))
+            j.pop("progress", None)
             j.update(status="done", files=r["files"], videos=r["files"],
                      summary=f"Scan to ship {scan:%d %b %H:%M}; clip {start:%H:%M}-{scan + timedelta(minutes=2):%H:%M}"
                      + (" · not saved: " + "; ".join(r["errors"]) if r["errors"] else ""))
             log(f"Packing clip saved for {j['order']}: {', '.join(r['files'])}")
         except Exception as e:
+            j.pop("progress", None)
             j.update(status="problem", problem=f"Could not download the clip: {clean(e)}")
             log(f"Packing clip for {j.get('order')} failed: {clean(e)}")
         json.dump(j, open(p, "w", encoding="utf8"), indent=1)
