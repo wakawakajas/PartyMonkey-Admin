@@ -1225,6 +1225,7 @@ def apply_cameras(force=False):
 def edit_cameras(b):
     apply_cameras()
     act, cam = b.get("action"), b.get("cam")
+    dup_area = None
     with CAM_LOCK:
         s = _read_json(CAMS_SHARED) or {}
         order = list(CFG["cameras"])
@@ -1260,6 +1261,19 @@ def edit_cameras(b):
             if b.get("packing", True):
                 s["packing"] = list(CFG["packing_cameras"]) + [new]
             cam = new
+        elif act == "duplicate":   # another view (own table box) of the same camera, placed right after it
+            src = CFG["cameras"][cam]
+            base = cam + "-copy"
+            new, n = base, 2
+            while new in CFG["cameras"] or new in BASE_CAMS["cameras"]:
+                new, n = f"{base}{n}", n + 1
+            s.setdefault("cameras", {})[new] = {"ip": src["ip"], "label": (src["label"] + " 2")[:40]}
+            s["removed"] = [k for k in s.get("removed") or [] if k != new]
+            s["order"] = order[:order.index(cam) + 1] + [new] + order[order.index(cam) + 1:]
+            if cam in CFG["packing_cameras"]:
+                s["packing"] = list(CFG["packing_cameras"]) + [new]
+            dup_area = areas().get(cam)
+            cam = new
         elif act == "remove":
             if cam == CFG["returns_camera"]:
                 raise ValueError("This is the unboxing camera; it cannot be removed")
@@ -1271,6 +1285,8 @@ def edit_cameras(b):
         os.makedirs(os.path.dirname(CAMS_SHARED), exist_ok=True)
         json.dump(s, open(CAMS_SHARED, "w", encoding="utf8"), indent=1)
         apply_cameras(force=True)
+        if act == "duplicate" and dup_area:
+            save_area(cam, dup_area)
     log(f"Cameras: {act} {CFG['cameras'].get(cam, {}).get('label', cam)}")
     return {"cameras": CFG["cameras"], "packing_cameras": CFG["packing_cameras"], "cam": cam}
 
