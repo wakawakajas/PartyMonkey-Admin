@@ -489,6 +489,113 @@ def request_packclip(b):
     return job
 
 
+# ---------------------------------------------------------------- packing clips that play while they download
+# The memory card only hands footage over as a download, so it is fetched one minute at a time; each minute gets a
+# small playable copy straight away (the pop-up plays them in order), and at the end the minutes are joined into the
+# full 4K clip plus one playable copy.
+LIVE_LOCK = threading.Lock()
+
+
+def encode_view(src, dst, cam):
+    a = areas().get(cam) if cam else None
+    vf = "fps=15," + (f"crop=iw*{a['w']}:ih*{a['h']}:iw*{a['x']}:ih*{a['y']}," if a else "") + "scale=960:-2"
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    tmp = dst + ".part.mp4"
+    r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-hwaccel", "auto", "-i", src, "-vf", vf,
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-g", "30", "-an", "-movflags", "+faststart", tmp],
+                       capture_output=True, timeout=1800, creationflags=NOWIN)
+    if r.returncode:
+        raise RuntimeError(r.stderr.decode("utf8", "replace")[-200:])
+    os.replace(tmp, dst)
+
+
+def _concat(parts, out, extra=()):
+    lst = out + ".txt"
+    with open(lst, "w", encoding="utf8") as f:
+        for p_ in parts:
+            f.write("file '" + p_.replace("\\", "/").replace("'", "'\\''") + "'\n")
+    r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst,
+                        "-map", "0:v", "-c", "copy", "-an", *extra, "-movflags", "+faststart", out],
+                       capture_output=True, timeout=900, creationflags=NOWIN)
+    os.remove(lst)
+    if r.returncode:
+        raise RuntimeError(r.stderr.decode("utf8", "replace")[-200:])
+
+
+def sd_clip_live(order, cam, start, end, job, save):
+    """Like sd_clip, but minute by minute, with each minute playable as soon as it is in."""
+    order = safe_id(order)
+    name = f"{order}_packing_{cam}_{start:%Y%m%d-%H%M}.mp4"
+    base = name[:-4]
+    out = os.path.join(order_dir(order), name)
+    n = max(1, int(-(-(end - start).total_seconds() // 60)))
+    raws, views, errs = [], [], []
+    job.update(live=[], live_total=n, live_cam=cam)
+    save()
+    enc = []
+    for i in range(n):
+        a = start + timedelta(minutes=i)
+        b = min(end, a + timedelta(minutes=1))
+        tmp = os.path.join(HERE, "tmp", f"sd_{base}_p{i:02d}.mp4")
+        for tries in range(4):
+            try:
+                sd(cam, "get", str(int(a.timestamp())), str(int(b.timestamp())), tmp)
+                break
+            except Exception as e:
+                msg = str(e).lower()
+                if ("busy" in msg or "in progress" in msg) and tries < 3:
+                    job["progress"] = f"Minute {i + 1} of {n}: the camera is busy, trying again in 1 minute"
+                    save()
+                    time.sleep(60)
+                    continue
+                errs.append(f"{a:%H:%M}: {clean(e)}")   # quiet minutes have no footage on the card
+                tmp = None
+                break
+        if not tmp:
+            continue
+        raws.append(tmp)
+        vname = f"{base}_p{i:02d}.mp4"
+        dst = view_path(order, vname)
+
+        def work(src=tmp, dst=dst, vname=vname):
+            try:
+                encode_view(src, dst, cam)
+                with LIVE_LOCK:
+                    job["live"] = sorted(job["live"] + [vname])
+                    save()
+            except Exception as e:
+                log(f"Could not make minute {vname} playable: {clean(e)}")
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+        enc.append(t)
+        views.append(dst)
+        job["progress"] = f"Downloading minute {i + 2 if i + 1 < n else n} of {n} (you can watch the first minutes already)"
+        save()
+    for t in enc:
+        t.join()
+    if not raws:
+        raise RuntimeError("No footage on the memory card for that time" + (f" ({errs[0]})" if errs else ""))
+    job["progress"] = "Joining the minutes into one clip"
+    save()
+    _concat(raws, out)
+    have_views = [v for v in views if os.path.isfile(v)]
+    if have_views:
+        try:
+            _concat(have_views, view_path(order, name))
+        except Exception as e:
+            log(f"Could not join the playable minutes for {name}: {clean(e)}")
+    for f_ in raws + have_views:
+        try:
+            os.remove(f_)
+        except OSError:
+            pass
+    with open(os.path.join(order_dir(order), "evidence-log.txt"), "a", encoding="utf8") as f:
+        f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  packing  {name}  {start:%Y-%m-%d %H:%M} to {end:%H:%M} (memory card)\n")
+    EV_CACHE[0] = 0
+    log(f"Packing clip saved: {out}")
+    return name
+
+
 def fetch_found_clips():
     """Download the clips whose scan time Claude has found (status "time_found")."""
     if not os.path.isdir(SAVE):
@@ -505,27 +612,39 @@ def fetch_found_clips():
             before, after = pack_minutes(j)
             start = scan - timedelta(minutes=before)
             end = scan + timedelta(minutes=after)
-            ready = end + timedelta(minutes=4)   # the camera hands over a recording only once that piece is finished
+            ready = end + timedelta(seconds=75)   # the camera hands over footage about a minute after it is recorded
             j["status"] = "downloading"
             if datetime.now() < ready:
                 j["progress"] = f"Waiting until {ready:%H:%M} for the camera to finish recording, then downloading"
                 json.dump(j, open(p, "w", encoding="utf8"), indent=1)
                 JOB_CACHE[0] = 0
                 time.sleep(max(0, (ready - datetime.now()).total_seconds()))
-            j["progress"] = "Downloading from the camera's memory card"
-            json.dump(j, open(p, "w", encoding="utf8"), indent=1)
-            JOB_CACHE[0] = 0
-            for tries in range(4):
-                r = pack_clips(j["order"], start, end, j.get("cams"), raise_all=False)
-                busy = [e for e in r["errors"] if "in progress" in e.lower() or "busy" in e.lower()]
-                if not busy or tries == 3:
-                    break
-                j["progress"] = ("The camera is busy (someone is watching it live?); trying again in 2 minutes"
-                                 if any("busy" in e.lower() for e in busy) else
-                                 "The camera is still recording that piece; trying again in 2 minutes")
+            j["progress"] = "Downloading minute 1"
+
+            def save(j=j, p=p):
                 json.dump(j, open(p, "w", encoding="utf8"), indent=1)
                 JOB_CACHE[0] = 0
-                time.sleep(120)
+            save()
+            made, errs, by_ip = [], [], {}
+            for cam in j.get("cams") or CFG["packing_cameras"]:
+                try:
+                    ip = CFG["cameras"][cam]["ip"]
+                    if ip in by_ip:   # the other half of the same camera: copy, don't download twice
+                        first_cam, first = by_ip[ip]
+                        nm = first.replace(f"_packing_{first_cam}_", f"_packing_{cam}_")
+                        shutil.copy(os.path.join(order_dir(j["order"]), first), os.path.join(order_dir(j["order"]), nm))
+                        if os.path.isfile(view_path(j["order"], first)):
+                            shutil.copy(view_path(j["order"], first), view_path(j["order"], nm))
+                        made.append(nm)
+                        continue
+                    nm = sd_clip_live(j["order"], cam, start, end, j, save)
+                    by_ip[ip] = (cam, nm)
+                    made.append(nm)
+                except Exception as e:
+                    errs.append(f"{CFG['cameras'][cam]['label']}: {clean(e)}")
+            r = {"files": made, "errors": errs}
+            for k in ("live", "live_total", "live_cam"):
+                j.pop(k, None)
             if not r["files"]:
                 raise RuntimeError("; ".join(r["errors"]))
             j.pop("progress", None)
@@ -534,7 +653,7 @@ def fetch_found_clips():
                      + (" · not saved: " + "; ".join(r["errors"]) if r["errors"] else ""))
             log(f"Packing clip saved for {j['order']}: {', '.join(r['files'])}")
             for f_ in r["files"]:
-                make_view(j["order"], f_)
+                make_view(j["order"], f_)   # no-op when the live download already made it
         except Exception as e:
             j.pop("progress", None)
             j.update(status="problem", problem=f"Could not download the clip: {clean(e)}")
@@ -964,7 +1083,8 @@ def order_info(order):
         j = _read_json(os.path.join(d, fn))
         if j:
             j.setdefault("kind", "packing")
-            reqs.append({k: j.get(k) for k in ("kind", "status", "progress", "problem", "summary", "requested_at", "scan_time", "cams", "clip")})
+            reqs.append({k: j.get(k) for k in ("kind", "status", "progress", "problem", "summary", "requested_at", "scan_time", "cams", "clip",
+                                               "live", "live_total")})
     row = next((r for r in returns_list() if r.get("order") == order), None)
     return {"order": order, "videos": vids, "jobs": reqs, "return": {k: row.get(k) for k in ("request", "status", "reason", "due", "todo", "appeal")} if row else None,
             "packing_cameras": [[c, CFG["cameras"][c]["label"]] for c in CFG["packing_cameras"]], "auto_videos": auto_state()}
@@ -1258,6 +1378,16 @@ def main():
     os.makedirs(os.path.join(HERE, "tmp"), exist_ok=True)
     import pigulink
     threading.Thread(target=tidy_views, daemon=True).start()
+    try:   # clip downloads cut off by a restart start again
+        for nm in os.listdir(SAVE):
+            rp = os.path.join(SAVE, nm, CLIP_REQ)
+            jj = _read_json(rp) if os.path.isfile(rp) else None
+            if jj and jj.get("status") == "downloading":
+                jj["status"] = "time_found"
+                json.dump(jj, open(rp, "w", encoding="utf8"), indent=1)
+        threading.Thread(target=fetch_found_clips, daemon=True).start()
+    except OSError:
+        pass
     LINK = pigulink.start(CFG, secrets().get("pin", ""), {
         "cfg": CFG, "unbox_state": UNBOX.state, "start": UNBOX.start, "stop": UNBOX.stop,
         "snapshot": snapshot, "returns": returns_list, "returns_info": returns_info,

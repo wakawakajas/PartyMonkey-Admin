@@ -64,7 +64,7 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const media=(f,dl,view)=>`/media?order=${encodeURIComponent(ORDER)}&file=${encodeURIComponent(f)}&pin=${encodeURIComponent(PIN)}${dl?'&dl=1':''}${view?'&view=1':''}`;
 const vinfo=f=>(D&&D.videos.find(v=>v.file===f))||{};
 const playSrc=f=>{const v=vinfo(f);return v.view==='ready'?media(f,0,1):media(f)};
-let asked={};
+let asked={}, livei=0;
 const mins=()=>{let b=5,a=1;try{b=+(localStorage.getItem('sp-before')||5);a=+(localStorage.getItem('sp-after1')||1)}catch(e){}return [b,a]};
 // minutes-before buttons (1 2 5 8 10 15): the chosen one is dark
 function spMinChips(root){(root||document).querySelectorAll('.mchips').forEach(c=>{const i=c.parentElement.querySelector('input[data-o=before],#pmb');if(!i)return;c.querySelectorAll('[data-mb]').forEach(b=>{const on=+b.dataset.mb===+i.value;b.style.background=on?'#1d1d1f':'#fff';b.style.color=on?'#fff':'#1d1d1f';b.style.borderColor=on?'#1d1d1f':'#ccc'})})}
@@ -114,6 +114,15 @@ function render(){
   if(list.length>1||(!cur&&list.length)) h+=`<div class="list">${list.map(v=>`<div class="vid" data-f="${esc(v.file)}" aria-current="${v.file===cur}"><div class="grow"><b>${esc(v.label)}</b><div class="meta">${esc(v.at)} · ${v.mb} MB</div></div><a class="btn" href="${media(v.file,1)}" download onclick="event.stopPropagation()">Download</a></div>`).join('')}</div>`;
   if(!list.length) h+=`<div class="empty">${tab==='unboxing'?'No unboxing video for this order yet. Record one on Sit Pretty\'s Unbox page.':tab==='detailed'?'No detailed packing video yet.':'No packing clip yet.'}</div>`;
 
+  const lj=(D.jobs||[]).find(j=>j.kind==='clip'&&j.live&&j.live.length&&['downloading','time_found'].includes(j.status));
+  if(tab==='simple'&&lj&&!list.some(v=>v.kind==='simple')){
+    if(livei>=lj.live.length) livei=lj.live.length-1;
+    const src=media(lj.live[livei],0,1);
+    h=`<div class="player"><video id="v" controls autoplay muted playsinline src="${src}"></video></div>
+      <div class="ctrl"><b>Live: minute ${livei+1} of ${lj.live_total}</b><span class="sub">(${lj.live.length} ready, the rest is still coming)</span>
+      ${[1,2,4,8].map(s=>`<button class="btn sp${s===speed?' on':''}" data-sp="${s}">${s}×</button>`).join('')}
+      <button class="btn" data-live="-1"${livei?'':' disabled'}>◀ Minute</button><button class="btn" data-live="1"${livei+1<lj.live.length?'':' disabled'}>Minute ▶</button></div>`;
+  }
   if(tab==='simple'){
     const raw=list.filter(v=>v.kind==='simple'), counted=list.some(v=>v.kind==='count');
     h+=jobHTML(['clip','count']);
@@ -133,10 +142,11 @@ function render(){
   if(D.return&&D.return.appeal) h+=`<div class="card"><h2>Appeal for Shopee</h2><div class="sub" style="white-space:pre-wrap">${esc(D.return.appeal)}</div><button class="btn" id="cpapp" style="margin-top:8px">Copy appeal</button></div>`;
 
   // keep the playing video when only the status changes
-  const v=$('#v'), keep=v&&cur&&v.getAttribute('src')===playSrc(cur)?{t:v.currentTime,p:!v.paused}:null;
+  const v=$('#v'), ns=(h.match(/<video id="v"[^>]*src="([^"]+)"/)||[])[1], keep=v&&ns&&v.getAttribute('src')===ns.replace(/&amp;/g,'&')?{t:v.currentTime,p:!v.paused}:null;
   if(keep){ const old=v.parentElement; $('#main').innerHTML=h; $('#v').parentElement.replaceWith(old); }
   else $('#main').innerHTML=h;
-  const nv=$('#v'); if(nv) nv.playbackRate=speed;
+  const nv=$('#v'); if(nv){ nv.playbackRate=speed;
+    nv.onended=()=>{ const j=(D.jobs||[]).find(j=>j.kind==='clip'&&j.live&&j.live.length); if(j&&livei+1<j.live.length){ livei++; nv.parentElement.remove(); render(); } }; }
   spMinChips();
 }
 
@@ -144,6 +154,7 @@ document.addEventListener('click',async e=>{
   const t=e.target.closest('[data-t]'); if(t){tab=t.dataset.t;cur='';render();return}
   const f=e.target.closest('.vid'); if(f){cur=f.dataset.f;$('#main').querySelector('.player')?.remove();render();return}
   const s=e.target.closest('[data-sp]'); if(s){speed=+s.dataset.sp;const v=$('#v');if(v)v.playbackRate=speed;document.querySelectorAll('.sp').forEach(b=>b.classList.toggle('on',+b.dataset.sp===speed));return}
+  const lv=e.target.closest('[data-live]'); if(lv){livei=Math.max(0,livei+ +lv.dataset.live);$('#main').querySelector('.player')?.remove();render();return}
   const k=e.target.closest('[data-skip]'); if(k){const v=$('#v');if(v)v.currentTime=Math.max(0,v.currentTime+ +k.dataset.skip);return}
   const id=e.target.id;
   if(id==='goclip'||id==='godet'){
@@ -174,7 +185,7 @@ async function load(){
   const r=D.return; $('#hdr').textContent=[r&&r.status?'Return: '+r.status:'',SCAN?'Scanned to ship '+fmtScan(SCAN):''].filter(Boolean).join(' · ');
   render();
   clearTimeout(timer);
-  if(busy(['clip','count','packing','unboxing'])||D.videos.some(v=>v.view==='making'||(v.view==='none'&&v.file===cur))) timer=setTimeout(load,5000);
+  if(busy(['clip','count','packing','unboxing'])||D.videos.some(v=>v.view==='making'||(v.view==='none'&&v.file===cur))) timer=setTimeout(load,4000);
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')window.close()});
 load();
