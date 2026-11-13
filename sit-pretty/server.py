@@ -1355,6 +1355,12 @@ def choose_clip(b):
             json.dump({"status": "chosen", "cams": cams, "scan": s, "at": f"{datetime.now():%Y-%m-%d %H:%M}"},
                       open(os.path.join(d, AUTO_CLIP), "w", encoding="utf8"), indent=1)
             log(f"Packing clip saved for {o}: " + ", ".join(CFG["cameras"][c]["label"] for c in cams))
+            # then the Shopee-ready detailed packing video (Claude labels every item), unless one is already asked for
+            j = _read_json(os.path.join(d, "evidence-request.json")) or {}
+            if j.get("status") not in ("queued", "working", "done"):
+                row = next((r for r in returns_list() if r.get("order") == o), {}) or {}
+                request_video({"order": o, "request": row.get("request", ""), "cams": cams, "scan_time": s,
+                               "before": b.get("before"), "after": b.get("after")})
         except Exception as e:
             log(f"Packing clip for {o}: {clean(str(e))}")
         finally:
