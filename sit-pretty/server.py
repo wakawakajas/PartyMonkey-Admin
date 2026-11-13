@@ -11,6 +11,7 @@ Nothing is recorded in between. Standard library plus ffmpeg; pytapo for clips.
 import json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+import footage
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG = json.load(open(os.path.join(HERE, "config.json"), encoding="utf8"))
@@ -235,6 +236,13 @@ def sd_clip(order, cam, start, end):
     out = os.path.join(order_dir(order), name)
     tmp = os.path.join(HERE, "tmp", "sd_" + name)
     os.makedirs(os.path.dirname(tmp), exist_ok=True)
+    if footage.has(cam, start, end):
+        footage.clip(cam, start, end, out)
+        with open(os.path.join(order_dir(order), "evidence-log.txt"), "a", encoding="utf8") as f:
+            f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  packing  {name}  {start:%Y-%m-%d %H:%M} to {end:%H:%M} (NAS footage)\n")
+        EV_CACHE[0] = 0
+        log(f"Packing clip saved from the NAS footage: {out}")
+        return name
     sd(cam, "get", str(int(start.timestamp())), str(int(end.timestamp())), tmp)
     r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", tmp, "-map", "0:v", "-c", "copy", "-an",
                         "-movflags", "+faststart", out], capture_output=True, creationflags=NOWIN, timeout=600)
@@ -532,6 +540,24 @@ def sd_clip_live(order, cam, start, end, job, save):
     name = f"{order}_packing_{cam}_{start:%Y%m%d-%H%M}.mp4"
     base = name[:-4]
     out = os.path.join(order_dir(order), name)
+    if footage.has(cam, start, end):
+        job["progress"] = "Cutting the clip from the NAS footage"
+        save()
+        try:
+            footage.clip(cam, start, end, out)
+            job["progress"] = "Making a playable copy"
+            save()
+            try:
+                encode_view(out, view_path(order, name), cam)
+            except Exception as e:
+                log(f"Could not make {name} playable: {clean(e)}")
+            with open(os.path.join(order_dir(order), "evidence-log.txt"), "a", encoding="utf8") as f:
+                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  packing  {name}  {start:%Y-%m-%d %H:%M} to {end:%H:%M} (NAS footage)\n")
+            EV_CACHE[0] = 0
+            log(f"Packing clip saved from the NAS footage: {out}")
+            return name
+        except Exception as e:
+            log(f"NAS footage failed for {name}, using the memory card: {clean(e)}")
     n = max(1, int(-(-(end - start).total_seconds() // 60)))
     raws, views, errs = [], [], []
     job.update(live=[], live_total=n, live_cam=cam)
@@ -617,6 +643,9 @@ def fetch_found_clips():
             start = scan - timedelta(minutes=before)
             end = scan + timedelta(minutes=after)
             ready = end + timedelta(seconds=75)   # the camera hands over footage about a minute after it is recorded
+            fs = footage.status()
+            if fs["recording"] or fs["other_pc"]:
+                ready = end + timedelta(seconds=20)   # the NAS files are readable while they are being written
             j["status"] = "downloading"
             if datetime.now() < ready:
                 j["progress"] = f"Waiting until {ready:%H:%M} for the camera to finish recording, then downloading"
@@ -1493,6 +1522,8 @@ class H(BaseHTTPRequestHandler):
                     "cam_login": {c: all(cam_login(c, s)) for c in CFG["cameras"]},
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
                     "pack_before": CFG["default_pack_minutes_before_scan"], "pack_after": CFG.get("default_pack_minutes_after_scan", 2), "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "auto_videos": auto_state(), "log": LOGS[-30:]})
+            if u.path == "/api/footage":
+                return self.send(200, footage.status())
             if u.path == "/api/discover":
                 return self.send(200, discover(q.get("again") == "1"))
             if u.path == "/api/order":
@@ -1573,6 +1604,8 @@ class H(BaseHTTPRequestHandler):
                 start = datetime.strptime(b["start"], "%Y-%m-%dT%H:%M")
                 end = datetime.strptime(b["end"], "%Y-%m-%dT%H:%M")
                 return self.send(200, pack_clips(b["order"], start, end, b.get("cams")))
+            if u.path == "/api/footage":
+                return self.send(200, footage.set_wanted(b.get("on")))
             if u.path == "/api/cameras":
                 return self.send(200, edit_cameras(b))
             if u.path == "/api/have":
@@ -1617,6 +1650,8 @@ def main():
     import pigulink
     apply_cameras()
     threading.Thread(target=tidy_views, daemon=True).start()
+    footage.start(cfg=CFG, rtsp=rtsp, log=log, ffmpeg=FFMPEG, local_cfg=local_cfg, local_path=LOCAL, nowin=NOWIN,
+                  clean=clean)
     try:   # clip downloads cut off by a restart start again
         for nm in os.listdir(SAVE):
             rp = os.path.join(SAVE, nm, CLIP_REQ)
