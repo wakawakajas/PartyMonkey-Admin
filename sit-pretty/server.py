@@ -185,6 +185,10 @@ class Unboxer:
                 log(f"Unboxing for {info['order']} failed: {err.strip()}")
                 raise RuntimeError("The recording is empty. Check the camera login and that the returns camera is online. " + err.strip()[:200])
             retime(info["tmp"], info["final"])
+            try:
+                make_view(info["order"], os.path.basename(info["final"]))
+            except Exception:
+                pass
             secs = int(time.time() - info["started"])
             meta = os.path.join(os.path.dirname(info["final"]), "evidence-log.txt")
             with open(meta, "a", encoding="utf8") as f:
@@ -502,10 +506,12 @@ def fetch_found_clips():
             JOB_CACHE[0] = 0
             for tries in range(4):
                 r = pack_clips(j["order"], start, end, j.get("cams"), raise_all=False)
-                busy = [e for e in r["errors"] if "in progress" in e.lower()]
+                busy = [e for e in r["errors"] if "in progress" in e.lower() or "busy" in e.lower()]
                 if not busy or tries == 3:
                     break
-                j["progress"] = "The camera is still recording that piece; trying again in 2 minutes"
+                j["progress"] = ("The camera is busy (someone is watching it live?); trying again in 2 minutes"
+                                 if any("busy" in e.lower() for e in busy) else
+                                 "The camera is still recording that piece; trying again in 2 minutes")
                 json.dump(j, open(p, "w", encoding="utf8"), indent=1)
                 JOB_CACHE[0] = 0
                 time.sleep(120)
@@ -516,6 +522,8 @@ def fetch_found_clips():
                      summary=f"Scan to ship {scan:%d %b %H:%M}; clip {start:%H:%M}-{scan + timedelta(minutes=2):%H:%M}"
                      + (" · not saved: " + "; ".join(r["errors"]) if r["errors"] else ""))
             log(f"Packing clip saved for {j['order']}: {', '.join(r['files'])}")
+            for f_ in r["files"]:
+                make_view(j["order"], f_)
         except Exception as e:
             j.pop("progress", None)
             j.update(status="problem", problem=f"Could not download the clip: {clean(e)}")
@@ -938,7 +946,7 @@ def order_info(order):
         for n in sorted(os.listdir(d)):
             if n.endswith(".mp4"):
                 p = os.path.join(d, n)
-                vids.append({"file": n, "kind": video_kind(n), "label": video_label(n),
+                vids.append({"file": n, "kind": video_kind(n), "label": video_label(n), "view": view_state(order, n),
                              "mb": round(os.path.getsize(p) / 1e6, 1), "at": datetime.fromtimestamp(os.path.getmtime(p)).strftime("%d %b %H:%M")})
     reqs = []
     for fn in ("evidence-request.json", "unboxing-video-request.json", CLIP_REQ, COUNT_REQ):
@@ -965,6 +973,72 @@ def request_count(b):
     log(f"Simple count asked for {order} ({clip})")
     job["now"] = kick_claude()
     return job
+
+
+# ---------------------------------------------------------------- playable copies of the 4K H.265 recordings
+# Chrome on the shop PCs cannot play the cameras' 4K H.265 files, so each raw clip / unboxing recording gets a
+# small H.264 copy (cropped to the table, 960 px, 15 fps) kept in _sitpretty\view. Download still gives the original.
+VIEW_DIR = os.path.join(SAVE, "_sitpretty", "view")
+VIEW_Q, VIEW_BUSY = [], set()
+VIEW_LOCK = threading.Lock()
+
+
+def needs_view(name):
+    k = video_kind(name)
+    return k == "simple" or (k == "unboxing" and "_labelled_" not in name)
+
+
+def view_path(order, name):
+    return os.path.join(VIEW_DIR, safe_id(order), os.path.basename(name))
+
+
+def view_state(order, name):
+    if not needs_view(name):
+        return "ok"
+    if os.path.isfile(view_path(order, name)):
+        return "ready"
+    return "making" if (safe_id(order), name) in VIEW_BUSY else "none"
+
+
+def _view_worker():
+    while True:
+        with VIEW_LOCK:
+            if not VIEW_Q:
+                return
+            order, name = VIEW_Q.pop(0)
+        src, dst = os.path.join(SAVE, order, name), view_path(order, name)
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            cam = next((c for c in CFG["cameras"] if f"_{c}_" in name), None)
+            a = areas().get(cam) if cam else None
+            vf = "fps=15," + (f"crop=iw*{a['w']}:ih*{a['h']}:iw*{a['x']}:ih*{a['y']}," if a else "") + "scale=960:-2"
+            tmp = dst + ".part.mp4"
+            r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-hwaccel", "auto", "-i", src, "-vf", vf,
+                                "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-g", "30", "-an", "-movflags", "+faststart", tmp],
+                               capture_output=True, timeout=1800, creationflags=NOWIN)
+            if r.returncode:
+                raise RuntimeError(r.stderr.decode("utf8", "replace")[-200:])
+            os.replace(tmp, dst)
+        except Exception as e:
+            log(f"Could not make a playable copy of {name}: {clean(e)}")
+        finally:
+            VIEW_BUSY.discard((order, name))
+
+
+def make_view(order, name):
+    """Queue a playable copy (about 2 minutes for 15 minutes of footage)."""
+    order, name = safe_id(order), os.path.basename(name)
+    if not needs_view(name) or os.path.isfile(view_path(order, name)) or (order, name) in VIEW_BUSY:
+        return view_state(order, name)
+    if not os.path.isfile(os.path.join(SAVE, order, name)):
+        raise ValueError("Video not found")
+    with VIEW_LOCK:
+        VIEW_BUSY.add((order, name))
+        VIEW_Q.append((order, name))
+        start = len(VIEW_Q) == 1 and len(VIEW_BUSY) == 1
+    if start:
+        threading.Thread(target=_view_worker, daemon=True).start()
+    return "making"
 
 
 def returns_list():
@@ -1066,7 +1140,7 @@ class H(BaseHTTPRequestHandler):
                     return self.send(503, {"error": str(e)})
             if u.path == "/media":
                 order, name = safe_id(q.get("order")), os.path.basename(q.get("file", ""))
-                p = os.path.join(SAVE, order, name)
+                p = view_path(order, name) if q.get("view") == "1" else os.path.join(SAVE, order, name)
                 if not (name.endswith(".mp4") and os.path.isfile(p)):
                     return self.send(404, {"error": "not found"})
                 return self.stream(p, q.get("dl") == "1")
@@ -1122,6 +1196,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, pack_clips(b["order"], start, end, b.get("cams")))
             if u.path == "/api/have":
                 return self.send(200, have(b.get("orders")))
+            if u.path == "/api/makeview":
+                return self.send(200, {"view": make_view(b.get("order"), b.get("file", ""))})
             if u.path == "/api/count":
                 return self.send(200, request_count(b))
             if u.path == "/api/readwb":

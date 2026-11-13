@@ -60,7 +60,10 @@ let PIN=P.get('pin')||(()=>{try{return localStorage.getItem('sp-pin')||''}catch(
 let D=null, tab=P.get('tab')||'', cur='', speed=1, timer=null;
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const media=(f,dl)=>`/media?order=${encodeURIComponent(ORDER)}&file=${encodeURIComponent(f)}&pin=${encodeURIComponent(PIN)}${dl?'&dl=1':''}`;
+const media=(f,dl,view)=>`/media?order=${encodeURIComponent(ORDER)}&file=${encodeURIComponent(f)}&pin=${encodeURIComponent(PIN)}${dl?'&dl=1':''}${view?'&view=1':''}`;
+const vinfo=f=>(D&&D.videos.find(v=>v.file===f))||{};
+const playSrc=f=>{const v=vinfo(f);return v.view==='ready'?media(f,0,1):media(f)};
+let asked={};
 async function api(path,body){
   const r=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json','X-Pin':PIN},body:body?JSON.stringify(body):undefined});
   if(r.status===401){askPin();throw new Error('PIN needed')}
@@ -91,8 +94,12 @@ function render(){
   const list=by[tab];
   if(!list.some(v=>v.file===cur)) cur=(list.find(v=>v.kind==='count')||list[0]||{}).file||'';
   let h='';
-  if(cur){
-    h+=`<div class="player"><video id="v" controls autoplay muted playsinline preload="metadata" src="${media(cur)}"></video></div>
+  const cv=vinfo(cur);
+  if(cur&&(cv.view==='none'||cv.view==='making')){
+    if(cv.view==='none'&&!asked[cur]){asked[cur]=1;api('/api/makeview',{order:ORDER,file:cur}).then(()=>setTimeout(load,1500)).catch(()=>{})}
+    h+=`<div class="card" style="text-align:center;padding:30px 12px"><span class="spin"></span> <b>Making a playable copy of this camera recording…</b><div class="sub" style="margin-top:6px">The camera's 4K files don't play in Chrome, so Sit Pretty makes a small copy (about 2 minutes for 15 minutes of footage). It plays here by itself when ready. Download gives the full 4K original now.</div><a class="btn" style="margin-top:10px" href="${media(cur,1)}" download>Download 4K original</a></div>`;
+  } else if(cur){
+    h+=`<div class="player"><video id="v" controls autoplay muted playsinline preload="metadata" src="${playSrc(cur)}"></video></div>
       <div class="ctrl"><span class="sub">Speed</span>${[1,2,4,8,16].map(s=>`<button class="btn sp${s===speed?' on':''}" data-sp="${s}">${s}×</button>`).join('')}
       <button class="btn" data-skip="-10">−10 s</button><button class="btn" data-skip="10">+10 s</button>
       <a class="btn" href="${media(cur,1)}" download>Download</a></div>`;
@@ -119,7 +126,7 @@ function render(){
   if(D.return&&D.return.appeal) h+=`<div class="card"><h2>Appeal for Shopee</h2><div class="sub" style="white-space:pre-wrap">${esc(D.return.appeal)}</div><button class="btn" id="cpapp" style="margin-top:8px">Copy appeal</button></div>`;
 
   // keep the playing video when only the status changes
-  const v=$('#v'), keep=v&&v.getAttribute('src')===media(cur)?{t:v.currentTime,p:!v.paused}:null;
+  const v=$('#v'), keep=v&&cur&&v.getAttribute('src')===playSrc(cur)?{t:v.currentTime,p:!v.paused}:null;
   if(keep){ const old=v.parentElement; $('#main').innerHTML=h; $('#v').parentElement.replaceWith(old); }
   else $('#main').innerHTML=h;
   const nv=$('#v'); if(nv) nv.playbackRate=speed;
@@ -158,7 +165,7 @@ async function load(){
   const r=D.return; $('#hdr').textContent=[r&&r.status?'Return: '+r.status:'',SCAN?'Scanned to ship '+fmtScan(SCAN):''].filter(Boolean).join(' · ');
   render();
   clearTimeout(timer);
-  if(busy(['clip','count','packing','unboxing'])) timer=setTimeout(load,5000);
+  if(busy(['clip','count','packing','unboxing'])||D.videos.some(v=>v.view==='making'||(v.view==='none'&&v.file===cur))) timer=setTimeout(load,5000);
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')window.close()});
 load();
