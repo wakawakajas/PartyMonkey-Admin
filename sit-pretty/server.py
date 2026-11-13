@@ -735,6 +735,10 @@ AUTO_PROMPT = (
     "available, leave that request queued for the hourly task. Delete temporary files when done. "
     "Finish with one line per request.")
 
+# the prompts name the save folder this PC actually uses
+CLIP_PROMPT, REFRESH_PROMPT, AUTO_PROMPT = (x.replace("N:\\Yong Chuan\\Dispute", SAVE.replace("{", "{{").replace("}", "}}"))
+                                            for x in (CLIP_PROMPT, REFRESH_PROMPT, AUTO_PROMPT))
+
 
 def auto_state():
     if not os.path.isfile(CLAUDE_EXE):
@@ -1529,7 +1533,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, {
                     "unbox": UNBOX.state(), "returns": returns_list(), "evidence": evidence(),
                     "cameras": CFG["cameras"], "returns_camera": CFG["returns_camera"],
-                    "packing_cameras": CFG["packing_cameras"], "save_dir": SAVE,
+                    "packing_cameras": CFG["packing_cameras"], "save_dir": SAVE, "save_ok": os.path.isdir(SAVE),
                     "login_ok": all(cam_login(CFG["returns_camera"], s)),
                     "cam_login": {c: all(cam_login(c, s)) for c in CFG["cameras"]},
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),

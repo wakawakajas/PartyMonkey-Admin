@@ -4,6 +4,8 @@ Staff ask for a video in Sit Pretty (**Evidence video** page): they pick the ret
 camera(s) that filmed the packing and, if they know it, BigSeller's "Scan to ship" time.
 That writes `N:\Yong Chuan\Dispute\<OrderID>\evidence-request.json` with `"status": "queued"`.
 The hourly Claude Code task `sit-pretty-evidence-videos` picks these up.
+`N:\Yong Chuan\Dispute` is the NAS folder `\\Partymonkey-nas\nc2\NC2 Accounts\Yong Chuan\Dispute`;
+on a PC without an N: drive, use that network path wherever this file says `N:\Yong Chuan\Dispute`.
 
 **Show your progress.** Staff watch the request in Sit Pretty and in the BigSeller pop-up. Whenever you
 move to a new step, write a short `"progress"` into the request file, e.g. "Finding the scan time in

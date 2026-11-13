@@ -78,10 +78,10 @@ if not exist "sitpretty-secrets.txt" (
 )
 
 rem --- the save folder must be reachable ------------------------------------
-if not exist "N:\Yong Chuan\Dispute" (
+if not exist "\\Partymonkey-nas\nc2\NC2 Accounts\Yong Chuan\Dispute" (
     echo.
-    echo WARNING: N:\Yong Chuan\Dispute is not reachable on this PC.
-    echo Map the NAS drive N: first, or videos cannot be saved.
+    echo WARNING: the NAS folder \\Partymonkey-nas\nc2\NC2 Accounts\Yong Chuan\Dispute is not reachable.
+    echo Open it once in File Explorer and sign in to the NAS, then start Sit Pretty again.
 )
 
 echo.
