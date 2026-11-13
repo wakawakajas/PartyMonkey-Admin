@@ -29,6 +29,12 @@ if exist "%~dp0..\lyrics-overlay\Start Lyrics Overlay.bat" (
     reg add "HKCU\Software\Classes\lyricsoverlay" /v "URL Protocol" /d "" /f >nul 2>&1
     reg add "HKCU\Software\Classes\lyricsoverlay\shell\open\command" /ve /d "\"%~dp0..\lyrics-overlay\Start Lyrics Overlay.bat\" \"%%1\"" /f >nul 2>&1
 )
+rem Same for Sit Pretty (return evidence videos): Pigu's "Start Sit Pretty" button.
+if exist "%~dp0..\sit-pretty\start-sit-pretty.bat" (
+    reg add "HKCU\Software\Classes\sitpretty" /ve /d "URL:Sit Pretty Protocol" /f >nul 2>&1
+    reg add "HKCU\Software\Classes\sitpretty" /v "URL Protocol" /d "" /f >nul 2>&1
+    reg add "HKCU\Software\Classes\sitpretty\shell\open\command" /ve /d "\"%~dp0..\sit-pretty\start-sit-pretty.bat\" \"%%1\"" /f >nul 2>&1
+)
 
 rem ---------------------------------------------------------------------
 rem Step 0b: if an agent is already up (this was launched again while one

@@ -7,11 +7,18 @@ echo   Sit Pretty - return evidence videos
 echo ============================================
 echo.
 
+rem --- let Pigu's "Start Sit Pretty" button (sitpretty://) start this file ----
+reg add "HKCU\Software\Classes\sitpretty" /ve /d "URL:Sit Pretty Protocol" /f >nul 2>&1
+reg add "HKCU\Software\Classes\sitpretty" /v "URL Protocol" /d "" /f >nul 2>&1
+reg add "HKCU\Software\Classes\sitpretty\shell\open\command" /ve /d "\"%~f0\" \"%%1\"" /f >nul 2>&1
+set "FROM_PIGU="
+echo %~1 | find /i "sitpretty:" >nul && set "FROM_PIGU=1"
+
 rem --- already running on this PC? just open it ---------------------------
 curl -s -o nul -m 1 "http://127.0.0.1:8787/api/state"
 if not errorlevel 1 (
-    echo Sit Pretty is already running - opening it.
-    start "" "http://localhost:8787/"
+    echo Sit Pretty is already running.
+    if not defined FROM_PIGU start "" "http://localhost:8787/"
     exit /b 0
 )
 
@@ -81,6 +88,6 @@ echo.
 echo Sit Pretty is running. Keep this window open.
 echo On this PC:  http://localhost:8787
 powershell -nop -c "$ip=(Get-NetIPAddress -AddressFamily IPv4 | ? IPAddress -like '192.168.10.*' | select -First 1).IPAddress; if($ip){'On a phone:  http://'+$ip+':8787'}"
-start "" "http://localhost:8787/"
+if not defined FROM_PIGU start "" "http://localhost:8787/"
 ".venv\Scripts\python.exe" server.py
 pause
