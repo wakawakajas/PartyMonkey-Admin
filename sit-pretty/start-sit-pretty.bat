@@ -87,6 +87,7 @@ if not exist "N:\Yong Chuan\Dispute" (
 echo.
 echo Sit Pretty is running. Keep this window open.
 echo On this PC:  http://localhost:8787
+echo Other PCs and phones:  http://%COMPUTERNAME%:8787   ^(this PC's name, it never changes^)
 powershell -nop -c "$ip=(Get-NetIPAddress -AddressFamily IPv4 | ? IPAddress -like '192.168.10.*' | select -First 1).IPAddress; if($ip){'On a phone:  http://'+$ip+':8787'}"
 if not defined FROM_PIGU start "" "http://localhost:8787/"
 ".venv\Scripts\python.exe" server.py
