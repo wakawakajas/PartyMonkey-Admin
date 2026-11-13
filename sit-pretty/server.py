@@ -427,7 +427,16 @@ AUTO = {"proc": None, "again": False, "state": "idle"}   # idle / running / sign
 AUTO_LOCK = threading.Lock()
 # Unboxing videos are simpler (no BigSeller lookup, no packing count), so they use the cheaper Sonnet model;
 # packing videos keep the default (stronger) model because the item counting needs care.
-AUTO_KINDS = [("unboxing-video-request.json", "sonnet"), ("evidence-request.json", None)]
+AUTO_KINDS = [("refresh", "sonnet"), ("unboxing-video-request.json", "sonnet"), ("evidence-request.json", None)]
+REFRESH_PROMPT = (
+    "Staff pressed \"Refresh from Shopee\" in Sit Pretty. Read sit-pretty/evidence/README.md, section "
+    "\"Returns list refresh\", and the daily task it points to "
+    "(C:\\Users\\Admin\\.claude\\scheduled-tasks\\shopee-return-claims-refresh\\SKILL.md), and do ONLY the "
+    "returns-list refresh now: rebuild N:\\Yong Chuan\\Dispute\\_sitpretty\\returns.json from Shopee Seller Centre "
+    "in Claude in Chrome (returns that are approved, refunded, closed or cancelled drop off the list), then delete "
+    "refresh-request.json. Do not make any videos and do not update the Claims Desk artifact. "
+    "Never type passwords. In Seller Centre only read: never click Refund, Dispute, Accept or anything that changes "
+    "an order. Use sit-pretty\\.venv\\Scripts\\python.exe for Python. Finish with one line: how many open returns.")
 AUTO_PROMPT = (
     "Make the queued Sit Pretty video requests now. Read sit-pretty/evidence/README.md and follow it exactly for "
     "every N:\\Yong Chuan\\Dispute\\*\\{fname} whose status is "
@@ -445,6 +454,8 @@ def auto_state():
 
 
 def queued(fname):
+    if fname == "refresh":
+        return os.path.exists(REFRESH_REQ)
     if not os.path.isdir(SAVE):
         return False
     for name in os.listdir(SAVE):
@@ -473,7 +484,7 @@ def _run_claude_once(fname, model):
     if True:
         out_p = os.path.join(HERE, "tmp", "claude-run.log")
         with open(out_p, "w", encoding="utf8") as out:
-            cmd = [CLAUDE_EXE, "-p", AUTO_PROMPT.replace("{fname}", fname), "--chrome", "--permission-mode", "acceptEdits",
+            cmd = [CLAUDE_EXE, "-p", (REFRESH_PROMPT if fname == "refresh" else AUTO_PROMPT.replace("{fname}", fname)), "--chrome", "--permission-mode", "acceptEdits",
                    "--add-dir", SAVE]
             if model:
                 cmd += ["--model", model]
@@ -486,7 +497,7 @@ def _run_claude_once(fname, model):
                 log(f"Could not start Claude Code: {e}")
                 return False
             AUTO["proc"], AUTO["state"] = p, "running"
-            kind = "unboxing" if fname.startswith("unboxing") else "packing"
+            kind = "returns-list refresh" if fname == "refresh" else "unboxing" if fname.startswith("unboxing") else "packing"
             log(f"Claude Code started making the {kind} videos ({model or 'default model'})")
             rc = p.wait()
         tail = open(out_p, encoding="utf8", errors="replace").read()[-3000:]
@@ -567,7 +578,7 @@ def ask_refresh():
     os.makedirs(os.path.dirname(REFRESH_REQ), exist_ok=True)
     json.dump({"requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, open(REFRESH_REQ, "w", encoding="utf8"))
     log("Returns list refresh requested")
-    return {"ok": True}
+    return {"ok": True, "now": kick_claude()}
 
 
 def returns_info():
