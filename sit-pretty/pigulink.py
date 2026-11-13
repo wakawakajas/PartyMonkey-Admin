@@ -28,7 +28,7 @@ def trim_returns(rows):
     for r in rows:
         out.append({k: r.get(k) for k in ("order", "request", "status", "reason", "date", "due", "todo",
                                           "return_tracking", "ship_tracking", "buyer_text", "buyer_videos",
-                                          "buyer_photos", "shopee_ask", "shopee_ask_at", "found")}
+                                          "buyer_photos", "shopee_ask", "shopee_ask_at", "found", "appeal")}
                    | {"items": [{k: i.get(k) for k in ("name", "model", "qty", "returned")} for i in r.get("items", [])]})
     return out
 

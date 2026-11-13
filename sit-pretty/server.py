@@ -638,6 +638,121 @@ def save_finding(order, issues, note="", by=""):
     return f
 
 
+# ---------------------------------------------------------------- the appeal message for Shopee
+# Written from what staff ticked after unboxing (findings.json), the buyer's words, the items and the
+# evidence videos in the order folder. Plain facts only; staff paste it into Shopee's Dispute box.
+APPEAL_CACHE = {}
+
+
+def _read_json(p):
+    try:
+        return json.load(open(p, encoding="utf8"))
+    except Exception:
+        return None
+
+
+def _missing_items(row, d):
+    """Which item(s) did not come back, from the unboxing request / summary (e.g. 'Matte Honey missing')."""
+    texts = []
+    for fn in ("unboxing-video-request.json",):
+        j = _read_json(os.path.join(d, fn)) or {}
+        texts += [j.get("missing_text") or "", j.get("summary") or ""]
+    f = finding(row.get("order", "")) or {}
+    texts.append(f.get("note") or "")
+    segs = [s.strip().lower() for t in texts for s in re.split(r"[;,.]|\band\b", t) if s.strip()]
+    out = []
+    for it in row.get("items") or []:
+        name = it.get("model") or it.get("name") or ""
+        if name and any(name.lower() in s and ("missing" in s or "not returned" in s or "no " + name.lower() in s) for s in segs):
+            out.append(name)
+    return out
+
+
+def _videos(d):
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return [], []
+    unbox = [n for n in names if n.endswith(".mp4") and "_unboxing_labelled_" in n]
+    if not unbox:
+        unbox = [n for n in names if n.endswith(".mp4") and "_unboxing_" in n]
+    j = _read_json(os.path.join(d, "evidence-request.json")) or {}
+    pack = [n for n in (j.get("videos") or []) if n in names] if j.get("status") == "done" else []
+    if not pack:
+        pack = [n for n in names if n.endswith(".mp4") and "_packing_" in n and re.search(r"video\d+of\d+", n)]
+    return unbox, pack
+
+
+def appeal_text(row):
+    order = row.get("order", "")
+    d = os.path.join(SAVE, safe_id(order))
+    try:
+        key = (os.path.getmtime(d), row.get("status"), row.get("buyer_text"), json.dumps(finding(order)))
+    except OSError:
+        return None
+    c = APPEAL_CACHE.get(order)
+    if c and c[0] == key:
+        return c[1]
+    f = finding(order) or {}
+    issues = f.get("issues") or []
+    if not issues or issues == ["fine"]:
+        APPEAL_CACHE[order] = (key, None)
+        return None
+    items = row.get("items") or []
+    n_sent = sum(int(i.get("qty") or 1) for i in items) or len(items)
+    names = [(i.get("model") or i.get("name") or "").strip() for i in items]
+    unbox, pack = _videos(d)
+    miss = _missing_items(row, d)
+
+    claim = f'as "{row["reason"]}"' if row.get("reason") else ""
+    said = f', saying: "{row["buyer_text"].strip()}"' if (row.get("buyer_text") or "").strip() else ""
+    lines = [f"The buyer returned this order {claim}{said}.".replace("order  ", "order ").replace(" ,", ",")]
+    facts = []
+    if "opened" in issues:
+        sealed = "sealed" in (row.get("reason") or "").lower() or "original" in (row.get("reason") or "").lower()
+        facts.append("The return parcel arrived already opened" + (", although the buyer said it was in original / sealed condition." if sealed else "."))
+    if "missing" in issues:
+        if miss:
+            got = [n for n in names if n and n not in miss]
+            facts.append(f"Only {n_sent - len(miss)} of {n_sent} items came back"
+                         + (f" ({', '.join(got)} returned)" if got else "") + f". Missing: {', '.join(miss)}.")
+        else:
+            facts.append("Not every item came back: " + (f.get("note") or "items were missing from the return parcel") + ".")
+    if "used" in issues:
+        facts.append("The item came back used, so it is not in the original condition required for a return.")
+    if "damaged" in issues:
+        facts.append("The item came back damaged. It left us in good condition, as our packing video shows.")
+    if "dirty" in issues:
+        facts.append("The item came back dirty, stained or smelling, so it cannot be resold.")
+    if "wrong_item" in issues:
+        facts.append("The item sent back is not the item we sent.")
+    if "photo_mismatch" in issues:
+        facts.append("The buyer's photos / videos do not show our item or this order.")
+    if f.get("note") and "missing" not in issues:
+        facts.append(f"We also found: {f['note'].strip().rstrip('.')}.")
+    lines += facts
+    ev = []
+    if unbox:
+        ev.append("Our unboxing video shows the return parcel opened in one take, from the waybill to the end"
+                  + (", with " + ", ".join(miss) + " not inside" if miss else "") + ".")
+    if pack:
+        ev.append(f"Our packing video shows all {n_sent} item{'s' if n_sent != 1 else ''}"
+                  + (f" ({', '.join(n for n in names if n)})" if 1 < len(names) <= 4 else "")
+                  + " packed and sealed before shipping.")
+    lines += ev
+    if "wrong_item" in issues or "photo_mismatch" in issues:
+        ask = "We request that the refund be rejected."
+    elif "missing" in issues and not set(issues) & {"used", "damaged", "dirty"}:
+        ask = ("We request that the refund be limited to the item actually returned, or that the buyer returns "
+               + (", ".join(miss) if miss else "the missing item") + ".")
+    else:
+        ask = "We request that the refund be rejected or reduced, as the item was not returned in the condition it was sent."
+    lines.append(ask)
+    text = " ".join(lines)
+    APPEAL_CACHE[order] = (key, text)
+    return text
+
+
 def returns_list():
     p = os.path.join(SAVE, "_sitpretty", "returns.json")
     try:
@@ -646,6 +761,10 @@ def returns_list():
         return []
     for row in rows:
         row["found"] = finding(row.get("order", ""))
+        try:
+            row["appeal"] = appeal_text(row)
+        except Exception as e:
+            log(f"Could not write the appeal for {row.get('order')}: {clean(e)}")
     return rows
 
 
