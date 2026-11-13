@@ -1105,6 +1105,13 @@ def order_info(order):
                 p = os.path.join(d, n)
                 vids.append({"file": n, "kind": video_kind(n), "label": video_label(n), "view": view_state(order, n),
                              "mb": round(os.path.getsize(p) / 1e6, 1), "at": datetime.fromtimestamp(os.path.getmtime(p)).strftime("%d %b %H:%M")})
+    photos = []
+    if os.path.isdir(d):
+        for n in sorted(os.listdir(d)):
+            if n.endswith(".jpg") and "_photo_" in n:
+                p = os.path.join(d, n)
+                photos.append({"file": n, "label": photo_label(n), "mb": round(os.path.getsize(p) / 1e6, 1),
+                               "at": datetime.fromtimestamp(os.path.getmtime(p)).strftime("%d %b %H:%M")})
     reqs = []
     for fn in ("evidence-request.json", "unboxing-video-request.json", CLIP_REQ, COUNT_REQ):
         j = _read_json(os.path.join(d, fn))
@@ -1113,7 +1120,7 @@ def order_info(order):
             reqs.append({k: j.get(k) for k in ("kind", "status", "progress", "problem", "summary", "requested_at", "scan_time", "cams", "clip",
                                                "live", "live_total")})
     row = next((r for r in returns_list() if r.get("order") == order), None)
-    return {"order": order, "videos": vids, "jobs": reqs, "return": {k: row.get(k) for k in ("request", "status", "reason", "due", "todo", "appeal")} if row else None,
+    return {"order": order, "videos": vids, "photos": photos, "jobs": reqs, "return": {k: row.get(k) for k in ("request", "status", "reason", "due", "todo", "appeal")} if row else None,
             "packing_cameras": [[c, CFG["cameras"][c]["label"]] for c in CFG["packing_cameras"]], "auto_videos": auto_state()}
 
 
@@ -1356,6 +1363,44 @@ def discover(again=False):
     return DISCOVER
 
 
+# ---------------------------------------------------------------- 4K photos for Shopee (waybill, outer packaging)
+PHOTO_KINDS = {"waybill": "Parcel with its waybill", "packaging": "Outer packaging", "item": "Item"}
+
+
+def save_photo(b):
+    """A full-size JPG for Shopee: a moment of a saved recording (file + t seconds), or the live camera now."""
+    order = safe_id(b.get("order"))
+    kind = b.get("kind") if b.get("kind") in PHOTO_KINDS else "item"
+    d = order_dir(order)
+    n = 1
+    while os.path.exists(os.path.join(d, f"{order}_photo_{kind}_{n}.jpg")):
+        n += 1
+    out = os.path.join(d, f"{order}_photo_{kind}_{n}.jpg")
+    if b.get("file"):
+        src = os.path.join(SAVE, order, os.path.basename(b["file"]))
+        if not (src.endswith(".mp4") and os.path.isfile(src)):
+            raise ValueError("Video not found")
+        t = max(0.0, float(b.get("t") or 0))
+        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{t:.3f}", "-i", src, "-frames:v", "1", "-q:v", "1", out]
+    else:
+        cam = b.get("cam") if b.get("cam") in CFG["cameras"] else CFG["returns_camera"]
+        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-rtsp_transport", "tcp", "-i", rtsp(cam, "stream1"),
+               "-frames:v", "1", "-q:v", "1", out]
+    r = subprocess.run(cmd, capture_output=True, timeout=40, creationflags=NOWIN)
+    if r.returncode or not os.path.isfile(out):
+        raise RuntimeError("Could not save the photo. " + clean(r.stderr.decode("utf8", "replace")[-150:]))
+    with open(os.path.join(d, "evidence-log.txt"), "a", encoding="utf8") as f:
+        f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  photo  {os.path.basename(out)}  "
+                + (f"from {os.path.basename(b['file'])} at {float(b.get('t') or 0):.1f}s" if b.get("file") else "live camera") + "\n")
+    log(f"Photo saved: {os.path.basename(out)}")
+    return {"file": os.path.basename(out), "label": photo_label(os.path.basename(out))}
+
+
+def photo_label(name):
+    m = re.search(r"_photo_([a-z]+)_(\d+)\.jpg$", name)
+    return f"{PHOTO_KINDS.get(m.group(1), 'Photo')} {m.group(2)}" if m else name
+
+
 def returns_list():
     p = os.path.join(SAVE, "_sitpretty", "returns.json")
     try:
@@ -1457,6 +1502,20 @@ class H(BaseHTTPRequestHandler):
                     return self.send(200, snapshot(q.get("cam", CFG["returns_camera"])), "image/jpeg")
                 except Exception as e:
                     return self.send(503, {"error": str(e)})
+            if u.path == "/photo":
+                order, name = safe_id(q.get("order")), os.path.basename(q.get("file", ""))
+                p = os.path.join(SAVE, order, name)
+                if not (name.endswith(".jpg") and "_photo_" in name and os.path.isfile(p)):
+                    return self.send(404, {"error": "not found"})
+                data = open(p, "rb").read()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(data)))
+                if q.get("dl") == "1":
+                    self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if u.path == "/media":
                 order, name = safe_id(q.get("order")), os.path.basename(q.get("file", ""))
                 p = view_path(order, name) if q.get("view") == "1" else os.path.join(SAVE, order, name)
@@ -1518,6 +1577,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, edit_cameras(b))
             if u.path == "/api/have":
                 return self.send(200, have(b.get("orders")))
+            if u.path == "/api/photo":
+                return self.send(200, save_photo(b))
             if u.path == "/api/makeview":
                 return self.send(200, {"view": make_view(b.get("order"), b.get("file", ""))})
             if u.path == "/api/count":
