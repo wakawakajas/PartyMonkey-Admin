@@ -33,6 +33,7 @@ video{display:block;width:100%;max-height:62vh;background:#000}
 .job{font-size:13px;margin-top:6px}
 .job b.working,.job b.queued,.job b.downloading,.job b.time_found{color:var(--warn)}
 .job b.done{color:var(--ok)}.job b.problem{color:var(--bad)}
+.mn{width:64px;height:32px;border:1px solid var(--line);border-radius:8px;padding:0 6px;font:inherit}
 .cams{display:flex;gap:12px;flex-wrap:wrap;margin:6px 0}
 .cams label{display:flex;gap:6px;align-items:center;cursor:pointer}
 .msg{font-size:13px;margin-top:6px}.msg.err{color:var(--bad)}.msg.ok{color:var(--ok)}
@@ -64,6 +65,9 @@ const media=(f,dl,view)=>`/media?order=${encodeURIComponent(ORDER)}&file=${encod
 const vinfo=f=>(D&&D.videos.find(v=>v.file===f))||{};
 const playSrc=f=>{const v=vinfo(f);return v.view==='ready'?media(f,0,1):media(f)};
 let asked={};
+const mins=()=>{let b=5,a=2;try{b=+(localStorage.getItem('sp-before')||5);a=+(localStorage.getItem('sp-after')||2)}catch(e){}return [b,a]};
+const saveMins=(b,a)=>{try{localStorage.setItem('sp-before',b);localStorage.setItem('sp-after',a)}catch(e){}};
+
 async function api(path,body){
   const r=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json','X-Pin':PIN},body:body?JSON.stringify(body):undefined});
   if(r.status===401){askPin();throw new Error('PIN needed')}
@@ -81,7 +85,7 @@ function jobHTML(kinds){
   return (D.jobs||[]).filter(j=>kinds.includes(j.kind)&&j.status!=='done').map(j=>`<div class="job">${esc(KINDTXT[j.kind]||j.kind)}: <b class="${esc(j.status)}">${['done','problem'].includes(j.status)?'':'<span class="spin"></span> '}${esc(JOBTXT[j.status]||j.status)}</b>${j.progress?' · '+esc(j.progress):''}${j.problem?'<div class="msg err">'+esc(j.problem)+'</div>':''}</div>`).join('');
 }
 const busy=kinds=>(D.jobs||[]).some(j=>kinds.includes(j.kind)&&['queued','working','time_found','downloading'].includes(j.status));
-function camsHTML(){return `<div class="cams">${D.packing_cameras.map(c=>`<label><input type="checkbox" value="${esc(c[0])}"> ${esc(c[1])}</label>`).join('')}</div>`}
+function camsHTML(){const [b,a]=mins();return `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0">Minutes before the scan <input class="mn" type="number" data-o="before" min="1" max="60" value="${b}"> after <input class="mn" type="number" data-o="after" min="0" max="30" value="${a}"></div><div class="cams">${D.packing_cameras.map(c=>`<label><input type="checkbox" value="${esc(c[0])}"> ${esc(c[1])}</label>`).join('')}</div>`}
 const pickedCams=root=>[...root.querySelectorAll('.cams input:checked')].map(i=>i.value);
 
 function render(){
@@ -111,7 +115,7 @@ function render(){
     const raw=list.filter(v=>v.kind==='simple'), counted=list.some(v=>v.kind==='count');
     h+=jobHTML(['clip','count']);
     if(!raw.length&&!busy(['clip'])){
-      h+=`<div class="card" id="getclip"><h2>Get the packing clip</h2><div class="sub">${SCAN?'BigSeller: scanned to ship <b>'+esc(fmtScan(SCAN))+'</b>. The clip runs from 15 minutes before to 2 minutes after.':'No BigSeller scan time was passed, so Claude looks it up first.'} Tick the table that packed it (each takes about 4 minutes to download).</div>${camsHTML()}<button class="btn main" id="goclip">Get packing clip</button><div class="msg" id="m1"></div></div>`;
+      h+=`<div class="card" id="getclip"><h2>Get the packing clip</h2><div class="sub">${SCAN?'BigSeller: scanned to ship <b>'+esc(fmtScan(SCAN))+'</b>. Choose how many minutes before and after it the clip covers.':'No BigSeller scan time was passed, so Claude looks it up first.'} Tick the table that packed it (each takes about 4 minutes to download).</div>${camsHTML()}<button class="btn main" id="goclip">Get packing clip</button><div class="msg" id="m1"></div></div>`;
     } else if(raw.length&&!counted&&!busy(['count'])){
       h+=`<div class="card" id="cnt"><h2>Simple count</h2><div class="sub">Claude adds a big ITEMS PACKED counter to the clip (no arrows or name tags). Quicker and cheaper than the detailed video, about 3-5 minutes.</div><button class="btn main" id="gocount">Add simple count</button><div class="msg" id="m2"></div></div>`;
     }
@@ -141,8 +145,9 @@ document.addEventListener('click',async e=>{
   if(id==='goclip'||id==='godet'){
     const box=e.target.closest('.card'), m=box.querySelector('.msg'), cams=pickedCams(box);
     if(!cams.length){m.className='msg err';m.textContent='Tick the table that packed this order.';return}
+    const before=+box.querySelector('[data-o=before]').value||5, after=+box.querySelector('[data-o=after]').value||0; saveMins(before,after);
     e.target.disabled=true;
-    try{ await api(id==='goclip'?'/api/packclip':'/api/evidence',{order:ORDER,request:(D.return||{}).request||'',cams,scan_time:SCAN});
+    try{ await api(id==='goclip'?'/api/packclip':'/api/evidence',{order:ORDER,request:(D.return||{}).request||'',cams,scan_time:SCAN,before,after});
       m.className='msg ok';m.textContent='Started.'; await load(); }
     catch(err){m.className='msg err';m.textContent=err.message;e.target.disabled=false}
   }

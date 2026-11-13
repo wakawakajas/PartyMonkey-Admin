@@ -416,6 +416,7 @@ def request_video(b):
     job = {"order": order, "request": b.get("request", ""), "cams": cams,
            "camera_ips": {c: CFG["cameras"][c]["ip"] for c in cams}, "scan_time": scan,
            "note": (b.get("note") or "")[:300], "areas": {c: areas()[c] for c in cams},
+           "before_min": pack_minutes(b)[0], "after_min": pack_minutes(b)[1],
            "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "status": "queued"}
     json.dump(job, open(p, "w", encoding="utf8"), indent=1)
     JOB_CACHE[0] = 0
@@ -451,14 +452,26 @@ def pack_clips(order, start, end, cams=None, raise_all=True):
 CLIP_REQ = "packclip-request.json"
 
 
+def pack_minutes(b):
+    """Staff choose how many minutes before and after the 'Scan to ship' time the footage covers."""
+    def num(k, d, lo, hi):
+        try:
+            return max(lo, min(hi, int(float(b.get(k)))))
+        except (TypeError, ValueError):
+            return d
+    return (num("before", CFG.get("default_pack_minutes_before_scan", 5), 1, 60),
+            num("after", CFG.get("default_pack_minutes_after_scan", 2), 0, 30))
+
+
 def request_packclip(b):
     """Order ID only: Claude reads the 'Scan to ship' time in BigSeller, then Sit Pretty downloads the clip."""
     order = safe_id(b.get("order"))
     cams = [c for c in (b.get("cams") or CFG["packing_cameras"]) if c in CFG["cameras"]]
     if not cams:
         raise ValueError("Tick at least one table")
+    before, after = pack_minutes(b)
     job = {"kind": "clip", "order": order, "cams": cams, "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-           "status": "queued"}
+           "status": "queued", "before": before, "after": after}
     scan = (b.get("scan_time") or "").strip()
     if scan:   # the BigSeller pop-up read the scan time already: download straight away, no Claude
         datetime.strptime(scan, "%Y-%m-%dT%H:%M")
@@ -489,11 +502,9 @@ def fetch_found_clips():
             continue
         try:
             scan = datetime.strptime(j["scan_time"], "%Y-%m-%dT%H:%M")
-            start = datetime.strptime(j["start_time"], "%Y-%m-%dT%H:%M") if j.get("start_time") else \
-                scan - timedelta(minutes=CFG["default_pack_minutes_before_scan"])
-            if not scan - timedelta(hours=1) <= start < scan:
-                start = scan - timedelta(minutes=CFG["default_pack_minutes_before_scan"])
-            end = scan + timedelta(minutes=2)
+            before, after = pack_minutes(j)
+            start = scan - timedelta(minutes=before)
+            end = scan + timedelta(minutes=after)
             ready = end + timedelta(minutes=4)   # the camera hands over a recording only once that piece is finished
             j["status"] = "downloading"
             if datetime.now() < ready:
@@ -519,7 +530,7 @@ def fetch_found_clips():
                 raise RuntimeError("; ".join(r["errors"]))
             j.pop("progress", None)
             j.update(status="done", files=r["files"], videos=r["files"],
-                     summary=f"Scan to ship {scan:%d %b %H:%M}; clip {start:%H:%M}-{scan + timedelta(minutes=2):%H:%M}"
+                     summary=f"Scan to ship {scan:%d %b %H:%M}; clip {start:%H:%M}-{end:%H:%M}"
                      + (" · not saved: " + "; ".join(r["errors"]) if r["errors"] else ""))
             log(f"Packing clip saved for {j['order']}: {', '.join(r['files'])}")
             for f_ in r["files"]:
@@ -1130,7 +1141,7 @@ class H(BaseHTTPRequestHandler):
                     "packing_cameras": CFG["packing_cameras"], "save_dir": SAVE,
                     "login_ok": all(all(cam_login(c, s)) for c in CFG["cameras"]),
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
-                    "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "auto_videos": auto_state(), "log": LOGS[-30:]})
+                    "pack_before": CFG["default_pack_minutes_before_scan"], "pack_after": CFG.get("default_pack_minutes_after_scan", 2), "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "auto_videos": auto_state(), "log": LOGS[-30:]})
             if u.path == "/api/order":
                 return self.send(200, order_info(q.get("order")))
             if u.path == "/api/snapshot.jpg":

@@ -75,8 +75,9 @@ moments to point at.
 1. Set `"status": "working"` in the request file.
 2. **Packing time.** Use `scan_time` from the request if given. Otherwise read the order in
    BigSeller (Chrome, All Orders, search the order number, Order Details, Order Log): the time on
-   "Scan to ship on APP" is when packing finished. Packing starts after the previous order's ship
-   scan on the same table; if you cannot tell, take 15 minutes before.
+   "Scan to ship on APP" is when packing finished. Use the request's `before_min` / `after_min`
+   (minutes before and after the scan, chosen by staff) for the footage window; only without them,
+   start after the previous order's ship scan on the same table (or 5 minutes before).
 3. **Footage.** For each camera in `cams`, list that day's memory-card recordings
    (`.venv\Scripts\python.exe sdclip.py list <ip> <YYYYMMDD>`) and download from the packing start
    to 2 minutes after the ship scan (`sdclip.py get <ip> <start epoch> <end epoch> <out.mp4>`).
