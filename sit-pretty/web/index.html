@@ -227,7 +227,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
 
     <section class="page" id="p-live" hidden>
       <div class="card glass" id="livehead"><h2>Live</h2><p class="sub">Every camera, live (about a second behind). Click a camera to make it big. Hold a camera for a moment, then drag it to rearrange (same order on every PC).</p>
-        <div class="row" style="margin-top:8px"><button class="btn" id="lvseam">Seamless view</button></div></div>
+        <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px"><button class="btn" id="lvseam">Seamless view</button><span class="sub">with:</span><span id="lvpick" style="display:inline-flex;flex-wrap:wrap;gap:10px"></span></div></div>
       <div id="livegrid"></div>
     </section>
     <style>
@@ -236,11 +236,12 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
       .lvtile img{width:100%;aspect-ratio:16/9;object-fit:contain;background:#111;border-radius:8px;display:block;pointer-events:none;-webkit-user-drag:none}
       .lvtile.lifted{transform:scale(1.03);box-shadow:0 12px 30px rgba(0,0,0,.25);cursor:grabbing;z-index:3;position:relative;opacity:.92}
       .lvtile.ghost{outline:2px dashed var(--rust)}
-      #livegrid.seam{position:fixed;inset:0;z-index:40;background:#000;gap:0;grid-template-columns:repeat(var(--lvcols,3),1fr);grid-auto-rows:1fr;align-content:stretch}
+      #livegrid.seam{position:fixed;inset:0;z-index:40;background:#000;gap:0;grid-template-columns:repeat(var(--lvcols,3),var(--lvw,320px));grid-auto-rows:var(--lvh,180px);justify-content:center;align-content:center}
+      #livegrid.seam .lvtile.seamoff{display:none}
       #livegrid.seam .lvtile{padding:0;border:0;border-radius:0;background:#000;box-shadow:none;backdrop-filter:none;margin:0;position:relative;overflow:hidden}
       #livegrid.seam .lvtile .row{position:absolute;left:6px;top:4px;z-index:2;margin:0!important;opacity:0;transition:opacity .2s;color:#fff;text-shadow:0 1px 3px #000;font-size:12px}
       #livegrid.seam .lvtile:hover .row{opacity:1}
-      #livegrid.seam .lvtile img{border-radius:0;height:100%;aspect-ratio:auto;object-fit:cover}
+      #livegrid.seam .lvtile img{border-radius:0;width:100%;height:100%;aspect-ratio:auto;object-fit:contain}
       #lvexit{position:fixed;right:10px;top:10px;z-index:41;opacity:.15;transition:opacity .2s}
       #lvexit:hover{opacity:1}
       #lvexit[hidden],#livebig[hidden]{display:none!important}
@@ -486,7 +487,7 @@ try{LV.seam=localStorage.getItem('sp-live-seam')==='1'}catch(e){}
 function liveTiles(){const g=$('#livegrid');if(LV.drag)return;const L=S.live||[];const key=L.map(x=>x.cam+x.name+x.record).join();
   if(g.dataset.k===key) return; g.dataset.k=key;
   g.innerHTML=L.map(x=>`<div class="card glass lvtile" data-live="${x.cam}"><div class="row" style="margin-bottom:6px"><b class="grow">${esc(x.name)}</b><span class="sub" data-lvst="${x.cam}">Connecting…</span>${x.record?'':'<span class="sub">· live only</span>'}</div><img data-lvimg="${x.cam}" alt="" draggable="false"></div>`).join('')||'<p class="sub">No cameras yet. Add them on the Cameras page.</p>';
-  seamLayout();}
+  seamPicker();seamLayout();}
 async function liveLoop(cam){if(LV.loops[cam])return;LV.loops[cam]=1;let seq=0,url='',fails=0;
   while(LV.on){const imgs=[...document.querySelectorAll(`[data-lvimg="${cam}"]`)];if(LV.big===cam)imgs.push($('#livebigimg'));
     const st=document.querySelector(`[data-lvst="${cam}"]`);
@@ -495,19 +496,47 @@ async function liveLoop(cam){if(LV.loops[cam])return;LV.loops[cam]=1;let seq=0,u
       seq=+r.headers.get('X-Seq')||0;const u=URL.createObjectURL(await r.blob());imgs.forEach(i=>i.src=u);if(url)URL.revokeObjectURL(url);url=u;fails=0;if(st){st.textContent='● Live';st.style.color='#c0392b'}}
     catch(e){fails++;if(st){st.textContent=e.message.slice(0,90);st.style.color='var(--rust)'}await new Promise(r=>setTimeout(r,Math.min(10000,2000*fails)))}}
   delete LV.loops[cam];}
-function liveStart(){if(document.hidden||$('#p-live').hidden){LV.on=false;if(LV.seam)seamSet(false,true);return}liveTiles();LV.on=true;(S.live||[]).forEach(x=>liveLoop(x.cam));}
+function livePlay(){if(!LV.on){LV.raf=0;return}const now=performance.now();
+  for(const cam in LV.play){const P=LV.play[cam];if(!P.q.length)continue;
+    const due=P.q.length>3?P.gap*0.6:P.gap*0.95;   // a bit faster when frames pile up, so the delay stays short
+    if(now-P.last<due)continue;P.last=now;const u=URL.createObjectURL(new Blob([P.q.shift()],{type:'image/jpeg'}));
+    document.querySelectorAll(`[data-lvimg="${cam}"]`).forEach(i=>i.src=u);if(LV.big===cam)$('#livebigimg').src=u;
+    if(P.url)URL.revokeObjectURL(P.url);P.url=u;}
+  LV.raf=requestAnimationFrame(livePlay);}
+function liveWS(){if(!LV.play)LV.play={};if(!LV.raf)LV.raf=requestAnimationFrame(livePlay);const cams=(S.live||[]).map(x=>x.cam);if(!cams.length)return;const key=cams.join(',');
+  if(LV.ws&&LV.wsKey===key&&LV.ws.readyState<2)return;if(LV.ws){try{LV.ws.close()}catch(e){}}
+  const ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/api/live.ws?cams=${encodeURIComponent(key)}&pin=${encodeURIComponent(PIN)}`);
+  ws.binaryType='arraybuffer';LV.ws=ws;LV.wsKey=key;const urls={};let got=false;
+  ws.onmessage=ev=>{if(typeof ev.data==='string'){try{const j=JSON.parse(ev.data);const st=document.querySelector(`[data-lvst="${j.cam}"]`);if(st){st.textContent=j.error.slice(0,90);st.style.color='var(--rust)'}}catch(e){}return}
+    got=true;const b=new Uint8Array(ev.data),n=b[0],cam=new TextDecoder().decode(b.subarray(1,1+n));
+    const P=LV.play[cam]||(LV.play[cam]={q:[],last:0,url:'',gap:50,arr:performance.now()});const now=performance.now();
+    P.gap=P.gap*0.9+Math.min(200,now-P.arr)*0.1;P.arr=now;   // how often frames arrive, smoothed
+    P.q.push(b.subarray(1+n));if(P.q.length>8)P.q.splice(0,P.q.length-3);
+    const st=document.querySelector(`[data-lvst="${cam}"]`);if(st&&st.textContent!=='● Live'){st.textContent='● Live';st.style.color='#c0392b'}};
+  ws.onclose=()=>{if(LV.ws!==ws)return;LV.ws=null;if(!LV.on)return;
+    if(!got){LV.noWS=true;cams.forEach(c=>liveLoop(c));return}   // WebSocket blocked: one picture per request instead
+    setTimeout(()=>{if(LV.on)liveWS()},1500)};}
+function liveStart(){if(document.hidden||$('#p-live').hidden){LV.on=false;if(LV.ws){const w=LV.ws;LV.ws=null;try{w.close()}catch(e){}}if(LV.seam)seamSet(false,true);return}liveTiles();LV.on=true;
+  if(LV.noWS)(S.live||[]).forEach(x=>liveLoop(x.cam));else liveWS();}
 document.addEventListener('visibilitychange',liveStart);
 // seamless: every camera stitched edge to edge, filling the screen
-function seamLayout(){const g=$('#livegrid'),n=(S&&S.live||[]).length||1;
-  let best=1,bs=0;for(let c=1;c<=n;c++){const r=Math.ceil(n/c),w=innerWidth/c,h=innerHeight/r,sz=Math.min(w,h*16/9);if(sz>bs){bs=sz;best=c}}
-  g.style.setProperty('--lvcols',best);}
+function seamCams(){let c=null;try{c=JSON.parse(localStorage.getItem('sp-seam-cams')||'null')}catch(e){}const all=(S&&S.live||[]).map(x=>x.cam);
+  const pick=Array.isArray(c)?all.filter(x=>c.includes(x)):all;return pick.length?pick:all;}
+function seamPicker(){const el=$('#lvpick');if(!el||!S)return;const on=seamCams();
+  el.innerHTML=(S.live||[]).map(x=>`<label class="sub" style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" data-seampick="${x.cam}" ${on.includes(x.cam)?'checked':''}>${esc(x.name)}</label>`).join('');}
+document.addEventListener('change',e=>{const c=e.target.closest('[data-seampick]');if(!c)return;
+  const on=[...document.querySelectorAll('[data-seampick]')].filter(x=>x.checked).map(x=>x.dataset.seampick);
+  try{localStorage.setItem('sp-seam-cams',JSON.stringify(on))}catch(_){}seamLayout();});
+// whole pictures (16:9), as big as the window allows, no cropping
+function seamLayout(){const g=$('#livegrid'),on=seamCams(),n=on.length||1;
+  g.querySelectorAll('[data-live]').forEach(t=>t.classList.toggle('seamoff',!on.includes(t.dataset.live)));
+  let best=1,bw=0;for(let c=1;c<=n;c++){const r=Math.ceil(n/c),w=Math.min(innerWidth/c,innerHeight/r*16/9);if(w>bw){bw=w;best=c}}
+  g.style.setProperty('--lvcols',best);g.style.setProperty('--lvw',Math.floor(bw)+'px');g.style.setProperty('--lvh',Math.floor(bw*9/16)+'px');}
 function seamSet(on,keep){LV.seam=on;const g=$('#livegrid');g.classList.toggle('seam',on);$('#lvexit').hidden=!on;
   if(!keep){try{localStorage.setItem('sp-live-seam',on?'1':'0')}catch(e){}}
-  if(on){seamLayout();try{document.documentElement.requestFullscreen&&!document.fullscreenElement&&document.documentElement.requestFullscreen().catch(()=>{})}catch(e){}}
-  else if(document.fullscreenElement){document.exitFullscreen().catch(()=>{})}}
+  if(on)seamLayout();}
 $('#lvseam').onclick=()=>seamSet(true);$('#lvexit').onclick=()=>seamSet(false);
 addEventListener('resize',()=>{if(LV.seam)seamLayout()});
-document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&LV.seam&&!$('#p-live').hidden)seamSet(false)});
 // click = big view; hold ~0.4 s, then drag = rearrange
 let lvPress=null,lvNoClick=false;
 document.addEventListener('pointerdown',e=>{const t=e.target.closest('[data-live]');if(!t||e.button>0)return;

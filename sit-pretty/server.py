@@ -1544,6 +1544,12 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, discover(q.get("again") == "1"))
             if u.path == "/api/order":
                 return self.send(200, order_info(q.get("order")))
+            if u.path == "/api/live.ws":
+                if self.headers.get("Upgrade", "").lower() != "websocket":
+                    return self.send(400, {"error": "WebSocket only"})
+                live.serve_ws(self, [c for c in (q.get("cams") or "").split(",") if c])
+                self.close_connection = True
+                return
             if u.path == "/api/live.jpg":
                 cam = q.get("cam")
                 if cam not in CFG["cameras"]:
