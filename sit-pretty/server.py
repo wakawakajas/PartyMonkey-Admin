@@ -1547,7 +1547,8 @@ class H(BaseHTTPRequestHandler):
             if u.path == "/api/live.ws":
                 if self.headers.get("Upgrade", "").lower() != "websocket":
                     return self.send(400, {"error": "WebSocket only"})
-                live.serve_ws(self, [c for c in (q.get("cams") or "").split(",") if c])
+                cams_ = [c for c in (q.get("cams") or "").split(",") if c]
+                (live.serve_ws_video if q.get("mode") == "video" else live.serve_ws)(self, cams_)
                 self.close_connection = True
                 return
             if u.path == "/api/live.jpg":

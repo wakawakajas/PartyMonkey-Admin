@@ -233,7 +233,9 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
     <style>
       #livegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px}
       .lvtile{padding:10px;cursor:zoom-in;user-select:none;-webkit-user-select:none;touch-action:pan-y;transition:transform .12s,box-shadow .12s}
-      .lvtile img{width:100%;aspect-ratio:16/9;object-fit:contain;background:#111;border-radius:8px;display:block;pointer-events:none;-webkit-user-drag:none}
+      .lvtile img,.lvtile video{width:100%;aspect-ratio:16/9;object-fit:contain;background:#111;border-radius:8px;display:block;pointer-events:none;-webkit-user-drag:none}
+      .lvtile video[hidden],.lvtile img[hidden]{display:none!important}
+      #livebig video{max-width:100%;max-height:calc(100vh - 90px);border-radius:10px;background:#111;width:auto;aspect-ratio:auto}
       .lvtile.lifted{transform:scale(1.03);box-shadow:0 12px 30px rgba(0,0,0,.25);cursor:grabbing;z-index:3;position:relative;opacity:.92}
       .lvtile.ghost{outline:2px dashed var(--rust)}
       #livegrid.seam{position:fixed;inset:0;z-index:40;background:#000;gap:0;grid-template-columns:repeat(var(--lvcols,3),var(--lvw,320px));grid-auto-rows:var(--lvh,180px);justify-content:center;align-content:center}
@@ -241,7 +243,7 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
       #livegrid.seam .lvtile{padding:0;border:0;border-radius:0;background:#000;box-shadow:none;backdrop-filter:none;margin:0;position:relative;overflow:hidden}
       #livegrid.seam .lvtile .row{position:absolute;left:6px;top:4px;z-index:2;margin:0!important;opacity:0;transition:opacity .2s;color:#fff;text-shadow:0 1px 3px #000;font-size:12px}
       #livegrid.seam .lvtile:hover .row{opacity:1}
-      #livegrid.seam .lvtile img{border-radius:0;width:100%;height:100%;aspect-ratio:auto;object-fit:contain}
+      #livegrid.seam .lvtile img,#livegrid.seam .lvtile video{border-radius:0;width:100%;height:100%;aspect-ratio:auto;object-fit:contain}
       #lvexit{position:fixed;right:10px;top:10px;z-index:41;opacity:.15;transition:opacity .2s}
       #lvexit:hover{opacity:1}
       #lvexit[hidden],#livebig[hidden]{display:none!important}
@@ -486,8 +488,8 @@ const LV={on:false,big:null,loops:{},drag:null,seam:false};
 try{LV.seam=localStorage.getItem('sp-live-seam')==='1'}catch(e){}
 function liveTiles(){const g=$('#livegrid');if(LV.drag)return;const L=S.live||[];const key=L.map(x=>x.cam+x.name+x.record).join();
   if(g.dataset.k===key) return; g.dataset.k=key;
-  g.innerHTML=L.map(x=>`<div class="card glass lvtile" data-live="${x.cam}"><div class="row" style="margin-bottom:6px"><b class="grow">${esc(x.name)}</b><span class="sub" data-lvst="${x.cam}">Connecting…</span>${x.record?'':'<span class="sub">· live only</span>'}</div><img data-lvimg="${x.cam}" alt="" draggable="false"></div>`).join('')||'<p class="sub">No cameras yet. Add them on the Cameras page.</p>';
-  seamPicker();seamLayout();}
+  g.innerHTML=L.map(x=>`<div class="card glass lvtile" data-live="${x.cam}"><div class="row" style="margin-bottom:6px"><b class="grow">${esc(x.name)}</b><span class="sub" data-lvst="${x.cam}">Connecting…</span>${x.record?'':'<span class="sub">· live only</span>'}</div><img data-lvimg="${x.cam}" alt="" draggable="false"><video data-lvvid="${x.cam}" muted playsinline hidden></video></div>`).join('')||'<p class="sub">No cameras yet. Add them on the Cameras page.</p>';
+  seamPicker();seamLayout();for(const c in VID)delete VID[c];if(LV.ws){const w=LV.ws;LV.ws=null;try{w.close()}catch(e){}}}
 async function liveLoop(cam){if(LV.loops[cam])return;LV.loops[cam]=1;let seq=0,url='',fails=0;
   while(LV.on){const imgs=[...document.querySelectorAll(`[data-lvimg="${cam}"]`)];if(LV.big===cam)imgs.push($('#livebigimg'));
     const st=document.querySelector(`[data-lvst="${cam}"]`);
@@ -503,12 +505,34 @@ function livePlay(){if(!LV.on){LV.raf=0;return}const now=performance.now();
     document.querySelectorAll(`[data-lvimg="${cam}"]`).forEach(i=>i.src=u);if(LV.big===cam)$('#livebigimg').src=u;
     if(P.url)URL.revokeObjectURL(P.url);P.url=u;}
   LV.raf=requestAnimationFrame(livePlay);}
-function liveWS(){if(!LV.play)LV.play={};if(!LV.raf)LV.raf=requestAnimationFrame(livePlay);const cams=(S.live||[]).map(x=>x.cam);if(!cams.length)return;const key=cams.join(',');
+// the cameras' own video (H.264) straight into each tile's <video>: smooth and about 1 Mbps per camera
+const VID={};
+function vidCodec(b){for(let i=0;i<b.length-8;i++){if(b[i]===0x61&&b[i+1]===0x76&&b[i+2]===0x63&&b[i+3]===0x43){const h=x=>x.toString(16).padStart(2,'0');return 'avc1.'+h(b[i+5])+h(b[i+6])+h(b[i+7])}}return 'avc1.640028'}
+function vidEl(cam){return document.querySelector(`[data-lvvid="${cam}"]`)}
+function vidStart(cam,data){const old=VID[cam];if(old){try{old.ms.readyState==='open'&&old.ms.endOfStream()}catch(e){}}
+  const v=vidEl(cam);if(!v)return;const ms=new MediaSource();const V=VID[cam]={ms,sb:null,q:[data],v};
+  v.hidden=false;const im=document.querySelector(`[data-lvimg="${cam}"]`);if(im)im.hidden=true;
+  v.src=URL.createObjectURL(ms);
+  ms.addEventListener('sourceopen',()=>{try{V.sb=ms.addSourceBuffer(`video/mp4; codecs="${vidCodec(data)}"`);V.sb.mode='segments';V.sb.addEventListener('updateend',()=>vidPump(cam));vidPump(cam)}catch(e){console.warn('live video',cam,e);LV.noVideo=true;if(LV.ws)LV.ws.close()}},{once:true});
+  v.play().catch(()=>{});}
+function vidPump(cam){const V=VID[cam];if(!V||!V.sb||V.sb.updating||!V.q.length)return;
+  const n=V.q.reduce((a,b)=>a+b.length,0),all=new Uint8Array(n);let o=0;V.q.forEach(b=>{all.set(b,o);o+=b.length});V.q=[];
+  try{V.sb.appendBuffer(all)}catch(e){if(e.name==='QuotaExceededError'){try{V.sb.remove(0,V.v.currentTime-2)}catch(_){}}}}
+setInterval(()=>{for(const cam in VID){const V=VID[cam],v=V.v;if(!v||!v.buffered.length)continue;const end=v.buffered.end(v.buffered.length-1);
+  const lag=end-v.currentTime;   // stay close to live without jumps: play a touch faster to catch up
+  if(lag>4)v.currentTime=end-0.3;else v.playbackRate=lag>1.5?1.25:lag>0.7?1.1:1;
+  if(v.paused)v.play().catch(()=>{});
+  if(V.sb&&!V.sb.updating&&v.currentTime-v.buffered.start(0)>30){try{V.sb.remove(v.buffered.start(0),v.currentTime-10)}catch(e){}}}},500);
+function liveWS(){if(!LV.play)LV.play={};if(!LV.raf)LV.raf=requestAnimationFrame(livePlay);
+  const video=!LV.noVideo&&window.MediaSource&&MediaSource.isTypeSupported('video/mp4; codecs="avc1.640028"');
+  if(!video)document.querySelectorAll('[data-lvvid]').forEach(v=>{v.hidden=true;const im=document.querySelector(`[data-lvimg="${v.dataset.lvvid}"]`);if(im)im.hidden=false});const cams=(S.live||[]).map(x=>x.cam);if(!cams.length)return;const key=cams.join(',');
   if(LV.ws&&LV.wsKey===key&&LV.ws.readyState<2)return;if(LV.ws){try{LV.ws.close()}catch(e){}}
-  const ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/api/live.ws?cams=${encodeURIComponent(key)}&pin=${encodeURIComponent(PIN)}`);
+  const ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/api/live.ws?cams=${encodeURIComponent(key)}&pin=${encodeURIComponent(PIN)}${video?'&mode=video':''}`);
   ws.binaryType='arraybuffer';LV.ws=ws;LV.wsKey=key;const urls={};let got=false;
   ws.onmessage=ev=>{if(typeof ev.data==='string'){try{const j=JSON.parse(ev.data);const st=document.querySelector(`[data-lvst="${j.cam}"]`);if(st){st.textContent=j.error.slice(0,90);st.style.color='var(--rust)'}}catch(e){}return}
     got=true;const b=new Uint8Array(ev.data),n=b[0],cam=new TextDecoder().decode(b.subarray(1,1+n));
+    if(video){const kind=b[1+n],d=b.slice(2+n);if(kind===0)vidStart(cam,d);else if(VID[cam]){VID[cam].q.push(d);vidPump(cam)}
+      const st=document.querySelector(`[data-lvst="${cam}"]`);if(st&&st.textContent!=='● Live'){st.textContent='● Live';st.style.color='#c0392b'}return}
     const P=LV.play[cam]||(LV.play[cam]={q:[],last:0,url:'',gap:50,arr:performance.now()});const now=performance.now();
     P.gap=P.gap*0.9+Math.min(200,now-P.arr)*0.1;P.arr=now;   // how often frames arrive, smoothed
     P.q.push(b.subarray(1+n));if(P.q.length>8)P.q.splice(0,P.q.length-3);
@@ -516,7 +540,7 @@ function liveWS(){if(!LV.play)LV.play={};if(!LV.raf)LV.raf=requestAnimationFrame
   ws.onclose=()=>{if(LV.ws!==ws)return;LV.ws=null;if(!LV.on)return;
     if(!got){LV.noWS=true;cams.forEach(c=>liveLoop(c));return}   // WebSocket blocked: one picture per request instead
     setTimeout(()=>{if(LV.on)liveWS()},1500)};}
-function liveStart(){if(document.hidden||$('#p-live').hidden){LV.on=false;if(LV.ws){const w=LV.ws;LV.ws=null;try{w.close()}catch(e){}}if(LV.seam)seamSet(false,true);return}liveTiles();LV.on=true;
+function liveStart(){if(document.hidden||$('#p-live').hidden){LV.on=false;if(LV.ws){const w=LV.ws;LV.ws=null;try{w.close()}catch(e){}}for(const c in VID){try{VID[c].v.removeAttribute('src');VID[c].v.load()}catch(e){}delete VID[c]}if(LV.seam)seamSet(false,true);return}liveTiles();LV.on=true;
   if(LV.noWS)(S.live||[]).forEach(x=>liveLoop(x.cam));else liveWS();}
 document.addEventListener('visibilitychange',liveStart);
 // seamless: every camera stitched edge to edge, filling the screen
@@ -553,9 +577,12 @@ async function lvDrop(){if(!lvPress)return;clearTimeout(lvPress.timer);lvPress=n
 document.addEventListener('pointerup',lvDrop);document.addEventListener('pointercancel',lvDrop);
 document.addEventListener('contextmenu',e=>{if(e.target.closest('[data-live]'))e.preventDefault()});
 document.addEventListener('click',e=>{const t=e.target.closest('[data-live]');if(!t)return;if(lvNoClick){lvNoClick=false;return}
-  LV.big=t.dataset.live;const x=(S.live||[]).find(y=>y.cam===LV.big);$('#livebigname').textContent=x?x.name:'';$('#livebig').hidden=false;});
-$('#livebigx').onclick=()=>{LV.big=null;$('#livebig').hidden=true};
-document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('#livebig').hidden){LV.big=null;$('#livebig').hidden=true}else if(LV.seam)seamSet(false)});
+  LV.big=t.dataset.live;const x=(S.live||[]).find(y=>y.cam===LV.big);$('#livebigname').textContent=x?x.name:'';
+  const v=VID[LV.big]&&VID[LV.big].v;if(v){$('#livebigimg').hidden=true;$('#livebig').insertBefore(v,$('#livebigx'));v.play().catch(()=>{})}else $('#livebigimg').hidden=false;
+  $('#livebig').hidden=false;});
+function bigClose(){const v=$('#livebig video');if(v){const t=document.querySelector(`[data-live="${v.dataset.lvvid}"]`);if(t)t.appendChild(v);v.play().catch(()=>{})}LV.big=null;$('#livebig').hidden=true}
+$('#livebigx').onclick=bigClose;
+document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('#livebig').hidden)bigClose();else if(LV.seam)seamSet(false)});
 // ---- all-day recording to the NAS (one PC records; every PC cuts clips from it)
 const DAYN=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 async function ftLoad(){try{const f=await api('/api/footage');const days=f.days.join()==='0,1,2,3,4,5'?'Mon–Sat':f.days.map(d=>DAYN[d]).join(', ');
