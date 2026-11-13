@@ -420,6 +420,90 @@ def request_video(b):
     return job
 
 
+def pack_clips(order, start, end, cams=None):
+    """Download the packing minutes from each table camera's memory card into the order folder."""
+    if end <= start or end - start > timedelta(hours=2):
+        raise ValueError("Pick an end time after the start, at most 2 hours later")
+    made, errs, by_ip = [], [], {}
+    for cam in cams or CFG["packing_cameras"]:
+        try:
+            ip = CFG["cameras"][cam]["ip"]
+            if ip in by_ip:  # two table views of one camera: download once, copy for the second view
+                first_cam, first = by_ip[ip]
+                name = first.replace(f"_packing_{first_cam}_", f"_packing_{cam}_")
+                shutil.copy(os.path.join(order_dir(order), first), os.path.join(order_dir(order), name))
+                made.append(name)
+                continue
+            name = sd_clip(order, cam, start, end)
+            by_ip[ip] = (cam, name)
+            made.append(name)
+        except Exception as e:
+            errs.append(f"{CFG['cameras'][cam]['label']}: {clean(e)}")
+    if not made:
+        raise RuntimeError("; ".join(errs))
+    return {"files": made, "errors": errs}
+
+
+CLIP_REQ = "packclip-request.json"
+
+
+def request_packclip(b):
+    """Order ID only: Claude reads the 'Scan to ship' time in BigSeller, then Sit Pretty downloads the clip."""
+    order = safe_id(b.get("order"))
+    cams = [c for c in (b.get("cams") or CFG["packing_cameras"]) if c in CFG["cameras"]]
+    if not cams:
+        raise ValueError("Tick at least one table")
+    job = {"kind": "clip", "order": order, "cams": cams, "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+           "status": "queued"}
+    scan = (b.get("scan_time") or "").strip()
+    if scan:   # the BigSeller pop-up read the scan time already: download straight away, no Claude
+        datetime.strptime(scan, "%Y-%m-%dT%H:%M")
+        job.update(scan_time=scan, status="time_found", progress="Downloading from the camera's memory card")
+        json.dump(job, open(os.path.join(order_dir(order), CLIP_REQ), "w", encoding="utf8"), indent=1)
+        JOB_CACHE[0] = 0
+        log(f"Packing clip asked for {order} (scan to ship {scan})")
+        threading.Thread(target=fetch_found_clips, daemon=True).start()
+        job["now"] = True
+        return job
+    json.dump(job, open(os.path.join(order_dir(order), CLIP_REQ), "w", encoding="utf8"), indent=1)
+    JOB_CACHE[0] = 0
+    log(f"Packing clip asked for {order}: Claude looks up the scan time first")
+    job["now"] = kick_claude()
+    return job
+
+
+def fetch_found_clips():
+    """Download the clips whose scan time Claude has found (status "time_found")."""
+    if not os.path.isdir(SAVE):
+        return
+    for name in os.listdir(SAVE):
+        p = os.path.join(SAVE, name, CLIP_REQ)
+        if not os.path.isfile(p):
+            continue
+        j = _read_json(p) or {}
+        if j.get("status") != "time_found":
+            continue
+        try:
+            scan = datetime.strptime(j["scan_time"], "%Y-%m-%dT%H:%M")
+            start = datetime.strptime(j["start_time"], "%Y-%m-%dT%H:%M") if j.get("start_time") else \
+                scan - timedelta(minutes=CFG["default_pack_minutes_before_scan"])
+            if not scan - timedelta(hours=1) <= start < scan:
+                start = scan - timedelta(minutes=CFG["default_pack_minutes_before_scan"])
+            j["status"] = "downloading"
+            json.dump(j, open(p, "w", encoding="utf8"), indent=1)
+            JOB_CACHE[0] = 0
+            r = pack_clips(j["order"], start, scan + timedelta(minutes=2), j.get("cams"))
+            j.update(status="done", files=r["files"], videos=r["files"],
+                     summary=f"Scan to ship {scan:%d %b %H:%M}; clip {start:%H:%M}-{scan + timedelta(minutes=2):%H:%M}"
+                     + (" · not saved: " + "; ".join(r["errors"]) if r["errors"] else ""))
+            log(f"Packing clip saved for {j['order']}: {', '.join(r['files'])}")
+        except Exception as e:
+            j.update(status="problem", problem=f"Could not download the clip: {clean(e)}")
+            log(f"Packing clip for {j.get('order')} failed: {clean(e)}")
+        json.dump(j, open(p, "w", encoding="utf8"), indent=1)
+        JOB_CACHE[0] = 0
+
+
 # ---------------------------------------------------------------- Claude Code makes the videos straight away
 REPO = os.path.dirname(HERE)
 CLAUDE_EXE = shutil.which("claude") or os.path.join(os.path.expanduser("~"), ".local", "bin", "claude.exe")
@@ -427,7 +511,17 @@ AUTO = {"proc": None, "again": False, "state": "idle"}   # idle / running / sign
 AUTO_LOCK = threading.Lock()
 # Unboxing videos are simpler (no BigSeller lookup, no packing count), so they use the cheaper Sonnet model;
 # packing videos keep the default (stronger) model because the item counting needs care.
-AUTO_KINDS = [("refresh", "sonnet"), ("unboxing-video-request.json", "sonnet"), ("evidence-request.json", None)]
+CLIP_PROMPT = (
+    "Staff want raw packing clips. For every N:\\Yong Chuan\\Dispute\\*\\packclip-request.json whose status is "
+    "\"queued\" (leave every other kind of request alone): open the order in BigSeller in Claude in Chrome (All Orders, "
+    "search the order number, Order Details, Order Log) and read the time of \"Scan to ship on APP\". Write it into "
+    "that request file as \"scan_time\": \"YYYY-MM-DDTHH:MM\" (Singapore time) and, if the same table's previous ship "
+    "scan shows when this order's packing started, \"start_time\" in the same format; then set \"status\": "
+    "\"time_found\". If the order has no ship scan or cannot be found, set \"status\": \"problem\" and \"problem\" "
+    "to one plain sentence for staff. Do NOT download footage or make videos: Sit Pretty downloads the clip itself. "
+    "Never type passwords. In BigSeller only read: never click Ship, Print or anything that changes an order. "
+    "Finish with one line per request.")
+AUTO_KINDS = [("refresh", "sonnet"), (CLIP_REQ, "sonnet"), ("count-request.json", "sonnet"), ("unboxing-video-request.json", "sonnet"), ("evidence-request.json", None)]
 REFRESH_PROMPT = (
     "Staff pressed \"Refresh from Shopee\" in Sit Pretty. Read sit-pretty/evidence/README.md, section "
     "\"Returns list refresh\", and the daily task it points to "
@@ -475,6 +569,8 @@ def _run_claude():
         for fname, model in AUTO_KINDS:
             if queued(fname) and not _run_claude_once(fname, model):
                 return
+            if fname == CLIP_REQ:
+                threading.Thread(target=fetch_found_clips, daemon=True).start()
         if not AUTO["again"]:
             AUTO["state"] = "idle"
             return
@@ -484,7 +580,7 @@ def _run_claude_once(fname, model):
     if True:
         out_p = os.path.join(HERE, "tmp", "claude-run.log")
         with open(out_p, "w", encoding="utf8") as out:
-            cmd = [CLAUDE_EXE, "-p", (REFRESH_PROMPT if fname == "refresh" else AUTO_PROMPT.replace("{fname}", fname)), "--chrome", "--permission-mode", "acceptEdits",
+            cmd = [CLAUDE_EXE, "-p", (REFRESH_PROMPT if fname == "refresh" else CLIP_PROMPT if fname == CLIP_REQ else AUTO_PROMPT.replace("{fname}", fname)), "--chrome", "--permission-mode", "acceptEdits",
                    "--add-dir", SAVE]
             if model:
                 cmd += ["--model", model]
@@ -497,7 +593,7 @@ def _run_claude_once(fname, model):
                 log(f"Could not start Claude Code: {e}")
                 return False
             AUTO["proc"], AUTO["state"] = p, "running"
-            kind = "returns-list refresh" if fname == "refresh" else "unboxing" if fname.startswith("unboxing") else "packing"
+            kind = "returns-list refresh" if fname == "refresh" else "packing-clip time" if fname == CLIP_REQ else "unboxing" if fname.startswith("unboxing") else "packing"
             log(f"Claude Code started making the {kind} videos ({model or 'default model'})")
             rc = p.wait()
         tail = open(out_p, encoding="utf8", errors="replace").read()[-3000:]
@@ -556,7 +652,7 @@ def jobs():
     out = []
     if os.path.isdir(SAVE):
         for name in os.listdir(SAVE):
-            for fname in ("evidence-request.json", "unboxing-video-request.json"):
+            for fname in ("evidence-request.json", "unboxing-video-request.json", CLIP_REQ, COUNT_REQ):
                 p = os.path.join(SAVE, name, fname)
                 if os.path.isfile(p):
                     try:
@@ -753,6 +849,104 @@ def appeal_text(row):
     return text
 
 
+# ---------------------------------------------------------------- one order's videos (the BigSeller pop-up)
+COUNT_REQ = "count-request.json"
+DIR_CACHE = [0, set()]
+
+
+def order_folders():
+    if time.time() - DIR_CACHE[0] > 30:
+        try:
+            DIR_CACHE[:] = [time.time(), set(os.listdir(SAVE))]
+        except OSError:
+            DIR_CACHE[:] = [time.time(), set()]
+    return DIR_CACHE[1]
+
+
+def video_kind(name):
+    """simple (raw packing clip), count (simple count), detailed (labelled packing), unboxing, or other."""
+    n = name.lower()
+    if "_unboxing_" in n:
+        return "unboxing"
+    if "_count_" in n:
+        return "count"
+    if "_packing_" in n and re.search(r"_video\d+of\d+", n):
+        return "detailed"
+    if "_packing_" in n and "_shopee" not in n:
+        return "simple"
+    return "other"
+
+
+def video_label(name):
+    n, k = name, video_kind(name)
+    cam = next((c for c in CFG["cameras"] if f"_{c}_" in n), None)
+    table = CFG["cameras"][cam]["label"] if cam else ""
+    part = re.search(r"video(\d+)of(\d+)", n)
+    part = f" {part.group(1)}/{part.group(2)}" if part else ""
+    if k == "unboxing":
+        return ("Unboxing, labelled" if "_labelled_" in n else "Unboxing recording") + part
+    if k == "count":
+        return f"Simple count · {table}{part}"
+    if k == "detailed":
+        return f"Detailed packing · {table}{part}"
+    if k == "simple":
+        t = re.search(r"_(\d{8})-(\d{4})", n)
+        when = f" · from {t.group(2)[:2]}:{t.group(2)[2:]}" if t else ""
+        return f"Packing clip · {table}{when}"
+    return n
+
+
+def have(orders):
+    """How many videos each order has (for the camera button colour on BigSeller)."""
+    folders, out = order_folders(), {}
+    for o in (orders or [])[:400]:
+        o = safe_id(o)
+        if o not in folders:
+            continue
+        try:
+            out[o] = sum(1 for n in os.listdir(os.path.join(SAVE, o)) if n.endswith(".mp4"))
+        except OSError:
+            pass
+    return out
+
+
+def order_info(order):
+    order = safe_id(order)
+    d = os.path.join(SAVE, order)
+    vids = []
+    if os.path.isdir(d):
+        for n in sorted(os.listdir(d)):
+            if n.endswith(".mp4"):
+                p = os.path.join(d, n)
+                vids.append({"file": n, "kind": video_kind(n), "label": video_label(n),
+                             "mb": round(os.path.getsize(p) / 1e6, 1), "at": datetime.fromtimestamp(os.path.getmtime(p)).strftime("%d %b %H:%M")})
+    reqs = []
+    for fn in ("evidence-request.json", "unboxing-video-request.json", CLIP_REQ, COUNT_REQ):
+        j = _read_json(os.path.join(d, fn))
+        if j:
+            j.setdefault("kind", "packing")
+            reqs.append({k: j.get(k) for k in ("kind", "status", "progress", "problem", "summary", "requested_at", "scan_time", "cams", "clip")})
+    row = next((r for r in returns_list() if r.get("order") == order), None)
+    return {"order": order, "videos": vids, "jobs": reqs, "return": {k: row.get(k) for k in ("request", "status", "reason", "due", "todo", "appeal")} if row else None,
+            "packing_cameras": [[c, CFG["cameras"][c]["label"]] for c in CFG["packing_cameras"]], "auto_videos": auto_state()}
+
+
+def request_count(b):
+    """Simple count: Claude adds only an ITEMS PACKED counter to a packing clip that is already downloaded."""
+    order = safe_id(b.get("order"))
+    clip = os.path.basename(b.get("clip") or "")
+    if not (clip.endswith(".mp4") and os.path.isfile(os.path.join(SAVE, order, clip))):
+        raise ValueError("Get the packing clip first")
+    cam = next((c for c in CFG["cameras"] if f"_{c}_" in clip), CFG["packing_cameras"][0])
+    job = {"kind": "count", "order": order, "clip": clip, "cam": cam, "area": areas().get(cam),
+           "scan_time": b.get("scan_time") or "", "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "status": "queued"}
+    json.dump(job, open(os.path.join(order_dir(order), COUNT_REQ), "w", encoding="utf8"), indent=1)
+    JOB_CACHE[0] = 0
+    log(f"Simple count asked for {order} ({clip})")
+    job["now"] = kick_claude()
+    return job
+
+
 def returns_list():
     p = os.path.join(SAVE, "_sitpretty", "returns.json")
     try:
@@ -830,6 +1024,8 @@ class H(BaseHTTPRequestHandler):
         try:
             if u.path in ("/", "/index.html"):
                 return self.send(200, open(os.path.join(HERE, "web", "index.html"), "rb").read(), "text/html; charset=utf-8")
+            if u.path == "/order":   # the pop-up the BigSeller extension opens
+                return self.send(200, open(os.path.join(HERE, "web", "order.html"), "rb").read(), "text/html; charset=utf-8")
             if not self.authed():
                 return self.send(401, {"error": "PIN needed"})
             if u.path == "/api/state":
@@ -841,6 +1037,8 @@ class H(BaseHTTPRequestHandler):
                     "login_ok": all(all(cam_login(c, s)) for c in CFG["cameras"]),
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
                     "pack_before": CFG["default_pack_minutes_before_scan"], "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "auto_videos": auto_state(), "log": LOGS[-30:]})
+            if u.path == "/api/order":
+                return self.send(200, order_info(q.get("order")))
             if u.path == "/api/snapshot.jpg":
                 try:
                     return self.send(200, snapshot(q.get("cam", CFG["returns_camera"])), "image/jpeg")
@@ -851,12 +1049,12 @@ class H(BaseHTTPRequestHandler):
                 p = os.path.join(SAVE, order, name)
                 if not (name.endswith(".mp4") and os.path.isfile(p)):
                     return self.send(404, {"error": "not found"})
-                return self.stream(p)
+                return self.stream(p, q.get("dl") == "1")
             return self.send(404, {"error": "not found"})
         except Exception as e:
             return self.send(500, {"error": str(e)})
 
-    def stream(self, p):
+    def stream(self, p, download=False):
         size = os.path.getsize(p)
         rng = self.headers.get("Range")
         start, end = 0, size - 1
@@ -867,6 +1065,8 @@ class H(BaseHTTPRequestHandler):
         self.send_response(206 if rng else 200)
         self.send_header("Content-Type", "video/mp4")
         self.send_header("Accept-Ranges", "bytes")
+        if download:
+            self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(p)}"')
         self.send_header("Content-Length", str(end - start + 1))
         if rng:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
@@ -895,28 +1095,15 @@ class H(BaseHTTPRequestHandler):
             if u.path == "/api/unbox/stop":
                 return self.send(200, UNBOX.stop())
             if u.path == "/api/packclip":
+                if not b.get("start") and not b.get("end"):   # order ID only: Claude finds the scan time first
+                    return self.send(200, request_packclip(b))
                 start = datetime.strptime(b["start"], "%Y-%m-%dT%H:%M")
                 end = datetime.strptime(b["end"], "%Y-%m-%dT%H:%M")
-                if end <= start or end - start > timedelta(hours=2):
-                    raise ValueError("Pick an end time after the start, at most 2 hours later")
-                made, errs, by_ip = [], [], {}
-                for cam in b.get("cams") or CFG["packing_cameras"]:
-                    try:
-                        ip = CFG["cameras"][cam]["ip"]
-                        if ip in by_ip:  # two table views of one camera: download once, copy for the second view
-                            first_cam, first = by_ip[ip]
-                            name = first.replace(f"_packing_{first_cam}_", f"_packing_{cam}_")
-                            shutil.copy(os.path.join(order_dir(b["order"]), first), os.path.join(order_dir(b["order"]), name))
-                            made.append(name)
-                            continue
-                        name = sd_clip(b["order"], cam, start, end)
-                        by_ip[ip] = (cam, name)
-                        made.append(name)
-                    except Exception as e:
-                        errs.append(f"{CFG['cameras'][cam]['label']}: {clean(e)}")
-                if not made:
-                    raise RuntimeError("; ".join(errs))
-                return self.send(200, {"files": made, "errors": errs})
+                return self.send(200, pack_clips(b["order"], start, end, b.get("cams")))
+            if u.path == "/api/have":
+                return self.send(200, have(b.get("orders")))
+            if u.path == "/api/count":
+                return self.send(200, request_count(b))
             if u.path == "/api/readwb":
                 return self.send(200, read_waybill(b.get("cam")))
             if u.path == "/api/unbox-video":

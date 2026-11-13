@@ -5,6 +5,15 @@ camera(s) that filmed the packing and, if they know it, BigSeller's "Scan to shi
 That writes `N:\Yong Chuan\Dispute\<OrderID>\evidence-request.json` with `"status": "queued"`.
 The hourly Claude Code task `sit-pretty-evidence-videos` picks these up.
 
+**Show your progress.** Staff watch the request in Sit Pretty and in the BigSeller pop-up. Whenever you
+move to a new step, write a short `"progress"` into the request file, e.g. "Finding the scan time in
+BigSeller", "Downloading footage (2 of 6 pieces)", "Watching the footage", "Writing the labels",
+"Rendering", "Checking the result". Remove `"progress"` when the request is done or has a problem.
+
+**Be quick.** If the order folder already has a raw packing clip from that camera
+(`<OrderID>_packing_<camera>_<YYYYMMDD-HHMM>.mp4`, downloaded by Sit Pretty) that covers the packing,
+use it as the source instead of downloading again. If `scan_time` is given, don't open BigSeller for it.
+
 ## Returns list refresh
 
 If `N:\Yong Chuan\Dispute\_sitpretty\refresh-request.json` exists, staff pressed "Refresh from Shopee".
@@ -38,6 +47,21 @@ Make it the same way as a packing video, with these differences:
 - **Waybill close-up must be readable.** Pick the frame where the waybill is closest to the camera and
   sharpest (score several with an edge filter, not just the first second). If no frame shows readable
   text, leave the waybill zoom out and rely on the info strip and end card for the order ID.
+
+## Simple count videos (count-request.json)
+
+A lighter, cheaper packing video: only the big **ITEMS PACKED n / N** counter, the one-row info strip and
+the end card. No arrows, name tags, banners, waybill zoom or sub-counters. The request has `clip` (a raw
+packing clip already in the order folder), `cam`, `area` (table area) and maybe `scan_time`.
+1. Set `"status": "working"` and keep `"progress"` up to date.
+2. Items and quantities from BigSeller or Seller Centre (N = total quantity in the order).
+3. Contact-sheet the clip at 1 frame every 2 seconds, cropped to `area`, and find only the moments each
+   item goes into the parcel.
+4. Spec: `source` = the clip, `basename` = `<OrderID>_count_<cam>`, `counter` with `"label": "ITEMS PACKED"`,
+   `total` N and one step per item going in, `segments` at 4x except 1x for 2 s around each step, and
+   `card_lines` (courier, packed date and time, "n / N items packed"). Nothing else.
+5. Render, check 2-3 frames, set `"status": "done"`, `"videos"`, `"done_at"`, `"summary"`.
+Same owner rules as packing: never show anything negative.
 
 ## What staff found (findings.json)
 

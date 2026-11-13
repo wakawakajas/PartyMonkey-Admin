@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Order videos</title>
+<style>
+:root{--ink:#1d1d1f;--sub:#6b6b78;--line:#e6e6ea;--bg:#f6f6f8;--card:#fff;--acc:#1d1d1f;--ok:#067647;--warn:#B54708;--bad:#B42318}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+header h1{margin:0;font-size:16px;font-family:ui-monospace,Consolas,monospace}
+header .sub{color:var(--sub);font-size:12.5px}
+.tabs{display:flex;gap:6px;padding:10px 16px 0;flex-wrap:wrap}
+.tab{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:7px 14px;font:inherit;cursor:pointer;color:var(--ink)}
+.tab[aria-selected=true]{background:var(--acc);color:#fff;border-color:var(--acc)}
+.tab .n{opacity:.6;margin-left:4px}
+main{padding:12px 16px 24px;max-width:1100px}
+.player{background:#000;border-radius:12px;overflow:hidden}
+video{display:block;width:100%;max-height:62vh;background:#000}
+.ctrl{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.btn{border:1px solid var(--line);background:var(--card);border-radius:10px;height:36px;padding:0 12px;font:inherit;cursor:pointer;color:var(--ink);text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+.btn.on,.btn.main{background:var(--acc);color:#fff;border-color:var(--acc)}
+.btn:disabled{opacity:.5;cursor:default}
+.list{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.vid{display:flex;gap:10px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer}
+.vid[aria-current=true]{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+.vid .grow{flex:1;min-width:0}
+.vid .meta{color:var(--sub);font-size:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}
+.card h2{margin:0 0 6px;font-size:14px}
+.sub{color:var(--sub)}
+.job{font-size:13px;margin-top:6px}
+.job b.working,.job b.queued,.job b.downloading,.job b.time_found{color:var(--warn)}
+.job b.done{color:var(--ok)}.job b.problem{color:var(--bad)}
+.cams{display:flex;gap:12px;flex-wrap:wrap;margin:6px 0}
+.cams label{display:flex;gap:6px;align-items:center;cursor:pointer}
+.msg{font-size:13px;margin-top:6px}.msg.err{color:var(--bad)}.msg.ok{color:var(--ok)}
+.empty{color:var(--sub);padding:20px 0;text-align:center}
+.pin{max-width:320px;margin:60px auto;text-align:center}
+.pin input{width:100%;height:40px;border:1px solid var(--line);border-radius:10px;padding:0 10px;font:inherit;margin:8px 0}
+.spin{display:inline-block;width:10px;height:10px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:s 1s linear infinite;vertical-align:-1px}
+@keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header><h1 id="ord">Order</h1><span class="sub" id="hdr"></span></header>
+<div class="tabs" role="tablist">
+  <button class="tab" role="tab" data-t="simple">Simple view<span class="n" id="n-simple"></span></button>
+  <button class="tab" role="tab" data-t="detailed">Detailed packing<span class="n" id="n-detailed"></span></button>
+  <button class="tab" role="tab" data-t="unboxing">Unboxing<span class="n" id="n-unboxing"></span></button>
+</div>
+<main id="main"></main>
+
+<script>
+const P=new URLSearchParams(location.search);
+const ORDER=(P.get('order')||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+const SCAN=P.get('scan')||'';           // BigSeller "Scan to ship" time, from the extension (YYYY-MM-DDTHH:MM)
+let PIN=P.get('pin')||(()=>{try{return localStorage.getItem('sp-pin')||''}catch(e){return ''}})();
+let D=null, tab=P.get('tab')||'', cur='', speed=1, timer=null;
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const media=(f,dl)=>`/media?order=${encodeURIComponent(ORDER)}&file=${encodeURIComponent(f)}&pin=${encodeURIComponent(PIN)}${dl?'&dl=1':''}`;
+async function api(path,body){
+  const r=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json','X-Pin':PIN},body:body?JSON.stringify(body):undefined});
+  if(r.status===401){askPin();throw new Error('PIN needed')}
+  const j=await r.json(); if(!r.ok) throw new Error(j.error||'Something went wrong'); return j;
+}
+function askPin(){
+  $('#main').innerHTML='<div class="pin"><h2>Sit Pretty PIN</h2><input id="pin" type="password" inputmode="numeric" autocomplete="off"><button class="btn main" id="pinok">Open</button></div>';
+  $('#pinok').onclick=()=>{PIN=$('#pin').value.trim();try{localStorage.setItem('sp-pin',PIN)}catch(e){};load()};
+  $('#pin').focus();
+}
+const fmtScan=s=>{if(!s)return'';const d=new Date(s);return isNaN(d)?s:d.toLocaleString('en-SG',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',hour12:false})};
+const JOBTXT={queued:'Waiting for Claude',working:'Claude is making it',time_found:'Downloading',downloading:'Downloading from the camera',done:'Done',problem:'Needs you'};
+const KINDTXT={packing:'Detailed packing video',count:'Simple count',clip:'Packing clip',unboxing:'Labelled unboxing'};
+function jobHTML(kinds){
+  return (D.jobs||[]).filter(j=>kinds.includes(j.kind)&&j.status!=='done').map(j=>`<div class="job">${esc(KINDTXT[j.kind]||j.kind)}: <b class="${esc(j.status)}">${['done','problem'].includes(j.status)?'':'<span class="spin"></span> '}${esc(JOBTXT[j.status]||j.status)}</b>${j.progress?' · '+esc(j.progress):''}${j.problem?'<div class="msg err">'+esc(j.problem)+'</div>':''}</div>`).join('');
+}
+const busy=kinds=>(D.jobs||[]).some(j=>kinds.includes(j.kind)&&['queued','working','time_found','downloading'].includes(j.status));
+function camsHTML(){return `<div class="cams">${D.packing_cameras.map(c=>`<label><input type="checkbox" value="${esc(c[0])}"> ${esc(c[1])}</label>`).join('')}</div>`}
+const pickedCams=root=>[...root.querySelectorAll('.cams input:checked')].map(i=>i.value);
+
+function render(){
+  if(!D) return;
+  const by={simple:[],detailed:[],unboxing:[]};
+  for(const v of D.videos){ if(v.kind==='simple'||v.kind==='count') by.simple.push(v); else if(by[v.kind]) by[v.kind].push(v); }
+  for(const k in by) $('#n-'+k).textContent=by[k].length?by[k].length:'';
+  if(!tab) tab=by.detailed.length?'detailed':by.simple.length?'simple':by.unboxing.length?'unboxing':'simple';
+  document.querySelectorAll('.tab').forEach(b=>b.setAttribute('aria-selected',b.dataset.t===tab));
+  const list=by[tab];
+  if(!list.some(v=>v.file===cur)) cur=(list.find(v=>v.kind==='count')||list[0]||{}).file||'';
+  let h='';
+  if(cur){
+    h+=`<div class="player"><video id="v" controls autoplay muted playsinline preload="metadata" src="${media(cur)}"></video></div>
+      <div class="ctrl"><span class="sub">Speed</span>${[1,2,4,8,16].map(s=>`<button class="btn sp${s===speed?' on':''}" data-sp="${s}">${s}×</button>`).join('')}
+      <button class="btn" data-skip="-10">−10 s</button><button class="btn" data-skip="10">+10 s</button>
+      <a class="btn" href="${media(cur,1)}" download>Download</a></div>`;
+  }
+  if(list.length>1||(!cur&&list.length)) h+=`<div class="list">${list.map(v=>`<div class="vid" data-f="${esc(v.file)}" aria-current="${v.file===cur}"><div class="grow"><b>${esc(v.label)}</b><div class="meta">${esc(v.at)} · ${v.mb} MB</div></div><a class="btn" href="${media(v.file,1)}" download onclick="event.stopPropagation()">Download</a></div>`).join('')}</div>`;
+  if(!list.length) h+=`<div class="empty">${tab==='unboxing'?'No unboxing video for this order yet. Record one on Sit Pretty\'s Unbox page.':tab==='detailed'?'No detailed packing video yet.':'No packing clip yet.'}</div>`;
+
+  if(tab==='simple'){
+    const raw=list.filter(v=>v.kind==='simple'), counted=list.some(v=>v.kind==='count');
+    h+=jobHTML(['clip','count']);
+    if(!raw.length&&!busy(['clip'])){
+      h+=`<div class="card" id="getclip"><h2>Get the packing clip</h2><div class="sub">${SCAN?'BigSeller: scanned to ship <b>'+esc(fmtScan(SCAN))+'</b>. The clip runs from 15 minutes before to 2 minutes after.':'No BigSeller scan time was passed, so Claude looks it up first.'} Tick the table that packed it (each takes about 4 minutes to download).</div>${camsHTML()}<button class="btn main" id="goclip">Get packing clip</button><div class="msg" id="m1"></div></div>`;
+    } else if(raw.length&&!counted&&!busy(['count'])){
+      h+=`<div class="card" id="cnt"><h2>Simple count</h2><div class="sub">Claude adds a big ITEMS PACKED counter to the clip (no arrows or name tags). Quicker and cheaper than the detailed video, about 3-5 minutes.</div><button class="btn main" id="gocount">Add simple count</button><div class="msg" id="m2"></div></div>`;
+    }
+  }
+  if(tab==='detailed'){
+    h+=jobHTML(['packing']);
+    if(!list.length&&!busy(['packing'])){
+      h+=`<div class="card" id="det"><h2>Make the detailed packing video</h2><div class="sub">Claude labels every item, the counting, the taping and the waybill (Shopee-ready, about 10-20 minutes).${SCAN?' Scanned to ship <b>'+esc(fmtScan(SCAN))+'</b>.':''}</div>${camsHTML()}<button class="btn main" id="godet">Make detailed video</button><div class="msg" id="m3"></div></div>`;
+    }
+  }
+  if(tab==='unboxing') h+=jobHTML(['unboxing']);
+  if(D.return&&D.return.appeal) h+=`<div class="card"><h2>Appeal for Shopee</h2><div class="sub" style="white-space:pre-wrap">${esc(D.return.appeal)}</div><button class="btn" id="cpapp" style="margin-top:8px">Copy appeal</button></div>`;
+
+  // keep the playing video when only the status changes
+  const v=$('#v'), keep=v&&v.getAttribute('src')===media(cur)?{t:v.currentTime,p:!v.paused}:null;
+  if(keep){ const old=v.parentElement; $('#main').innerHTML=h; $('#v').parentElement.replaceWith(old); }
+  else $('#main').innerHTML=h;
+  const nv=$('#v'); if(nv) nv.playbackRate=speed;
+}
+
+document.addEventListener('click',async e=>{
+  const t=e.target.closest('[data-t]'); if(t){tab=t.dataset.t;cur='';render();return}
+  const f=e.target.closest('.vid'); if(f){cur=f.dataset.f;$('#main').querySelector('.player')?.remove();render();return}
+  const s=e.target.closest('[data-sp]'); if(s){speed=+s.dataset.sp;const v=$('#v');if(v)v.playbackRate=speed;document.querySelectorAll('.sp').forEach(b=>b.classList.toggle('on',+b.dataset.sp===speed));return}
+  const k=e.target.closest('[data-skip]'); if(k){const v=$('#v');if(v)v.currentTime=Math.max(0,v.currentTime+ +k.dataset.skip);return}
+  const id=e.target.id;
+  if(id==='goclip'||id==='godet'){
+    const box=e.target.closest('.card'), m=box.querySelector('.msg'), cams=pickedCams(box);
+    if(!cams.length){m.className='msg err';m.textContent='Tick the table that packed this order.';return}
+    e.target.disabled=true;
+    try{ await api(id==='goclip'?'/api/packclip':'/api/evidence',{order:ORDER,request:(D.return||{}).request||'',cams,scan_time:SCAN});
+      m.className='msg ok';m.textContent='Started.'; await load(); }
+    catch(err){m.className='msg err';m.textContent=err.message;e.target.disabled=false}
+  }
+  if(id==='gocount'){
+    const m=$('#m2'), clip=(D.videos.find(v=>v.file===cur&&v.kind==='simple')||D.videos.find(v=>v.kind==='simple')).file;
+    e.target.disabled=true;
+    try{ await api('/api/count',{order:ORDER,clip,scan_time:SCAN}); await load(); }
+    catch(err){m.className='msg err';m.textContent=err.message;e.target.disabled=false}
+  }
+  if(id==='cpapp'){
+    const a=document.createElement('textarea');a.value=D.return.appeal;document.body.appendChild(a);a.select();document.execCommand('copy');a.remove();
+    e.target.textContent='Copied';setTimeout(()=>e.target.textContent='Copy appeal',1500);
+  }
+});
+
+async function load(){
+  if(!ORDER){$('#main').innerHTML='<div class="empty">No order ID.</div>';return}
+  try{ D=await api('/api/order?order='+encodeURIComponent(ORDER)); }catch(e){ if(e.message!=='PIN needed') $('#main').innerHTML='<div class="empty">'+esc(e.message)+'</div>'; return; }
+  $('#ord').textContent=ORDER; document.title=ORDER+' videos';
+  const r=D.return; $('#hdr').textContent=[r&&r.status?'Return: '+r.status:'',SCAN?'Scanned to ship '+fmtScan(SCAN):''].filter(Boolean).join(' · ');
+  render();
+  clearTimeout(timer);
+  if(busy(['clip','count','packing','unboxing'])) timer=setTimeout(load,5000);
+}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')window.close()});
+load();
+</script>
+</body>
+</html>
