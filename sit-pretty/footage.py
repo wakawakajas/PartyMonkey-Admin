@@ -49,8 +49,12 @@ def cams_by_ip(all_cams=False):
 
 def live_list():
     """One tile per physical camera for the Live page."""
-    return [{"cam": cam, "key": k, "name": folder_name(k)[:-len(f" ({k})")],
-             "record": k in cams_by_ip()} for k, cam in cams_by_ip(True).items()]
+    rec = cams_by_ip()
+    tiles = [{"cam": cam, "key": k, "name": folder_name(k)[:-len(f" ({k})")], "record": k in rec}
+             for k, cam in cams_by_ip(True).items()]
+    lo = H["cfg"].get("live_order") or []
+    pos = {c: i for i, c in enumerate(lo)}
+    return sorted(tiles, key=lambda t: (pos.get(t["cam"], len(lo)), list(H["cfg"]["cameras"]).index(t["cam"])))
 
 
 def folder_name(k):

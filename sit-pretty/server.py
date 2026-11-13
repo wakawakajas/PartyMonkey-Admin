@@ -1283,6 +1283,7 @@ def apply_cameras(force=False):
     packing = s.get("packing") if s.get("packing") is not None else BASE_CAMS["packing"]
     CFG["cameras"] = {k: cams[k] for k in order}
     CFG["packing_cameras"] = [k for k in order if k in packing]
+    CFG["live_order"] = [k for k in (s.get("live_order") or []) if k in cams]
 
 
 def edit_cameras(b):
@@ -1292,9 +1293,12 @@ def edit_cameras(b):
     with CAM_LOCK:
         s = _read_json(CAMS_SHARED) or {}
         order = list(CFG["cameras"])
-        if act != "add" and cam not in CFG["cameras"]:
+        if act == "live_order":   # the Live page's own order (long press and drag), the same on every PC
+            s["live_order"] = [k for k in (b.get("order") or []) if k in CFG["cameras"]]
+            cam = None
+        elif act != "add" and cam not in CFG["cameras"]:
             raise ValueError("Unknown camera")
-        if act == "rename":
+        elif act == "rename":
             label = " ".join(str(b.get("label") or "").split())[:40]
             if not label:
                 raise ValueError("Type a name")

@@ -226,10 +226,26 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
     </section>
 
     <section class="page" id="p-live" hidden>
-      <div class="card glass"><h2>Live</h2><p class="sub">Every camera, live (about a second behind). Click a camera to make it big; Esc to go back. The video stops when you leave this page.</p></div>
-      <div id="livegrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px"></div>
+      <div class="card glass" id="livehead"><h2>Live</h2><p class="sub">Every camera, live (about a second behind). Click a camera to make it big. Hold a camera for a moment, then drag it to rearrange (same order on every PC).</p>
+        <div class="row" style="margin-top:8px"><button class="btn" id="lvseam">Seamless view</button></div></div>
+      <div id="livegrid"></div>
     </section>
-    <style>#livebig[hidden]{display:none!important}</style>
+    <style>
+      #livegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px}
+      .lvtile{padding:10px;cursor:zoom-in;user-select:none;-webkit-user-select:none;touch-action:pan-y;transition:transform .12s,box-shadow .12s}
+      .lvtile img{width:100%;aspect-ratio:16/9;object-fit:contain;background:#111;border-radius:8px;display:block;pointer-events:none;-webkit-user-drag:none}
+      .lvtile.lifted{transform:scale(1.03);box-shadow:0 12px 30px rgba(0,0,0,.25);cursor:grabbing;z-index:3;position:relative;opacity:.92}
+      .lvtile.ghost{outline:2px dashed var(--rust)}
+      #livegrid.seam{position:fixed;inset:0;z-index:40;background:#000;gap:0;grid-template-columns:repeat(var(--lvcols,3),1fr);grid-auto-rows:1fr;align-content:stretch}
+      #livegrid.seam .lvtile{padding:0;border:0;border-radius:0;background:#000;box-shadow:none;backdrop-filter:none;margin:0;position:relative;overflow:hidden}
+      #livegrid.seam .lvtile .row{position:absolute;left:6px;top:4px;z-index:2;margin:0!important;opacity:0;transition:opacity .2s;color:#fff;text-shadow:0 1px 3px #000;font-size:12px}
+      #livegrid.seam .lvtile:hover .row{opacity:1}
+      #livegrid.seam .lvtile img{border-radius:0;height:100%;aspect-ratio:auto;object-fit:cover}
+      #lvexit{position:fixed;right:10px;top:10px;z-index:41;opacity:.15;transition:opacity .2s}
+      #lvexit:hover{opacity:1}
+      #lvexit[hidden],#livebig[hidden]{display:none!important}
+    </style>
+    <button class="btn" id="lvexit" hidden>Exit seamless (Esc)</button>
     <div id="livebig" hidden style="position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:16px">
       <div style="color:#fff;font-weight:600" id="livebigname"></div>
       <img id="livebigimg" alt="" style="max-width:100%;max-height:calc(100vh - 90px);border-radius:10px;background:#111">
@@ -384,7 +400,7 @@ async function api(path,body){
 $('#pinok').onclick=()=>{PIN=$('#pin').value.trim();try{localStorage.setItem('sp-pin',PIN)}catch(e){}$('#pinbox').hidden=true;refresh()};
 
 function go(p){page=p;document.querySelectorAll('.nav').forEach(b=>b.dataset.page===p?b.setAttribute('aria-current','page'):b.removeAttribute('aria-current'));
-  ['overview','unbox','evid','pack','saved','live','cams'].forEach(k=>$('#p-'+k).hidden=k!==p);if(location.hash.slice(1)!==p)history.replaceState(null,'','#'+p);render();if(S)liveStart()}
+  ['overview','unbox','evid','pack','saved','live','cams'].forEach(k=>$('#p-'+k).hidden=k!==p);if(location.hash.slice(1)!==p)history.replaceState(null,'','#'+p);render();if(S)liveStart();if(p==='live'&&LV.seam&&!$('#livegrid').classList.contains('seam'))seamSet(true,true)}
 document.querySelectorAll('.nav').forEach(b=>b.onclick=()=>go(b.dataset.page));
 
 function hay(r){return (r.order+' '+(r.request||'')+' '+(r.product||'')+' '+(r.return_tracking||[]).join(' ')+' '+(r.ship_tracking||[]).join(' ')).toLowerCase()}
@@ -464,10 +480,12 @@ function render(){
   }
 }
 // ---- Live page: each tile asks for the newest frame again as soon as it has one
-const LV={on:false,big:null,loops:{}};
-function liveTiles(){const g=$('#livegrid');const L=S.live||[];
-  if(g.dataset.k===L.map(x=>x.cam+x.name).join()) return; g.dataset.k=L.map(x=>x.cam+x.name).join();
-  g.innerHTML=L.map(x=>`<div class="card glass" style="padding:10px;cursor:zoom-in" data-live="${x.cam}"><div class="row" style="margin-bottom:6px"><b class="grow">${esc(x.name)}</b><span class="sub" data-lvst="${x.cam}">Connecting…</span>${x.record?'':'<span class="sub">· live only</span>'}</div><img data-lvimg="${x.cam}" alt="" style="width:100%;aspect-ratio:16/9;object-fit:contain;background:#111;border-radius:8px;display:block"></div>`).join('')||'<p class="sub">No cameras yet. Add them on the Cameras page.</p>';}
+const LV={on:false,big:null,loops:{},drag:null,seam:false};
+try{LV.seam=localStorage.getItem('sp-live-seam')==='1'}catch(e){}
+function liveTiles(){const g=$('#livegrid');if(LV.drag)return;const L=S.live||[];const key=L.map(x=>x.cam+x.name+x.record).join();
+  if(g.dataset.k===key) return; g.dataset.k=key;
+  g.innerHTML=L.map(x=>`<div class="card glass lvtile" data-live="${x.cam}"><div class="row" style="margin-bottom:6px"><b class="grow">${esc(x.name)}</b><span class="sub" data-lvst="${x.cam}">Connecting…</span>${x.record?'':'<span class="sub">· live only</span>'}</div><img data-lvimg="${x.cam}" alt="" draggable="false"></div>`).join('')||'<p class="sub">No cameras yet. Add them on the Cameras page.</p>';
+  seamLayout();}
 async function liveLoop(cam){if(LV.loops[cam])return;LV.loops[cam]=1;let seq=0,url='',fails=0;
   while(LV.on){const imgs=[...document.querySelectorAll(`[data-lvimg="${cam}"]`)];if(LV.big===cam)imgs.push($('#livebigimg'));
     const st=document.querySelector(`[data-lvst="${cam}"]`);
@@ -476,11 +494,38 @@ async function liveLoop(cam){if(LV.loops[cam])return;LV.loops[cam]=1;let seq=0,u
       seq=+r.headers.get('X-Seq')||0;const u=URL.createObjectURL(await r.blob());imgs.forEach(i=>i.src=u);if(url)URL.revokeObjectURL(url);url=u;fails=0;if(st){st.textContent='● Live';st.style.color='#c0392b'}}
     catch(e){fails++;if(st){st.textContent=e.message.slice(0,90);st.style.color='var(--rust)'}await new Promise(r=>setTimeout(r,Math.min(10000,2000*fails)))}}
   delete LV.loops[cam];}
-function liveStart(){if(document.hidden||$('#p-live').hidden){LV.on=false;return}liveTiles();LV.on=true;(S.live||[]).forEach(x=>liveLoop(x.cam));}
+function liveStart(){if(document.hidden||$('#p-live').hidden){LV.on=false;if(LV.seam)seamSet(false,true);return}liveTiles();LV.on=true;(S.live||[]).forEach(x=>liveLoop(x.cam));}
 document.addEventListener('visibilitychange',liveStart);
-document.addEventListener('click',e=>{const t=e.target.closest('[data-live]');if(!t)return;LV.big=t.dataset.live;const x=(S.live||[]).find(y=>y.cam===LV.big);$('#livebigname').textContent=x?x.name:'';$('#livebig').hidden=false;});
+// seamless: every camera stitched edge to edge, filling the screen
+function seamLayout(){const g=$('#livegrid'),n=(S&&S.live||[]).length||1;
+  let best=1,bs=0;for(let c=1;c<=n;c++){const r=Math.ceil(n/c),w=innerWidth/c,h=innerHeight/r,sz=Math.min(w,h*16/9);if(sz>bs){bs=sz;best=c}}
+  g.style.setProperty('--lvcols',best);}
+function seamSet(on,keep){LV.seam=on;const g=$('#livegrid');g.classList.toggle('seam',on);$('#lvexit').hidden=!on;
+  if(!keep){try{localStorage.setItem('sp-live-seam',on?'1':'0')}catch(e){}}
+  if(on){seamLayout();try{document.documentElement.requestFullscreen&&!document.fullscreenElement&&document.documentElement.requestFullscreen().catch(()=>{})}catch(e){}}
+  else if(document.fullscreenElement){document.exitFullscreen().catch(()=>{})}}
+$('#lvseam').onclick=()=>seamSet(true);$('#lvexit').onclick=()=>seamSet(false);
+addEventListener('resize',()=>{if(LV.seam)seamLayout()});
+document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement&&LV.seam&&!$('#p-live').hidden)seamSet(false)});
+// click = big view; hold ~0.4 s, then drag = rearrange
+let lvPress=null,lvNoClick=false;
+document.addEventListener('pointerdown',e=>{const t=e.target.closest('[data-live]');if(!t||e.button>0)return;
+  lvPress={t,x:e.clientX,y:e.clientY,id:e.pointerId,timer:setTimeout(()=>{LV.drag=t;t.classList.add('lifted');lvNoClick=true;try{t.setPointerCapture(e.pointerId)}catch(_){};if(navigator.vibrate)navigator.vibrate(20)},420)};});
+document.addEventListener('pointermove',e=>{if(!lvPress)return;
+  if(!LV.drag){if(Math.hypot(e.clientX-lvPress.x,e.clientY-lvPress.y)>8){clearTimeout(lvPress.timer);lvPress=null}return}
+  e.preventDefault();const t=LV.drag;t.style.pointerEvents='none';const over=document.elementFromPoint(e.clientX,e.clientY);t.style.pointerEvents='';
+  const o=over&&over.closest('[data-live]');if(!o||o===t)return;const g=$('#livegrid'),tiles=[...g.children];
+  if(tiles.indexOf(o)<tiles.indexOf(t))g.insertBefore(t,o);else g.insertBefore(t,o.nextSibling);});
+async function lvDrop(){if(!lvPress)return;clearTimeout(lvPress.timer);lvPress=null;const t=LV.drag;if(!t)return;
+  t.classList.remove('lifted');LV.drag=null;const order=[...$('#livegrid').children].map(x=>x.dataset.live).filter(Boolean);
+  S.live.sort((a,b)=>order.indexOf(a.cam)-order.indexOf(b.cam));$('#livegrid').dataset.k=S.live.map(x=>x.cam+x.name+x.record).join();
+  try{await api('/api/cameras',{action:'live_order',order})}catch(e){alert('Could not save the order: '+e.message)}}
+document.addEventListener('pointerup',lvDrop);document.addEventListener('pointercancel',lvDrop);
+document.addEventListener('contextmenu',e=>{if(e.target.closest('[data-live]'))e.preventDefault()});
+document.addEventListener('click',e=>{const t=e.target.closest('[data-live]');if(!t)return;if(lvNoClick){lvNoClick=false;return}
+  LV.big=t.dataset.live;const x=(S.live||[]).find(y=>y.cam===LV.big);$('#livebigname').textContent=x?x.name:'';$('#livebig').hidden=false;});
 $('#livebigx').onclick=()=>{LV.big=null;$('#livebig').hidden=true};
-document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('#livebig').hidden){LV.big=null;$('#livebig').hidden=true}});
+document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(!$('#livebig').hidden){LV.big=null;$('#livebig').hidden=true}else if(LV.seam)seamSet(false)});
 // ---- all-day recording to the NAS (one PC records; every PC cuts clips from it)
 const DAYN=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 async function ftLoad(){try{const f=await api('/api/footage');const days=f.days.join()==='0,1,2,3,4,5'?'Mon–Sat':f.days.map(d=>DAYN[d]).join(', ');
