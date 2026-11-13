@@ -1288,19 +1288,32 @@ def scan_want():
             and now - v["tried"].get(r["order"], 0) > 12 * 3600][:20]
 
 
-# ---- Packing clips cut by themselves: once a return's ship scan is known, the recording PC cuts the clip
-#      from the NAS footage of the table that was busy in the minutes before the scan.
+# ---- Which table packed it? Returns whose ship scan is known and whose packing is on the NAS wait for
+#      staff to pick the table (stills of every table at the scan moment); then the clip is cut from the NAS.
 AUTO_CLIP = "autoclip.json"
+CHOOSING = set()
+CHOICES = {"at": 0, "v": []}
 
 
-def auto_clips_once(limit=3):
+def _pack_cams():
+    cams, seen = [], set()
+    for c in CFG["packing_cameras"]:   # one per camera (Party table Latex / Drawer / Full are one camera)
+        k = footage.key_of(CFG["cameras"][c]["ip"])
+        if k not in seen:
+            seen.add(k)
+            cams.append([c, re.sub(r"\s*\(\d+\)$", "", footage.folder_name(k))])
+    return cams
+
+
+def clip_choices():
+    if time.time() - CHOICES["at"] < 30:
+        return CHOICES["v"]
     v = scans_all()["scans"]
     b4, af = CFG.get("default_pack_minutes_before_scan", 5), CFG.get("default_pack_minutes_after_scan", 1)
-    keep = int(footage.conf()["keep_days"])
-    done = 0
+    out = []
     for r in returns_list():
         o, s = r.get("order"), v.get(r.get("order") or "")
-        if not (o and s):
+        if not (o and s) or o in CHOOSING:
             continue
         d = os.path.join(SAVE, safe_id(o))
         if os.path.isfile(os.path.join(d, AUTO_CLIP)):
@@ -1308,43 +1321,66 @@ def auto_clips_once(limit=3):
         if os.path.isdir(d) and any("_packing_" in n and n.endswith(".mp4") for n in os.listdir(d)):
             continue
         start, end = _scan_window(s, b4, af)
-        cams, seen = [], set()
-        for c in CFG["packing_cameras"]:
-            k = footage.key_of(CFG["cameras"][c]["ip"])
-            if k not in seen:
-                seen.add(k)
-                if footage.has(c, start, end):
-                    cams.append(c)
-        if not cams:
-            if (datetime.now() - end).days >= 1 or (datetime.now() - end).days > keep:
-                os.makedirs(d, exist_ok=True)
-                json.dump({"status": "no NAS footage", "scan": s, "at": f"{datetime.now():%Y-%m-%d %H:%M}"},
-                          open(os.path.join(d, AUTO_CLIP), "w", encoding="utf8"), indent=1)
-            continue
-        scan_t = _scan_window(s, 0, 0)[0]
-        score = {c: footage.motion(c, scan_t - timedelta(minutes=3), scan_t + timedelta(seconds=30)) for c in cams}
-        best = max(score.values())
-        # every table with people working before the scan (idle is about 0.4, packing about 4); the busiest if none
-        pick = [c for c in cams if score[c] >= 1.2] or [max(cams, key=lambda c: score[c])]
-        for c in pick:
-            sd_clip(o, c, start, end)
-        json.dump({"status": "done", "cams": pick, "motion": {c: round(x, 2) for c, x in score.items()}, "scan": s,
-                   "at": f"{datetime.now():%Y-%m-%d %H:%M}"}, open(os.path.join(d, AUTO_CLIP), "w", encoding="utf8"), indent=1)
-        log(f"Packing clip cut by itself for {o}: " + ", ".join(CFG["cameras"][c]["label"] for c in pick))
-        done += 1
-        if done >= limit:
-            break
+        cams = [c for c in _pack_cams() if footage.has(c[0], start, end)]
+        if cams:
+            out.append({"order": o, "scan": s, "product": r.get("product", ""), "status": r.get("status", ""), "cams": cams})
+    CHOICES.update(at=time.time(), v=out)
+    return out
 
 
-def auto_clips_loop():
-    time.sleep(90)
-    while True:
+def choose_clip(b):
+    """Staff picked the table(s) that packed the order (or none): cut those packing clips from the NAS."""
+    o = safe_id(b.get("order"))
+    if not o:
+        raise ValueError("No order")
+    d = order_dir(o)
+    CHOICES["at"] = 0
+    if b.get("skip"):
+        json.dump({"status": "skipped", "at": f"{datetime.now():%Y-%m-%d %H:%M}"}, open(os.path.join(d, AUTO_CLIP), "w", encoding="utf8"), indent=1)
+        return {"ok": True}
+    cams = [c for c in (b.get("cams") or []) if c in CFG["cameras"]]
+    if not cams:
+        raise ValueError("Pick a table first")
+    s = b.get("scan") or scans_all()["scans"].get(o, "")
+    if not SCAN_RE.match(s or ""):
+        raise ValueError("No ship-scan time for this order")
+    start, end = _scan_window(s, b.get("before", CFG.get("default_pack_minutes_before_scan", 5)),
+                              b.get("after", CFG.get("default_pack_minutes_after_scan", 1)))
+    CHOOSING.add(o)
+
+    def run():
         try:
-            if footage.STATE.get("recording"):   # only the recording PC cuts, so clips aren't made twice
-                auto_clips_once()
+            for c in cams:
+                sd_clip(o, c, start, end)
+            json.dump({"status": "chosen", "cams": cams, "scan": s, "at": f"{datetime.now():%Y-%m-%d %H:%M}"},
+                      open(os.path.join(d, AUTO_CLIP), "w", encoding="utf8"), indent=1)
+            log(f"Packing clip saved for {o}: " + ", ".join(CFG["cameras"][c]["label"] for c in cams))
         except Exception as e:
-            log(f"Automatic packing clips: {clean(str(e))}")
-        time.sleep(300)
+            log(f"Packing clip for {o}: {clean(str(e))}")
+        finally:
+            CHOOSING.discard(o)
+            CHOICES["at"] = 0
+    threading.Thread(target=run, daemon=True).start()
+    return {"ok": True}
+
+
+def nas_frame(cam, scan):
+    """A small still of one table at the ship-scan moment (to tell which table packed the order)."""
+    if cam not in CFG["cameras"] or not SCAN_RE.match(scan or ""):
+        raise ValueError("Bad request")
+    t = _scan_window(scan, 0, 0)[0]
+    os.makedirs(NASVIEW_DIR, exist_ok=True)
+    out = os.path.join(NASVIEW_DIR, f"frame_{cam}_{t:%Y%m%d-%H%M}.jpg")
+    if not os.path.isfile(out):
+        f = footage._files(footage.key_of(CFG["cameras"][cam]["ip"]), t, t + timedelta(seconds=1))
+        if not f:
+            raise RuntimeError("No NAS footage")
+        off = max(0.0, (t - f[0][0]).total_seconds())
+        r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{off:.1f}", "-i", f[0][1], "-frames:v", "1",
+                            "-vf", "scale=640:-2", "-q:v", "4", out], capture_output=True, timeout=60, creationflags=NOWIN)
+        if r.returncode or not os.path.isfile(out):
+            raise RuntimeError("Could not read the footage")
+    return out
 
 
 def nas_check(scan, before, after):
@@ -1777,6 +1813,13 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, footage.status())
             if u.path == "/api/discover":
                 return self.send(200, discover(q.get("again") == "1"))
+            if u.path == "/api/choices":
+                return self.send(200, {"choices": clip_choices()})
+            if u.path == "/nasframe.jpg":
+                try:
+                    return self.send(200, open(nas_frame(q.get("cam", ""), q.get("scan", "")), "rb").read(), "image/jpeg")
+                except Exception as e:
+                    return self.send(404, {"error": clean(str(e))})
             if u.path == "/api/scanwant":
                 return self.send(200, {"orders": scan_want()})
             if u.path == "/api/nascheck":
@@ -1897,6 +1940,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, footage.set_wanted(b.get("on")))
             if u.path == "/api/cameras":
                 return self.send(200, edit_cameras(b))
+            if u.path == "/api/choose":
+                return self.send(200, choose_clip(b))
             if u.path == "/api/scans":
                 return self.send(200, {"saved": scans_put(b.get("scans"), b.get("tried"))})
             if u.path == "/api/have":
@@ -1965,7 +2010,6 @@ def main():
     import pigulink
     apply_cameras()
     threading.Thread(target=tidy_views, daemon=True).start()
-    threading.Thread(target=auto_clips_loop, daemon=True).start()
     footage.start(cfg=CFG, rtsp=rtsp, log=log, ffmpeg=FFMPEG, local_cfg=local_cfg, local_path=LOCAL, nowin=NOWIN,
                   clean=clean)
     live.start(cfg=CFG, rtsp=rtsp, log=log, ffmpeg=FFMPEG, nowin=NOWIN, clean=clean, in_job=footage._in_job)

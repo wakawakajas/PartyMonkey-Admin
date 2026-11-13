@@ -26,6 +26,12 @@ body{margin:0;font-family:var(--font);font-size:14px;line-height:1.45;color:var(
 h1{font:700 22px/1.1 var(--font);letter-spacing:-.02em;margin:0}
 .grow{flex:1}
 .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:4px 10px;border-radius:99px;background:var(--ok-soft);color:var(--ok)}
+.pick{display:grid;gap:8px;padding:10px 0;border-top:1px solid rgba(0,0,0,.08)}
+.pick .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.thumb{border:3px solid transparent;border-radius:12px;overflow:hidden;cursor:pointer;background:#111;padding:0;position:relative;font:inherit}
+.thumb img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block}
+.thumb span{position:absolute;left:6px;bottom:6px;background:rgba(0,0,0,.65);color:#fff;font-size:12px;padding:2px 7px;border-radius:6px}
+.thumb.sel{border-color:var(--ok)}.thumb.sel span{background:var(--ok)}
 .pill.bad{background:var(--rust-soft);color:var(--rust)}.pill.warn{background:var(--amber-soft);color:var(--amber)}
 .pill i{width:7px;height:7px;border-radius:50%;background:currentColor}
 .left{position:sticky;top:10px;padding:8px;display:flex;flex-direction:column;gap:2px;border-radius:18px}
@@ -172,6 +178,11 @@ td.r{text-align:right;font-variant-numeric:tabular-nums}
           <video id="scanvid" playsinline muted hidden style="width:100%;border-radius:12px"></video>
           <div class="list" id="returns"></div>
           <p class="sub" id="retnote"></p>
+        </div>
+        <div class="card glass" id="pickcard" hidden>
+          <h2>Which table packed it?</h2>
+          <p class="sub">Each picture is a packing table at the moment the order was scanned to ship in BigSeller. Tap the table that packed it (or more than one), then Save packing clip. It is cut from the NAS footage in a few seconds.</p>
+          <div id="picks"></div>
         </div>
       </div>
     </section>
@@ -749,6 +760,21 @@ function live(){if(page==='unbox'&&S&&S.login_ok&&!document.hidden){const img=ne
     (async()=>{for(const el of g.querySelectorAll('img[data-snap]')){const c=el.dataset.snap;if(S.cam_login&&!S.cam_login[c])continue;
       await new Promise(ok=>{const im=new Image();im.onload=()=>{el.src=im.src;ok()};im.onerror=ok;im.src='/api/snapshot.jpg?cam='+c+'&t='+Date.now()+'&pin='+encodeURIComponent(PIN)})}})()}
   clearTimeout(liveT);liveT=setTimeout(live,page==='cams'?12000:1500)}
+// "Which table packed it?": returns with a ship-scan time and NAS footage wait for staff to pick the table
+let PK=null,PKK='';
+async function picksLoad(){try{const r=await api('/api/choices');PK=r.choices||[];const k=JSON.stringify(PK.map(p=>p.order));if(k!==PKK){PKK=k;picksRender()}}catch(e){}}
+function picksRender(){const c=$('#pickcard');if(!PK||!PK.length){c.hidden=true;return}c.hidden=false;
+  $('#picks').innerHTML=PK.map(p=>`<div class="pick" data-po="${esc(p.order)}" data-ps="${esc(p.scan)}"><div><b class="mono">${esc(p.order)}</b> <span class="sub">${esc(p.product||'')} · scanned to ship ${esc(p.scan.replace('T',' '))}</span></div>
+    <div class="thumbs">${p.cams.map(([c,l])=>`<button type="button" class="thumb" data-pc="${esc(c)}"><img loading="lazy" alt="" src="/nasframe.jpg?cam=${encodeURIComponent(c)}&scan=${encodeURIComponent(p.scan)}&pin=${encodeURIComponent(PIN)}"><span>${esc(l)}</span></button>`).join('')}</div>
+    <div class="row"><button class="btn" data-psave disabled>Save packing clip</button><a class="btn ghost" style="display:inline-flex;align-items:center;text-decoration:none" target="_blank" href="/order?order=${encodeURIComponent(p.order)}&scan=${encodeURIComponent(p.scan)}">Watch first</a><button class="btn ghost" data-pskip>None of these</button><span class="sub" data-pmsg></span></div></div>`).join('')}
+$('#picks').addEventListener('click',async e=>{const p=e.target.closest('.pick');if(!p)return;const m=p.querySelector('[data-pmsg]');
+  const t=e.target.closest('.thumb');if(t){t.classList.toggle('sel');p.querySelector('[data-psave]').disabled=!p.querySelector('.thumb.sel');return}
+  const sv=e.target.closest('[data-psave]'),sk=e.target.closest('[data-pskip]');if(!sv&&!sk)return;
+  const cams=[...p.querySelectorAll('.thumb.sel')].map(x=>x.dataset.pc);
+  try{(sv||sk).disabled=true;m.textContent=sv?'Saving the clip…':'';await api('/api/choose',sk?{order:p.dataset.po,skip:true}:{order:p.dataset.po,cams,scan:p.dataset.ps});
+    m.textContent=sv?'Saved. It is in the order folder in a few seconds.':'';setTimeout(()=>{p.remove();PK=PK.filter(x=>x.order!==p.dataset.po);PKK=JSON.stringify(PK.map(x=>x.order));if(!PK.length)$('#pickcard').hidden=true},sv?2500:0)}
+  catch(err){m.textContent=err.message;(sv||sk).disabled=false}});
+setTimeout(picksLoad,1500);setInterval(picksLoad,60000);
 async function refresh(){try{S=await api('/api/state');render();liveStart()}catch(e){if(e.message!=='PIN needed'){$('#health').className='pill bad';$('#health').innerHTML='<i></i>Server not reachable'}}}
 setInterval(refresh,1000);
 const PAGES=['overview','unbox','evid','pack','saved','live','cams'];
