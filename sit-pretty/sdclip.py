@@ -65,6 +65,10 @@ def main():
         ok = os.path.isfile(out) and os.path.getsize(out) > 10000
         print(json.dumps({"ok": ok, "file": out, "status": status.get("currentAction")}))
         return
+    if cmd == "info":
+        b = tapo.getBasicInfo()["device_info"]["basic_info"]
+        print(json.dumps({"ok": True, "name": b.get("device_alias"), "model": b.get("device_model")}))
+        return
     raise SystemExit("unknown command")
 
 

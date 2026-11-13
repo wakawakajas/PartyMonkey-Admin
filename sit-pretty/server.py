@@ -251,6 +251,7 @@ def sd_clip(order, cam, start, end):
 # ---------------------------------------------------------------- snapshots
 SNAP_LOCK = threading.Lock()
 SNAPS = {}
+SNAP_CAM_LOCKS = {}
 
 
 def snapshot(cam):
@@ -259,9 +260,11 @@ def snapshot(cam):
         p = os.path.join(HERE, "tmp", "preview_rec.jpg")
         if os.path.exists(p):
             return open(p, "rb").read()
-    with SNAP_LOCK:
+    with SNAP_LOCK:   # one grab per camera at a time; different cameras in parallel
+        lk = SNAP_CAM_LOCKS.setdefault(cam, threading.Lock())
+    with lk:
         t, data = SNAPS.get(cam, (0, None))
-        if data and time.time() - t < 2:
+        if data and time.time() - t < 4:
             return data
         r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
                             "-i", rtsp(cam, "stream2"), "-frames:v", "1", "-q:v", "5", "-f", "image2", "-"],
@@ -326,7 +329,8 @@ def local_cfg():
 
 
 def areas():
-    a = dict(DEFAULT_AREAS)
+    a = {c: {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8} for c in CFG["cameras"]}
+    a.update(DEFAULT_AREAS)
     a.update(local_cfg().get("areas", {}))
     return a
 
@@ -1186,6 +1190,133 @@ def make_view(order, name):
     return "making"
 
 
+# ---------------------------------------------------------------- the camera list, shared by every shop PC
+# config.json has the starting cameras; names, order, which ones pack, and added cameras live on the NAS
+# (_sitpretty\cameras.json), so a rename on one PC shows on all of them.
+CAMS_SHARED = os.path.join(SAVE, "_sitpretty", "cameras.json")
+BASE_CAMS = {"cameras": {k: dict(v) for k, v in CFG["cameras"].items()}, "packing": list(CFG["packing_cameras"])}
+CAM_MTIME = [False]
+CAM_LOCK = threading.Lock()
+
+
+def apply_cameras(force=False):
+    try:
+        m = os.path.getmtime(CAMS_SHARED)
+    except OSError:
+        m = None
+    if m == CAM_MTIME[0] and not force:
+        return
+    CAM_MTIME[0] = m
+    s = _read_json(CAMS_SHARED) or {}
+    cams = {k: dict(v) for k, v in BASE_CAMS["cameras"].items()}
+    for k, v in (s.get("cameras") or {}).items():
+        cams[k] = dict(cams.get(k, {}), **v)
+    for k in s.get("removed") or []:
+        if k != CFG["returns_camera"]:
+            cams.pop(k, None)
+    cams = {k: v for k, v in cams.items() if v.get("ip")}
+    order = [k for k in (s.get("order") or []) if k in cams]
+    order += [k for k in cams if k not in order]
+    packing = s.get("packing") if s.get("packing") is not None else BASE_CAMS["packing"]
+    CFG["cameras"] = {k: cams[k] for k in order}
+    CFG["packing_cameras"] = [k for k in order if k in packing]
+
+
+def edit_cameras(b):
+    apply_cameras()
+    act, cam = b.get("action"), b.get("cam")
+    with CAM_LOCK:
+        s = _read_json(CAMS_SHARED) or {}
+        order = list(CFG["cameras"])
+        if act != "add" and cam not in CFG["cameras"]:
+            raise ValueError("Unknown camera")
+        if act == "rename":
+            label = " ".join(str(b.get("label") or "").split())[:40]
+            if not label:
+                raise ValueError("Type a name")
+            s.setdefault("cameras", {}).setdefault(cam, {})["label"] = label
+        elif act == "move":
+            i = order.index(cam)
+            j = i - 1 if b.get("dir") == "up" else i + 1
+            if 0 <= j < len(order):
+                order[i], order[j] = order[j], order[i]
+            s["order"] = order
+        elif act == "packing":
+            pk = set(CFG["packing_cameras"])
+            pk.add(cam) if b.get("on") else pk.discard(cam)
+            s["packing"] = [k for k in order if k in pk]
+        elif act == "add":
+            ip = str(b.get("ip") or "").strip()
+            if not re.fullmatch(r"192\.168\.\d{1,3}\.\d{1,3}", ip):
+                raise ValueError("Pick a camera from the list")
+            label = " ".join(str(b.get("label") or "").split())[:40] or f"Camera {ip.rsplit('.', 1)[1]}"
+            base = "cam-" + ip.rsplit(".", 1)[1]
+            new, n = base, 2
+            while new in CFG["cameras"] or new in BASE_CAMS["cameras"]:
+                new, n = f"{base}-{n}", n + 1
+            s.setdefault("cameras", {})[new] = {"ip": ip, "label": label}
+            s["removed"] = [k for k in s.get("removed") or [] if k != new]
+            s["order"] = order + [new]
+            if b.get("packing", True):
+                s["packing"] = list(CFG["packing_cameras"]) + [new]
+            cam = new
+        elif act == "remove":
+            if cam == CFG["returns_camera"]:
+                raise ValueError("This is the unboxing camera; it cannot be removed")
+            s.setdefault("removed", []).append(cam)
+            s["order"] = [k for k in order if k != cam]
+            s["packing"] = [k for k in CFG["packing_cameras"] if k != cam]
+        else:
+            raise ValueError("Unknown change")
+        os.makedirs(os.path.dirname(CAMS_SHARED), exist_ok=True)
+        json.dump(s, open(CAMS_SHARED, "w", encoding="utf8"), indent=1)
+        apply_cameras(force=True)
+    log(f"Cameras: {act} {CFG['cameras'].get(cam, {}).get('label', cam)}")
+    return {"cameras": CFG["cameras"], "packing_cameras": CFG["packing_cameras"], "cam": cam}
+
+
+DISCOVER = {"running": False, "at": 0, "found": []}
+
+
+def _discover():
+    import socket
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        mine = {v["ip"] for v in CFG["cameras"].values()}
+        prefix = next(iter(mine)).rsplit(".", 1)[0] if mine else "192.168.10"
+
+        def rtsp_open(ip):
+            try:
+                with socket.create_connection((ip, 554), timeout=1.2):
+                    return ip
+            except OSError:
+                return None
+        with ThreadPoolExecutor(64) as ex:
+            ips = [ip for ip in ex.map(rtsp_open, [f"{prefix}.{i}" for i in range(1, 255)]) if ip]
+        found = []
+        for ip in ips:
+            info = {"ip": ip, "name": "", "model": "", "added": ip in mine}
+            if not info["added"]:
+                try:
+                    r = subprocess.run([VENV_PY, os.path.join(HERE, "sdclip.py"), "info", ip], capture_output=True, text=True,
+                                       timeout=40, creationflags=NOWIN, cwd=HERE)
+                    j = json.loads([l for l in r.stdout.splitlines() if l.startswith("{")][-1])
+                    info.update(name=j.get("name") or "", model=j.get("model") or "")
+                except Exception:
+                    pass
+            found.append(info)
+        DISCOVER.update(found=found, at=time.time())
+    finally:
+        DISCOVER["running"] = False
+
+
+def discover(again=False):
+    if not DISCOVER["running"] and (again or time.time() - DISCOVER["at"] > 600):
+        DISCOVER["running"] = True
+        threading.Thread(target=_discover, daemon=True).start()
+    return DISCOVER
+
+
 def returns_list():
     p = os.path.join(SAVE, "_sitpretty", "returns.json")
     try:
@@ -1260,6 +1391,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(u.query))
+        apply_cameras()
         try:
             if u.path in ("/", "/index.html"):
                 return self.send(200, open(os.path.join(HERE, "web", "index.html"), "rb").read(), "text/html; charset=utf-8")
@@ -1273,9 +1405,12 @@ class H(BaseHTTPRequestHandler):
                     "unbox": UNBOX.state(), "returns": returns_list(), "evidence": evidence(),
                     "cameras": CFG["cameras"], "returns_camera": CFG["returns_camera"],
                     "packing_cameras": CFG["packing_cameras"], "save_dir": SAVE,
-                    "login_ok": all(all(cam_login(c, s)) for c in CFG["cameras"]),
+                    "login_ok": all(cam_login(CFG["returns_camera"], s)),
+                    "cam_login": {c: all(cam_login(c, s)) for c in CFG["cameras"]},
                     "sd_ready": bool(s.get("tapo_app_password")) and os.path.isfile(VENV_PY),
                     "pack_before": CFG["default_pack_minutes_before_scan"], "pack_after": CFG.get("default_pack_minutes_after_scan", 2), "areas": areas(), "overview": overview(), "jobs": jobs(), "returns_info": returns_info(), "pigu_link": bool(LINK and LINK.connected), "found_opts": FOUND_OPTS, "auto_videos": auto_state(), "log": LOGS[-30:]})
+            if u.path == "/api/discover":
+                return self.send(200, discover(q.get("again") == "1"))
             if u.path == "/api/order":
                 return self.send(200, order_info(q.get("order")))
             if u.path == "/api/snapshot.jpg":
@@ -1325,6 +1460,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
+        apply_cameras()
         try:
             if not self.authed():
                 return self.send(401, {"error": "PIN needed"})
@@ -1339,6 +1475,8 @@ class H(BaseHTTPRequestHandler):
                 start = datetime.strptime(b["start"], "%Y-%m-%dT%H:%M")
                 end = datetime.strptime(b["end"], "%Y-%m-%dT%H:%M")
                 return self.send(200, pack_clips(b["order"], start, end, b.get("cams")))
+            if u.path == "/api/cameras":
+                return self.send(200, edit_cameras(b))
             if u.path == "/api/have":
                 return self.send(200, have(b.get("orders")))
             if u.path == "/api/makeview":
@@ -1377,6 +1515,7 @@ def main():
     global LINK
     os.makedirs(os.path.join(HERE, "tmp"), exist_ok=True)
     import pigulink
+    apply_cameras()
     threading.Thread(target=tidy_views, daemon=True).start()
     try:   # clip downloads cut off by a restart start again
         for nm in os.listdir(SAVE):
