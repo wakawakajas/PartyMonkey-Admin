@@ -963,39 +963,72 @@ def appeal_text(row):
     miss = _missing_items(row, d)
 
     # Owner's wording (13 Nov): full sentences, our facts, the videos and the ask; no retelling of the buyer's
-    # claim (Shopee has it), so it stays around 400 characters.
+    # claim (Shopee has it). Shopee's dispute box takes at most 256 characters, so every sentence has shorter
+    # wordings, used (longest first) until the whole appeal fits.
+    LIMIT = 256
     sealed = any(w in (row.get("reason") or "").lower() for w in ("sealed", "original"))
-    lines = []
+    m = ", ".join(miss)
+    got = [n for n in names if n and n not in miss]
+    both = "both items" if n_sent == 2 else f"all {n_sent} items"
+    parts = []   # each: wordings from longest to shortest
     if "missing" in issues:
         if miss:
-            got = [n for n in names if n and n not in miss]
-            lines.append(f"Only {n_sent - len(miss)} of {n_sent} items came back" + (f" ({', '.join(got)} returned)" if got else "")
-                         + f". Missing: {', '.join(miss)}.")
+            parts.append([f"Only {n_sent - len(miss)} of {n_sent} items came back" + (f" ({', '.join(got)} returned)" if got else "") + f". Missing: {m}.",
+                          f"Only {n_sent - len(miss)} of {n_sent} items came back. Missing: {m}.",
+                          f"{m} missing."])
         else:
-            lines.append("Not every item came back in the return parcel.")
+            parts.append(["Not every item came back in the return parcel.", "Items missing."])
     elif "opened" in issues:
-        lines.append("The return parcel arrived already opened" + (", although the buyer said it was in original / sealed condition." if sealed else "."))
-    for k, t in (("used", "The item came back used, so it is not in the original condition required for a return."),
-                 ("damaged", "The item came back damaged; it left us in good condition."),
-                 ("dirty", "The item came back dirty or stained, so it cannot be resold."),
-                 ("wrong_item", "The item sent back is not the item we sent."),
-                 ("photo_mismatch", "The buyer's photos / videos do not show our item or this order.")):
+        parts.append(["The return parcel arrived already opened" + (", although the buyer said it was sealed." if sealed else "."),
+                      "The return parcel arrived opened."])
+    for k, long_, short in (("used", "The item came back used, so it cannot be returned.", "Item returned used."),
+                            ("damaged", "The item came back damaged; it left us in good condition.", "Item returned damaged."),
+                            ("dirty", "The item came back dirty or stained.", "Item returned dirty."),
+                            ("wrong_item", "The item sent back is not the item we sent.", "Wrong item returned."),
+                            ("photo_mismatch", "The buyer's photos do not show our item or this order.", "Buyer's photos are not our item.")):
         if k in issues:
-            lines.append(t)
+            parts.append([long_, short])
     if unbox:
-        lines.append("Our unboxing video shows the return parcel opened in one take, from the waybill to the end"
-                     + (f", with {', '.join(miss)} not inside." if miss else "."))
+        parts.append([f"Our unboxing video shows the return parcel opened in one take, from the waybill to the end" + (f", with {m} not inside." if miss else "."),
+                      f"Our unboxing video shows {m} was not inside." if miss else "Our unboxing video shows the parcel opened in one take.",
+                      f"Our unboxing video shows {m} missing." if miss else "Our unboxing video shows the opening."])
     if pack:
-        lines.append(f"Our packing video shows all {n_sent} item{'s' if n_sent != 1 else ''}"
-                     + (f" ({', '.join(n for n in names if n)})" if 1 < len(names) <= 4 else "")
-                     + " packed and sealed before shipping.")
+        parts.append([f"Our packing video shows all {n_sent} item{'s' if n_sent != 1 else ''}"
+                      + (f" ({', '.join(n for n in names if n)})" if 1 < len(names) <= 4 else "") + " packed and sealed before shipping.",
+                      f"Our packing video shows {both} packed and sealed.",
+                      f"Our packing video shows {both} packed."])
     if "wrong_item" in issues or "photo_mismatch" in issues:
-        lines.append("We request that the refund be rejected.")
+        parts.append(["We request that the refund be rejected.", "Please reject the refund."])
     elif "missing" in issues and not set(issues) & {"used", "damaged", "dirty"}:
-        lines.append("We request that the refund be limited to the item actually returned, or that the buyer returns "
-                     + (", ".join(miss) if miss else "the missing item") + ".")
+        parts.append([f"We request that the refund be limited to the item actually returned, or that the buyer returns {m or 'the missing item'}.",
+                      f"We request a refund for the returned item only, or the buyer returns {m or 'the missing item'}.",
+                      "Please refund only the returned item."])
     else:
-        lines.append("We request that the refund be rejected or reduced, as the item was not returned in the condition it was sent.")
+        parts.append(["We request that the refund be rejected or reduced, as the item was not returned in the condition it was sent.",
+                      "We request that the refund be rejected or reduced.", "Please reject or reduce the refund."])
+    # shorten one step at a time, videos first, then the request, our facts last; stop as soon as it fits
+    n_parts = len(parts)
+    kinds = ["fact"] * n_parts
+    k_ = n_parts - 1
+    kinds[k_] = "ask"
+    if pack:
+        k_ -= 1
+        kinds[k_] = "pack"
+    if unbox:
+        k_ -= 1
+        kinds[k_] = "unbox"
+    order_ = [i_ for kind in ("pack", "unbox", "ask", "fact") for i_ in range(n_parts) if kinds[i_] == kind]
+    pick = [0] * n_parts
+    lines = [p_[0] for p_ in parts]
+    for level in (1, 2):
+        for i_ in order_:
+            if len(" ".join(lines)) <= LIMIT:
+                break
+            if level < len(parts[i_]):
+                pick[i_] = level
+                lines[i_] = parts[i_][level]
+    while len(" ".join(lines)) > LIMIT and len(lines) > 1:
+        lines.pop(-2)   # still too long: drop sentences before the ask, never cut one in half
     text = " ".join(lines)
     APPEAL_CACHE[order] = (key, text)
     return text
