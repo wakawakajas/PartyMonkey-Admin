@@ -19,6 +19,18 @@ import time
 HOST = socket.gethostname()
 
 
+def lan_ip():
+    """This PC's address on the shop network (PC names do not work on every PC; numbers do)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("192.168.10.1", 80))   # picks the shop-network card; nothing is sent
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
+
+
 def channel_name(pin):
     return "sitpretty-" + hashlib.sha256(("sitpretty:" + pin).encode()).hexdigest()[:16]
 
@@ -64,7 +76,7 @@ class PiguLink(threading.Thread):
 
     # ------------------------------------------------------------ what Pigu sees
     def state(self, full=False):
-        s = {"host": HOST, "unbox": self.api["unbox_state"](), "at": int(time.time())}
+        s = {"host": HOST, "ip": lan_ip(), "unbox": self.api["unbox_state"](), "at": int(time.time())}
         if full:
             cfg = self.api["cfg"]
             s["cameras"] = {c: v["label"] for c, v in cfg["cameras"].items()}
