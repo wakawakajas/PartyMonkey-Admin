@@ -1036,6 +1036,20 @@ def _view_worker():
             VIEW_BUSY.discard((order, name))
 
 
+def tidy_views():
+    """Remove playable copies whose original was deleted (staff delete order folders on the NAS)."""
+    try:
+        for order in os.listdir(VIEW_DIR):
+            d = os.path.join(VIEW_DIR, order)
+            for n in os.listdir(d):
+                if not os.path.isfile(os.path.join(SAVE, order, n)) and (order, n) not in VIEW_BUSY:
+                    os.remove(os.path.join(d, n))
+            if not os.listdir(d):
+                os.rmdir(d)
+    except OSError:
+        pass
+
+
 def make_view(order, name):
     """Queue a playable copy (about 2 minutes for 15 minutes of footage)."""
     order, name = safe_id(order), os.path.basename(name)
@@ -1243,6 +1257,7 @@ def main():
     global LINK
     os.makedirs(os.path.join(HERE, "tmp"), exist_ok=True)
     import pigulink
+    threading.Thread(target=tidy_views, daemon=True).start()
     LINK = pigulink.start(CFG, secrets().get("pin", ""), {
         "cfg": CFG, "unbox_state": UNBOX.state, "start": UNBOX.start, "stop": UNBOX.stop,
         "snapshot": snapshot, "returns": returns_list, "returns_info": returns_info,
