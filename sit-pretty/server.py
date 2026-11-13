@@ -420,7 +420,7 @@ def request_video(b):
     return job
 
 
-def pack_clips(order, start, end, cams=None):
+def pack_clips(order, start, end, cams=None, raise_all=True):
     """Download the packing minutes from each table camera's memory card into the order folder."""
     if end <= start or end - start > timedelta(hours=2):
         raise ValueError("Pick an end time after the start, at most 2 hours later")
@@ -439,7 +439,7 @@ def pack_clips(order, start, end, cams=None):
             made.append(name)
         except Exception as e:
             errs.append(f"{CFG['cameras'][cam]['label']}: {clean(e)}")
-    if not made:
+    if not made and raise_all:
         raise RuntimeError("; ".join(errs))
     return {"files": made, "errors": errs}
 
@@ -489,10 +489,28 @@ def fetch_found_clips():
                 scan - timedelta(minutes=CFG["default_pack_minutes_before_scan"])
             if not scan - timedelta(hours=1) <= start < scan:
                 start = scan - timedelta(minutes=CFG["default_pack_minutes_before_scan"])
+            end = scan + timedelta(minutes=2)
+            ready = end + timedelta(minutes=4)   # the camera hands over a recording only once that piece is finished
             j["status"] = "downloading"
+            if datetime.now() < ready:
+                j["progress"] = f"Waiting until {ready:%H:%M} for the camera to finish recording, then downloading"
+                json.dump(j, open(p, "w", encoding="utf8"), indent=1)
+                JOB_CACHE[0] = 0
+                time.sleep(max(0, (ready - datetime.now()).total_seconds()))
+            j["progress"] = "Downloading from the camera's memory card"
             json.dump(j, open(p, "w", encoding="utf8"), indent=1)
             JOB_CACHE[0] = 0
-            r = pack_clips(j["order"], start, scan + timedelta(minutes=2), j.get("cams"))
+            for tries in range(4):
+                r = pack_clips(j["order"], start, end, j.get("cams"), raise_all=False)
+                busy = [e for e in r["errors"] if "in progress" in e.lower()]
+                if not busy or tries == 3:
+                    break
+                j["progress"] = "The camera is still recording that piece; trying again in 2 minutes"
+                json.dump(j, open(p, "w", encoding="utf8"), indent=1)
+                JOB_CACHE[0] = 0
+                time.sleep(120)
+            if not r["files"]:
+                raise RuntimeError("; ".join(r["errors"]))
             j.pop("progress", None)
             j.update(status="done", files=r["files"], videos=r["files"],
                      summary=f"Scan to ship {scan:%d %b %H:%M}; clip {start:%H:%M}-{scan + timedelta(minutes=2):%H:%M}"
