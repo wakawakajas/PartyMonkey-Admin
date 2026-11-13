@@ -1289,6 +1289,38 @@ def nas_view(cam, scan, before, after):
     return out
 
 
+def nas_view_phone(cam, scan, before, after):
+    """720p H.264 copy for phones that can't play the cameras' 4K HEVC (graphics card: ~20 s for 6 minutes)."""
+    src = nas_view(cam, scan, before, after)
+    out = src[:-4] + "_720.mp4"
+    with NASVIEW_LOCK:
+        ev = NASVIEW_BUSY.get(out)
+        mine = ev is None and not os.path.isfile(out)
+        if mine:
+            ev = NASVIEW_BUSY[out] = threading.Event()
+    if mine:
+        try:
+            tmp = out[:-4] + ".part.mp4"
+            tries = [["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", src, "-vf", "scale_cuda=-2:720",
+                      "-c:v", "h264_nvenc", "-preset", "p1", "-b:v", "2M"],
+                     ["-i", src, "-vf", "scale=-2:720", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26"]]
+            for t in tries:
+                r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", *t, "-an", "-movflags", "+faststart", tmp],
+                                   capture_output=True, timeout=900, creationflags=NOWIN)
+                if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 10000:
+                    os.replace(tmp, out)
+                    break
+        finally:
+            with NASVIEW_LOCK:
+                NASVIEW_BUSY.pop(out, None)
+            ev.set()
+    elif ev:
+        ev.wait(900)
+    if not os.path.isfile(out):
+        raise RuntimeError("Could not make the phone copy")
+    return out
+
+
 def tidy_views():
     """Remove playable copies whose original was deleted (staff delete order folders on the NAS)."""
     try:
@@ -1678,7 +1710,7 @@ class H(BaseHTTPRequestHandler):
                 return
             if u.path == "/nasview.mp4":   # the packing minutes from the NAS, straight away
                 try:
-                    p = nas_view(q.get("cam", ""), q.get("scan", ""), q.get("before", "5"), q.get("after", "1"))
+                    p = (nas_view_phone if q.get("phone") == "1" else nas_view)(q.get("cam", ""), q.get("scan", ""), q.get("before", "5"), q.get("after", "1"))
                 except Exception as e:
                     return self.send(404, {"error": clean(str(e))})
                 return self.stream(p)
