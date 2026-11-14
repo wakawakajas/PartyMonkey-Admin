@@ -569,6 +569,16 @@ _PICKER = r"""
   const box = boxes[0];
   const sig = conv + '|' + opts.map(o => o.text).join('|');
   const place = () => {
+    let pos = null;
+    try { pos = JSON.parse(localStorage.getItem('piguPos') || 'null'); } catch (e) {}
+    if (pos && typeof pos.x === 'number') {
+      p.style.bottom = 'auto';
+      p.style.left = Math.max(0, Math.min(window.innerWidth - 120, pos.x)) + 'px';
+      p.style.top = Math.max(0, Math.min(window.innerHeight - 40, pos.y)) + 'px';
+      if (pos.w) p.style.width = pos.w + 'px';
+      return;
+    }
+    p.style.top = 'auto';
     // above the whole composer (its emoji / photo buttons stay clickable)
     const r = box.el.getBoundingClientRect();
     // the composer: the nearest wrapper that starts above the box (where its
@@ -631,6 +641,25 @@ _PICKER = r"""
     try { localStorage.setItem('piguSmall', v ? '1' : '0'); } catch (e) {} };
   fold.onclick = () => setSmall(!small);
   head.appendChild(fold); head.appendChild(x); p.appendChild(head); p.appendChild(list);
+  // drag by the top bar; where it is left is remembered on this PC
+  head.style.cursor = 'move'; head.title = 'Drag to move \u00b7 double-click to put it back';
+  head.addEventListener('mousedown', e => {
+    if (e.target.closest('button')) return;
+    e.preventDefault();
+    const q = p.getBoundingClientRect(), dx = e.clientX - q.left, dy = e.clientY - q.top;
+    const move = ev => { p.style.bottom = 'auto';
+      p.style.left = Math.max(0, Math.min(window.innerWidth - 120, ev.clientX - dx)) + 'px';
+      p.style.top = Math.max(0, Math.min(window.innerHeight - 40, ev.clientY - dy)) + 'px'; };
+    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+      const z = p.getBoundingClientRect();
+      try { localStorage.setItem('piguPos', JSON.stringify({ x: Math.round(z.left), y: Math.round(z.top), w: Math.round(z.width) })); } catch (err) {} };
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+  });
+  head.addEventListener('dblclick', e => {
+    if (e.target.closest('button')) return;
+    try { localStorage.removeItem('piguPos'); } catch (err) {}
+    place();
+  });
   setSmall(small);
   opts.forEach(o => {
     const b = document.createElement('button');
@@ -846,10 +875,11 @@ _MESSAGES = r"""
     c = c || {};
     let text = c.text || '';
     const imgs = c.imageUrl ? [c.imageUrl] : [];
-    if (!text && m.messageType === 'item' && c.title) text = '[product] ' + c.title;
+    const isProduct = ['item', 'product', 'variation_card', 'product_card'].includes(m.messageType);
+    if (!text && isProduct) text = '[product] ' + (c.title || c.itemName || c.name || c.skuValue || c.itemId || '');
     if (!text && m.messageType === 'order') text = '[order]';
     if (!text && !imgs.length) continue;
-    out.push({ inbound: m.fromAccountType === 1, text: String(text).slice(0, 1200), imgs,
+    out.push({ inbound: m.fromAccountType === 1, text: String(text).slice(0, 1200), imgs, product: isProduct, product: isProduct,
                ts: m.createdTimestamp || 0 });
   }
   out.sort((a, b) => a.ts - b.ts);   // the API gives newest first
@@ -879,7 +909,8 @@ def read_conversation(shop_id: str, conversation_id: str) -> list[dict]:
     if not data.get("ok"):
         return []
     return [{"inbound": bool(l.get("inbound")), "text": str(l.get("text") or "").strip(),
-             "imgs": [str(u) for u in (l.get("imgs") or []) if str(u).startswith("http")]}
+             "imgs": [str(u) for u in (l.get("imgs") or []) if str(u).startswith("http")],
+             "product": bool(l.get("product"))}
             for l in data.get("lines") or []]
 
 

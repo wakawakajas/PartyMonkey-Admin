@@ -2478,6 +2478,8 @@ _FURNITURE = re.compile(
 
 def _is_auto_line(line: dict) -> bool:
     """A line DuoKe or a rule wrote, not the buyer or a person at the shop."""
+    if line.get("product") and line.get("inbound"):
+        return False        # a product the buyer sent is the buyer speaking
     text = " ".join(str(line.get("text") or "").split())
     return (not text or text.lower() in _LABELS or bool(_FURNITURE.search(text))
             or (not line.get("inbound") and bool(_AUTO_TEXT.search(text))))
@@ -2821,6 +2823,17 @@ def _draft_now(conv: str) -> Optional[dict]:
     mark = _fingerprint(key, text)
     if not text or mark in _drafted:
         return None
+    # Only a product sent, nothing typed (since the shop last spoke): the
+    # shop's answer is always the same, so no AI is asked. Into the box only.
+    run = []
+    for l in reversed(said):
+        if not l["inbound"]:
+            break
+        run.append(l)
+    if run and all(l.get("product") for l in run):
+        words = str(cfg.get("product_only_reply") or "hi how can I help you")
+        _picker[conv] = {"text": text, "draft": words}
+        return {"mark": mark, "words": words, "photos": [], "key": key, "text": text}
     cloud = shared_cloud(cfg.get("supabase_url", ""), cfg.get("supabase_anon_key", ""),
                          cfg.get("email", ""), cfg.get("password", ""))
     if not cloud.user_id:
