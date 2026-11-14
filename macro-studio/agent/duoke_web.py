@@ -565,6 +565,30 @@ _PICKER = r"""
     .map(el => ({ el, r: el.getBoundingClientRect() }))
     .filter(b => b.r.width > 300)
     .sort((a, b) => b.r.width - a.r.width);
+  // Double-click the reply box: show the panel if it was closed, close it if
+  // it is open. Installed once; works for whichever chat is open.
+  if (!window.__piguDbl) {
+    window.__piguDbl = true;
+    document.addEventListener('dblclick', e => {
+      const t = e.target;
+      if (!t || !t.matches || !t.matches('textarea,[contenteditable="true"]')) return;
+      if (t.getBoundingClientRect().width < 300 || t.closest('#' + ID)) return;
+      const q = document.getElementById(ID);
+      if (!q) {
+        let n = document.getElementById('pigu-note');
+        if (!n) { n = document.createElement('div'); n.id = 'pigu-note'; document.body.appendChild(n); }
+        const r = t.getBoundingClientRect();
+        n.style.cssText = 'position:fixed;z-index:99999;background:#333;color:#fff;font:14px system-ui;padding:6px 10px;' +
+          'border-radius:8px;left:' + Math.round(r.left) + 'px;top:' + Math.round(r.top - 40) + 'px';
+        n.textContent = 'Pigu: no reply waiting in this chat';
+        clearTimeout(window.__piguNoteT); window.__piguNoteT = setTimeout(() => n.remove(), 1800);
+        return;
+      }
+      const shut = q.style.display === 'none';
+      q.style.display = shut ? '' : 'none';
+      if (shut) delete q.dataset.closed; else q.dataset.closed = q.dataset.sig.split('|')[0];
+    });
+  }
   if (!conv || !opts.length || !boxes.length) { if (p) p.remove(); return 'hidden'; }
   const box = boxes[0];
   const sig = conv + '|' + opts.map(o => o.text).join('|');
@@ -633,7 +657,7 @@ _PICKER = r"""
   const fold = document.createElement('button');
   const x = document.createElement('button');
   [fold, x].forEach(k => { k.style.cssText = 'border:0;background:none;font-size:18px;cursor:pointer;color:#888;padding:0 4px;line-height:1'; });
-  x.textContent = '\u00d7'; x.title = 'Hide for this chat';
+  x.textContent = '\u00d7'; x.title = 'Hide (double-click the reply box to bring it back)';
   x.onclick = () => { p.dataset.closed = conv; p.style.display = 'none'; };
   const list = document.createElement('div');
   const setSmall = v => { small = v; list.style.display = v ? 'none' : 'block';
