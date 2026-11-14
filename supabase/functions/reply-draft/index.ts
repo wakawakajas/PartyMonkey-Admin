@@ -388,6 +388,8 @@ function draftPrompt(
   store: string,
   history: Line[],
   knowledge: { q: string; a: string }[] = [],
+  orders: Record<string, unknown>[] = [],
+  product: Record<string, unknown> | null = null,
 ) {
   const lines: string[] = [];
   lines.push(
@@ -419,6 +421,29 @@ function draftPrompt(
       "first person (\"we\"), one or two lines, no \"the seller\". SHOP FACTS win where the two disagree.");
     lines.push("");
   }
+  if (orders.length) {
+    // Read from the shop's order system on the shop PC: real, current.
+    lines.push("THIS BUYER'S ORDERS (real, from the shop's order system — you may state these):");
+    for (const o of orders) lines.push("- " + JSON.stringify(o));
+    lines.push("Status words: READY_TO_SHIP / PROCESSED = packed, not sent yet; SHIPPED = on the way " +
+      "(for Seller Store Pick Up: ready to collect at the shop); " +
+      "TO_CONFIRM_RECEIVE / COMPLETED = delivered or collected; CANCELLED = cancelled. Give a tracking " +
+      "number only if it is here. Never mention fees, commission or the shop's costs.");
+    lines.push("");
+  }
+  if (product) {
+    lines.push("THE PRODUCT THE BUYER SENT (real listing data — you may state these):");
+    lines.push(JSON.stringify({ name: product.name, price: product.price, status: product.status }));
+    const vars = Array.isArray(product.variations) ? product.variations : [];
+    if (vars.length) lines.push("Variations: " + vars.join(" | "));
+    const qa = Array.isArray(product.qa) ? product.qa : [];
+    for (const k of qa) lines.push(`Q: ${(k as { q?: string }).q}\nA: ${(k as { a?: string }).a}`);
+    lines.push("A variation marked OUT OF STOCK is not available: say so and offer one that is in stock. " +
+      "Do not list every variation; answer what was asked. When they ask about price, stock, colours or " +
+      "sizes of this product, answer with the real figures above (e.g. \"yes got! eucalyptus green $3.82\") " +
+      "instead of telling them to check the listing, even if an approved reply did that.");
+    lines.push("");
+  }
   if (examples.length) {
     lines.push("REPLIES THIS SELLER HAS ALREADY APPROVED — copy this voice, wording and length:");
     for (const ex of examples) {
@@ -442,7 +467,9 @@ function draftPrompt(
   lines.push("- No emoji unless the approved replies above use them.");
   lines.push(
     "- Never invent a posting date, tracking number, price, discount, stock level or courier " +
-    "that is not in SHOP FACTS" + (knowledge.length ? " or MORE SHOP FACTS" : "") + ". Where the fact is missing, say you will check, or ask for the " +
+    "that is not in SHOP FACTS" + (knowledge.length ? " or MORE SHOP FACTS" : "") +
+    (orders.length ? " or THIS BUYER'S ORDERS" : "") + (product ? " or THE PRODUCT THE BUYER SENT" : "") +
+    ". Where the fact is missing, say you will check, or ask for the " +
     "order number.",
   );
   lines.push("- Never promise a refund amount, and never accept blame for a courier's delay.");
@@ -686,6 +713,13 @@ Deno.serve(async (req) => {
                 a: String(k?.a ?? "").slice(0, 500),
               }))
               .filter((k: { q: string; a: string }) => k.q && k.a),
+            // size-capped: anything oversized is left out rather than cut
+            (Array.isArray(body?.orders) ? body.orders : []).slice(0, 2)
+              .filter((o: unknown) => o && typeof o === "object" && JSON.stringify(o).length <= 1500),
+            body?.product && typeof body.product === "object" &&
+              JSON.stringify(body.product).length <= 5000
+              ? body.product
+              : null,
           ),
         }],
       }],

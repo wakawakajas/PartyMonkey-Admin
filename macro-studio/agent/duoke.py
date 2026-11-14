@@ -567,7 +567,8 @@ class Cloud:
             raise CloudError(f"cannot reach storage: {exc.reason}") from exc
 
     def draft(self, message: str, history: list[dict],
-              knowledge: Optional[list[dict]] = None) -> tuple[str, list[str]]:
+              knowledge: Optional[list[dict]] = None,
+              context: Optional[dict] = None) -> tuple[str, list[str]]:
         """A draft from the reply-draft function, in the shop's voice, and the
         storage paths of the photos its matched saved replies carry.
 
@@ -583,6 +584,13 @@ class Cloud:
             # DuokeAI's knowledge-base Q&As that fit this question (its shop's
             # own); the draft may state them, in the shop's voice
             body["knowledge"] = knowledge[:3]
+        if context:
+            # the buyer's own orders and the product they sent, read from
+            # DuokeAI on this PC -- real facts the draft may state
+            if context.get("orders"):
+                body["orders"] = context["orders"][:2]
+            if context.get("product"):
+                body["product"] = context["product"]
         key = hashlib.sha1(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
         now = time.time()
         with _draft_cache_lock:
@@ -2697,6 +2705,18 @@ def kb_answer(text: str, shop_id: str) -> Optional[dict]:
     return got[0] if got else None
 
 
+def context_for_draft(conv: str) -> dict:
+    """The chat's orders and the product the buyer sent, from DuokeAI."""
+    try:
+        shop = next((r["shop_id"] for r in duoke_web.list_sessions()[0]
+                     if r["conversation_id"] == conv), "") or \
+            next((r["shop_id"] for r in duoke_web.all_sessions(1)
+                  if r["conversation_id"] == conv), "")
+        return duoke_web.chat_context(shop, conv) if shop else {}
+    except Exception:
+        return {}
+
+
 def kb_for_draft(text: str, conv: str) -> list[dict]:
     """Up to three Q&As for the draft to draw on, for the chat's own shop --
     a printing shop's answer is wrong in a balloon shop's chat. [{q, a}]."""
@@ -2840,7 +2860,7 @@ def _draft_now(conv: str) -> Optional[dict]:
         cloud.sign_in()
     history = [{"inbound": bool(l["inbound"]), "text": str(l.get("text") or "")[:400]}
                for l in lines[-MESSAGE_TAIL:]]
-    words, photos = cloud.draft(text, history[:-1], kb_for_draft(text, conv))
+    words, photos = cloud.draft(text, history[:-1], kb_for_draft(text, conv), context_for_draft(conv))
     _picker[conv] = {"text": text, "draft": words or ""}
     return {"mark": mark, "words": words, "photos": photos, "key": key, "text": text}
 
@@ -3189,7 +3209,8 @@ def sync_once() -> dict:
         if want_draft:
             try:
                 words, photos = cloud.draft(text, row["history"][:-1],
-                                            kb_for_draft(text, conv) if conv else None)
+                                            kb_for_draft(text, conv) if conv else None,
+                                            context_for_draft(conv) if conv else None)
             except CloudError as exc:
                 report["notes"].append(f"{key[:30]}: {exc}")
                 return

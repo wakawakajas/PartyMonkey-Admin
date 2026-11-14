@@ -589,6 +589,32 @@ _PICKER = r"""
       if (shut) delete q.dataset.closed; else q.dataset.closed = q.dataset.sig.split('|')[0];
     });
   }
+  // Alt+1, Alt+2 ... puts that answer in the box, as a click would
+  if (!window.__piguKeys) {
+    window.__piguKeys = true;
+    document.addEventListener('keydown', e => {
+      if (!e.altKey || e.ctrlKey || e.shiftKey || !/^Digit[1-9]$/.test(e.code)) return;
+      const q = document.getElementById(ID);
+      if (!q || q.style.display === 'none') return;
+      const b = q.querySelectorAll('button[type=button]')[Number(e.code.slice(5)) - 1];
+      if (!b) return;
+      e.preventDefault(); e.stopPropagation();
+      b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    }, true);
+  }
+  // Alt+1, Alt+2 ... puts that answer in the box, as a click would
+  if (!window.__piguKeys) {
+    window.__piguKeys = true;
+    document.addEventListener('keydown', e => {
+      if (!e.altKey || e.ctrlKey || e.shiftKey || !/^Digit[1-9]$/.test(e.code)) return;
+      const q = document.getElementById(ID);
+      if (!q || q.style.display === 'none') return;
+      const b = q.querySelectorAll('button[type=button]')[Number(e.code.slice(5)) - 1];
+      if (!b) return;
+      e.preventDefault(); e.stopPropagation();
+      b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    }, true);
+  }
   if (!conv || !opts.length || !boxes.length) { if (p) p.remove(); return 'hidden'; }
   const box = boxes[0];
   const sig = conv + '|' + opts.map(o => o.text).join('|');
@@ -653,7 +679,7 @@ _PICKER = r"""
   const head = document.createElement('div');
   head.style.cssText = 'display:flex;align-items:center;gap:8px;color:#888;font-size:13px';
   head.innerHTML = '<b style="color:#e4572e;font-size:14px">Pigu</b><span style="flex:1">' + opts.length +
-    (opts.length > 1 ? ' replies' : ' reply') + ' &middot; click one, then you press Enter &middot; hover to read all</span>';
+    (opts.length > 1 ? ' replies' : ' reply') + ' &middot; click or Alt+number, then you press Enter &middot; hover to read all</span>';
   const fold = document.createElement('button');
   const x = document.createElement('button');
   [fold, x].forEach(k => { k.style.cssText = 'border:0;background:none;font-size:18px;cursor:pointer;color:#888;padding:0 4px;line-height:1'; });
@@ -685,17 +711,17 @@ _PICKER = r"""
     place();
   });
   setSmall(small);
-  opts.forEach(o => {
+  opts.forEach((o, i) => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.title = o.text;
+    b.title = o.text + (i < 9 ? '\n\n(Alt+' + (i + 1) + ')' : '');
     b.style.cssText = 'display:flex;gap:8px;align-items:baseline;width:100%;text-align:left;border:1px solid #eee;' +
       'background:#fafafa;border-radius:8px;padding:4px 8px;margin:3px 0;cursor:pointer;font:inherit;color:inherit';
     b.onmouseenter = () => { b.style.background = '#fff4ef'; b.style.borderColor = '#f3b49c'; };
     b.onmouseleave = () => { b.style.background = '#fafafa'; b.style.borderColor = '#eee'; };
     const tag = document.createElement('span');
     tag.style.cssText = 'flex:none;font-size:13px;color:#e4572e;font-weight:600;white-space:nowrap';
-    tag.textContent = o.label + ((o.photos || []).length ? ' \ud83d\udcf7' : '');
+    tag.textContent = (i < 9 ? (i + 1) + ' \u00b7 ' : '') + o.label + ((o.photos || []).length ? ' \ud83d\udcf7' : '');
     const t = document.createElement('span');
     t.style.cssText = 'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     t.textContent = o.text.replace(/\s+/g, ' ');
@@ -805,6 +831,130 @@ def load_photos(urls: list[str]) -> None:
                 continue
             _photo_cache[u] = base64.b64encode(data).decode("ascii")
         _run(f"(window.__piguImg = window.__piguImg || {{}})[{json.dumps(u)}] = {json.dumps(_photo_cache[u])}")
+
+
+# WHAT THE DRAFT SHOULD KNOW ABOUT THIS CHAT, read from DuokeAI on this PC:
+# the buyer's latest orders (status, items, shipping, tracking -- never the
+# address or phone) and the last product they sent (variations with price and
+# stock, plus DuokeAI's own Q&As for that product). Read only.
+_CONTEXT = r"""
+(async (shopId, conversationId) => {
+  const v3 = document.querySelector('#app-vue3') && document.querySelector('#app-vue3').__vue_app__;
+  const pin = v3 && v3.config.globalProperties.$pinia;
+  if (!pin) return JSON.stringify({ ok: false });
+  const st = pin.state.value;
+  const h = { 'x-access-token': st.runtime.token, 'X-Duoke-Version': 'v2', 'Content-Type': 'application/json' };
+  const get = async u => { try { const r = await (await fetch('/api/v1' + u, { headers: h })).json(); return r && r.code === 0 ? r.data : null; } catch (e) { return null; } };
+  const post = async (u, b) => { try { const r = await (await fetch('/api/v1' + u, { method: 'POST', headers: h, body: JSON.stringify(b) })).json(); return r && r.code === 0 ? r.data : null; } catch (e) { return null; } };
+  const day = t => t ? new Date(Number(t)).toISOString().slice(0, 10) : '';
+  const out = { ok: true, orders: [], product: null };
+  const ids = (await get(`/util/workOrderSystem/getAssociatedOrderList?platform=shopee&shopId=${shopId}&conversationId=${conversationId}`)) || [];
+  for (const id of ids.slice(0, 2)) {
+    const o = await post('/dk/unity/order/detail', { shopId, uid: st.runtime.uid, puid: st.runtime.puid, platform: 'shopee', orderNumber: id });
+    if (!o) continue;
+    const lg = o.logistics || {};
+    out.orders.push({ order: o.orderNumber, status: o.platformOrderStatus || o.dkOrderStatus || '',
+      placed: day(o.platformCreateTime), paid: o.amount, shipping: lg.logisticsServiceName || '',
+      tracking: (lg.trackingNumber || [])[0] || '', ship_by: day(lg.shipByDate), completed: day(o.completeTime),
+      buyer_note: String(o.buyerNotes || '').slice(0, 200),
+      items: (o.productList || []).slice(0, 8).map(p => `${p.quantity} x ${String(p.productName || '').slice(0, 70)}` +
+        (p.variation ? ` (${p.variation})` : '')) });
+  }
+  // the last product card the buyer sent
+  const m = await get(`/im/message/list?pageNo=1&pageSize=20&shopId=${shopId}&conversationId=${conversationId}&platform=shopee`);
+  let itemId = '';
+  for (const x of (m && m.list) || []) {
+    if (x.fromAccountType !== 1 || !/item|product|variation/.test(String(x.messageType))) continue;
+    try { itemId = String(JSON.parse(x.messageContent).itemId || ''); } catch (e) {}
+    if (itemId) break;
+  }
+  if (itemId) {
+    const pl = await post('/dk/unity/product/list', { shopId, platform: 'shopee', pageNo: 1, pageSize: 1, messageItemIds: itemId });
+    const p = pl && (pl.list || [])[0];
+    if (p && String(p.productId) === itemId) {
+      const qa = await post('/kb/qa/v1/product/qa/list', { shopId, productId: itemId, pageNo: 1, pageSize: 8 });
+      out.product = { name: String(p.productName || '').slice(0, 160), status: p.platformProductStatus || '',
+        price: p.productMinPrice === p.productMaxPrice ? String(p.productMinPrice) : `${p.productMinPrice} - ${p.productMaxPrice}`,
+        stock: p.productStock,
+        variations: (p.items || []).filter(i => i.itemId).slice(0, 30)
+          .map(i => `${i.attribute || i.itemSku}: $${i.price}, ${i.stock > 0 ? i.stock + ' in stock' : 'OUT OF STOCK'}`),
+        qa: ((qa && qa.list) || []).slice(0, 6).map(q => ({ q: String(q.question || '').slice(0, 200), a: String(q.answer || '').slice(0, 300) })) };
+    }
+  }
+  return JSON.stringify(out);
+})
+"""
+
+
+def chat_context(shop_id: str, conversation_id: str) -> dict:
+    """{orders: [...], product: {...} or None} for the draft; {} when DuokeAI
+    is not there or the chat has neither."""
+    data = _json(_run(f"({_CONTEXT})({json.dumps(str(shop_id))}, {json.dumps(str(conversation_id))})", timeout=20))
+    if not data.get("ok"):
+        return {}
+    return {k: data[k] for k in ("orders", "product") if data.get(k)}
+
+
+# WHAT THE DRAFT SHOULD KNOW ABOUT THIS CHAT, read from DuokeAI on this PC:
+# the buyer's latest orders (status, items, shipping, tracking -- never the
+# address or phone) and the last product they sent (variations with price and
+# stock, plus DuokeAI's own Q&As for that product). Read only.
+_CONTEXT = r"""
+(async (shopId, conversationId) => {
+  const v3 = document.querySelector('#app-vue3') && document.querySelector('#app-vue3').__vue_app__;
+  const pin = v3 && v3.config.globalProperties.$pinia;
+  if (!pin) return JSON.stringify({ ok: false });
+  const st = pin.state.value;
+  const h = { 'x-access-token': st.runtime.token, 'X-Duoke-Version': 'v2', 'Content-Type': 'application/json' };
+  const get = async u => { try { const r = await (await fetch('/api/v1' + u, { headers: h })).json(); return r && r.code === 0 ? r.data : null; } catch (e) { return null; } };
+  const post = async (u, b) => { try { const r = await (await fetch('/api/v1' + u, { method: 'POST', headers: h, body: JSON.stringify(b) })).json(); return r && r.code === 0 ? r.data : null; } catch (e) { return null; } };
+  const day = t => t ? new Date(Number(t)).toISOString().slice(0, 10) : '';
+  const out = { ok: true, orders: [], product: null };
+  const ids = (await get(`/util/workOrderSystem/getAssociatedOrderList?platform=shopee&shopId=${shopId}&conversationId=${conversationId}`)) || [];
+  for (const id of ids.slice(0, 2)) {
+    const o = await post('/dk/unity/order/detail', { shopId, uid: st.runtime.uid, puid: st.runtime.puid, platform: 'shopee', orderNumber: id });
+    if (!o) continue;
+    const lg = o.logistics || {};
+    out.orders.push({ order: o.orderNumber, status: o.platformOrderStatus || o.dkOrderStatus || '',
+      placed: day(o.platformCreateTime), paid: o.amount, shipping: lg.logisticsServiceName || '',
+      tracking: (lg.trackingNumber || [])[0] || '', ship_by: day(lg.shipByDate), completed: day(o.completeTime),
+      buyer_note: String(o.buyerNotes || '').slice(0, 200),
+      items: (o.productList || []).slice(0, 8).map(p => `${p.quantity} x ${String(p.productName || '').slice(0, 70)}` +
+        (p.variation ? ` (${p.variation})` : '')) });
+  }
+  // the last product card the buyer sent
+  const m = await get(`/im/message/list?pageNo=1&pageSize=20&shopId=${shopId}&conversationId=${conversationId}&platform=shopee`);
+  let itemId = '';
+  for (const x of (m && m.list) || []) {
+    if (x.fromAccountType !== 1 || !/item|product|variation/.test(String(x.messageType))) continue;
+    try { itemId = String(JSON.parse(x.messageContent).itemId || ''); } catch (e) {}
+    if (itemId) break;
+  }
+  if (itemId) {
+    const pl = await post('/dk/unity/product/list', { shopId, platform: 'shopee', pageNo: 1, pageSize: 1, messageItemIds: itemId });
+    const p = pl && (pl.list || [])[0];
+    if (p && String(p.productId) === itemId) {
+      const qa = await post('/kb/qa/v1/product/qa/list', { shopId, productId: itemId, pageNo: 1, pageSize: 8 });
+      out.product = { name: String(p.productName || '').slice(0, 160), status: p.platformProductStatus || '',
+        price: p.productMinPrice === p.productMaxPrice ? String(p.productMinPrice) : `${p.productMinPrice} - ${p.productMaxPrice}`,
+        stock: p.productStock,
+        variations: (p.items || []).filter(i => i.itemId).slice(0, 30)
+          .map(i => `${i.attribute || i.itemSku}: $${i.price}, ${i.stock > 0 ? i.stock + ' in stock' : 'OUT OF STOCK'}`),
+        qa: ((qa && qa.list) || []).slice(0, 6).map(q => ({ q: String(q.question || '').slice(0, 200), a: String(q.answer || '').slice(0, 300) })) };
+    }
+  }
+  return JSON.stringify(out);
+})
+"""
+
+
+def chat_context(shop_id: str, conversation_id: str) -> dict:
+    """{orders: [...], product: {...} or None} for the draft; {} when DuokeAI
+    is not there or the chat has neither."""
+    data = _json(_run(f"({_CONTEXT})({json.dumps(str(shop_id))}, {json.dumps(str(conversation_id))})", timeout=20))
+    if not data.get("ok"):
+        return {}
+    return {k: data[k] for k in ("orders", "product") if data.get(k)}
 
 
 def show_picker(conversation_id: str, options: list[dict]) -> str:
