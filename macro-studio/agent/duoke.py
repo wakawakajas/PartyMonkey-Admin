@@ -102,7 +102,7 @@ DEFAULTS: dict[str, Any] = {
     # itself again whenever a conversation is open, while the exe stays
     # Duoke.exe. Leave the title empty to match on the program alone.
     "window_title": "",
-    "window_process": "duoke",
+    "window_process": "duokeai",
     "poll_seconds": 20,
     # A minimised DuoKe cannot be read at all: minimising it makes Chromium
     # tear down the accessibility tree, and restoring it from here does not
@@ -852,18 +852,25 @@ def find_window() -> Optional[int]:
     want_exe = (cfg.get("window_process") or "").strip().lower()
     if not want and not want_exe:
         return None
+    # The whole exe name, not a part of it. DuoKe became DuokeAI (2.0, Nov
+    # 2026) and the two sit side by side for a while, so either name finds
+    # DuokeAI first and the old DuoKe only when DuokeAI is not open -- a PC
+    # whose duoke.json still says "duoke" carries on after the upgrade.
+    exes = [want_exe, want_exe + ".exe"] if want_exe else []
+    if want_exe in ("duoke", "duoke.exe", "duokeai", "duokeai.exe"):
+        exes = ["duokeai.exe", "duoke.exe"]
     best: Optional[int] = None
+    rank = len(exes) + 1
     for hwnd in winapi.enum_top_level_windows():
         title = winapi.window_title(hwnd) or ""
         by_title = bool(want) and want in title.lower()
-        by_exe = False
-        if want_exe and not by_title:
-            # The whole name, not a part of it: DuokeAI.exe (DuoKe's newer AI
-            # app, installed beside it) contains "duoke" too, and reading or
-            # relaunching that one would leave the real chats unread.
+        r = 0
+        if exes and not by_title:
             name = winapi.process_name(winapi.window_pid(hwnd)) or ""
-            by_exe = name in (want_exe, want_exe + ".exe")
-        if not (by_title or by_exe):
+            r = exes.index(name) + 1 if name in exes else 0
+        if not (by_title or r):
+            continue
+        if not by_title and r >= rank:
             continue
         # Our own browser tab showing the Replies screen has "DuoKe" in its
         # title the moment somebody types the word. A window with no size is
@@ -874,14 +881,14 @@ def find_window() -> Optional[int]:
         # size test below would throw out -- and then nothing would ever
         # restore it, which is how "DuoKe is not open" came to mean "DuoKe is
         # sitting in the taskbar". Size can only be judged once it is up.
-        if winapi.is_minimized(hwnd):
-            best = hwnd
-            break
-        left, top, right, bottom = winapi.window_rect(hwnd)
-        if right - left < 400 or bottom - top < 300:
-            continue
+        if not winapi.is_minimized(hwnd):
+            left, top, right, bottom = winapi.window_rect(hwnd)
+            if right - left < 400 or bottom - top < 300:
+                continue
         best = hwnd
-        break
+        if by_title or r == 1:
+            break
+        rank = r
     return best
 
 
@@ -2828,8 +2835,8 @@ def sync_once() -> dict:
         # background, and the old screen way clicks and restores the window
         # under whoever is using it (a colleague's PC, 2026-09-25). So this PC
         # does nothing at all until DuoKe is reopened the right way.
-        note = ("DuoKe was not opened with the \"DuoKe (readable)\" shortcut, so this PC "
-                "leaves it alone -- close DuoKe and open it from that shortcut to draft.")
+        note = ("DuokeAI was not opened with the \"DuokeAI (readable)\" shortcut, so this PC "
+                "leaves it alone -- close DuokeAI and open it from that shortcut to draft.")
         report["notes"].append(note)
         try:
             cloud.beat(device, True, 0, note)

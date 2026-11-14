@@ -453,7 +453,8 @@ _OPEN_SHORTCUTS = r"""
 
 _READ_SHORTCUTS = r"""
 (() => {
-  const ul = document.querySelector('ul.el-autocomplete-suggestion__list');
+  // el- in the old DuoKe, dk- in DuokeAI (same list, renamed)
+  const ul = document.querySelector('ul.el-autocomplete-suggestion__list, ul.dk-autocomplete-suggestion__list');
   if (!ul) return JSON.stringify({ ok: false, why: 'no quick reply list' });
   const rows = [...ul.children].map(li => ({
     code: ((li.querySelector('.container_text_instruction') || {}).textContent || '').trim(),
@@ -485,7 +486,8 @@ _BOX_TEXT = r"""
 
 _PICK_SHORTCUT_UNUSED = r"""
 ((code) => {
-  const ul = document.querySelector('ul.el-autocomplete-suggestion__list');
+  // el- in the old DuoKe, dk- in DuokeAI (same list, renamed)
+  const ul = document.querySelector('ul.el-autocomplete-suggestion__list, ul.dk-autocomplete-suggestion__list');
   if (!ul) return 'no quick reply list';
   const li = [...ul.children].find(li =>
     ((li.querySelector('.container_text_instruction') || {}).textContent || '').trim() === code);
@@ -564,24 +566,61 @@ def put_draft(text: str) -> str:
 # read, and whoever is working in DuoKe never sees a thing. This is what lets
 # a draft be written in the background and only put in the box once the
 # person opens that chat themselves.
+# DuoKe was rebuilt as DuokeAI (2.0, Nov 2026): Vue 3 with Pinia stores
+# (chatSession, chatConversation, chatMessage) instead of one Vuex "Chat"
+# module, and its API is called with fetch and the login token rather than
+# through vm.$http. _DK gives every snippet below the same few things on
+# either app, so the old DuoKe still works on a PC not yet upgraded.
+_DK = r"""
+  const _v3 = document.querySelector('#app-vue3') && document.querySelector('#app-vue3').__vue_app__;
+  const _pinia = _v3 && _v3.config.globalProperties.$pinia;
+  const _vm = !_pinia && document.querySelector('#app') && document.querySelector('#app').__vue__;
+  const DK = {
+    ok: !!(_pinia || (_vm && _vm.$store)),
+    v3: !!_pinia,
+    sessions: () => _pinia ? (_pinia.state.value.chatSession || {}).sessions || []
+                           : ((_vm.$store.state.Chat || {}).sessions || []),
+    shopIds: () => _pinia ? (_pinia.state.value.chatSession || {}).allowShopIds || []
+                          : _vm.$store.state.Chat.allowShopIds,
+    openId: () => String((_pinia ? (_pinia.state.value.chatConversation || {}).conversationId
+                                  : _vm.$store.state.Chat.conversationId) || ''),
+    api: async (path, body, query) => {
+      const h = { 'x-access-token': _pinia.state.value.runtime.token, 'X-Duoke-Version': 'v2' };
+      let url = '/api/v1/im' + path;
+      if (query) url += '?' + new URLSearchParams(query).toString();
+      const opt = body ? { method: 'POST', body: JSON.stringify(body),
+                           headers: { ...h, 'Content-Type': 'application/json' } } : { headers: h };
+      const r = await (await fetch(url, opt)).json();
+      return r && r.code === 0 ? r.data : null;
+    },
+    conversations: async (size, offset) => _pinia
+      ? await DK.api('/conversation/queryConversationList', { shopIdList: DK.shopIds(), size, offset, filterGroups: [] })
+      : await _vm.$http.queryConversationList({ shopIdList: DK.shopIds(), size, offset, filterGroups: [] }),
+    messages: async (shopId, conversationId, platform) => _pinia
+      ? await DK.api('/message/list', null, { pageNo: 1, pageSize: 40, shopId, conversationId, platform: platform || 'shopee' })
+      : await _vm.$http.getImMessageList({ shopId, conversationId, pageSize: 40 }),
+    send: async (msg) => _pinia ? await _pinia._s.get('chatMessage').sendMessage({ msg })
+                                : await _vm.$store.dispatch('Chat/send-message', { msg }),
+  };
+"""
+
 _SESSIONS = r"""
-(() => {
-  const vm = document.querySelector('#app') && document.querySelector('#app').__vue__;
-  const chat = vm && vm.$store && vm.$store.state.Chat;
-  if (!chat || !Array.isArray(chat.sessions)) return JSON.stringify({ ok: false });
-  return JSON.stringify({ ok: true, open: String(chat.conversationId || ''),
-    rows: chat.sessions.map(s => ({
+(() => {""" + _DK + r"""
+  if (!DK.ok) return JSON.stringify({ ok: false });
+  return JSON.stringify({ ok: true, open: DK.openId(),
+    rows: DK.sessions().map(s => ({
       conversation_id: String(s.conversationId), shop_id: String(s.shopId),
       name: s.buyerNick || '', shop: s.shopName || '',
       unread: (s.unReadCount || s.unreadCount || 0) > 0,
+      platform: s.platform || '',
       last_id: String(s.lastMessageId || s.latestMessageId || '') })) });
 })()
 """
 
 _MESSAGES = r"""
-(async (shopId, conversationId) => {
-  const vm = document.querySelector('#app').__vue__;
-  const r = await vm.$http.getImMessageList({ shopId, conversationId, pageSize: 40 });
+(async (shopId, conversationId) => {""" + _DK + r"""
+  const s = DK.sessions().find(x => String(x.conversationId) === conversationId);
+  const r = await DK.messages(shopId, conversationId, s && s.platform);
   const out = [];
   for (const m of (r && r.list) || []) {
     // 1 is the buyer, 2 the shop, 3 DuoKe's own notices
@@ -631,18 +670,17 @@ def read_conversation(shop_id: str, conversation_id: str) -> list[dict]:
 
 
 _ALL = r"""
-(async (pages) => {
-  const vm = document.querySelector('#app').__vue__;
-  const chat = vm.$store.state.Chat;
+(async (pages) => {""" + _DK + r"""
+  if (!DK.ok) return JSON.stringify({ ok: false });
   const rows = [];
   let offset = 0;
   for (let i = 0; i < pages; i++) {
-    const r = await vm.$http.queryConversationList({ shopIdList: chat.allowShopIds,
-      size: 100, offset, filterGroups: [] });
+    const r = await DK.conversations(100, offset);
     for (const s of (r && r.list) || []) rows.push({
       conversation_id: String(s.conversationId), shop_id: String(s.shopId),
       name: s.buyerNick || '', shop: s.shopName || '',
       unread: (s.unReadCount || s.unreadCount || 0) > 0,
+      platform: s.platform || '',
       last_id: String(s.lastMessageId || s.latestMessageId || '') });
     if (!r || !r.hasMore) break;
     offset = r.nextOffset;
@@ -679,18 +717,15 @@ def reply_box_text() -> Optional[str]:
 # calls. Used for exactly one thing -- a reply a person pressed Send on in
 # Pigu -- and only from inside duoke.approved_send() (the caller checks).
 _SEND = r"""
-(async (shopId, conversationId, text) => {
-  const vm = document.querySelector('#app').__vue__;
-  const st = vm.$store;
-  const r = await vm.$http.queryConversationList({ shopIdList: st.state.Chat.allowShopIds,
-    size: 100, offset: 0, filterGroups: [] });
+(async (shopId, conversationId, text) => {""" + _DK + r"""
+  const r = await DK.conversations(100, 0);
   const s = ((r && r.list) || []).find(x => String(x.conversationId) === conversationId
                                           && String(x.shopId) === shopId)
-         || st.state.Chat.sessions.find(x => String(x.conversationId) === conversationId);
+         || DK.sessions().find(x => String(x.conversationId) === conversationId);
   if (!s) return 'conversation not found';
-  await st.dispatch('Chat/send-message', { msg: {
+  await DK.send({
     shopId: s.shopId, platform: s.platform, groupId: s.groupId,
-    conversationId: s.conversationId, content: { text }, contentType: 'text' } });
+    conversationId: s.conversationId, content: { text }, contentType: 'text' });
   return 'dispatched';
 })
 """
@@ -717,22 +752,26 @@ def send_text(shop_id: str, conversation_id: str, text: str) -> str:
 # _SEND -- only for something a person pressed Send on in Pigu, inside
 # duoke.approved_send().
 _SEND_IMAGE = r"""
-(async (shopId, conversationId, b64, name) => {
-  const vm = document.querySelector('#app').__vue__;
-  const st = vm.$store;
-  const r = await vm.$http.queryConversationList({ shopIdList: st.state.Chat.allowShopIds,
-    size: 100, offset: 0, filterGroups: [] });
+(async (shopId, conversationId, b64, name) => {""" + _DK + r"""
+  const r = await DK.conversations(100, 0);
   const s = ((r && r.list) || []).find(x => String(x.conversationId) === conversationId
                                           && String(x.shopId) === shopId)
-         || st.state.Chat.sessions.find(x => String(x.conversationId) === conversationId);
+         || DK.sessions().find(x => String(x.conversationId) === conversationId);
   if (!s) return 'conversation not found';
   const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
   const file = new File([bytes], name, { type: 'image/jpeg' });
-  const url = await vm.$commFn.uploadFile({ file });
+  const base = { shopId: s.shopId, platform: s.platform, groupId: s.groupId,
+                 conversationId: s.conversationId, contentType: 'image' };
+  if (DK.v3) {
+    // DuokeAI uploads inside its own send: a message marked "uploading" with
+    // the file attached, exactly what its photo button hands over
+    await DK.send({ ...base, dkMessageType: 'image', feMessageStatus: 'uploading',
+                    contentFile: { file }, content: { imageUrl: URL.createObjectURL(file) } });
+    return 'dispatched';
+  }
+  const url = await document.querySelector('#app').__vue__.$commFn.uploadFile({ file });
   if (!url) return 'DuoKe would not take the photo';
-  await st.dispatch('Chat/send-message', { msg: {
-    shopId: s.shopId, platform: s.platform, groupId: s.groupId,
-    conversationId: s.conversationId, content: { imageUrl: url }, contentType: 'image' } });
+  await DK.send({ ...base, content: { imageUrl: url } });
   return 'dispatched';
 })
 """
