@@ -390,6 +390,7 @@ function draftPrompt(
   knowledge: { q: string; a: string }[] = [],
   orders: Record<string, unknown>[] = [],
   product: Record<string, unknown> | null = null,
+  candidates: Record<string, unknown>[] = [],
 ) {
   const lines: string[] = [];
   lines.push(
@@ -432,7 +433,11 @@ function draftPrompt(
     lines.push("");
   }
   if (product) {
-    lines.push("THE PRODUCT THE BUYER SENT (real listing data — you may state these):");
+    lines.push(product.from_words
+      ? "THE PRODUCT THE BUYER'S WORDS MATCH (they did not send it; real listing data — you may state these). " +
+        "If the name clearly fits what they asked, answer from it; if it might be a different item, say which one " +
+        "you mean by its name, or ask them to send the product link:"
+      : "THE PRODUCT THE BUYER SENT (real listing data — you may state these):");
     lines.push(JSON.stringify({ name: product.name, price: product.price, status: product.status }));
     const vars = Array.isArray(product.variations) ? product.variations : [];
     if (vars.length) lines.push("Variations: " + vars.join(" | "));
@@ -442,6 +447,13 @@ function draftPrompt(
       "Do not list every variation; answer what was asked. When they ask about price, stock, colours or " +
       "sizes of this product, answer with the real figures above (e.g. \"yes got! eucalyptus green $3.82\") " +
       "instead of telling them to check the listing, even if an approved reply did that.");
+    lines.push("");
+  }
+  if (candidates.length) {
+    lines.push("LISTINGS THAT MATCH THE BUYER'S WORDS (real; they did not send a product link):");
+    for (const c of candidates) lines.push("- " + JSON.stringify(c));
+    lines.push("If one clearly fits, answer about it by name; if two could be meant, ask which one in a " +
+      "short line (\"u mean the gold letter balloons or rose gold ones?\").");
     lines.push("");
   }
   if (examples.length) {
@@ -468,7 +480,8 @@ function draftPrompt(
   lines.push(
     "- Never invent a posting date, tracking number, price, discount, stock level or courier " +
     "that is not in SHOP FACTS" + (knowledge.length ? " or MORE SHOP FACTS" : "") +
-    (orders.length ? " or THIS BUYER'S ORDERS" : "") + (product ? " or THE PRODUCT THE BUYER SENT" : "") +
+    (orders.length ? " or THIS BUYER'S ORDERS" : "") + (product ? " or THE PRODUCT section" : "") +
+    (candidates.length ? " or LISTINGS THAT MATCH" : "") +
     ". Where the fact is missing, say you will check, or ask for the " +
     "order number.",
   );
@@ -482,6 +495,8 @@ function draftPrompt(
     );
   }
   lines.push("- Do not apologise twice, and do not thank them twice.");
+  lines.push("- Call a product by a short everyday name (\"the LED candles\", \"gold letter balloons\"), " +
+    "never its full listing title with [SG Seller] and keywords.");
   if (tone) lines.push(`- This is a rewrite of a draft that was not right: make it ${tone}.`);
   lines.push(
     "- Output the reply text and nothing else. No quotes around it, no explanation, " +
@@ -685,7 +700,7 @@ Deno.serve(async (req) => {
     // is the chart" with no chart attached is worse than one that never
     // mentioned a chart at all.
     const offered = photosFor(message, facts);
-    const draft = (await ask({
+    let draft = (await ask({
       contents: [{
         role: "user",
         parts: [{
@@ -720,6 +735,8 @@ Deno.serve(async (req) => {
               JSON.stringify(body.product).length <= 5000
               ? body.product
               : null,
+            (Array.isArray(body?.candidates) ? body.candidates : []).slice(0, 3)
+              .filter((c: unknown) => c && typeof c === "object" && JSON.stringify(c).length <= 400),
           ),
         }],
       }],
@@ -741,6 +758,13 @@ Deno.serve(async (req) => {
       .replace(/(^|\s)[*_`]+|[*_`]+(?=\s|$)/g, "$1")
       .trim();
 
+    // The model sometimes thinks out loud ("The buyer is asking... Let's say:
+    // ...") and the working arrives as the reply. The answer is its last line;
+    // a quote it was drafting inside is unwrapped.
+    if (/SHOP FACTS|THE PRODUCT|LISTINGS THAT MATCH|the buyer is asking|^\s*let'?s |^\s*wait,|^\s*therefore,/im.test(draft)) {
+      const ls = draft.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+      draft = (ls[ls.length - 1] || "").replace(/^.*["“](?=[^"“”]+["”]?$)/, "").replace(/["”]+$/, "").trim();
+    }
     if (!draft) return json({ error: "the draft came back empty — try again" }, 502);
 
     return json({

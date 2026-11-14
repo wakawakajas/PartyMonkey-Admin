@@ -591,6 +591,8 @@ class Cloud:
                 body["orders"] = context["orders"][:2]
             if context.get("product"):
                 body["product"] = context["product"]
+            if context.get("candidates"):
+                body["candidates"] = context["candidates"][:3]
         key = hashlib.sha1(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
         now = time.time()
         with _draft_cache_lock:
@@ -2705,14 +2707,84 @@ def kb_answer(text: str, shop_id: str) -> Optional[dict]:
     return got[0] if got else None
 
 
-def context_for_draft(conv: str) -> dict:
-    """The chat's orders and the product the buyer sent, from DuokeAI."""
+_catalogs: dict[str, tuple[float, list[dict]]] = {}
+# words in half the names say nothing about which product is meant
+_PRODUCT_NOISE = {"party", "decoration", "decor", "birthday", "wedding", "event", "seller", "instock",
+                  "partymonkey", "plant", "talks", "planttalks", "buckethome", "home", "set", "pcs",
+                  "inch", "for", "and", "the", "with", "you", "have", "got", "any", "how", "much",
+                  "price", "stock", "available", "still", "can", "want", "buy", "need", "this", "that",
+                  "what", "your", "u", "hv", "ah", "lah", "pls", "please", "thanks", "thank", "hello"}
+
+
+def _stem(w: str) -> str:
+    return w[:-1] if len(w) > 4 and w.endswith("s") else w
+
+
+def _shop_rows(shop_id: str, platform: str) -> list[dict]:
+    hit = _catalogs.get(shop_id)
+    if not hit or time.time() - hit[0] > 3 * 3600:
+        rows = duoke_web.catalog(shop_id, platform)
+        if not rows and hit:
+            rows = hit[1]
+        _catalogs[shop_id] = hit = (time.time(), rows)
+    return [r for r in hit[1] if r.get("ok", True)]
+
+
+def guess_product(text: str, shop_id: str, platform: str = "shopee") -> tuple[str, list[dict]]:
+    """The listing a buyer is asking about by name ("got gold letter
+    balloons?") when they have not sent the product card. Rare words count for
+    more than common ones; words in the product's own name count fully, words
+    only in a variation name a little; words that sit side by side in the name
+    as in the question ("clear tape") count extra. (id, []) for a clear
+    winner; ("", top three) when several fit about as well."""
+    import math
+    rows = _shop_rows(shop_id, platform)
+    if not rows:
+        return "", []
+    said = [_stem(w) for w in words(text)]
+    want = set(said) - _PRODUCT_NOISE
+    if not want:
+        return "", []
+    names = [[_stem(w) for w in words(r["name"])] for r in rows]
+    vars_ = [{_stem(w) for w in words(" ".join(r.get("vars") or []))} for r in rows]
+    df: dict[str, int] = {}
+    for nm, vs in zip(names, vars_):
+        for w in set(nm) | vs:
+            df[w] = df.get(w, 0) + 1
+    n = len(rows)
+    pairs = {(a, b) for a, b in zip(said, said[1:]) if a in want and b in want}
+    scored = []
+    for i, (nm, vs) in enumerate(zip(names, vars_)):
+        ns = set(nm)
+        sc = sum(math.log(n / df[w]) * (1.0 if w in ns else 0.35 if w in vs else 0) for w in want if w in df)
+        sc += 1.5 * len(pairs & set(zip(nm, nm[1:])))
+        scored.append((sc, i))
+    scored.sort(reverse=True)
+    best, i = scored[0]
+    if best < 3.0:
+        return "", []
+    second = scored[1][0] if len(scored) > 1 else 0.0
+    if best >= second * 1.2:
+        return rows[i]["id"], []
+    near = [rows[k] for sc, k in scored[:3] if sc >= best * 0.8]
+    return "", [{"name": r["name"][:110], "price": r.get("price", ""),
+                 "stock": r.get("stock")} for r in near]
+
+
+def context_for_draft(conv: str, text: str = "") -> dict:
+    """The chat's orders and the product the buyer sent -- or, with no card
+    sent, the product their words name -- from DuokeAI."""
     try:
-        shop = next((r["shop_id"] for r in duoke_web.list_sessions()[0]
-                     if r["conversation_id"] == conv), "") or \
-            next((r["shop_id"] for r in duoke_web.all_sessions(1)
-                  if r["conversation_id"] == conv), "")
-        return duoke_web.chat_context(shop, conv) if shop else {}
+        row = next((r for r in duoke_web.list_sessions()[0] if r["conversation_id"] == conv), None) or \
+            next((r for r in duoke_web.all_sessions(1) if r["conversation_id"] == conv), None)
+        if not row:
+            return {}
+        plat = row.get("platform") or "shopee"
+        guess, maybe = guess_product(text, row["shop_id"], plat) if text else ("", [])
+        ctx = duoke_web.chat_context(row["shop_id"], conv, guess, plat)
+        if maybe:   # several fit: offer them, even over an older card in the chat
+            ctx["candidates"] = maybe
+        return ctx
     except Exception:
         return {}
 
@@ -2860,7 +2932,7 @@ def _draft_now(conv: str) -> Optional[dict]:
         cloud.sign_in()
     history = [{"inbound": bool(l["inbound"]), "text": str(l.get("text") or "")[:400]}
                for l in lines[-MESSAGE_TAIL:]]
-    words, photos = cloud.draft(text, history[:-1], kb_for_draft(text, conv), context_for_draft(conv))
+    words, photos = cloud.draft(text, history[:-1], kb_for_draft(text, conv), context_for_draft(conv, text))
     _picker[conv] = {"text": text, "draft": words or ""}
     return {"mark": mark, "words": words, "photos": photos, "key": key, "text": text}
 
@@ -3210,7 +3282,7 @@ def sync_once() -> dict:
             try:
                 words, photos = cloud.draft(text, row["history"][:-1],
                                             kb_for_draft(text, conv) if conv else None,
-                                            context_for_draft(conv) if conv else None)
+                                            context_for_draft(conv, text) if conv else None)
             except CloudError as exc:
                 report["notes"].append(f"{key[:30]}: {exc}")
                 return
