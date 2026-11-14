@@ -566,7 +566,8 @@ class Cloud:
         except urllib.error.URLError as exc:
             raise CloudError(f"cannot reach storage: {exc.reason}") from exc
 
-    def draft(self, message: str, history: list[dict]) -> tuple[str, list[str]]:
+    def draft(self, message: str, history: list[dict],
+              knowledge: Optional[list[dict]] = None) -> tuple[str, list[str]]:
         """A draft from the reply-draft function, in the shop's voice, and the
         storage paths of the photos its matched saved replies carry.
 
@@ -578,6 +579,10 @@ class Cloud:
         body = {"message": message[:4000],
                 "history": [{"inbound": bool(l.get("inbound")),
                              "text": str(l.get("text") or "")[:400]} for l in history]}
+        if knowledge:
+            # DuokeAI's knowledge-base Q&As that fit this question (its shop's
+            # own); the draft may state them, in the shop's voice
+            body["knowledge"] = knowledge[:3]
         key = hashlib.sha1(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
         now = time.time()
         with _draft_cache_lock:
@@ -2685,15 +2690,36 @@ _kb = {"rows": [], "at": 0.0}
 
 
 def kb_answer(text: str, shop_id: str) -> Optional[dict]:
-    """The knowledge-base Q&A whose question best fits the buyer's message,
-    for this chat's shop; refreshed hourly, read on this PC."""
+    """The knowledge-base Q&A whose question best fits the buyer's message."""
+    got = kb_matches(text, shop_id, 1)
+    return got[0] if got else None
+
+
+def kb_for_draft(text: str, conv: str) -> list[dict]:
+    """Up to three Q&As for the draft to draw on, for the chat's own shop --
+    a printing shop's answer is wrong in a balloon shop's chat. [{q, a}]."""
+    try:
+        shop = next((r["shop_id"] for r in duoke_web.list_sessions()[0]
+                     if r["conversation_id"] == conv), "") or \
+            next((r["shop_id"] for r in duoke_web.all_sessions(1)
+                  if r["conversation_id"] == conv), "")
+        if not shop:
+            return []
+        return [{"q": r["q"][:300], "a": r["a"][:500]} for r in kb_matches(text, shop, 3)]
+    except Exception:
+        return []
+
+
+def kb_matches(text: str, shop_id: str, n: int = 3) -> list[dict]:
+    """The knowledge-base Q&As whose questions best fit the buyer's message,
+    for this chat's shop, best first; refreshed hourly, read on this PC."""
     if time.time() - _kb["at"] > 3600:
         rows = duoke_web.knowledge()
         _kb["at"] = time.time()
         if rows:
             _kb["rows"] = rows
     want = set(words(text)) - _CHAT_STOP
-    best, score = None, 0.0
+    scored = []
     for row in _kb["rows"]:
         if shop_id and row.get("shops") and shop_id not in row["shops"]:
             continue
@@ -2702,9 +2728,10 @@ def kb_answer(text: str, shop_id: str) -> Optional[dict]:
         if common < 2:
             continue
         s = common / ((len(want) * len(theirs)) ** 0.5 or 1)
-        if s > score:
-            best, score = row, s
-    return best if best and score >= 0.3 else None
+        if s >= 0.3:
+            scored.append((s, row))
+    scored.sort(key=lambda x: -x[0])
+    return [r for _, r in scored[:n]]
 
 
 def picker_options(text: str, draft: str, shop_id: str = "") -> list[dict]:
@@ -2799,7 +2826,7 @@ def _draft_now(conv: str) -> Optional[dict]:
         cloud.sign_in()
     history = [{"inbound": bool(l["inbound"]), "text": str(l.get("text") or "")[:400]}
                for l in lines[-MESSAGE_TAIL:]]
-    words, photos = cloud.draft(text, history[:-1])
+    words, photos = cloud.draft(text, history[:-1], kb_for_draft(text, conv))
     _picker[conv] = {"text": text, "draft": words or ""}
     return {"mark": mark, "words": words, "photos": photos, "key": key, "text": text}
 
@@ -3147,7 +3174,8 @@ def sync_once() -> dict:
         # Only ever into the box. Nothing on this path presses Enter.
         if want_draft:
             try:
-                words, photos = cloud.draft(text, row["history"][:-1])
+                words, photos = cloud.draft(text, row["history"][:-1],
+                                            kb_for_draft(text, conv) if conv else None)
             except CloudError as exc:
                 report["notes"].append(f"{key[:30]}: {exc}")
                 return

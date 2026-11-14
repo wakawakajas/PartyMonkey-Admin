@@ -387,6 +387,7 @@ function draftPrompt(
   tone: string,
   store: string,
   history: Line[],
+  knowledge: { q: string; a: string }[] = [],
 ) {
   const lines: string[] = [];
   lines.push(
@@ -407,6 +408,17 @@ function draftPrompt(
       : "- (none recorded yet)",
   );
   lines.push("");
+  if (knowledge.length) {
+    // From DuokeAI's knowledge base: Q&As it wrote from this shop's own past
+    // chats, matched to this question on the shop PC. Facts, not wording --
+    // they are written formally and the voice comes from the replies below.
+    lines.push("MORE SHOP FACTS — questions this shop has answered before (you may state these too):");
+    for (const k of knowledge) lines.push(`Q: ${k.q}\nA: ${k.a}`);
+    lines.push("Use only what answers this buyer's question. Never copy an A: line word for word: " +
+      "say it the way this seller types in chat (the approved replies below) -- short, casual, " +
+      "first person (\"we\"), one or two lines, no \"the seller\". SHOP FACTS win where the two disagree.");
+    lines.push("");
+  }
   if (examples.length) {
     lines.push("REPLIES THIS SELLER HAS ALREADY APPROVED — copy this voice, wording and length:");
     for (const ex of examples) {
@@ -430,7 +442,7 @@ function draftPrompt(
   lines.push("- No emoji unless the approved replies above use them.");
   lines.push(
     "- Never invent a posting date, tracking number, price, discount, stock level or courier " +
-    "that is not in SHOP FACTS. Where the fact is missing, say you will check, or ask for the " +
+    "that is not in SHOP FACTS" + (knowledge.length ? " or MORE SHOP FACTS" : "") + ". Where the fact is missing, say you will check, or ask for the " +
     "order number.",
   );
   lines.push("- Never promise a refund amount, and never accept blame for a courier's delay.");
@@ -667,6 +679,13 @@ Deno.serve(async (req) => {
                 text: String(l?.text ?? "").slice(0, 400),
               }))
               .filter((l) => l.text),
+            (Array.isArray(body?.knowledge) ? body.knowledge : [])
+              .slice(0, 3)
+              .map((k: { q?: unknown; a?: unknown }) => ({
+                q: String(k?.q ?? "").slice(0, 300),
+                a: String(k?.a ?? "").slice(0, 500),
+              }))
+              .filter((k: { q: string; a: string }) => k.q && k.a),
           ),
         }],
       }],
