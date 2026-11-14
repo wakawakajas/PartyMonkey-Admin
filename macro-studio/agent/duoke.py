@@ -2740,7 +2740,7 @@ def picker_options(text: str, draft: str, shop_id: str = "") -> list[dict]:
     DuoKe's own "/" list, so nothing extra goes to the cloud."""
     out = []
     if draft:
-        out.append({"label": "Pigu draft", "text": " ".join(str(draft).split())})
+        out.append({"label": "Draft", "text": " ".join(str(draft).split())})
     if not _shortcuts["rows"] or time.time() - _shortcuts["at"] > 1800:
         rows = duoke_web.quick_replies()
         if rows:
@@ -2755,12 +2755,13 @@ def picker_options(text: str, draft: str, shop_id: str = "") -> list[dict]:
     scored.sort(key=lambda x: -x[0])
     kb = kb_answer(text, shop_id)
     if kb and kb.get("a"):
-        out.append({"label": "DuokeAI knowledge base: " + kb["q"][:60], "text": kb["a"].strip()})
+        out.append({"label": "Knowledge", "text": kb["a"].strip()})
     for _, row in scored[:3]:
         t = str(row.get("text") or "").strip()
         if t and all(t != o["text"] for o in out):
-            out.append({"label": "Quick reply: " + str(row.get("code") or "") +
-                        (" (add its photo with /)" if row.get("photo") else ""), "text": t})
+            n = len(row.get("photos") or [])
+            out.append({"label": str(row.get("code") or "quick reply") + (f" +{n}" if n > 1 else ""),
+                        "text": t, "photos": row.get("photos") or []})
     return out
 
 

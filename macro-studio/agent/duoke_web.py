@@ -569,38 +569,83 @@ _PICKER = r"""
   const box = boxes[0];
   const sig = conv + '|' + opts.map(o => o.text).join('|');
   const place = () => {
+    // above the whole composer (its emoji / photo buttons stay clickable)
     const r = box.el.getBoundingClientRect();
+    // the composer: the nearest wrapper that starts above the box (where its
+    // buttons are) and is still composer-sized, not the whole chat column
+    let top = r.top;
+    for (let n = box.el.parentElement; n && n !== document.body; n = n.parentElement) {
+      const q = n.getBoundingClientRect();
+      if (q.height > 420) break;
+      if (q.top < top) top = q.top;
+    }
     p.style.left = Math.round(r.left) + 'px';
-    p.style.width = Math.round(Math.min(r.width, 640)) + 'px';
-    p.style.bottom = Math.round(window.innerHeight - r.top + 8) + 'px';
+    p.style.width = Math.round(Math.min(r.width, 820)) + 'px';
+    p.style.bottom = Math.round(window.innerHeight - Math.min(r.top, top) + 6) + 'px';
   };
   if (p && p.dataset.sig === sig) { if (p.dataset.closed !== conv) place(); return 'same'; }
   if (p) p.remove();
+  if (!window.__piguDrop) {
+    const previewOpen = () => [...document.querySelectorAll('span,div,header')].some(e =>
+      !e.childElementCount && e.textContent.trim() === 'Send Image' && e.getBoundingClientRect().width > 0);
+    window.__piguDrop = (urls, target) => {
+      clearInterval(window.__piguDropT);
+      const next = () => {
+        if (previewOpen()) return;
+        const u = urls.shift();
+        if (!u) { clearInterval(window.__piguDropT); return; }
+        const b64 = (window.__piguImg || {})[u];
+        if (!b64) return;              // not fetched yet: try again shortly
+        const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        const dt = new DataTransfer();
+        dt.items.add(new File([bytes], 'photo.jpg', { type: 'image/jpeg' }));
+        for (const t of ['dragenter', 'dragover', 'drop'])
+          target.dispatchEvent(new DragEvent(t, { dataTransfer: dt, bubbles: true, cancelable: true }));
+      };
+      next();
+      window.__piguDropT = setInterval(next, 600);
+    };
+  }
   p = document.createElement('div');
   p.id = ID; p.dataset.sig = sig;
-  p.style.cssText = 'position:fixed;z-index:99999;background:#fff;border:1px solid #d9d9e3;border-radius:12px;' +
-    'box-shadow:0 6px 24px rgba(0,0,0,.18);padding:8px;font:13px/1.35 system-ui,sans-serif;color:#222;' +
-    'max-height:46vh;overflow:auto';
+  // COMPACT: it sits over the bottom of the conversation, so one line per
+  // answer (the whole text on hover) and a button that folds it to one bar --
+  // the buyer's newest message must stay readable.
+  p.style.cssText = 'position:fixed;z-index:99999;background:rgba(255,255,255,.97);border:1px solid #d9d9e3;' +
+    'border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.15);padding:4px 8px 6px;' +
+    'font:15px/1.35 system-ui,sans-serif;color:#222';
+  let small = false;
+  try { small = localStorage.getItem('piguSmall') === '1'; } catch (e) {}
   const head = document.createElement('div');
-  head.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin:0 2px 6px;color:#666;font-size:12px';
-  head.innerHTML = '<b style="color:#e4572e">Pigu</b><span>click one to put it in the box &middot; you press Enter</span>';
+  head.style.cssText = 'display:flex;align-items:center;gap:8px;color:#888;font-size:13px';
+  head.innerHTML = '<b style="color:#e4572e;font-size:14px">Pigu</b><span style="flex:1">' + opts.length +
+    (opts.length > 1 ? ' replies' : ' reply') + ' &middot; click one, then you press Enter &middot; hover to read all</span>';
+  const fold = document.createElement('button');
   const x = document.createElement('button');
+  [fold, x].forEach(k => { k.style.cssText = 'border:0;background:none;font-size:18px;cursor:pointer;color:#888;padding:0 4px;line-height:1'; });
   x.textContent = '\u00d7'; x.title = 'Hide for this chat';
-  x.style.cssText = 'border:0;background:none;font-size:18px;cursor:pointer;color:#888;padding:0 4px';
   x.onclick = () => { p.dataset.closed = conv; p.style.display = 'none'; };
-  head.appendChild(x); p.appendChild(head);
+  const list = document.createElement('div');
+  const setSmall = v => { small = v; list.style.display = v ? 'none' : 'block';
+    fold.textContent = v ? '\u25b4' : '\u25be'; fold.title = v ? 'Show the replies' : 'Fold to one line';
+    try { localStorage.setItem('piguSmall', v ? '1' : '0'); } catch (e) {} };
+  fold.onclick = () => setSmall(!small);
+  head.appendChild(fold); head.appendChild(x); p.appendChild(head); p.appendChild(list);
+  setSmall(small);
   opts.forEach(o => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.style.cssText = 'display:block;width:100%;text-align:left;border:1px solid #eee;background:#fafafa;' +
-      'border-radius:9px;padding:7px 9px;margin:4px 0;cursor:pointer;font:inherit;color:inherit;white-space:pre-wrap';
+    b.title = o.text;
+    b.style.cssText = 'display:flex;gap:8px;align-items:baseline;width:100%;text-align:left;border:1px solid #eee;' +
+      'background:#fafafa;border-radius:8px;padding:4px 8px;margin:3px 0;cursor:pointer;font:inherit;color:inherit';
     b.onmouseenter = () => { b.style.background = '#fff4ef'; b.style.borderColor = '#f3b49c'; };
     b.onmouseleave = () => { b.style.background = '#fafafa'; b.style.borderColor = '#eee'; };
-    const tag = document.createElement('div');
-    tag.style.cssText = 'font-size:11px;color:#e4572e;font-weight:600;margin-bottom:2px';
-    tag.textContent = o.label;
-    const t = document.createElement('div');
-    t.textContent = o.text.length > 260 ? o.text.slice(0, 260) + '\u2026' : o.text;
+    const tag = document.createElement('span');
+    tag.style.cssText = 'flex:none;font-size:13px;color:#e4572e;font-weight:600;white-space:nowrap';
+    tag.textContent = o.label + ((o.photos || []).length ? ' \ud83d\udcf7' : '');
+    const t = document.createElement('span');
+    t.style.cssText = 'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+    t.textContent = o.text.replace(/\s+/g, ' ');
     b.appendChild(tag); b.appendChild(t);
     // mousedown, not click: keeps the reply box's focus and selection
     b.addEventListener('mousedown', e => {
@@ -611,9 +656,15 @@ _PICKER = r"""
       else { const r = document.createRange(); r.selectNodeContents(el);
              const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
       document.execCommand('insertText', false, o.text);
+      // DuoKe offers its own quick reply when the words match one, and Enter
+      // would pick that instead of sending these words: close its list
+      const esc = () => el.dispatchEvent(new KeyboardEvent('keydown',
+        { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+      setTimeout(esc, 250); setTimeout(esc, 700);
       b.style.background = '#e9f7ee'; b.style.borderColor = '#8fd1a6';
+      if ((o.photos || []).length) window.__piguDrop(o.photos.slice(), el);
     });
-    p.appendChild(b);
+    list.appendChild(b);
   });
   document.body.appendChild(p);
   place();
@@ -630,7 +681,10 @@ _QUICK = r"""
   if (!Array.isArray(rows)) return JSON.stringify({ ok: false });
   return JSON.stringify({ ok: true, rows: rows.map(m => ({
     code: String(m.quickInstructions || '').trim(), text: String(m.content || '').trim(),
-    photo: !!(m.mediaUrl || (m.mediaInfos || []).length) })).filter(r => r.code && r.text) });
+    photo: !!(m.mediaUrl || (m.mediaInfos || []).length),
+    photos: (m.mediaInfos || []).filter(x => x.mediaType === 'image' && x.mediaUrl).map(x => String(x.mediaUrl))
+      .concat(!(m.mediaInfos || []).length && m.mediaType === 'image' && m.mediaUrl ? [String(m.mediaUrl)] : [])
+  })).filter(r => r.code && r.text) });
 })()
 """
 
@@ -675,11 +729,38 @@ def knowledge(pages: int = 10) -> list[dict]:
     return data.get("rows") or [] if data.get("ok") else []
 
 
+_photo_cache: dict[str, str] = {}
+
+
+def load_photos(urls: list[str]) -> None:
+    """Hand the page the quick replies' photos (it cannot fetch them itself:
+    the photo host does not allow it). Downloaded once on this PC, then only
+    the ones the page does not have yet are passed in."""
+    urls = list(dict.fromkeys(urls))
+    if not urls:
+        return
+    have = _json(_run("JSON.stringify({ ok: true, have: Object.keys(window.__piguImg || {}) })"))
+    missing = [u for u in urls if u not in set(have.get("have") or [])]
+    import base64
+    for u in missing[:4]:
+        if u not in _photo_cache:
+            try:
+                data = urllib.request.urlopen(u, timeout=20).read()
+            except (urllib.error.URLError, OSError):
+                continue
+            if len(data) > 8_000_000:
+                continue
+            _photo_cache[u] = base64.b64encode(data).decode("ascii")
+        _run(f"(window.__piguImg = window.__piguImg || {{}})[{json.dumps(u)}] = {json.dumps(_photo_cache[u])}")
+
+
 def show_picker(conversation_id: str, options: list[dict]) -> str:
     """Show (or keep, or hide with no options) the reply picker for the open
     chat. options: [{label, text}]. Never sends anything."""
-    opts = [{"label": str(o.get("label") or "")[:40], "text": str(o.get("text") or "").strip()}
+    opts = [{"label": str(o.get("label") or "")[:80], "text": str(o.get("text") or "").strip(),
+             "photos": [str(u) for u in (o.get("photos") or []) if str(u).startswith("http")][:4]}
             for o in options if str(o.get("text") or "").strip()]
+    load_photos([u for o in opts for u in o["photos"]])
     return str(_run(f"({_PICKER})({json.dumps(str(conversation_id or ''))}, {json.dumps(opts)})") or "")
 
 
