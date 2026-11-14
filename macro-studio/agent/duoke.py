@@ -858,7 +858,11 @@ def find_window() -> Optional[int]:
         by_title = bool(want) and want in title.lower()
         by_exe = False
         if want_exe and not by_title:
-            by_exe = want_exe in (winapi.process_name(winapi.window_pid(hwnd)) or "")
+            # The whole name, not a part of it: DuokeAI.exe (DuoKe's newer AI
+            # app, installed beside it) contains "duoke" too, and reading or
+            # relaunching that one would leave the real chats unread.
+            name = winapi.process_name(winapi.window_pid(hwnd)) or ""
+            by_exe = name in (want_exe, want_exe + ".exe")
         if not (by_title or by_exe):
             continue
         # Our own browser tab showing the Replies screen has "DuoKe" in its
