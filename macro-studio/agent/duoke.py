@@ -2641,7 +2641,7 @@ def pick_shortcut(draft: str, wants_photo: bool) -> Optional[dict]:
     draft that wanted a photo gets a lower one, because that is exactly the
     case where the words alone are not the answer."""
     if not _shortcuts["rows"] or time.time() - _shortcuts["at"] > 1800:
-        rows = duoke_web.list_shortcuts()
+        rows = duoke_web.quick_replies()
         if rows:
             _shortcuts["rows"], _shortcuts["at"] = rows, time.time()
     mine = set(words(draft))
@@ -2665,6 +2665,98 @@ def pick_shortcut(draft: str, wants_photo: bool) -> Optional[dict]:
             best, score = row, s
     bar = 0.35 if wants_photo else 0.5
     return best if best and score >= bar else None
+
+
+# conversation id -> {"text": the buyer's waiting message, "draft": Pigu's words}
+# for the reply picker; filled wherever a draft is made, so the picker costs no
+# extra draft calls
+_picker: dict[str, dict] = {}
+_picker_shown = [""]
+_picker_tick = [0]
+
+
+# words every chat has, which say nothing about which quick reply fits
+_CHAT_STOP = {"you", "your", "can", "thank", "thanks", "what", "hello", "please", "are",
+              "will", "our", "this", "that", "have", "from", "want", "how", "when",
+              "today", "may", "know", "would", "like", "need", "just", "any", "yes", "not"}
+
+
+_kb = {"rows": [], "at": 0.0}
+
+
+def kb_answer(text: str, shop_id: str) -> Optional[dict]:
+    """The knowledge-base Q&A whose question best fits the buyer's message,
+    for this chat's shop; refreshed hourly, read on this PC."""
+    if time.time() - _kb["at"] > 3600:
+        rows = duoke_web.knowledge()
+        _kb["at"] = time.time()
+        if rows:
+            _kb["rows"] = rows
+    want = set(words(text)) - _CHAT_STOP
+    best, score = None, 0.0
+    for row in _kb["rows"]:
+        if shop_id and row.get("shops") and shop_id not in row["shops"]:
+            continue
+        theirs = set(words(row.get("q") or "")) - _CHAT_STOP
+        common = len(want & theirs)
+        if common < 2:
+            continue
+        s = common / ((len(want) * len(theirs)) ** 0.5 or 1)
+        if s > score:
+            best, score = row, s
+    return best if best and score >= 0.3 else None
+
+
+def picker_options(text: str, draft: str, shop_id: str = "") -> list[dict]:
+    """Pigu's draft first, then up to three quick replies that share the most
+    words with the buyer's message and the draft -- read on this PC from
+    DuoKe's own "/" list, so nothing extra goes to the cloud."""
+    out = []
+    if draft:
+        out.append({"label": "Pigu draft", "text": " ".join(str(draft).split())})
+    if not _shortcuts["rows"] or time.time() - _shortcuts["at"] > 1800:
+        rows = duoke_web.quick_replies()
+        if rows:
+            _shortcuts["rows"], _shortcuts["at"] = rows, time.time()
+    want = (set(words(text)) | set(words(draft))) - _CHAT_STOP
+    scored = []
+    for row in _shortcuts["rows"]:
+        theirs = (set(words(row.get("text") or "")) | set(words(row.get("code") or ""))) - _CHAT_STOP
+        common = len(want & theirs)
+        if common >= 2 or (common and want & set(words(row.get("code") or ""))):
+            scored.append((common / (len(theirs) ** 0.5 or 1), row))
+    scored.sort(key=lambda x: -x[0])
+    kb = kb_answer(text, shop_id)
+    if kb and kb.get("a"):
+        out.append({"label": "DuokeAI knowledge base: " + kb["q"][:60], "text": kb["a"].strip()})
+    for _, row in scored[:3]:
+        t = str(row.get("text") or "").strip()
+        if t and all(t != o["text"] for o in out):
+            out.append({"label": "Quick reply: " + str(row.get("code") or "") +
+                        (" (add its photo with /)" if row.get("photo") else ""), "text": t})
+    return out
+
+
+def update_picker() -> None:
+    """Keep the picker over DuoKe's reply box in step with the open chat."""
+    if not load().get("reply_picker", True):
+        return
+    rows, conv = duoke_web.list_sessions()
+    item = _picker.get(conv) if conv else None
+    if item:
+        # once the shop has answered (somebody pressed Enter), the picker goes
+        last_id = next((r["last_id"] for r in rows if r["conversation_id"] == conv), "")
+        if last_id and last_id != item.get("last_id"):
+            item["last_id"] = last_id
+            sess = next((r for r in rows if r["conversation_id"] == conv), None)
+            lines = [l for l in duoke_web.read_conversation(sess["shop_id"], conv)
+                     if not _is_auto_line(l)] if sess else []
+            if lines and not lines[-1]["inbound"]:
+                _picker.pop(conv, None)
+                item = None
+    shop = next((r["shop_id"] for r in rows if r["conversation_id"] == conv), "") if item else ""
+    opts = picker_options(item["text"], item["draft"], shop) if item else []
+    duoke_web.show_picker(conv if opts else "", opts)
 
 
 # Messages a draft has been left for, this run of the agent. In memory on
@@ -2708,6 +2800,7 @@ def _draft_now(conv: str) -> Optional[dict]:
     history = [{"inbound": bool(l["inbound"]), "text": str(l.get("text") or "")[:400]}
                for l in lines[-MESSAGE_TAIL:]]
     words, photos = cloud.draft(text, history[:-1])
+    _picker[conv] = {"text": text, "draft": words or ""}
     return {"mark": mark, "words": words, "photos": photos, "key": key, "text": text}
 
 
@@ -2771,6 +2864,7 @@ def place_ready_draft() -> Optional[str]:
         if duoke_web.open_conversation_id() != conv:
             return None
         _ready.pop(conv, None)
+        _picker.setdefault(conv, {"text": item["text"], "draft": item["words"] or ""})
         if item["mark"] in _drafted:
             return None               # already put in once; not again
         sess = next((x for x in duoke_web.list_sessions()[0]
@@ -3489,6 +3583,9 @@ class Watcher:
                     _duoke_front_at[0] = time.time()
                 if duoke_web.available():
                     place_ready_draft()
+                    _picker_tick[0] += 1
+                    if _picker_tick[0] % 3 == 0:
+                        update_picker()
             except Exception:
                 hwnd = 0
             # often, so a chat that is opened gets its draft at once

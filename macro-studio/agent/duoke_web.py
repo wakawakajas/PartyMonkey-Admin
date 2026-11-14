@@ -550,6 +550,139 @@ def list_shortcuts() -> list[dict]:
 # presses anything that sends.
 
 
+# THE REPLY PICKER: a small panel over DuoKe's reply box with a few answers
+# for the open chat -- Pigu's draft and the quick replies that fit. Clicking one
+# REPLACES what is in the box with it and puts the cursor there. It never
+# sends: there is no Enter, no click on Send, and quick replies go in as plain
+# words (picking DuoKe's own can send them, 2026-09-25). The person reads it,
+# edits if they like, and presses Enter themselves.
+_PICKER = r"""
+((conv, opts) => {
+  const ID = 'pigu-picker';
+  let p = document.getElementById(ID);
+  const boxes = [...document.querySelectorAll('textarea,[contenteditable="true"]')]
+    .filter(el => !el.closest('#' + ID))
+    .map(el => ({ el, r: el.getBoundingClientRect() }))
+    .filter(b => b.r.width > 300)
+    .sort((a, b) => b.r.width - a.r.width);
+  if (!conv || !opts.length || !boxes.length) { if (p) p.remove(); return 'hidden'; }
+  const box = boxes[0];
+  const sig = conv + '|' + opts.map(o => o.text).join('|');
+  const place = () => {
+    const r = box.el.getBoundingClientRect();
+    p.style.left = Math.round(r.left) + 'px';
+    p.style.width = Math.round(Math.min(r.width, 640)) + 'px';
+    p.style.bottom = Math.round(window.innerHeight - r.top + 8) + 'px';
+  };
+  if (p && p.dataset.sig === sig) { if (p.dataset.closed !== conv) place(); return 'same'; }
+  if (p) p.remove();
+  p = document.createElement('div');
+  p.id = ID; p.dataset.sig = sig;
+  p.style.cssText = 'position:fixed;z-index:99999;background:#fff;border:1px solid #d9d9e3;border-radius:12px;' +
+    'box-shadow:0 6px 24px rgba(0,0,0,.18);padding:8px;font:13px/1.35 system-ui,sans-serif;color:#222;' +
+    'max-height:46vh;overflow:auto';
+  const head = document.createElement('div');
+  head.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin:0 2px 6px;color:#666;font-size:12px';
+  head.innerHTML = '<b style="color:#e4572e">Pigu</b><span>click one to put it in the box &middot; you press Enter</span>';
+  const x = document.createElement('button');
+  x.textContent = '\u00d7'; x.title = 'Hide for this chat';
+  x.style.cssText = 'border:0;background:none;font-size:18px;cursor:pointer;color:#888;padding:0 4px';
+  x.onclick = () => { p.dataset.closed = conv; p.style.display = 'none'; };
+  head.appendChild(x); p.appendChild(head);
+  opts.forEach(o => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.style.cssText = 'display:block;width:100%;text-align:left;border:1px solid #eee;background:#fafafa;' +
+      'border-radius:9px;padding:7px 9px;margin:4px 0;cursor:pointer;font:inherit;color:inherit;white-space:pre-wrap';
+    b.onmouseenter = () => { b.style.background = '#fff4ef'; b.style.borderColor = '#f3b49c'; };
+    b.onmouseleave = () => { b.style.background = '#fafafa'; b.style.borderColor = '#eee'; };
+    const tag = document.createElement('div');
+    tag.style.cssText = 'font-size:11px;color:#e4572e;font-weight:600;margin-bottom:2px';
+    tag.textContent = o.label;
+    const t = document.createElement('div');
+    t.textContent = o.text.length > 260 ? o.text.slice(0, 260) + '\u2026' : o.text;
+    b.appendChild(tag); b.appendChild(t);
+    // mousedown, not click: keeps the reply box's focus and selection
+    b.addEventListener('mousedown', e => {
+      e.preventDefault();
+      const el = box.el;
+      el.focus();
+      if (el.tagName === 'TEXTAREA') el.select();
+      else { const r = document.createRange(); r.selectNodeContents(el);
+             const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+      document.execCommand('insertText', false, o.text);
+      b.style.background = '#e9f7ee'; b.style.borderColor = '#8fd1a6';
+    });
+    p.appendChild(b);
+  });
+  document.body.appendChild(p);
+  place();
+  return 'shown';
+})
+"""
+
+
+_QUICK = r"""
+(() => {
+  const v3 = document.querySelector('#app-vue3') && document.querySelector('#app-vue3').__vue_app__;
+  const p = v3 && v3.config.globalProperties.$pinia;
+  const rows = p && (p.state.value.system || {}).instMsgs;
+  if (!Array.isArray(rows)) return JSON.stringify({ ok: false });
+  return JSON.stringify({ ok: true, rows: rows.map(m => ({
+    code: String(m.quickInstructions || '').trim(), text: String(m.content || '').trim(),
+    photo: !!(m.mediaUrl || (m.mediaInfos || []).length) })).filter(r => r.code && r.text) });
+})()
+"""
+
+
+def quick_replies() -> list[dict]:
+    """The shop's quick replies as [{code, text, photo}] -- from DuokeAI's own
+    store, so the reply box is never touched; the old DuoKe falls back to
+    opening the "/" list in an empty box."""
+    data = _json(_run(_QUICK))
+    if data.get("ok"):
+        return data.get("rows") or []
+    return list_shortcuts()
+
+
+# DuokeAI's knowledge base: question-and-answer pairs it wrote from the shop's
+# past chats (Knowledge base > shop Q&A). Read only.
+_KB = r"""
+(async (pages) => {
+  const v3 = document.querySelector('#app-vue3') && document.querySelector('#app-vue3').__vue_app__;
+  const p = v3 && v3.config.globalProperties.$pinia;
+  if (!p) return JSON.stringify({ ok: false });
+  const h = { 'x-access-token': p.state.value.runtime.token, 'X-Duoke-Version': 'v2',
+              'Content-Type': 'application/json' };
+  const rows = [];
+  for (let n = 1; n <= pages; n++) {
+    const r = await (await fetch('/api/v1/kb/qa/v1/shop/qa/list',
+      { method: 'POST', headers: h, body: JSON.stringify({ pageNo: n, pageSize: 50 }) })).json();
+    const d = r && r.code === 0 && r.data;
+    if (!d) break;
+    for (const q of d.list || []) rows.push({ q: String(q.question || ''), a: String(q.answer || ''),
+      shops: (q.shops || []).map(s => String(s.shopId)) });
+    if (n >= (d.totalPage || 1)) break;
+  }
+  return JSON.stringify({ ok: true, rows });
+})
+"""
+
+
+def knowledge(pages: int = 10) -> list[dict]:
+    """DuokeAI's shop Q&As as [{q, a, shops}]; empty on the old DuoKe."""
+    data = _json(_run(f"({_KB})({int(pages)})", timeout=30))
+    return data.get("rows") or [] if data.get("ok") else []
+
+
+def show_picker(conversation_id: str, options: list[dict]) -> str:
+    """Show (or keep, or hide with no options) the reply picker for the open
+    chat. options: [{label, text}]. Never sends anything."""
+    opts = [{"label": str(o.get("label") or "")[:40], "text": str(o.get("text") or "").strip()}
+            for o in options if str(o.get("text") or "").strip()]
+    return str(_run(f"({_PICKER})({json.dumps(str(conversation_id or ''))}, {json.dumps(opts)})") or "")
+
+
 def put_draft(text: str) -> str:
     """Leave `text` in the open conversation's reply box without sending it.
 
