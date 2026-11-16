@@ -819,6 +819,55 @@ def kick_claude():
         return was != "signin"
 
 
+def _queued_times(fname):
+    """When each still-queued request of this kind was written."""
+    paths = [REFRESH_REQ] if fname == "refresh" else (
+        [os.path.join(SAVE, n, fname) for n in os.listdir(SAVE)] if os.path.isdir(SAVE) else [])
+    out = []
+    for p in paths:
+        if not os.path.isfile(p):
+            continue
+        try:
+            if fname != "refresh" and json.load(open(p, encoding="utf8")).get("status") != "queued":
+                continue
+            out.append(os.path.getmtime(p))
+        except Exception:
+            pass
+    return out
+
+
+WATCH = {"kicked_at": 0.0}
+
+
+def watch_requests():
+    """Make requests asked for on ANY PC straight away, not at the hourly task.
+
+    Each Sit Pretty starts Claude Code for its own requests, but a PC whose
+    Claude Code is missing or signed out leaves them for the hourly task (an
+    evidence video waited 30 minutes, 2026-11-16). The PC with
+    "run_requests_from_all_pcs": true in its sitpretty-local.json picks up
+    anything still queued after 2 minutes -- long enough that the asking PC,
+    if it can, has already marked it "working".
+
+    Each request starts a run once: one that run had to leave queued (say
+    Chrome was not there for the BigSeller time) waits for the hourly task
+    rather than starting Claude Code again every 30 seconds."""
+    while True:
+        time.sleep(30)
+        try:
+            if not local_cfg().get("run_requests_from_all_pcs") or auto_state() in ("missing", "signin"):
+                continue
+            if AUTO["proc"] and AUTO["proc"].poll() is None:
+                continue
+            now = time.time()
+            if any(now - m > 120 and m > WATCH["kicked_at"] for f, _ in AUTO_KINDS for m in _queued_times(f)):
+                WATCH["kicked_at"] = now
+                log("A request made on another PC has waited 2 minutes, so this PC is starting Claude Code for it")
+                kick_claude()
+        except Exception as e:
+            log(f"Watching for requests from other PCs: {e}")
+
+
 def request_unbox_video(b):
     """Staff want a labelled copy of an unboxing recording (made by Claude, like the packing videos)."""
     order = safe_id(b.get("order"))
@@ -2016,6 +2065,7 @@ def main():
     import pigulink
     apply_cameras()
     threading.Thread(target=tidy_views, daemon=True).start()
+    threading.Thread(target=watch_requests, daemon=True).start()
     footage.start(cfg=CFG, rtsp=rtsp, log=log, ffmpeg=FFMPEG, local_cfg=local_cfg, local_path=LOCAL, nowin=NOWIN,
                   clean=clean)
     live.start(cfg=CFG, rtsp=rtsp, log=log, ffmpeg=FFMPEG, nowin=NOWIN, clean=clean, in_job=footage._in_job)
