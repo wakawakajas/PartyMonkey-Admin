@@ -909,9 +909,9 @@ def request_unbox_video(b):
         if not vids:
             raise ValueError("There is no unboxing recording for this order yet")
         video = vids[-1]
-    opts = {k: bool(b.get(k)) for k in ("count", "highlight_items", "highlight_weight", "missing")}
+    opts = {k: bool(b.get(k)) for k in ("count", "highlight_items", "highlight_weight", "missing", "photos")}
     if not any(opts.values()):
-        raise ValueError("Tick at least one thing to show")
+        raise ValueError("Tick at least one thing")
     cam = b.get("cam") if b.get("cam") in CFG["cameras"] else CFG["returns_camera"]
     job = {"kind": "unboxing", "order": order, "request": b.get("request", ""), "video": video, "cams": [cam],
            **opts, "missing_text": str(b.get("missing_text") or "")[:300], "note": str(b.get("note") or "")[:300],

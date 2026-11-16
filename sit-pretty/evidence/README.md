@@ -49,8 +49,11 @@ Make it the same way as a packing video, with these differences:
 - **Waybill close-up must be readable.** Pick the frame where the waybill is closest to the camera and
   sharpest (score several with an edge filter, not just the first second). If no frame shows readable
   text, leave the waybill zoom out and rely on the info strip and end card for the order ID.
-- **Also save the 3 dispute photos** Shopee's form asks for, unless staff already saved that kind with the
-  photo buttons (any `<OrderID>_photo_<kind>_*.jpg` in the folder): full-size 4K stills from `video`
+- **Photos only:** when `photos` is true and `count`, `highlight_items`, `highlight_weight` and `missing`
+  are all false, staff want just the photos below: make no video, save the photos, and set the request to
+  done with the photo files in `"photos"` and a one-line summary.
+- **Also save the 3 dispute photos** (when `photos` is true or missing) Shopee's form asks for, unless
+  staff already saved that kind with the photo buttons (any `<OrderID>_photo_<kind>_*.jpg` in the folder): full-size 4K stills from `video`
   (`ffmpeg -ss <t> -i video -frames:v 1 -q:v 2`, about 1 MB, never downscaled; each must stay under 30 MB):
   `<OrderID>_photo_waybill_1.jpg` (the return parcel with its waybill readable, the sharpest frame),
   `<OrderID>_photo_packaging_1.jpg` (the outer packaging as it arrived, before it is opened) and
