@@ -859,6 +859,11 @@ def watch_requests():
                 continue
             if AUTO["proc"] and AUTO["proc"].poll() is None:
                 continue
+            # a request marked "working" means a Claude Code run (the hourly
+            # task, or another PC's) is busy and goes on to the queued ones
+            # after it: starting another would make the same video twice
+            if any((j.get("status") == "working") for j in jobs()):
+                continue
             now = time.time()
             if any(now - m > 120 and m > WATCH["kicked_at"] for f, _ in AUTO_KINDS for m in _queued_times(f)):
                 WATCH["kicked_at"] = now
