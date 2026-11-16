@@ -386,9 +386,46 @@ _last_hand_check = [0.0]
 # started again because of it
 _cold_since = [0.0]
 _last_relaunch = [0.0]
+# when DuoKe was first seen open without the readable flags
+_unflagged_since = [0.0]
+# pid -> the command line it was started with (it never changes for a pid)
+_cmdlines: dict[int, Optional[str]] = {}
 
 
-def revive(hwnd: int) -> tuple[bool, str]:
+def command_line(pid: int) -> Optional[str]:
+    """How a process was started, or None when Windows would not say.
+
+    A Shopee "chat with buyer" link starts DuokeAI through its duokeai://
+    handler, which has no flags, and DuokeAI rewrites that handler back on
+    every start -- so a DuokeAI that is open is not necessarily readable, and
+    this is how the agent tells."""
+    if not pid:
+        return None
+    if pid in _cmdlines:
+        return _cmdlines[pid]
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"],
+            capture_output=True, text=True, timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        line: Optional[str] = (out.stdout or "").strip() or None
+    except (OSError, subprocess.SubprocessError):
+        line = None
+    if line is not None:
+        if len(_cmdlines) > 50:
+            _cmdlines.clear()
+        _cmdlines[pid] = line
+    return line
+
+
+def _link_args(cmdline: Optional[str]) -> list[str]:
+    """The duokeai:// link DuokeAI was opened with, to open the same chat again."""
+    m = re.search(r'(duokeai?://[^\s"]+)', cmdline or "")
+    return ["--", m.group(1)] if m else []
+
+
+def revive(hwnd: int, extra_args: Optional[list[str]] = None) -> tuple[bool, str]:
     """Start DuoKe again, with the flags that make it readable.
 
     The exe is taken from the window itself rather than a configured path, so
@@ -412,8 +449,13 @@ def revive(hwnd: int) -> tuple[bool, str]:
     try:
         subprocess.run(["taskkill", "/PID", str(winapi.window_pid(hwnd)), "/F", "/T"],
                        capture_output=True, timeout=20)
+        if path.lower().endswith("duokeai.exe"):
+            # the old DuoKe cannot be used any more, and left running it holds
+            # the debugging port DuokeAI needs (seen 2026-11-16)
+            subprocess.run(["taskkill", "/IM", "Duoke.exe", "/F", "/T"],
+                           capture_output=True, timeout=20)
         time.sleep(3.0)
-        subprocess.Popen([path, *flags], close_fds=True)
+        subprocess.Popen([path, *flags, *(extra_args or [])], close_fds=True)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"could not start it again: {exc}"
     _last_relaunch[0] = time.time()
@@ -3057,13 +3099,37 @@ def sync_once() -> dict:
 
     hwnd = find_window()
     restored = False
-    if hwnd and not duoke_web.available():
-        # DuoKe opened from its ordinary shortcut: nothing can be read in the
-        # background, and the old screen way clicks and restores the window
-        # under whoever is using it (a colleague's PC, 2026-09-25). So this PC
-        # does nothing at all until DuoKe is reopened the right way.
-        note = ("DuokeAI was not opened with the \"DuokeAI (readable)\" shortcut, so this PC "
-                "leaves it alone -- close DuokeAI and open it from that shortcut to draft.")
+    cmdline = command_line(winapi.window_pid(hwnd)) if hwnd else None
+    unflagged = bool(hwnd) and cmdline is not None and "--remote-debugging-port" not in cmdline
+    if hwnd and (unflagged or not duoke_web.available()):
+        # DuoKe opened from its ordinary shortcut or a Shopee chat link:
+        # nothing can be read in the background, and the old screen way clicks
+        # and restores the window under whoever is using it (a colleague's PC,
+        # 2026-09-25). So nothing is read; instead, once nobody has used DuoKe
+        # for a while, it is started again with the flags, on the same chat.
+        if not _unflagged_since[0]:
+            _unflagged_since[0] = time.time()
+        wait = float(cfg.get("relaunch_if_cold_seconds") or 0)
+        if (wait > 0 and time.time() - _unflagged_since[0] >= min(wait, 60)
+                and not in_use(hwnd, cfg)):
+            done, why = revive(hwnd, _link_args(cmdline))
+            report["notes"].append(why)
+            if done:
+                _unflagged_since[0] = 0.0
+                try:
+                    cloud.beat(device, True, 0,
+                               "DuokeAI was not opened the readable way, so the shop PC "
+                               "restarted it with the readable flags — reading again in a "
+                               "few seconds (click Chat once if it opens on the dashboard).")
+                except CloudError:
+                    pass
+                _state["last_report"] = report
+                _state["last_pass_at"] = datetime.now(timezone.utc).isoformat()
+                return report
+        note = ("DuokeAI was not opened with the \"DuokeAI (readable)\" shortcut (a Shopee "
+                "chat link opens it without the flags). This PC restarts it the readable way "
+                "once nobody has used it for a minute -- or close it and open it from that "
+                "shortcut.")
         report["notes"].append(note)
         try:
             cloud.beat(device, True, 0, note)
@@ -3072,6 +3138,7 @@ def sync_once() -> dict:
         _state["last_report"] = report
         _state["last_pass_at"] = datetime.now(timezone.utc).isoformat()
         return report
+    _unflagged_since[0] = 0.0
     if hwnd:
         restored = _show_for_reading(hwnd)
     if not hwnd:
