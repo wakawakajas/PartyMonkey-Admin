@@ -735,8 +735,34 @@ AUTO_PROMPT = (
     "available, leave that request queued for the hourly task. Delete temporary files when done. "
     "Finish with one line per request.")
 
+def _drive_path(unc):
+    """The same folder through a mapped drive letter (\\\\nas\\share\\x -> N:\\x), or unc as it is.
+
+    Claude Code will not take a network path as a working folder ("map the
+    share to a drive letter and pass it with --add-dir"), so a run handed the
+    UNC path gave up at once (unboxing videos, 2026-11-16)."""
+    if not unc.startswith("\\\\") or os.name != "nt":
+        return unc
+    try:
+        out = subprocess.run(["net", "use"], capture_output=True, text=True, timeout=10, creationflags=NOWIN).stdout
+    except Exception:
+        return unc
+    for line in out.splitlines():
+        m = re.search(r"\b([A-Z]:)\s+(\\\\\S.*?)\s*(?:Microsoft Windows Network)?\s*$", line)
+        if not m:
+            continue
+        root = m.group(2).rstrip("\\")
+        if unc.lower() == root.lower() or unc.lower().startswith(root.lower() + "\\"):
+            p = m.group(1) + unc[len(root):]
+            if os.path.isdir(p):
+                return p
+    return unc
+
+
+CLAUDE_SAVE = _drive_path(SAVE)
+
 # the prompts name the save folder this PC actually uses
-CLIP_PROMPT, REFRESH_PROMPT, AUTO_PROMPT = (x.replace("N:\\Yong Chuan\\Dispute", SAVE.replace("{", "{{").replace("}", "}}"))
+CLIP_PROMPT, REFRESH_PROMPT, AUTO_PROMPT = (x.replace("N:\\Yong Chuan\\Dispute", CLAUDE_SAVE.replace("{", "{{").replace("}", "}}"))
                                             for x in (CLIP_PROMPT, REFRESH_PROMPT, AUTO_PROMPT))
 
 
@@ -780,7 +806,7 @@ def _run_claude_once(fname, model):
         out_p = os.path.join(HERE, "tmp", "claude-run.log")
         with open(out_p, "w", encoding="utf8") as out:
             cmd = [CLAUDE_EXE, "-p", (REFRESH_PROMPT if fname == "refresh" else CLIP_PROMPT if fname == CLIP_REQ else AUTO_PROMPT.replace("{fname}", fname)), "--chrome", "--permission-mode", "acceptEdits",
-                   "--add-dir", SAVE]
+                   "--add-dir", CLAUDE_SAVE]
             if model:
                 cmd += ["--model", model]
             cmd += ["--allowedTools", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "mcp__claude-in-chrome"]
