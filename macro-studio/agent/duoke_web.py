@@ -587,6 +587,7 @@ _PICKER = r"""
       const shut = q.style.display === 'none';
       q.style.display = shut ? '' : 'none';
       if (shut) delete q.dataset.closed; else q.dataset.closed = q.dataset.sig.split('|')[0];
+      if (window.__piguClear) window.__piguClear();
     });
   }
   // Alt+1, Alt+2 ... puts that answer in the box, as a click would
@@ -602,10 +603,52 @@ _PICKER = r"""
       b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
     }, true);
   }
-  if (!conv || !opts.length || !boxes.length) { if (p) p.remove(); return 'hidden'; }
+  // ROOM FOR THE PICKER: it sits over the bottom of the messages, so the
+  // message list gets that much extra space at its end and the buyer's newest
+  // message scrolls up above the picker instead of under it (2026-11-16).
+  if (!window.__piguClear) {
+    const scroller = () => {
+      const old = window.__piguSc;
+      if (old && old.isConnected && old.getBoundingClientRect().width > 300) return old;
+      const bx = [...document.querySelectorAll('textarea,[contenteditable="true"]')]
+        .filter(e => !e.closest('#' + ID)).map(e => e.getBoundingClientRect())
+        .filter(r => r.width > 300).sort((a, b) => b.width - a.width)[0];
+      if (!bx) return null;
+      let best = null, area = 0;
+      for (const e of document.querySelectorAll('div,section,main,ul')) {
+        const r = e.getBoundingClientRect();
+        if (r.width < 300 || r.height < 200 || r.bottom > bx.top + 5 || r.right < bx.left || r.left > bx.right) continue;
+        if (!/auto|scroll/.test(getComputedStyle(e).overflowY)) continue;
+        if (r.width * r.height > area) { best = e; area = r.width * r.height; }
+      }
+      return best;
+    };
+    window.__piguClear = () => {
+      const sc = scroller(), prev = window.__piguSc;
+      if (prev && prev !== sc && 'piguPad' in prev.dataset) {
+        prev.style.paddingBottom = prev.dataset.piguPad; delete prev.dataset.piguPad;
+      }
+      window.__piguSc = sc;
+      if (!sc) return;
+      if (!('piguPad' in sc.dataset)) sc.dataset.piguPad = sc.style.paddingBottom;
+      const q = document.getElementById(ID);
+      const s = sc.getBoundingClientRect();
+      const r = q && q.style.display !== 'none' ? q.getBoundingClientRect() : null;
+      const over = r && r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top;
+      const was = parseFloat(sc.style.paddingBottom) || 0;
+      const need = over ? Math.round(s.bottom - r.top + 12) : 0;
+      if (need ? Math.abs(was - need) < 2 : !sc.style.paddingBottom || sc.style.paddingBottom === sc.dataset.piguPad) return;
+      const atEnd = sc.scrollHeight - sc.scrollTop - sc.clientHeight < Math.max(60, was + 40);
+      sc.style.paddingBottom = need ? need + 'px' : sc.dataset.piguPad;
+      if (atEnd) sc.scrollTop = sc.scrollHeight;
+    };
+    window.addEventListener('resize', () => window.__piguClear());
+  }
+  if (!conv || !opts.length || !boxes.length) { if (p) p.remove(); window.__piguClear(); return 'hidden'; }
   const box = boxes[0];
   const sig = conv + '|' + opts.map(o => o.text).join('|');
-  const place = () => {
+  const place = () => { setPlace(); window.__piguClear(); };
+  const setPlace = () => {
     let pos = null;
     try { pos = JSON.parse(localStorage.getItem('piguPos') || 'null'); } catch (e) {}
     if (pos && typeof pos.x === 'number') {
@@ -671,11 +714,12 @@ _PICKER = r"""
   const x = document.createElement('button');
   [fold, x].forEach(k => { k.style.cssText = 'border:0;background:none;font-size:18px;cursor:pointer;color:#888;padding:0 4px;line-height:1'; });
   x.textContent = '\u00d7'; x.title = 'Hide (double-click the reply box to bring it back)';
-  x.onclick = () => { p.dataset.closed = conv; p.style.display = 'none'; };
+  x.onclick = () => { p.dataset.closed = conv; p.style.display = 'none'; window.__piguClear(); };
   const list = document.createElement('div');
   const setSmall = v => { small = v; list.style.display = v ? 'none' : 'block';
     fold.textContent = v ? '\u25b4' : '\u25be'; fold.title = v ? 'Show the replies' : 'Fold to one line';
-    try { localStorage.setItem('piguSmall', v ? '1' : '0'); } catch (e) {} };
+    try { localStorage.setItem('piguSmall', v ? '1' : '0'); } catch (e) {}
+    if (p.isConnected) window.__piguClear(); };
   fold.onclick = () => setSmall(!small);
   head.appendChild(fold); head.appendChild(x); p.appendChild(head); p.appendChild(list);
   // drag by the top bar; where it is left is remembered on this PC
@@ -689,7 +733,8 @@ _PICKER = r"""
       p.style.top = Math.max(0, Math.min(window.innerHeight - 40, ev.clientY - dy)) + 'px'; };
     const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
       const z = p.getBoundingClientRect();
-      try { localStorage.setItem('piguPos', JSON.stringify({ x: Math.round(z.left), y: Math.round(z.top), w: Math.round(z.width) })); } catch (err) {} };
+      try { localStorage.setItem('piguPos', JSON.stringify({ x: Math.round(z.left), y: Math.round(z.top), w: Math.round(z.width) })); } catch (err) {}
+      window.__piguClear(); };
     document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
   });
   head.addEventListener('dblclick', e => {
