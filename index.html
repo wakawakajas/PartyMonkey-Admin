@@ -21216,6 +21216,11 @@ async function gtOpenTile(m){
   // + Add line went into the batch as another design for the line last opened.
   if(typeof mcGtHome!=='undefined'&&mcGtHome)
     await mcGtReturn().catch(err=>{ try{ mcWarn('The gift tag sheet could not be taken back: '+((err&&err.message)||err)); }catch(e){} });
+  // and nothing a batch put on the page stays on its own sheet: Magic Create's
+  // tags are on its lines, and showed up here (and on every batch after)
+  gtOrder=gtOrder.filter(l=>!gtMagicRow(l));
+  Object.keys(gtOrders).forEach(k=>{ if(Array.isArray(gtOrders[k])) gtOrders[k]=gtOrders[k].filter(l=>!gtMagicRow(l)); });
+  try{ gtWorkSaveSoon(); }catch(e){}
   showScreen('tool-gift-tag');
 }
 document.getElementById('goToGiftTagBtn')
@@ -41589,6 +41594,11 @@ const gtOneOffDesign=(rec,id)=>gtNormalizeDesign({id:id||rec.id,name:rec.name||'
   fields:rec.fields||[],hole:rec.hole,back:rec.back,...(rec.artV?{artV:rec.artV}:{}),art:rec.art,bleed:rec.bleed,
   trace:rec.trace,cutSeen:rec.cutSeen,cutSheet:rec.cutSheet,turn:rec.turn,nestEach:rec.nestEach,
   wordsCut:rec.wordsCut,pieceEdit:rec.pieceEdit});
+// A row a Magic Create batch put on a page (the SKU summary's Add tags each
+// with its SKU; a row keyed in on the page never has one). It is the batch's,
+// not the page's: never saved as the page's order, never read back into it,
+// and taken off when the page is opened on its own (gtOpenTile).
+const gtMagicRow=l=>!!(l&&l.sku&&!String(l.id||'').startsWith('mc-'));
 // ---- the order through a hard refresh ----
 // Every page's own order (a batch's lent lines are the batch's) and the
 // pictures of the one-offs on it, in this browser. A line taken off takes its
@@ -41602,8 +41612,11 @@ function gtWorkSaveSoon(){
 async function gtWorkSave(){
   const orders={}, used=new Set();
   Object.keys(gtOrders).forEach(m=>{
-    const list=m===gtMode?gtOrder:gtOrders[m];
-    const own=(Array.isArray(list)?list:[]).filter(l=>l&&l.designId&&!String(l.id||'').startsWith('mc-'));
+    // while a Magic Create batch has this page's sheet, the page's own rows are
+    // the ones it set aside (mcGtHome.own), not what is on the batch's sheet
+    const lentPage=typeof mcGtHome!=='undefined'&&mcGtHome&&Array.isArray(mcGtHome.own)&&mcGtHome.page===m;
+    const list=lentPage?mcGtHome.own:(m===gtMode?gtOrder:gtOrders[m]);
+    const own=(Array.isArray(list)?list:[]).filter(l=>l&&l.designId&&!gtMagicRow(l)&&!String(l.id||'').startsWith('mc-'));
     orders[m]=JSON.parse(JSON.stringify(own));
     own.forEach(l=>used.add(l.designId));
   });
@@ -41625,7 +41638,7 @@ async function gtWorkTake(){
     if(o&&o.rec&&o.blob&&!gtOneOffKeep.has(id)) gtOneOffKeep.set(id,{d:gtOneOffDesign(o.rec,id),blob:o.blob});
   });
   Object.keys(gtOrders).forEach(m=>{
-    const o=v.orders&&v.orders[m];
+    const o=v.orders&&v.orders[m]&&Array.isArray(v.orders[m])?v.orders[m].filter(l=>!gtMagicRow(l)):null;
     if(Array.isArray(o)&&o.length&&!(gtOrders[m]&&gtOrders[m].length)) gtOrders[m]=o;
   });
   if(!gtOrder.length&&gtOrders[gtMode]&&gtOrders[gtMode].length) gtOrder=gtOrders[gtMode];
@@ -43277,6 +43290,8 @@ const HELP=[
    h:'Opening a line from Magic Create puts the batch list in the left panel as a <b>Magic Create</b> tab, next to Library. The line being worked on glows. Fold it with <b>«</b>; <b>✨ Batch</b> brings it back. Back returns to the batch screen. Create on a line of another order starts a clean sheet with that line’s own paper - the last order’s cards never carry over.',sel:'.gtnl-mctab,.pcnl-mctab,.gtnl-mcrail,.pcnl-mcrail'},
   {on:'sheet',t:'Pick every placeholder (Ctrl+A)',k:'ctrl a select all pick all contours placeholders magic create pack nested sku summary',
    h:'Turn on <b>Contours</b>, click the sheet, then <b>Ctrl+A</b>: every placeholder on the sheet is picked. Works beside a Magic Create batch too, with the SKU summary open. Not while typing in a box.',sel:'#gtContourBtn'},
+  {on:'sheet',t:'Magic Create sheet is separate from Die Cut',k:'magic create batch own sheet separate independent die cut old lines left over previous batch main builder',
+   h:'A Magic Create batch’s Die Cut / Sticker sheet shows only that batch’s lines. The page’s own sheet (opened from its tile) is set aside while the batch is on it and comes back as it was; nothing from a batch is saved onto it. A tag put on a batch’s sheet that is not a line yet stays with that batch for the next time it is opened.'},
   {on:'sheet',t:'Tags moved by hand on a Magic Create sheet',k:'magic create save to line move placeholder drag position kept held nested pack',
    h:'On a packed (nested) Die Cut / Sticker sheet lent from Magic Create, drag a tag where you want it, then <b>Save to line</b>. Each line keeps where its tags were put: opening the sheet again and Download All print them there. Changing the paper, margins or gaps packs the sheet afresh.'},
   {on:'design',t:'Design editor from Magic Create',k:'magic create batch one-off one time design layout colour old new full width',
@@ -72661,6 +72676,20 @@ document.getElementById('mcBackChip').addEventListener('click',async()=>{
 // on the way out — so a sheet being built on the Gift Tag screen is not lost
 // to a batch borrowing it, and edits made there land on the batch's rows.
 let mcGtHome=null;
+// Rows on a batch's sheet that are not lines yet, held for that batch, page and
+// paper between trips - in this session only, and never on the page's own sheet.
+const mcGtLoose=new Map();
+const mcGtLooseKey=(page,fin)=>`${(typeof mcBatch!=='undefined'&&mcBatch&&mcBatch.id)||''}|${page}|${fin}`;
+function mcGtLooseTake(page,fin){
+  const k=mcGtLooseKey(page,fin), v=mcGtLoose.get(k)||[];
+  mcGtLoose.delete(k);
+  return v;
+}
+function mcGtLoosePut(page,fin,rows){
+  if(!rows||!rows.length) return;
+  const k=mcGtLooseKey(page,fin), had=mcGtLoose.get(k)||[];
+  mcGtLoose.set(k,had.concat(rows.filter(l=>!had.includes(l))));
+}
 let mcGtLoanSeq=0;     // numbers each loan, so undo never reaches across two
 // A row on the gift tag sheet that came from the batch rather than from
 // somebody typing it in there. The two share one order now, so every place
@@ -72783,11 +72812,18 @@ async function mcGtOpenFullRun(page,finish){
     // opening the full builder read as the sheet being emptied — an afternoon
     // of lines keyed in by hand gone, with nothing to say they were coming
     // back. Only the rows the batch lent are ever taken away again.
-    const own=gtOrder.filter(l=>!mcGtLent(l)&&!dupe(l));
-    // set aside rather than deleted: they are the page's, and go back on return
-    mcGtHome={ids:lines.map(l=>l.id),page:want,finish:fin,dropped:gtOrder.filter(dupe),loan:++mcGtLoanSeq};
-    if(!own.length) gtJobBack=null;    // a new order: no saved sheet's back on it
-    gtOrder=own.concat(lines.map(mcGtLine));
+    // Magic Create's sheet is its own (2026-11-17): only the batch's lines are on
+    // it. The page's own rows - the Die Cut builder's sheet - are set aside whole
+    // and put back untouched on the way out. Kept on, they sat under every batch
+    // and the rows a batch left behind turned up again on every batch after it.
+    // A row a batch's SKU summary put on the page is not the page's; its line is
+    // lent instead.
+    const own=gtOrder.filter(l=>!mcGtLent(l)&&!l.mcNewFor&&!gtMagicRow(l));
+    mcGtHome={ids:lines.map(l=>l.id),page:want,finish:fin,dropped:[],own,jobBack:gtJobBack,loan:++mcGtLoanSeq};
+    gtJobBack=null;                    // the batch's sheet: no saved sheet's back on it
+    // and what was left on this batch's sheet last time and did not become a line
+    gtOrder=lines.map(mcGtLine).concat(mcGtLooseTake(want,fin));
+    try{ gtNlHist.back=[]; gtNlHist.fwd=[]; }catch(e){}
     // and each tag where it was moved to by hand when the line was saved
     mcGtHandPut(lines);
   }
@@ -72933,8 +72969,20 @@ async function mcGtReturnRun(){
   // page's own and stays exactly as it was left, edits and all. A row added as
   // another design for a batch line is the batch's too.
   gtOrder=gtOrder.filter(l=>!mcGtLent(l)&&!l.mcNewFor);
+  // The page's own sheet, exactly as it was set aside. What is left on the
+  // batch's sheet that is not a line (a design dragged on, a row not given an
+  // order yet) stays with the batch for its next trip - never on the page's.
+  if(Array.isArray(home.own)){
+    const onHome=home.page===gtMode;
+    const left=(onHome?gtOrder:((gtOrders&&gtOrders[home.page])||[])).filter(l=>l&&l.designId);
+    mcGtLoosePut(home.page,home.finish,left);
+    if(onHome){ gtOrder=home.own; gtJobBack=home.own.length?(home.jobBack??null):null; }
+    else{ gtOrders[home.page]=home.own; gtJobBacks[home.page]=home.own.length?(home.jobBack??null):null; }
+    try{ gtNlHist.back=[]; gtNlHist.fwd=[]; }catch(e){}
+    try{ gtWorkSaveSoon(); }catch(e){}
+  }
   // and the page's own rows that were set aside for the loan come back
-  const back=(home.dropped||[]).filter(l=>!gtOrder.some(x=>x.id===l.id));
+  const back=Array.isArray(home.own)?[]:(home.dropped||[]).filter(l=>!gtOrder.some(x=>x.id===l.id));
   if(back.length){
     const target=(home.page===gtMode||typeof gtOrders==='undefined')?null:home.page;
     if(target) gtOrders[target]=(gtOrders[target]||[]).concat(back);
@@ -72950,6 +72998,8 @@ async function mcGtReturnRun(){
   // A row added on the sheet that did not become a line - its order not given,
   // or no design picked yet - is the page's own again rather than lost.
   const stay=edited.filter(l=>l&&!mcGtLent(l)&&!l.mcAdopting&&!gtOrder.includes(l)&&(l.designId||l.mcNewFor!==undefined));
+  // on a batch's own sheet they are the batch's: held for its next trip there
+  if(stay.length&&Array.isArray(home.own)){ mcGtLoosePut(home.page,home.finish,stay); stay.length=0; }
   if(stay.length){
     stay.forEach(l=>{ delete l.mcNewFor; });
     // each onto the page it was added on
