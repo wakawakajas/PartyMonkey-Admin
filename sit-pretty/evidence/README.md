@@ -55,7 +55,10 @@ Make it the same way as a packing video, with these differences:
 - **Also save the 3 dispute photos** (when `photos` is true or missing) Shopee's form asks for, unless
   staff already saved that kind with the photo buttons (any `<OrderID>_photo_<kind>_*.jpg` in the folder): full-size 4K stills from `video`
   (`ffmpeg -ss <t> -i video -frames:v 1 -q:v 2`, about 1 MB, never downscaled; each must stay under 30 MB):
-  `<OrderID>_photo_waybill_1.jpg` (the return parcel with its waybill readable, the sharpest frame),
+  `<OrderID>_photo_waybill_1.jpg` (the return parcel with its waybill readable, the sharpest frame, as a
+  **close-up**: render.py saves it from the spec's `waybill` zoom, so with a readable zoom don't make it
+  yourself; without one, crop the sharpest frame to the waybill with a little parcel round it, enlarge 2x,
+  turn it upright. Never the whole table from a metre away),
   `<OrderID>_photo_packaging_1.jpg` (the outer packaging as it arrived, before it is opened) and
   `<OrderID>_photo_item_1.jpg` (every returned item lying still and clearly visible, with the damage or
   missing part in view; add `_item_2`, `_item_3` when one frame cannot show all of them). Look at each
@@ -174,6 +177,10 @@ Fractions (0-1) of the cropped table view; times in seconds from the first frame
 
 `waybill.center` and `width` are fractions of the **full** camera frame (not the table view).
 `rotate` turns the frozen close-up so the order ID reads left to right (0, 90, 180, 270).
+render.py also saves the Shopee **parcel-with-waybill photo** from the same frame: a close crop round
+`center` (1.7x `width`, enlarged, turned by `rotate`) as the next free `<OrderID>_photo_waybill_<n>.jpg`,
+and writes its name into `waybill.photo` so rendering again replaces it. Set `"photo": false` to skip it.
+Look at the photo: the order ID on the label must be readable. Name it in the request's summary.
 `sharp_t`: pick the sharpest frame while the label is still (score a few with an edge filter).
 `label_at` may be `"auto"` for flat tags and callouts. Banners take an optional `"at": [x, y]`; without it
 they go where nothing moves. `"keep_clear": [[x, y, w, h], ...]` (fractions of the table view) are areas

@@ -370,6 +370,7 @@ def render(spec_path):
         fz = fz.resize((W, H), Image.LANCZOS)
         fz = ImageOps.autocontrast(fz, cutoff=1).filter(ImageFilter.UnsharpMask(radius=3, percent=160, threshold=2))
         clean_label = fz.copy()
+        photo = waybill_photo(s, spec_path, sharp, cx, cy, zw)
         dd = ImageDraw.Draw(fz)
         t = "WAYBILL" + ("  (turned upright to read)" if wb.get("rotate") else "")
         label(dd, t, ((W - tw(dd, t, BOLD)) // 2, 62), YEL)
@@ -455,8 +456,40 @@ def render(spec_path):
              "-maxrate", "3500k", "-bufsize", "7000k", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out])
         made.append({"file": out, "mb": round(os.path.getsize(out) / 1e6, 1), "seconds": round(plen, 1)})
     shutil.rmtree(work, ignore_errors=True)
-    print(json.dumps({"ok": True, "videos": made}))
+    print(json.dumps({"ok": True, "videos": made, "photo": photo if wb else None}))
     return made
+
+
+def waybill_photo(s, spec_path, sharp, cx, cy, zw):
+    """The Shopee 'parcel with its waybill' photo: a close crop of the sharpest frame around the waybill,
+    with some parcel round it, enlarged 2x and turned upright. Not the whole table from a metre away.
+    The file name is kept in the spec, so rendering again replaces it instead of adding another."""
+    wb = s["waybill"]
+    if wb.get("photo") is False:
+        return None
+    out_dir, order = s["output_dir"], s["order"]
+    name = wb.get("photo")
+    if not name:
+        n = 1
+        while os.path.exists(os.path.join(out_dir, f"{order}_photo_waybill_{n}.jpg")):
+            n += 1
+        name = f"{order}_photo_waybill_{n}.jpg"
+    BW, BH = sharp.size
+    pw = min(BW, zw * 1.7); ph = min(BH, pw * 0.72)
+    x0 = min(max(0, cx - pw / 2), BW - pw); y0 = min(max(0, cy - ph / 2), BH - ph)
+    im = sharp.crop((int(x0), int(y0), int(x0 + pw), int(y0 + ph)))
+    if wb.get("rotate"):
+        im = im.rotate(wb["rotate"], expand=True)
+    k = max(1, min(3, round(1600 / im.width)))
+    im = im.resize((im.width * k, im.height * k), Image.LANCZOS).filter(ImageFilter.UnsharpMask(radius=2, percent=90, threshold=2))
+    im.save(os.path.join(out_dir, name), quality=95)
+    if wb.get("photo") != name:
+        wb["photo"] = name
+        json.dump(s, open(spec_path, "w", encoding="utf8"), indent=1)
+    with open(os.path.join(out_dir, "evidence-log.txt"), "a", encoding="utf8") as f:
+        f.write(f"{__import__('datetime').datetime.now():%Y-%m-%d %H:%M:%S}  photo  {name}  waybill close-up from "
+                f"{os.path.basename(s['source'])} at {wb.get('sharp_t', wb['zoom_frame_t'])}s\n")
+    return name
 
 
 if __name__ == "__main__":
