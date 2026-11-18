@@ -139,6 +139,9 @@ moments to point at.
   colours cannot be told apart from the picture, ask staff (show a frame with the groups marked A, B, C).
 - Items carried in or held in the hand count too: tag them ("Roses in hand: 3 x Tri Vanilla") as they
   come onto the table, at normal speed, not only once they lie flat.
+- Tag only what is really on the table in that frame: check frames first and count. If part of the
+  order is still in the hand, say so ("ON THE TABLE: 6 STALKS", then "6 on table + 3 in hand = 9"),
+  never a flat-lay tag or "9 STALKS" banner over a table that holds 6.
 - Things counted one by one (rose stalks, bunches of 3) step the main counter as each goes in, e.g.
   "ROSE STALKS PACKED 3 / 9", 6 / 9, 9 / 9: never one jump from 0 to the total.
 - Flowers are counted by STALK, never by flower head: one stalk with 3 heads ("Tri") is 1. The
