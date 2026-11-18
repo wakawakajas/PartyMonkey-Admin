@@ -335,10 +335,13 @@ def _fit(draw, text: str, box_w: float, box_h: float, max_lines: int):
     return best_rows, best_font
 
 
-def _wrap_to_width(draw, text: str, font, max_w: float, max_lines: int) -> list[str]:
+def _wrap_to_width(draw, text: str, font, max_w: float) -> list[str]:
     """Break on words at a size already decided, filling each line as far as
-    it will go. A single word wider than the line stays on its own line and
-    overhangs -- the shrink below is what deals with that."""
+    it will go. Every word is kept: a long name gives more lines, never fewer
+    words (it used to stop at two lines and drop the rest, which is how
+    'Graduation Bear Bundle (A)' came out as 'Graduation Bear'). A single word
+    wider than the line stays on its own line and overhangs -- the caller
+    shrinks the type for that."""
     rows: list[str] = []
     cur = ""
     for word in text.split():
@@ -346,11 +349,9 @@ def _wrap_to_width(draw, text: str, font, max_w: float, max_lines: int) -> list[
         if cur and draw.textlength(trial, font=font) > max_w:
             rows.append(cur)
             cur = word
-            if len(rows) >= max_lines:
-                break
         else:
             cur = trial
-    if cur and len(rows) < max_lines:
+    if cur:
         rows.append(cur)
     return rows or [text]
 
@@ -362,17 +363,21 @@ def _fit_at(draw, text: str, box_w: float, box_h: float, size: int, max_lines: i
     a drawer of labels looking like one drawer. Only a name that still runs
     over the half it has is stepped down, and then only as far as it takes --
     a word printed across the cut line is worse than a word a point smaller.
+    Up to max_lines first; a name too long for that at any readable size may
+    take up to _MAX_LINES, and the last resort is the biggest type that holds
+    every word -- a name is never cut short.
     """
-    size = max(5, int(size))
-    while size >= 5:
-        font = _font(size)
-        rows = _wrap_to_width(draw, text, font, box_w, max_lines)
-        w, h = _measure(draw, rows, font)
-        if w <= box_w and h <= box_h:
-            return rows, font
-        size = int(size * 0.92) if int(size * 0.92) < size else size - 1
-    font = _font(5)
-    return _wrap_to_width(draw, text, font, box_w, max_lines), font
+    for lines in sorted({max_lines, max(max_lines, _MAX_LINES)}):
+        s = max(5, int(size))
+        floor = 7 if lines > max_lines else max(7, int(size * 0.7))
+        while s >= floor:
+            font = _font(s)
+            rows = _wrap_to_width(draw, text, font, box_w)
+            w, h = _measure(draw, rows, font)
+            if len(rows) <= lines and w <= box_w and h <= box_h:
+                return rows, font
+            s = int(s * 0.92) if int(s * 0.92) < s else s - 1
+    return _fit(draw, text, box_w, box_h, _MAX_LINES)
 
 
 def _draw_cell(draw, text: str, left: int, top: int, width: int, height: int,
