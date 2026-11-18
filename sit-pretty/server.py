@@ -9,7 +9,7 @@ and records Tapo cameras over RTSP with ffmpeg:
 Nothing is recorded in between. Standard library plus ffmpeg; pytapo for clips.
 """
 import json, os, re, shutil, socket, subprocess, sys, threading, time, urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import footage
 import live
@@ -1777,6 +1777,22 @@ def photo_label(name):
     return f"{PHOTO_KINDS.get(m.group(1), 'Photo')} {m.group(2)}" if m else name
 
 
+SGT = timezone(timedelta(hours=8))
+
+
+def due_from_todo(todo):
+    """Shopee's list often leaves the due time empty but says '... by 20-11-2026' in the hint:
+    that day, end of day in Singapore, so the countdown still shows. 0 when there is no 'by' date."""
+    m = re.search(r"\bby\s+(\d{1,2})-(\d{1,2})-(\d{4})", todo or "", re.I)
+    if not m:
+        return 0
+    d, mo, y = map(int, m.groups())
+    try:
+        return int(datetime(y, mo, d, 23, 59, 59, tzinfo=SGT).timestamp())
+    except ValueError:
+        return 0
+
+
 def returns_list():
     p = os.path.join(SAVE, "_sitpretty", "returns.json")
     try:
@@ -1784,6 +1800,8 @@ def returns_list():
     except Exception:
         return []
     for row in rows:
+        if not row.get("due"):
+            row["due"] = due_from_todo(row.get("todo"))
         row["found"] = finding(row.get("order", ""))
         try:
             row["appeal"] = appeal_text(row)
