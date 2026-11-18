@@ -97,6 +97,10 @@ moments to point at.
    to 2 minutes after the ship scan (`sdclip.py get <ip> <start epoch> <end epoch> <out.mp4>`).
    Pieces are 3 minutes long; download each and join them in order (ffmpeg concat). Keep going
    past the ship scan until the parcel leaves the table (the FRAGILE sticker often goes on last).
+0. **Staff note.** Read the request's `note` first (typed in Sit Pretty's "Note for Claude" box, also kept in
+   `<OrderID>\packing-note.txt`). It is the owner's instruction for this video, e.g. "count each rose stalk":
+   follow it over the defaults below (counter label and steps, extra callouts, which part at normal speed).
+   It also applies to simple count requests. Never let a note make you show a negative.
 4. **Items.** Take the order's lines from Seller Centre or BigSeller (name, variation, qty).
    Count what the order says, never guess from the picture. Number them 1, 2, 3 in that order.
    Items whose design cannot be read (folded foil balloons) are "Item 1", "Item 2"...
@@ -128,6 +132,8 @@ moments to point at.
 - Only show what helps us. **Never** show a negative ("not seen", "missing"): if something cannot
   be seen, leave it out of the video.
 - Every item gets a name tag and an arrow, when flat on the table and again when it goes in.
+- Things counted one by one (rose stalks, bunches of 3) step the main counter as each goes in, e.g.
+  "ROSE STALKS PACKED 3 / 9", 6 / 9, 9 / 9: never one jump from 0 to the total.
 - The ITEMS PACKED counter always shows (top-right). Counting (100 latex balloons by 1s or 2s,
   glue dot sheets) gets a sub-counter that steps with each count, at normal speed.
 - Taping: just the banner text ("TAPED TIGHTLY so ... cannot open"). No moving arrow.

@@ -418,6 +418,23 @@ def overview():
 
 # ---------------------------------------------------------------- evidence video requests (Claude Code makes them)
 JOB_CACHE = [0, []]
+PACK_NOTE = "packing-note.txt"   # staff's note for Claude about the packing video ("count each stalk")
+
+
+def pack_note(order, note=None):
+    """Read the order's packing note, or save it when note is given (blank deletes it)."""
+    p = os.path.join(order_dir(order), PACK_NOTE)
+    if note is None:
+        try:
+            return open(p, encoding="utf8").read().strip()[:300]
+        except OSError:
+            return ""
+    note = str(note).strip()[:300]
+    if note:
+        open(p, "w", encoding="utf8").write(note)
+    elif os.path.exists(p):
+        os.remove(p)
+    return note
 
 
 def request_video(b):
@@ -431,7 +448,7 @@ def request_video(b):
     p = os.path.join(order_dir(order), "evidence-request.json")
     job = {"order": order, "request": b.get("request", ""), "cams": cams,
            "camera_ips": {c: CFG["cameras"][c]["ip"] for c in cams}, "scan_time": scan,
-           "note": (b.get("note") or "")[:300], "areas": {c: areas()[c] for c in cams},
+           "note": (b.get("note") or pack_note(order))[:300], "areas": {c: areas()[c] for c in cams},
            "before_min": pack_minutes(b)[0], "after_min": pack_minutes(b)[1],
            "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "status": "queued"}
     json.dump(job, open(p, "w", encoding="utf8"), indent=1)
@@ -1237,7 +1254,7 @@ def order_info(order):
             reqs.append({k: j.get(k) for k in ("kind", "status", "progress", "problem", "summary", "requested_at", "scan_time", "cams", "clip",
                                                "live", "live_total")})
     row = next((r for r in returns_list() if r.get("order") == order), None)
-    return {"order": order, "scan": scans_all()["scans"].get(order, ""), "videos": vids, "photos": photos, "jobs": reqs, "return": {k: row.get(k) for k in ("request", "status", "reason", "due", "todo", "appeal")} if row else None,
+    return {"order": order, "scan": scans_all()["scans"].get(order, ""), "videos": vids, "photos": photos, "jobs": reqs, "pack_note": pack_note(order), "return": {k: row.get(k) for k in ("request", "status", "reason", "due", "todo", "appeal")} if row else None,
             "packing_cameras": [[c, CFG["cameras"][c]["label"]] for c in CFG["packing_cameras"]], "auto_videos": auto_state()}
 
 
@@ -1249,7 +1266,8 @@ def request_count(b):
         raise ValueError("Get the packing clip first")
     cam = next((c for c in CFG["cameras"] if f"_{c}_" in clip), CFG["packing_cameras"][0])
     job = {"kind": "count", "order": order, "clip": clip, "cam": cam, "area": areas().get(cam),
-           "scan_time": b.get("scan_time") or "", "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "status": "queued"}
+           "scan_time": b.get("scan_time") or "", "note": pack_note(order),
+           "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "status": "queued"}
     json.dump(job, open(os.path.join(order_dir(order), COUNT_REQ), "w", encoding="utf8"), indent=1)
     JOB_CACHE[0] = 0
     log(f"Simple count asked for {order} ({clip})")
@@ -2066,6 +2084,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, ask_refresh())
             if u.path == "/api/evidence":
                 return self.send(200, request_video(b))
+            if u.path == "/api/packnote":
+                return self.send(200, {"note": pack_note(safe_id(b.get("order")), b.get("note") or "")})
             if u.path == "/api/shopee":
                 return self.send(200, shopee_copy(b.get("order"), b.get("file", ""), b.get("mode", "from"), b.get("start", 0)))
             if u.path == "/api/area":
