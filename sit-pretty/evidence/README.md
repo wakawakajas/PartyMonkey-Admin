@@ -135,6 +135,10 @@ moments to point at.
 - Only show what helps us. **Never** show a negative ("not seen", "missing"): if something cannot
   be seen, leave it out of the video.
 - Every item gets a name tag and an arrow, when flat on the table and again when it goes in.
+- Name items by their variation with the quantity, e.g. "3 x Tri Vanilla", not just "Roses". If the
+  colours cannot be told apart from the picture, ask staff (show a frame with the groups marked A, B, C).
+- Items carried in or held in the hand count too: tag them ("Roses in hand: 3 x Tri Vanilla") as they
+  come onto the table, at normal speed, not only once they lie flat.
 - Things counted one by one (rose stalks, bunches of 3) step the main counter as each goes in, e.g.
   "ROSE STALKS PACKED 3 / 9", 6 / 9, 9 / 9: never one jump from 0 to the total.
 - The ITEMS PACKED counter always shows (top-right). Counting (100 latex balloons by 1s or 2s,
