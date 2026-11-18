@@ -1783,11 +1783,33 @@ def save_photo(b):
     r = subprocess.run(cmd, capture_output=True, timeout=40, creationflags=NOWIN)
     if r.returncode or not os.path.isfile(out):
         raise RuntimeError("Could not save the photo. " + clean(r.stderr.decode("utf8", "replace")[-150:]))
+    zoom = ""
+    at = b.get("at")
+    if kind == "waybill" and isinstance(at, list) and len(at) == 2:
+        zoom_waybill(out, float(at[0]), float(at[1]), 180 if b.get("rotate") == 180 else 0)
+        zoom = f" (close-up of the waybill at {float(at[0]):.2f},{float(at[1]):.2f})"
     with open(os.path.join(d, "evidence-log.txt"), "a", encoding="utf8") as f:
         f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  photo  {os.path.basename(out)}  "
-                + (f"from {os.path.basename(b['file'])} at {float(b.get('t') or 0):.1f}s" if b.get("file") else "live camera") + "\n")
+                + (f"from {os.path.basename(b['file'])} at {float(b.get('t') or 0):.1f}s" if b.get("file") else "live camera") + zoom + "\n")
     log(f"Photo saved: {os.path.basename(out)}")
     return {"file": os.path.basename(out), "label": photo_label(os.path.basename(out))}
+
+
+def zoom_waybill(path, fx, fy, rotate=0):
+    """Crop the saved frame to the parcel around the spot staff tapped on the waybill, enlarged and sharpened."""
+    from PIL import Image, ImageFilter
+    im = Image.open(path).convert("RGB")
+    W, H = im.size
+    cw = int(W * (0.26 if W >= 3000 else 0.34))
+    ch = int(cw * 0.75)
+    x0 = min(max(0, int(fx * W - cw / 2)), W - cw)
+    y0 = min(max(0, int(fy * H - ch / 2)), H - ch)
+    c = im.crop((x0, y0, x0 + cw, y0 + ch))
+    if rotate:
+        c = c.rotate(rotate)
+    if cw < 1600:
+        c = c.resize((1600, round(1600 * ch / cw)), Image.LANCZOS)
+    c.filter(ImageFilter.UnsharpMask(radius=2, percent=80, threshold=2)).save(path, quality=95)
 
 
 def photo_label(name):

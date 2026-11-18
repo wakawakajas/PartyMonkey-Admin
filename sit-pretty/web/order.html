@@ -17,6 +17,10 @@ header .sub{color:var(--sub);font-size:12.5px}
 .tab .n{opacity:.6;margin-left:4px}
 main{padding:12px 16px 24px;max-width:1100px}
 .player{background:#000;border-radius:12px;overflow:hidden;position:relative}
+.pickov{position:absolute;inset:0;cursor:crosshair;background:rgba(0,0,0,.18);z-index:5}
+.pickov .pk{position:absolute;top:10px;left:50%;transform:translateX(-50%);display:flex;gap:8px;align-items:center;background:#ffd400;color:#000;font-weight:700;padding:6px 10px;border-radius:8px;white-space:nowrap}
+.pickov .pk button{font:inherit;font-weight:600;border:1px solid #000;background:#fff;border-radius:6px;padding:2px 8px;cursor:pointer}
+.pickov .pk button.on{background:#000;color:#ffd400}
 .tl{position:relative;height:16px;background:#e3e3e8;border-radius:8px;margin:10px 0 4px;cursor:pointer}
 .tl .tlp{position:absolute;left:0;top:0;bottom:0;background:#9a9aa6;border-radius:8px;pointer-events:none}
 .tl .tlm{position:absolute;top:-5px;bottom:-5px;width:4px;margin-left:-2px;background:#e0302a;border-radius:2px;pointer-events:none}
@@ -101,7 +105,7 @@ function nasHTML(){
     <div class="ctrl"><span class="sub">Pause where it's clearest, then save a 4K photo:</span><button class="btn" data-nphoto="waybill">Waybill photo</button><button class="btn" data-nphoto="packaging">Box photo</button><button class="btn" data-nphoto="item">Item photo</button></div>
     <div class="ctrl"><button class="btn main" data-nsave="1">Save clip + make detailed video</button><span class="sub">Saves these minutes of ${esc((ok.find(c=>c[0]===nascam)||[0,''])[1])} in the order folder.</span></div><div class="msg" id="nphmsg"></div>`;
 }
-document.addEventListener('click',e=>{
+document.addEventListener('click',async e=>{
   const c=e.target.closest('[data-nascam]');if(c){nascam=c.dataset.nascam;try{localStorage.setItem('sp-nascam',nascam)}catch(_){}render();return}
   const nb=e.target.closest('[data-nasb]'),na=e.target.closest('[data-nasa]');
   if(nb||na){try{if(nb)localStorage.setItem('sp-nasb',nb.dataset.nasb);if(na)localStorage.setItem('sp-nasa',na.dataset.nasa)}catch(_){}nasLoad();return}
@@ -109,10 +113,26 @@ document.addEventListener('click',e=>{
   const tlc=e.target.closest('#tl');if(tlc){const v=$('#v');if(v&&v.duration){const r=tlc.getBoundingClientRect();v.currentTime=(e.clientX-r.left)/r.width*v.duration}return}
   const ns=e.target.closest('[data-nsave]');if(ns){const m=$('#nphmsg'),[b,a]=nasMins();ns.disabled=true;m.className='msg';m.textContent='Saving the packing clip…';
     api('/api/choose',{order:ORDER,cams:[nascam],scan:scanT(),before:b,after:a}).then(()=>{m.className='msg ok';m.textContent='Saved. Claude now makes the detailed packing video (about 10-20 minutes); it shows under Detailed packing.';setTimeout(load,5000);setTimeout(load,12000)}).catch(err=>{m.className='msg err';m.textContent=err.message;ns.disabled=false});return}
-  const np=e.target.closest('[data-nphoto]');if(np){const v=$('#v'),m=$('#nphmsg'),[b,a]=nasMins();if(!v)return;v.pause();m.className='msg';m.textContent='Saving the 4K photo…';
-    api('/api/photo',{order:ORDER,kind:np.dataset.nphoto,t:v.currentTime,nas:{cam:nascam,scan:scanT(),before:b,after:a}}).then(r=>{m.className='msg ok';m.textContent='Saved in the order folder: '+r.file}).catch(err=>{m.className='msg err';m.textContent=err.message});return}
+  const np=e.target.closest('[data-nphoto]');if(np){const v=$('#v'),m=$('#nphmsg'),[b,a]=nasMins();if(!v)return;v.pause();
+    let pick=null;if(np.dataset.nphoto==='waybill'){m.className='msg';m.textContent='Tap the waybill label on the video.';pick=await pickSpot(v);if(!pick){m.textContent='';return}}
+    m.className='msg';m.textContent='Saving the 4K photo…';
+    api('/api/photo',{order:ORDER,kind:np.dataset.nphoto,t:v.currentTime,nas:{cam:nascam,scan:scanT(),before:b,after:a},...(pick||{})}).then(r=>{m.className='msg ok';m.textContent='Saved in the order folder: '+r.file}).catch(err=>{m.className='msg err';m.textContent=err.message});return}
   if(e.target.closest('#packgo')){const v=($('#packat')||{}).value;if(v){packAt=v;nasLoad();render()}}
 });
+// Waybill photos: staff tap the label on the paused video; the server saves a close-up around that spot.
+function pickSpot(v){return new Promise(res=>{const p=v.closest('.player');if(!p)return res(null);p.querySelector('.pickov')?.remove();
+  const o=document.createElement('div');o.className='pickov';let rot=0;
+  o.innerHTML='<div class="pk">Tap the middle of the waybill label <button type="button" data-rot>Label upside down</button><button type="button" data-cancel>Cancel</button></div>';
+  p.appendChild(o);
+  o.addEventListener('click',ev=>{ev.stopPropagation();
+    if(ev.target.closest('[data-rot]')){rot=rot?0:180;ev.target.classList.toggle('on',!!rot);return}
+    if(ev.target.closest('[data-cancel]')){o.remove();return res(null)}
+    if(ev.target.closest('.pk'))return;
+    const r=v.getBoundingClientRect(),vw=v.videoWidth||16,vh=v.videoHeight||9,s=Math.min(r.width/vw,r.height/vh),w=vw*s,h=vh*s,
+      fx=(ev.clientX-r.left-(r.width-w)/2)/w,fy=(ev.clientY-r.top-(r.height-h)/2)/h;
+    if(fx<0||fx>1||fy<0||fy>1)return;
+    o.remove();res({at:[+fx.toFixed(4),+fy.toFixed(4)],rotate:rot})});
+})}
 const phsrc=(f,dl)=>`/photo?order=${encodeURIComponent(ORDER)}&file=${encodeURIComponent(f)}&pin=${encodeURIComponent(PIN)}${dl?'&dl=1':''}`;
 const mins=()=>{let b=5,a=1;try{b=+(localStorage.getItem('sp-before')||5);a=+(localStorage.getItem('sp-after1')||1)}catch(e){}return [b,a]};
 // minutes-before buttons (1 2 5 8 10 15): the chosen one is dark
@@ -216,8 +236,10 @@ document.addEventListener('click',async e=>{
   const lv=e.target.closest('[data-live]'); if(lv){livei=Math.max(0,livei+ +lv.dataset.live);$('#main').querySelector('.player')?.remove();render();return}
   const k=e.target.closest('[data-skip]'); if(k){const v=$('#v');if(v)v.currentTime=Math.max(0,v.currentTime+ +k.dataset.skip);return}
   const pb=e.target.closest('[data-photo]');
-  if(pb){ const v=$('#v'); if(!v||!cur) return; v.pause(); pb.disabled=true; const m=$('#phmsg'); m.className='msg'; m.textContent='Saving the 4K photo…';
-    try{ const r=await api('/api/photo',{order:ORDER,file:cur,t:v.currentTime,kind:pb.dataset.photo}); m.className='msg ok'; m.textContent='Saved: '+r.label; await load(); }
+  if(pb){ const v=$('#v'); if(!v||!cur) return; v.pause(); const m=$('#phmsg');
+    let pick=null; if(pb.dataset.photo==='waybill'){ m.className='msg'; m.textContent='Tap the waybill label on the video.'; pick=await pickSpot(v); if(!pick){ m.textContent=''; return; } }
+    pb.disabled=true; m.className='msg'; m.textContent='Saving the 4K photo…';
+    try{ const r=await api('/api/photo',{order:ORDER,file:cur,t:v.currentTime,kind:pb.dataset.photo,...(pick||{})}); m.className='msg ok'; m.textContent='Saved: '+r.label; await load(); }
     catch(err){ m.className='msg err'; m.textContent=err.message; } pb.disabled=false; return; }
   const id=e.target.id;
   if(id==='goclip'||id==='godet'||id==='gocount'){try{await savePackNote()}catch(_){}}

@@ -141,6 +141,12 @@ moments to point at.
   come onto the table, at normal speed, not only once they lie flat.
 - Things counted one by one (rose stalks, bunches of 3) step the main counter as each goes in, e.g.
   "ROSE STALKS PACKED 3 / 9", 6 / 9, 9 / 9: never one jump from 0 to the total.
+- Flowers are counted by STALK, never by flower head: one stalk with 3 heads ("Tri") is 1. The
+  Shopee quantity is the number of stalks. Every tag, banner, counter and card line says stalks:
+  "1: 3 stalks Tri Vanilla", "9 STALKS: ...", "STALKS PACKED 3 / 9", "9 / 9 stalks packed", never
+  "9 ROSES". If staff handle stalks one at a time (laying out, picking up), step a sub-counter
+  "STALKS COUNTED 1 / 9" ... with each one at normal speed; if stalks overlap and cannot be told
+  apart, count them by group ("3 stalks") rather than guess a number on each stem.
 - The ITEMS PACKED counter always shows (top-right). Counting (100 latex balloons by 1s or 2s,
   glue dot sheets) gets a sub-counter that steps with each count, at normal speed.
 - Taping: just the banner text ("TAPED TIGHTLY so ... cannot open"). No moving arrow.
