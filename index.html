@@ -38628,6 +38628,41 @@ const pdfLift=(function(){
     let contentLen = chunks.reduce((a, c) => a + c.length, 0);
     let content = new Uint8Array(contentLen);
     { let o = 0; chunks.forEach(c => { content.set(c, o); o += c.length; }); }
+    // A red cut line that Illustrator put in a form of its own (a transparency
+    // group - `/Fm13 Do`) is not in the page's drawing, so pdfCutScan never saw
+    // it: on 2026-11-19 Custom Topper-Space-04's 5th planet got no sticker of its
+    // own. Such a form - small, a red stroke and nothing else - is written into
+    // the page where it is called, so it is read like any other red line. Done
+    // before the blanking below, on every pass alike, so the byte places agree.
+    if (opts && opts.cut) {
+      try {
+        const xo = src.resolve(get('Resources') && src.resolve(get('Resources')).get('XObject'));
+        if (xo && xo.has) {
+          const dec = new TextDecoder('latin1');
+          let txt = null;
+          const cutRed = body => {
+            // a stroke in plain red: CMYK 0/1/1/0 (loosely) or RGB red
+            const ms = [...body.matchAll(/(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+K\b/g)];
+            const rg = [...body.matchAll(/(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+RG\b/g)];
+            return ms.some(m => +m[1] <= 0.15 && +m[4] <= 0.15 && +m[2] >= 0.85 && +m[3] >= 0.75)
+              || rg.some(m => +m[1] >= 0.8 && +m[2] <= 0.3 && +m[3] <= 0.3);
+          };
+          for (const [name, val] of xo) {
+            const f = src.resolve(val);
+            if (!isStream(f) || f.dict.get('Subtype')?.name !== 'Form') continue;
+            const body = dec.decode(await src.streamData(f, inflateBytes));
+            if (body.length > 20000 || /\b(Do|Tf|sh|BI|ID)\b/.test(body) || !/\b[Ss]\b/.test(body) || !cutRed(body)) continue;
+            if (txt === null) txt = dec.decode(content);
+            const mx = (src.resolve(f.dict.get('Matrix')) || [1, 0, 0, 1, 0, 0]).map(x => +src.resolve(x));
+            const call = new RegExp('/' + name.replace(/[^\w]/g, '\\$&') + '\\s+Do\\b', 'g');
+            // its transparency settings (/GSn gs) are the form's own names: left out
+            const inner = body.replace(/\/\S+\s+gs\b/g, '');
+            txt = txt.replace(call, () => '\nq ' + (mx.length === 6 && mx.every(isFinite) ? mx.join(' ') + ' cm ' : '') + inner + '\nQ');
+          }
+          if (txt !== null) { const u = new Uint8Array(txt.length); for (let k = 0; k < txt.length; k++) u[k] = txt.charCodeAt(k) & 255; content = u; }
+        }
+      } catch (e) { /* the page as it was */ }
+    }
     // the other stickers' red lines on a sheet lifted a sticker at a time
     // (pdfSheetPieces): blanked byte for byte, so every place pdfCutScan said
     // they were is still where they are
