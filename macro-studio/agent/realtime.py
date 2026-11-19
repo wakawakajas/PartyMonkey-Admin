@@ -89,6 +89,7 @@ class Listener:
             }))
             started = time.time()
             beat_at = started
+            heard_at = started
             joined = False
             while not self._stop.is_set():
                 if time.time() - started > RECONNECT_SECONDS:
@@ -104,7 +105,12 @@ class Listener:
                     ws.send(json.dumps({"topic": "phoenix", "event": "heartbeat",
                                         "payload": {}, "ref": str(ref)}))
                 if raw is None:
+                    # Supabase answers every heartbeat; silence this long means
+                    # the socket is dead even though recv() has not failed
+                    if time.time() - heard_at > HEARTBEAT_SECONDS * 3:
+                        raise RuntimeError("realtime socket went silent")
                     continue
+                heard_at = time.time()
                 try:
                     msg = json.loads(raw)
                 except (TypeError, ValueError):

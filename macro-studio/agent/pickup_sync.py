@@ -365,7 +365,9 @@ class Watcher:
             elif retry:
                 timeout = retry
             elif self._listener.connected:
-                timeout = None                  # nothing to do until pushed
+                # pushed, but a socket can die without saying so (seen
+                # 2026-11-19: no pass for an hour) -- look once a minute anyway
+                timeout = 60
             else:
                 timeout = max(2, int(cfg.get("poll_seconds") or 4)) * 4
             self._wake.wait(timeout)
