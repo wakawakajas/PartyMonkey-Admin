@@ -904,10 +904,13 @@ def watch_requests():
                 continue
             # a request marked "working" means a Claude Code run (the hourly
             # task, or another PC's) is busy and goes on to the queued ones
-            # after it: starting another would make the same video twice
-            if any((j.get("status") == "working") for j in jobs()):
-                continue
+            # after it: starting another would make the same video twice.
+            # A run updates "progress" as it goes, so a request untouched for
+            # an hour is one a run left as "working" by mistake (19 Nov: a
+            # finished packing video stayed "Rendering" and blocked new ones)
             now = time.time()
+            if any(j.get("status") == "working" and now - j["mtime"] < 3600 for j in jobs()):
+                continue
             if any(now - m > 120 and m > WATCH["kicked_at"] for f, _ in AUTO_KINDS for m in _queued_times(f)):
                 WATCH["kicked_at"] = now
                 log("A request made on another PC has waited 2 minutes, so this PC is starting Claude Code for it")
