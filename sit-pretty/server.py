@@ -885,7 +885,58 @@ def _queued_times(fname):
     return out
 
 
-WATCH = {"kicked_at": 0.0}
+WATCH = {"kicked_at": 0.0, "unstuck_at": 0.0}
+
+# The video requests a Claude Code run marks "working" while it makes them, and
+# the part of a file name that says the video was made (evidence/README.md)
+STUCK_AFTER = 3600
+VIDEO_REQS = {"evidence-request.json": ("_packing_", "_video"),
+              "unboxing-video-request.json": ("_unboxing_labelled",)}
+
+
+def unstick_working():
+    """A video request left "working" for over an hour is one a run let go of.
+
+    A run keeps "progress" up to date, so an hour with no change means it
+    stopped (closed, crashed, signed out) or finished without saying so
+    (19 Nov: a packing video made at 09:41 sat on "Rendering"). A video made
+    since it was asked for: marked done with it. None: queued again, so the
+    next run makes it -- up to 3 times, then it is a problem for staff."""
+    if not os.path.isdir(SAVE):
+        return
+    now = time.time()
+    for name in os.listdir(SAVE):
+        d = os.path.join(SAVE, name)
+        for fname, marks in VIDEO_REQS.items():
+            p = os.path.join(d, fname)
+            try:
+                if not os.path.isfile(p) or now - os.path.getmtime(p) < STUCK_AFTER:
+                    continue
+                j = _read_json(p) or {}
+                if j.get("status") != "working":
+                    continue
+                try:
+                    since = datetime.strptime(j.get("requested_at", ""), "%Y-%m-%d %H:%M:%S").timestamp()
+                except ValueError:
+                    since = 0
+                vids = sorted(n for n in os.listdir(d) if n.endswith(".mp4") and all(m in n for m in marks)
+                              and os.path.getmtime(os.path.join(d, n)) >= since)
+                j.pop("progress", None)
+                if vids:
+                    j.update(status="done", videos=vids, done_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                             summary=j.get("summary") or "Video made (the run that made it did not mark it done).")
+                    log(f"{j.get('order') or name}: the video was made but its request still said working - marked done")
+                elif int(j.get("requeued") or 0) >= 3:
+                    j.update(status="problem", problem="Claude Code started this video 3 times and stopped without "
+                             "making it. Ask Claude what went wrong.")
+                    log(f"{j.get('order') or name}: stuck 3 times - marked as a problem")
+                else:
+                    j.update(status="queued", requeued=int(j.get("requeued") or 0) + 1)
+                    log(f"{j.get('order') or name}: stuck on working for an hour with no video - queued again")
+                json.dump(j, open(p, "w", encoding="utf8"), indent=1)
+                JOB_CACHE[0] = 0
+            except Exception as e:
+                log(f"Checking {name}/{fname} for a stuck request: {clean(e)}")
 
 
 def watch_requests():
@@ -913,6 +964,9 @@ def watch_requests():
                 continue
             if AUTO["proc"] and AUTO["proc"].poll() is None:
                 continue
+            if first or time.time() - WATCH["unstuck_at"] > 300:   # every 5 minutes
+                WATCH["unstuck_at"] = time.time()
+                unstick_working()
             # a request marked "working" means a Claude Code run (the hourly
             # task, or another PC's) is busy and goes on to the queued ones
             # after it: starting another would make the same video twice.
