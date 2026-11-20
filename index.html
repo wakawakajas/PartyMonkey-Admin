@@ -40950,21 +40950,26 @@ async function gtDirIsPiguRoot(dir){
   gtRootCheck.set(dir,root);
   return root;
 }
+// a path may sit any number of folders deep: a design filed into a folder of
+// its own inside designs/ (20 Nov)
+async function gtDirAt(dir,path,create){
+  const parts=String(path).split('/'), name=parts.pop();
+  let at=dir; for(const s of parts) if(s) at=await at.getDirectoryHandle(s,create?{create:true}:undefined);
+  return [at,name];
+}
 async function gtDirWrite(dir,path,blob){
-  const [folder,name]=path.includes('/')?path.split('/'):[null,path];
   // read before anything is made: a blob whose file has gone from the disk used
   // to fail the write after the folder and the empty file had been created,
   // leaving a 0-byte copy of the design in the folder
   const bytes=blob.size!=null?await blob.arrayBuffer():blob;
-  const target=folder?await dir.getDirectoryHandle(folder,{create:true}):dir;
+  const [target,name]=await gtDirAt(dir,path,true);
   const fh=await target.getFileHandle(name,{create:true});
   const w=await fh.createWritable();
   try{ await w.write(bytes); await w.close(); }
   catch(e){ try{ await w.abort(); }catch(_){} throw e; }
 }
 async function gtDirRead(dir,path){
-  const [folder,name]=path.includes('/')?path.split('/'):[null,path];
-  const target=folder?await dir.getDirectoryHandle(folder):dir;
+  const [target,name]=await gtDirAt(dir,path,false);
   return (await (await target.getFileHandle(name)).getFile());
 }
 // Design files already seen on a folder this session. Every save looked each
@@ -42027,6 +42032,8 @@ function gtNormalizeDesign(d){
   else if(d.file&&gtCutSheetFiles.has(d.file)
     &&!(gtLib.designs||[]).some(x=>x.id!==d.id&&x.file===d.file&&x.cutSheet)) gtCutSheetFiles.delete(d.file);
   return {id:d.id||gtId('d'),name:d.name||'Untitled',file:d.file||'',adhoc:!!d.adhoc,
+    // its file's size and date, which a rename or a move leaves alone (gtRelinkMoved)
+    ...(d.fp?{fp:String(d.fp)}:{}),
     // which page a Die Cut design was read from (gtComboLive)
     ...(GT_COMBO_KINDS.includes(d.kind)?{kind:d.kind}:{}),
     // read live out of that page's folder and not changed here (gtComboLive)
@@ -42466,34 +42473,79 @@ async function gtScanRun(){
   // what is in the folder right now, and whether both places a design can sit
   // were read through to the end — a drive that dropped out half way is not a
   // folder with nothing in it
-  const present=new Set(); const listed={designs:false,root:false};
+  const present=new Set(); const listed={designs:false,root:false}; const fresh=[];
   for(const [folder,wanted,take] of jobs){
     let dh=gtDir;
     if(folder){ try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; } }
     const found=[];
-    try{ for await (const entry of dh.values())
-      if(entry.kind==='file'&&wanted.test(entry.name)) found.push(entry); }catch(e){ continue; }
+    // designs/ is read with the folders inside it, so designs can be filed away
+    try{ await gtWalkDir(dh,folder,wanted,folder==='designs'&&wanted===GT_ART,found); }catch(e){ continue; }
     if(wanted===GT_ART) listed[folder?'designs':'root']=true;
     else if(folder) listed.fonts=true;
-    found.forEach(en=>present.add((folder?folder+'/':'')+en.name));
+    found.forEach(en=>present.add(en.path));
     // in the order the folder reads them, so a numbered set lands in its order
-    found.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
-    for(const entry of found){
-      const path=(folder?folder+'/':'')+entry.name;
-      if(known.has(path)) continue;
-      try{ gtAssets.set(path,await entry.getFile()); }catch(e){ continue; }
+    found.sort((a,b)=>a.path.localeCompare(b.path,undefined,{numeric:true}));
+    for(const {entry,path} of found){
+      if(known.has(path)){
+        // a design from before fingerprints gets one while its file is in hand
+        if(wanted===GT_ART){ const d=gtLib.designs.find(x=>x.file===path&&!x.fp);
+          if(d){ try{ d.fp=gtFpOf(await entry.getFile()); if(d.fp) added=Math.max(added,1); }catch(e){} } }
+        continue;
+      }
+      let file; try{ file=await entry.getFile(); gtAssets.set(path,file); }catch(e){ continue; }
       take(entry.name.replace(/\.[^.]+$/,''),path);
+      if(wanted===GT_ART){ const d=gtLib.designs[gtLib.designs.length-1]; d.fp=gtFpOf(file); fresh.push(d); }
       known.add(path); added++;
     }
   }
   added+=await gtScanShape(known);
   await Promise.all([gtShapeList(),gtLibList()]);
   if(gtDedupeLib()) added=Math.max(added,1);
+  if(listed.designs&&listed.root&&present.size&&gtRelinkMoved(present,fresh)) added=Math.max(added,1);
   if(listed.designs&&listed.root&&present.size) added+=gtDropMissing(present);
   if(listed.fonts&&listed.root&&present.size) added+=gtRepointFonts(present);
   if(gtMode==='combo') gtComboFonts();     // fonts just found, for the live designs' words
   if(added){ await gtHydrate(); await gtSaveLib(); }
   return added;
+}
+// A design file's fingerprint: its size and when it was last changed, both of
+// which a rename, or a move to another folder, leaves as they were.
+const gtFpOf=f=>f&&f.size?f.size+':'+(f.lastModified||0):'';
+async function gtWalkDir(dh,base,wanted,deep,out,depth=0){
+  for await (const en of dh.values()){
+    const path=(base?base+'/':'')+en.name;
+    if(en.kind==='file'&&wanted.test(en.name)) out.push({entry:en,path});
+    else if(deep&&en.kind==='directory'&&depth<6&&!/^[.~]/.test(en.name))
+      await gtWalkDir(en,path,wanted,deep,out,depth+1);
+  }
+}
+// Renamed or moved (20 Nov). A design file renamed, or moved into a folder
+// inside designs/, looks like one gone and a new one come. Where the new one
+// has the very fingerprint of the one gone, it is the same file: the design
+// keeps everything (its words, cut line, bleed, stickers, and every order
+// line and Magic Create row using it) and only points at the new place. Its
+// name follows the file's, unless it had been given one of its own.
+function gtRelinkMoved(present,fresh){
+  // one not fingerprinted yet is known by its file if that was read this session
+  gtLib.designs.forEach(d=>{ if(!d.fp&&d.file&&!present.has(d.file)){ const f=gtFpOf(gtAssets.get(d.file)); if(f) d.fp=f; } });
+  const goneOf=d=>!d.adhoc&&d.file&&d.fp&&!present.has(d.file)&&(/^designs\//.test(d.file)||!d.file.includes('/'));
+  const old=gtLib.designs.filter(goneOf);
+  let n=0;
+  old.forEach(o=>{
+    const hits=fresh.filter(x=>x.fp===o.fp&&gtLib.designs.includes(x));
+    // the same fingerprint twice over is two files that cannot be told apart
+    if(hits.length!==1||old.filter(y=>y.fp===o.fp).length!==1) return;
+    const nd=hits[0], was=o.file, stem=s=>String(s||'').split('/').pop().replace(/\.[^.]+$/,'');
+    if(o.name===stem(was)) o.name=nd.name;
+    if(o.pieceEdit&&o.pieceEdit.file===was) o.pieceEdit.file=nd.file;
+    if(gtCutSheetFiles.has(was)){ gtCutSheetFiles.delete(was); gtCutSheetFiles.add(nd.file); }
+    o.file=nd.file;
+    gtAssets.delete(was);
+    gtLib.designs=gtLib.designs.filter(x=>x!==nd);
+    if(gtOwnDesigns) gtOwnDesigns=gtOwnDesigns.filter(x=>x!==nd);
+    n++;
+  });
+  return n;
 }
 // A design whose file has been deleted from the folder is dropped from the
 // library, and with it any order line that was using it. It is not remembered as
@@ -42614,9 +42666,9 @@ async function gtLibList(){
                                      ['designs',GT_ART,''],['fonts',GT_FACE,'']]){
     let dh=gtDir;
     if(folder){ try{ dh=await gtDir.getDirectoryHandle(folder); }catch(e){ continue; } }
-    try{ for await (const entry of dh.values())
-      if(entry.kind==='file'&&wanted.test(entry.name))
-        out[kind].push({name:entry.name,path:(folder?folder+'/':'')+entry.name}); }catch(e){}
+    const got=[];
+    try{ await gtWalkDir(dh,folder,wanted,folder==='designs',got); }catch(e){}
+    got.forEach(({entry,path})=>out[kind].push({name:entry.name,path}));
   }
   Object.values(out).forEach(list=>
     list.sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true})));
@@ -43494,6 +43546,7 @@ const HELP=[
    h:'Right panel → <b>Placeholders</b> → <b>Margin shift</b>: moves every placeholder, cut line, mark and design together - a Magic Create line never moves its design on its own.',tab:'#gtNl [data-nltab="slots"]',find:'Margin shift'},
   {on:'sheet',t:'Turn single placeholders off',k:'placeholder on off skip every one',
    h:'Right panel → <b>Placeholders</b> → <b>Every placeholder, one by one</b>: untick one to leave it empty. <b>Reset placeholders</b> brings them all back.',tab:'#gtNl [data-nltab="slots"]',find:'Every placeholder'},
+  {on:'design',t:'Rename or move a design file',k:'rename move file folder pdf sub-folder organise sort',h:'A design file can be renamed, or moved into a folder of its own inside <b>designs</b>, in Explorer: Pigu knows it by its size and date, so its words, cut line, stickers and order lines stay with it. Its name follows the new file name unless you gave it your own. Open Die Cut once before renaming files from before 20 Nov, so it can note them first.'},
   {on:'design',t:'Design name',k:'name rename design',
    h:'Left → <b>Design</b> → <b>DESIGN NAME</b>.',find:'DESIGN NAME'},
   {on:'design',t:'Punch hole on the tag',k:'punch hole mark diameter',
