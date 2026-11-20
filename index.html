@@ -37839,9 +37839,11 @@ async function testSheetPdf(mode,count,step,pair){
   // pair: 2 columns of the front's last sheet and 2 of the back's, side by
   // side - each version as its own side prints it
   const groups=pair?await testPairGroups(pair):null;
-  const {art,kind,src,inv}=groups?groups[0]:await testSheetArtKind(); if(!art) throw new Error('No artwork on this side');
-  if(groups&&groups.some(G=>G.kind!==kind))
-    throw new Error('the front and the back are not the same kind of file (one a PDF, one a picture) - make their sheets one at a time');
+  const {art,kind:kind0,src,inv}=groups?groups[0]:await testSheetArtKind(); if(!art) throw new Error('No artwork on this side');
+  // a PDF on one side and a picture on the other (20 Nov): the sheet is made
+  // the PDF way, and each picture version goes on as a page of its own, made
+  // CMYK as a picture with that version's values (testSheetCellPdf)
+  const kind=groups&&groups.some(G=>G.kind==='vec')?'vec':kind0;
   let list, fixedCols;
   if(groups){
     list=[]; fixedCols=groups.length;
@@ -37889,7 +37891,7 @@ async function testSheetPdf(mode,count,step,pair){
     const G=groups?groups[v.g]:null;
     const c=i%best.c, r=(i/best.c)|0;
     const X=px(x0+c*(cwMm+GAP)), Y=px(TOP+r*(chMm+LAB+GAP)), w=px(cwMm), h=px(chMm);
-    if(kind!=='vec') g.drawImage(G?G.art:art,X,Y,w,h);
+    if((G?G.kind:kind)!=='vec') g.drawImage(G?G.art:art,X,Y,w,h);
     cells.push({v,G,X,Y,w,h,mm:{x:x0+c*(cwMm+GAP),y:TOP+r*(chMm+LAB+GAP),w:cwMm,h:chMm}});
     g.font=`700 ${px(2.8)}px "IBM Plex Sans",system-ui,sans-serif`;
     const mark=G?(v.b===G.b0&&v.w===G.w0?'  (now)':''):(v.b===b0&&v.w===w0?'  (now)':'');
@@ -37904,12 +37906,23 @@ async function testSheetPdf(mode,count,step,pair){
   // and placed as the export places it. The number picked then prints in
   // the real export exactly as it did here.
   if(kind==='vec'){
-    if(!src||(groups&&groups.some(G=>!G.src))) throw new Error('the PDF could not be read');
+    if(groups?groups.some(G=>G.kind==='vec'&&!G.src):!src) throw new Error('the PDF could not be read');
     const forms=new Map(), keyOf=(v,G)=>(G?G.side[0]:'')+'v'+v.n;
     // each copy no finer than 300 dpi at the size it prints here: full-size
     // copies made a 50-version sheet near 80 MB. The colours are the same.
     const maxPx=Math.ceil(Math.max(cwMm,chMm)/25.4*300);
-    for(const {v,G} of cells){
+    for(const {v,G,X,Y,w,h,mm} of cells){
+      // a picture's version (the other side a PDF): its cell as drawn, made
+      // CMYK as a picture with this version's values, as a page of its own
+      if(G&&G.kind!=='vec'){
+        const x0c=Math.max(0,X), y0c=Math.max(0,Y), ww=Math.min(W,X+w)-x0c, hh=Math.min(H,Y+h)-y0c;
+        if(ww<=0||hh<=0) continue;
+        const cid=new ImageData(ww,hh);
+        for(let y=0;y<hh;y++) cid.data.set(id.data.subarray(((y0c+y)*W+x0c)*4,((y0c+y)*W+x0c+ww)*4),y*ww*4);
+        const b=await testSheetImgPdf(cid,ww,hh,{w:mm.w*ww/w,h:mm.h*hh/h},[{v,G,X:0,Y:0,w:ww,h:hh}]);
+        forms.set(keyOf(v,G),{bytes:b,page:0});
+        continue;
+      }
       // a pair sheet's cell is made as its own side prints (its Hue/Saturation)
       const sw=_printSideNow; if(G) _printSideNow=G.side;
       _printOv={warm:v.w,bright:v.b}; _pdfTestScale={maxPx,dpi:300};
@@ -37930,6 +37943,15 @@ async function testSheetPdf(mode,count,step,pair){
     testSheetKeep(now,side0,list,fixedCols,mode,art0);
     return {bytes:out,count:list.filter(Boolean).length,side:side0};
   }
+  const out=await testSheetImgPdf(id,W,H,p,cells);
+  // and the side it was made for, which is the side its Use sets
+  testSheetKeep(now,side0,list,fixedCols,mode,art0);
+  return {bytes:out,count:list.filter(Boolean).length,side:side0};
+}
+// pixels (id, W x H, p in mm) as a one-page PDF, made CMYK as the export makes
+// a sheet, each version's cell (cells) then with its own values: the whole
+// sheet of a picture design, or one picture version on a front + back sheet
+async function testSheetImgPdf(id,W,H,p,cells){
   // the sheet as the export makes it, then each version with its own values
   const sl=await sheetScanlines(id);
   if(sl.cmyk){
@@ -37972,9 +37994,7 @@ async function testSheetPdf(mode,count,step,pair){
   push(enc.encode(x+`trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`));
   const out=new Uint8Array(pos); let o=0;
   parts.forEach(u=>{ out.set(u,o); o+=u.length; });
-  // and the side it was made for, which is the side its Use sets
-  testSheetKeep(now,side0,list,fixedCols,mode,art0);
-  return {bytes:out,count:list.filter(Boolean).length,side:side0};
+  return out;
 }
 function testSheetKept(){ try{ return JSON.parse(localStorage.getItem(TEST_SHEET_KEY)||'null'); }catch(e){ return null; } }
 // each side's last sheet of its own, kept beside the last sheet made: a front
@@ -43441,7 +43461,7 @@ const HELP=[
   {on:'sheet custom',t:'Colours on a Magic Create line',k:'magic create line colours test sheet use warmth brightness hue saturation save to line draft',h:'With a Magic Create line open, Printer warmth, Brightness, Hue/Saturation and a test sheet\'s <b>Use</b> change <b>that line only</b>, and only the side on show (<b>Front</b> or <b>Back</b>): each side keeps its own (Print preview\'s title says <b>this line only</b>). <b>Save to line</b> keeps them on the line and its file prints with them; close the line without saving and they are thrown away. Lines with none saved print at 0. Outside a line (Custom Template, gift tag sheet, Die Cut) the colours belong to the pictures on screen only: a new picture, template or page starts at 0, and nothing is kept on the computer.'},
   {on:'sheet custom',t:'Brightness and Hue/Saturation work as Photoshop',k:'brightness hue saturation lightness photoshop same match range reds yellows',h:'<b>Print preview</b> -> <b>Brightness</b> (-150 to 150) and <b>Hue/Saturation</b> (Master, Reds, Yellows, Greens, Cyans, Blues, Magentas) give the same colours as the same numbers in Photoshop (Brightness/Contrast with Use Legacy off; Hue/Saturation). They were checked against Photoshop 2023 on thousands of colours. So a value you found in Photoshop can be typed straight in. Printer warmth is Pigu\'s own and has no Photoshop slider.'},
   {on:'sheet custom',t:'Test sheet: front and back each their own',k:'test sheet best number use printer warmth brightness front back side',h:'<b>Print preview</b> -> <b>Test sheet</b>: pick <b>Front</b> or <b>Back</b> first, make the sheet, then type the best number and press <b>Use</b>. It sets Brightness and Printer warmth for <b>that side only</b>; the other side keeps its own. The warmth and Brightness sliders also change only the side on show. Hue/Saturation is the side on show only too: each side keeps its own. A PDF design is made exactly as the export makes it (its own CMYK, greys as black ink, its changed colours and Invert colours too), so the number picked prints the same in the real file. On the gift tag page the sheet is the gift tag paper, and a PDF tag goes on without its cut line.'},
-  {on:'sheet custom',t:'Test sheet: 2 columns of front and back on one sheet',k:'test sheet front back columns pick two print together pair',h:'<b>Print preview</b> -> <b>Test sheet</b>: make a cooler/warmer grid sheet for the <b>Front</b> and one for the <b>Back</b> first. Each side keeps its last grid sheet (and the design it was made of), even after a lighter or darker sheet. Then under <b>Front</b> and <b>Back</b> pick 2 columns each and press <b>Make front + back sheet</b>: one sheet with those 4 columns side by side, each version made as its own side prints. Numbers read <b>F#</b> (front) and <b>B#</b> (back): show the front, type its F number, <b>Use</b>; then the back with its B number.',find:'Make front + back sheet'},
+  {on:'sheet custom',t:'Test sheet: 2 columns of front and back on one sheet',k:'test sheet front back columns pick two print together pair',h:'<b>Print preview</b> -> <b>Test sheet</b>: make a cooler/warmer grid sheet for the <b>Front</b> and one for the <b>Back</b> first. Each side keeps its last grid sheet (and the design it was made of), even after a lighter or darker sheet. Then under <b>Front</b> and <b>Back</b> pick 2 columns each and press <b>Make front + back sheet</b>: one sheet with those 4 columns side by side, each version made as its own side prints. A PDF on one side and a picture on the other works too. Numbers read <b>F#</b> (front) and <b>B#</b> (back): show the front, type its F number, <b>Use</b>; then the back with its B number.',find:'Make front + back sheet'},
   {on:'sheet',t:'Save PDF / cut line and print',k:'print pdf plt cut file export download',
    h:'Top bar → <b>Save PDF / Cut line &amp; Print</b>. A check lists anything to fix first; <b>⚠ to check</b> walks through them. A front or back picture that cannot be read stops it, by name, rather than printing a blank tag; a sheet whose cut file cannot be made is named in the result.',sel:'#gtPrintBtn'},
   {on:'sheet',t:'Saved sheets',k:'save keep later open job',h:'Left panel → <b>Saved sheets</b>: keep this sheet for later, or open one.',find:'Saved sheets'},
