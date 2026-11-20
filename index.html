@@ -43402,7 +43402,7 @@ const HELP=[
   {on:'design',t:'Font, size, line spacing',k:'font size line spacing character',h:'Text column → <b>Character</b>.',sel:'#gtTextFont'},
   {on:'design',t:'Fill, outline and thickness',k:'colour color fill outline thick stroke appearance',h:'Text column → <b>Appearance</b>. Click a colour box for the wheel, or Alt + click the tag.',sel:'#gtTextColor'},
   {on:'design',t:'Rotate or curve a text',k:'rotate curve arc bend transform',h:'Text column → <b>Transform</b>: Rotate ° and Curve °.',sel:'#gtTextRot'},
-  {on:'design',t:'Size and position of a text box',k:'width height x y position move size',h:'Text column → <b>Size &amp; position</b>: W, H, X, Y in mm. Or drag the box on the tag.',sel:'#gtTextW'},
+  {on:'design',t:'Size and position of a text box',k:'width height x y position move size drag shift straight alt copy duplicate',h:'Text column → <b>Size &amp; position</b>: W, H, X, Y in mm. Or drag the box on the tag. <b>Shift</b> + drag keeps it in a straight line; <b>Alt</b> + drag drags off a copy and leaves the text where it was.',sel:'#gtTextW'},
   {on:'design',t:'Saved phrases',k:'phrase saved words reuse',h:'Text column → Character → <b>Saved phrase</b> to use one; <b>Save these words as a phrase</b> to keep the words.',sel:'#gtTextPhrase'},
   {on:'design',t:'Line up several texts',k:'align arrange left centre right top middle bottom together each',
    h:'Tick the boxes in Text fields (or Select all), choose <b>Together</b> or <b>Each</b>, then Left / Centre / Right / Top / Middle / Bottom.',find:'Together'},
@@ -55253,10 +55253,11 @@ document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
     return {u:bw?(dx+bw/2)/bw:0, v:bh?(dy+bh/2)/bh:0};
   };
   // its resize corner, for the Alt key outside it (Alt on a corner resizes; elsewhere it picks a colour)
+  // Alt inside a text box copies it as it is dragged (20 Nov), so the colour
+  // pick is left to the Alt press outside every box
   c._ccHandle=e=>{ const d=gtCurrentDesign; if(!d) return false; const p=at(e);
-    return gtSideFields(d).some(f=>{ const l=localFrac(p,f,p.g); if(l.u<0||l.u>1||l.v<0||l.v>1) return false;
-      const bw=f.w*p.g.art.w, bh=f.h*p.g.art.h, g=Math.max(0.8,c.width?8*p.g.vw/c.width:2);
-      return bw&&bh&&(bw-l.u*bw)<=Math.min(g,bw*0.35)&&(bh-l.v*bh)<=Math.min(g,bh*0.35); }); };
+    return (gtEditLock?gtSideFields(d).filter(f=>f.id===gtEditLock):gtSideFields(d)).some(f=>{
+      const l=localFrac(p,f,p.g); return l.u>=0&&l.u<=1&&l.v>=0&&l.v<=1; }); };
   c.addEventListener('pointerdown',e=>{
     const d=gtCurrentDesign; if(!d) return;
     const p=at(e);
@@ -55265,7 +55266,7 @@ document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
     const list=gtEditLock?gtSideFields(d).filter(f=>f.id===gtEditLock):gtSideFields(d);
     // topmost first, so a box drawn over another takes the tap
     for(let i=list.length-1;i>=0;i--){
-      const f=list[i];
+      let f=list[i];
       const l=localFrac(p,f,p.g);
       const inside=l.u>=0&&l.u<=1&&l.v>=0&&l.v<=1;
       if(!inside) continue;
@@ -55275,21 +55276,33 @@ document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
       const near=bw&&bh&&(bw-l.u*bw)<=Math.min(g,bw*0.35)
                       &&(bh-l.v*bh)<=Math.min(g,bh*0.35);
       gtEditSel=f;
-      // shift picks boxes out rather than dragging them, which is how several
-      // are gathered before being moved or lined up as one
-      if(e.shiftKey&&!near){
-        if(gtFieldPick.has(f.id)) gtFieldPick.delete(f.id); else gtFieldPick.add(f.id);
-        gtDrawDesign(); gtRenderFields();
-        return;
-      }
+      // Shift: a tap picks boxes out, which is how several are gathered before
+      // being moved or lined up as one; a drag moves in a straight line (20 Nov)
+      const tap=e.shiftKey&&!near;
       // a plain tap on a box that was not among the ticked ones starts again
       // from it: the ticked set is a thing being gathered, and gathering the
       // next one begins by dropping the last
-      if(!near&&!f.group&&!gtFieldPick.has(f.id)) gtFieldPick.clear();
-      const moving=near?[f]:gtMoveSet(f);
+      if(!near&&!tap&&!f.group&&!gtFieldPick.has(f.id)) gtFieldPick.clear();
+      let moving=near?[f]:gtMoveSet(f);
+      // Alt + drag: the copy is what moves and the text stays where it was -
+      // a group or the ticked ones are copied together, still a group or ticked
+      if(e.altKey&&!near){
+        const grp={}, made=moving.map(m=>{
+          const k={...JSON.parse(JSON.stringify(m)),id:gtId('f')};
+          delete k.fromSheet;
+          if(m.group) k.group=grp[m.group]||(grp[m.group]=gtId('g'));
+          return k;
+        });
+        const last=Math.max(...moving.map(m=>d.fields.indexOf(m)));
+        d.fields.splice(last+1,0,...made);
+        const wasPicked=moving.some(m=>gtFieldPick.has(m.id));
+        gtFieldPick.clear(); if(wasPicked&&made.length>1) made.forEach(k=>gtFieldPick.add(k.id));
+        gtEditSel=f=made[moving.indexOf(f)]; moving=made;
+        gtSaveSoon();
+      }
       gtEditGeomHeld=p.g;
       gtEditDrag={f,mode:near?'resize':'move',px:p.x,py:p.y,x:f.x,y:f.y,w:f.w,h:f.h,
-        moving:moving.map(m=>({f:m,x:m.x,y:m.y}))};
+        tap,cx:e.clientX,cy:e.clientY,moving:moving.map(m=>({f:m,x:m.x,y:m.y}))};
       c.setPointerCapture(e.pointerId);
       gtDrawDesign(); gtRenderFields();
       return;
@@ -55326,6 +55339,8 @@ document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
     const p=at(e), g=gtEditDrag, dx=p.x-g.px, dy=p.y-g.py;
     const clamp=(v,lo,hi)=>Math.min(hi,Math.max(lo,v));
     if(g.mode==='move'){
+      // a Shift press is a tap until it has really moved
+      if(g.tap&&!g.moved){ if(Math.hypot(e.clientX-g.cx,e.clientY-g.cy)<4) return; g.moved=true; }
       // held back at the edge by whichever of them reaches it first, so the
       // arrangement inside a group survives being pushed into a corner
       let mx=dx,my=dy;
@@ -55350,7 +55365,10 @@ document.getElementById('gtDesignCanvas').addEventListener('wheel',e=>{
     }
     gtDrawDesign();
   });
-  const stop=()=>{ if(!gtEditDrag) return; gtEditDrag=null; gtEditGeomHeld=null; gtRenderFields(); gtDrawDesign(); };
+  const stop=()=>{ if(!gtEditDrag) return;
+    const g=gtEditDrag; gtEditDrag=null; gtEditGeomHeld=null;
+    if(g.tap&&!g.moved){ const f=g.f; if(gtFieldPick.has(f.id)) gtFieldPick.delete(f.id); else gtFieldPick.add(f.id); }
+    gtRenderFields(); gtDrawDesign(); };
   c.addEventListener('pointerup',stop);
   c.addEventListener('pointercancel',stop);
 })();
