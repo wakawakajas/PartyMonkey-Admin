@@ -885,7 +885,7 @@ def _queued_times(fname):
     return out
 
 
-WATCH = {"kicked_at": 0.0, "unstuck_at": 0.0}
+WATCH = {"kicked_at": 0.0}
 
 # The video requests a Claude Code run marks "working" while it makes them, and
 # the part of a file name that says the video was made (evidence/README.md)
@@ -901,9 +901,13 @@ def unstick_working():
     stopped (closed, crashed, signed out) or finished without saying so
     (19 Nov: a packing video made at 09:41 sat on "Rendering"). A video made
     since it was asked for: marked done with it. None: queued again, so the
-    next run makes it -- up to 3 times, then it is a problem for staff."""
+    next run makes it -- up to 3 times, then it is a problem for staff.
+
+    Run only when staff press "Check for update" (check_jobs), never on a
+    timer: the owner wants it looked at when asked, not every few minutes."""
+    fixed = []
     if not os.path.isdir(SAVE):
-        return
+        return fixed
     now = time.time()
     for name in os.listdir(SAVE):
         d = os.path.join(SAVE, name)
@@ -926,17 +930,34 @@ def unstick_working():
                     j.update(status="done", videos=vids, done_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                              summary=j.get("summary") or "Video made (the run that made it did not mark it done).")
                     log(f"{j.get('order') or name}: the video was made but its request still said working - marked done")
+                    fixed.append({"order": j.get("order") or name, "now": "done"})
                 elif int(j.get("requeued") or 0) >= 3:
                     j.update(status="problem", problem="Claude Code started this video 3 times and stopped without "
                              "making it. Ask Claude what went wrong.")
                     log(f"{j.get('order') or name}: stuck 3 times - marked as a problem")
+                    fixed.append({"order": j.get("order") or name, "now": "problem"})
                 else:
                     j.update(status="queued", requeued=int(j.get("requeued") or 0) + 1)
                     log(f"{j.get('order') or name}: stuck on working for an hour with no video - queued again")
+                    fixed.append({"order": j.get("order") or name, "now": "queued"})
                 json.dump(j, open(p, "w", encoding="utf8"), indent=1)
                 JOB_CACHE[0] = 0
             except Exception as e:
                 log(f"Checking {name}/{fname} for a stuck request: {clean(e)}")
+    return fixed
+
+
+def check_jobs():
+    """Staff pressed "Check for update": stuck requests sorted out, and anything
+    waiting handed to Claude Code now rather than at the hourly task."""
+    fixed = unstick_working()
+    JOB_CACHE[0] = 0
+    js = jobs()
+    started = False
+    busy = AUTO["proc"] and AUTO["proc"].poll() is None
+    if any(j.get("status") == "queued" for j in js) and not busy             and not any(j.get("status") == "working" and time.time() - j["mtime"] < STUCK_AFTER for j in js):
+        started = kick_claude()
+    return {"fixed": fixed, "jobs": js, "started": bool(started or busy), "now": time.time(), "auto": auto_state()}
 
 
 def watch_requests():
@@ -964,9 +985,6 @@ def watch_requests():
                 continue
             if AUTO["proc"] and AUTO["proc"].poll() is None:
                 continue
-            if first or time.time() - WATCH["unstuck_at"] > 300:   # every 5 minutes
-                WATCH["unstuck_at"] = time.time()
-                unstick_working()
             # a request marked "working" means a Claude Code run (the hourly
             # task, or another PC's) is busy and goes on to the queued ones
             # after it: starting another would make the same video twice.
@@ -2173,6 +2191,8 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, request_unbox_video(b))
             if u.path == "/api/finding":
                 return self.send(200, save_finding(b.get("order"), b.get("issues"), b.get("note"), b.get("by")))
+            if u.path == "/api/checkjobs":
+                return self.send(200, check_jobs())
             if u.path == "/api/refresh-returns":
                 return self.send(200, ask_refresh())
             if u.path == "/api/evidence":
