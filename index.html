@@ -54721,15 +54721,17 @@ async function gtComboLive(ask){
     const listed=new Set([...(man.designs||[]).flatMap(x=>[x&&x.file,x&&x.back&&x.back.file]),
       man.sheet&&man.sheet.layoutFile,man.sheet&&man.sheet.baseFile,
       ...((man.sheet&&man.sheet.shapeSeen)||[]),...((man.sheet&&man.sheet.libSeen)||[])].filter(Boolean));
+    const here=new Set(); let readAll=true;     // that page's files as they are now (gtComboRelink)
     for(const sub of ['designs','']){
       let dh=dir;
-      if(sub){ try{ dh=await dir.getDirectoryHandle(sub); }catch(e){ continue; } }
+      if(sub){ try{ dh=await dir.getDirectoryHandle(sub); }catch(e){ readAll=false; continue; } }
       const found=[];
       try{ for await (const en of dh.values())
-        if(en.kind==='file'&&GT_ART.test(en.name)) found.push(en.name); }catch(e){ continue; }
+        if(en.kind==='file'&&GT_ART.test(en.name)) found.push(en.name); }catch(e){ readAll=false; continue; }
       found.sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
       for(const nm of found){
         const path=(sub?sub+'/':'')+nm;
+        here.add(gtLivePath(kind,path));
         if(listed.has(path)) continue;
         listed.add(path);
         // named by its path, so an order line made with it finds it next time
@@ -54748,6 +54750,10 @@ async function gtComboLive(ask){
       try{ gtAssets.set(to,await gtDirRead(dir,from)); }catch(e){}
     });
     made.forEach(d=>{ gtLiveSnap.set(d.id,gtLiveLook(d)); gtLib.designs.push(d); });
+    // each file's fingerprint while it is in hand, and a file renamed in that
+    // page's folder keeps what was set on it here (gtComboRelink)
+    gtLib.designs.forEach(d=>{ if(d.kind===kind&&!d.fp){ const f=gtFpOf(gtAssets.get(d.file)); if(f) d.fp=f; } });
+    if(readAll&&here.size&&gtComboRelink(kind,here)) staleFixed++;
     // a design changed here drawn again from the file just read
     gtLib.designs.forEach(d=>{ if(d.live) return;
       if(ownLive.has(d.file)){ gtImgs.delete(d.id); try{ gtImgFailed.delete(d.id); }catch(e){} }
@@ -54758,6 +54764,47 @@ async function gtComboLive(ask){
   gtComboLiveNote='Live from '+escapeHtml(root.name)+' — '+notes.map(escapeHtml).join(' · ');
   await gtHydrateBacks().catch(()=>{});
   gtComboLivePaint();
+}
+// A file renamed in Custom's or Festive's own folder (20 Nov: "Custom
+// 106-Space Travel" became "Design 106-Space Travel" and its three lines of
+// words were left on the old name). Die Cut names those designs by their
+// path there, so the new name came in as a new design with nothing on it. The
+// one whose file has gone hands what was set on it - words, cut line, bleed,
+// stickers - to the one come in bare with the very same file: the same size
+// and date (fp), or, for one read before there were those, the same cut line
+// read off the file (cutSeen). Order lines follow it; the old entry goes.
+function gtComboRelink(kind,here){
+  const pre=GT_COMBO_HOME+'/'+kind+'~';
+  const mine=d=>d&&d.kind===kind&&String(d.file||'').startsWith(pre);
+  const pieces=d=>d.pieceEdit&&Object.keys(d.pieceEdit).some(k=>/^\d+$/.test(k));
+  const setOn=d=>!!((d.fields||[]).length||pieces(d)||(d.trace&&!d.trace.auto)||d.bleed||d.back);
+  const gone=gtLib.designs.filter(d=>mine(d)&&!here.has(d.file)&&setOn(d));
+  const bare=gtLib.designs.filter(d=>mine(d)&&here.has(d.file)&&!setOn(d));
+  const same=(o,n)=>(o.fp&&n.fp)?o.fp===n.fp:!!(o.cutSeen&&o.cutSeen===n.cutSeen);
+  const stem=s=>String(s||'').split('/').pop().replace(/\.[^.]+$/,'');
+  let n=0;
+  gone.forEach(o=>{
+    const hits=bare.filter(x=>same(o,x));
+    // two of the same cannot be told apart: neither is guessed at
+    if(hits.length!==1||gone.filter(y=>same(y,hits[0])).length!==1) return;
+    const h=hits[0];
+    ['trace','fields','bleed','back','art','hole','cutSeen','cutSheet','nestEach','wordsCut','pieceEdit','turn'].forEach(k=>{
+      if(o[k]!==undefined&&o[k]!==null) h[k]=JSON.parse(JSON.stringify(o[k])); });
+    if(h.pieceEdit&&h.pieceEdit.file===o.file) h.pieceEdit.file=h.file;
+    if(h.cutSheet&&h.file) gtCutSheetFiles.add(h.file);
+    // its own name stays; one that was only the old file's name takes the new one
+    if(o.name&&o.name!==stem(o.file).replace(/^.*~/,'')) h.name=o.name;
+    delete h.live; h.kind=kind; gtLiveSnap.delete(h.id);
+    [gtOrder,...Object.values(gtOrders||{})].forEach(list=>(Array.isArray(list)?list:[]).forEach(l=>{
+      if(l&&l.designId===o.id) l.designId=h.id; }));
+    if(gtCurrentDesign===o) gtCurrentDesign=h;
+    gtLib.designs=gtLib.designs.filter(x=>x!==o);
+    if(gtOwnDesigns) gtOwnDesigns=gtOwnDesigns.filter(x=>x!==o);
+    gtImgs.delete(h.id); try{ gtImgFailed.delete(h.id); }catch(e){}
+    gtSetForget&&gtSetForget(h.id);
+    n++;
+  });
+  return n;
 }
 function gtComboLivePaint(){
   const el=document.getElementById('gtComboLiveState');
