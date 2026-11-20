@@ -900,9 +900,14 @@ def watch_requests():
 
     Each request starts a run once: one that run had to leave queued (say
     Chrome was not there for the BigSeller time) waits for the hourly task
-    rather than starting Claude Code again every 30 seconds."""
+    rather than starting Claude Code again every 30 seconds.
+
+    When Sit Pretty starts, every request still queued is started at once
+    (20 Nov: two packing videos queued while Sit Pretty was off or stuck
+    should not wait another 2 minutes, or for the hourly task)."""
+    first = True
     while True:
-        time.sleep(30)
+        time.sleep(5 if first else 30)
         try:
             if not local_cfg().get("run_requests_from_all_pcs") or auto_state() in ("missing", "signin"):
                 continue
@@ -917,12 +922,15 @@ def watch_requests():
             now = time.time()
             if any(j.get("status") == "working" and now - j["mtime"] < 3600 for j in jobs()):
                 continue
-            if any(now - m > 120 and m > WATCH["kicked_at"] for f, _ in AUTO_KINDS for m in _queued_times(f)):
+            if any((first or now - m > 120) and m > WATCH["kicked_at"] for f, _ in AUTO_KINDS for m in _queued_times(f)):
                 WATCH["kicked_at"] = now
-                log("A request made on another PC has waited 2 minutes, so this PC is starting Claude Code for it")
+                log("Sit Pretty just started and requests are waiting, so Claude Code is starting on them now" if first else
+                    "A request made on another PC has waited 2 minutes, so this PC is starting Claude Code for it")
                 kick_claude()
         except Exception as e:
             log(f"Watching for requests from other PCs: {e}")
+        finally:
+            first = False
 
 
 def request_unbox_video(b):
