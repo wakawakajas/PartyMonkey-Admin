@@ -43343,6 +43343,8 @@ const HELP=[
    h:'Pick a line on the Order tab: drag its pop-up by the header to move it left or right; drag its left or right edge to make it wider or narrower. Kept on this computer; <b>More → Reset panel layout</b> puts it back.'},
   {on:'sheet',t:'How many tags are picked',k:'selected count how many picked multiple select',
    h:'Pick tags on the sheet (Shift-click, drag a box, or double-click). Under <b>tags · sheets · used</b> on the Order tab, a bar says how many are picked, e.g. <b>3 tags selected</b>.',sel:'#gtNlSelN'},
+  {on:'sheet',t:'Same words on every sticker',k:'sticker sheet break up same words name age change all every sticker replace many at once',
+   h:'A sticker sheet broken up into separate stickers: retype one box in the line\'s pop-up (or on Magic Create) and every sticker on that line with the same words changes with it. Untick <b>Change the same words on every sticker</b> to change one sticker on its own. The design in the library is never changed.',find:'Change the same words on every sticker'},
   {on:'sheet',t:'Change a line\'s words',k:'text edit words name line pop-up',
    h:'Click the tag on the sheet (or the line in Order). Its pop-up opens beside the sheet; type in the words box. Drag in the box to select words.'},
   {on:'sheet',t:'Pack, Grid or Template layout',k:'nest pack grid template rearrange layout arrangement',
@@ -49194,6 +49196,20 @@ function gtNewLineField(line){
     align:'center',rot:0,curve:0,oc:'#FFFFFF',ow:0,group:'',
     x:0.12,y:Math.min(0.78,0.55+n*0.12),w:0.76,h:0.16};
 }
+// Same words on every sticker (20 Nov). A sticker sheet broken up into its
+// stickers gives every sticker its own boxes - twelve name boxes and twelve
+// age boxes all saying "Vanny" / "Turns 5!". Retyping one changes every box
+// on the line that said the same words when it was clicked into, unless the
+// line's tick is off (line.eachWords). Only the line changes: the design in
+// the library is the template and is never written to. Name lists are left
+// alone, and blank boxes never join in.
+function gtSameWordsIds(line,d,fid,old){
+  if(!line||line.eachWords===true||!d||!gtLineSplits(line,d)) return [];
+  if(!String(old||'').trim()) return [];
+  const vals=line.vals||{};
+  return gtLineFieldsOf(d,line).filter(f=>f.id!==fid&&!(vals[f.id]&&typeof vals[f.id].names==='string')
+    &&gtVal(line,f).text===old).map(f=>f.id);
+}
 // A field's live values: what the order line says, falling back to what the
 // design says. Nothing here writes to the design.
 function gtVal(line,f){
@@ -49364,7 +49380,9 @@ const gtLineBleedKept=l=>({...(l&&l.bleed&&l.bleed.on?{bleed:{on:true,mm:Math.ma
   ...(l&&typeof l.back==='string'?{back:l.back}:{}),
   // and its Break up tick on a sticker sheet (gtLineSplits): a Magic Create
   // line is made again from its batch row, and lost it every time
-  ...(l&&typeof l.split==='boolean'?{split:l.split}:{})});
+  ...(l&&typeof l.split==='boolean'?{split:l.split}:{}),
+  // and its "same words on every sticker" tick, when it was taken off
+  ...(l&&l.eachWords===true?{eachWords:true}:{})});
 function gtBleedOf(d,line){
   // Cut to its own line drawn out past the artwork (an outset) it bleeds too:
   // the artwork is grown out to the line and past it (gtArtGrow). A nested
@@ -52008,6 +52026,8 @@ function gtRenderOrder(){
       ${gtBackRow(l,d)}
       ${gtEnhanceRow(d)}
       ${words}
+      ${d&&gtLineSplits(l,d)?`<label class="click-tog" style="margin-top:6px;" title="On: retyping a box changes every sticker on this line with the same words. Off: each sticker is changed on its own. The design in the library is never changed.">
+        <input type="checkbox" data-gtl="sameWords"${l.eachWords===true?'':' checked'}/>Change the same words on every sticker</label>`:''}
       ${d?`<button type="button" class="btn-outline btn-sm" data-gt-add-lfield
         style="width:100%;margin-top:8px;">+ Text on this line only</button>`:''}
       </div>
@@ -52207,6 +52227,20 @@ document.getElementById('gtOrderList').addEventListener('click',e=>{
 document.addEventListener('click',e=>{
   if(!e.target.closest('#gtOrderList')) gtCloseDesignPanels(null);
 });
+// The boxes that follow a retyped one (gtSameWordsIds), read as it is clicked
+// into, so they keep following while the words are cleared and typed anew.
+let gtSameWords=null;
+document.getElementById('gtOrderList').addEventListener('focusin',e=>{
+  gtSameWords=null;
+  const fk=String((e.target.dataset&&e.target.dataset.gtf)||'');
+  if(!fk.endsWith('|text')) return;
+  const card=e.target.closest('[data-gt-line]'); if(!card) return;
+  const line=gtOrder.find(l=>l.id===card.dataset.gtLine); if(!line) return;
+  const fid=fk.split('|')[0], d=gtDesign(line.designId);
+  const f=(gtLineFieldsOf(d,line)||[]).find(x=>x.id===fid); if(!f) return;
+  const ids=gtSameWordsIds(line,d,fid,gtVal(line,f).text);
+  if(ids.length) gtSameWords={line:line.id,fid,ids};
+});
 // Typing redraws the sheet but never rebuilds this list — a field being rebuilt
 // under the caret is a keystroke lost.
 document.getElementById('gtOrderList').addEventListener('input',e=>{
@@ -52245,6 +52279,12 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
     if(gtNestHand) gtNestHand={...gtNestHand,sig:'',pages:gtNestHand.pages.map(pg=>pg.filter(h=>!h.key||base(h.key).split('|')[0]!==line.id))};
     delete line.nestPage; gtNeatSet(line.id,{page:v>0?v:0,sent:{}}); gtSaveSoon();
     gtNestCache=null; gtNestSync(); gtDraw(); return;
+  }
+  if(lk==='sameWords'){
+    if(e.target.checked) delete line.eachWords; else line.eachWords=true;
+    gtSameWords=null;
+    gtWorkSaveSoon();
+    return;
   }
   if(lk==='split'){
     const d=gtDesign(line.designId);
@@ -52289,6 +52329,14 @@ document.getElementById('gtOrderList').addEventListener('input',e=>{
   // as black and looks like the setting simply not working
   v[key]=(key==='text'||key==='font'||key==='align'||key==='oc'||key==='color'||key==='names'||key==='order')
     ?e.target.value:Number(e.target.value)||0;
+  if(key==='text'&&gtSameWords&&gtSameWords.line===line.id&&gtSameWords.fid===fid){
+    gtSameWords.ids.forEach(id=>{
+      const o=line.vals[id]||(line.vals[id]={});
+      o.text=v.text;
+      const box=card.querySelector(`[data-gtf="${id}|text"]`);
+      if(box&&box!==e.target) box.value=v.text;
+    });
+  }
   if(key==='names'||key==='order'){
     const NL=gtNamesOf(line);
     if(NL) line.qty=NL.total;
@@ -72396,7 +72444,8 @@ function mcGiftWire(it){
       // the whole bleed: its kind (AI fill, Mirror...) and edge trim too - kept as
       // on and mm alone, the line exported with the sheet's own kind, Offset
       bleed:gtLineBleedKept(live).bleed,
-      split:typeof live.split==='boolean'?live.split:undefined};
+      split:typeof live.split==='boolean'?live.split:undefined,
+      eachWords:live.eachWords===true?true:undefined};
     if(mcGtPick!==live.designId){
       mcGtPick=live.designId||'';
       const d=mcGtDesign(mcGtPick);
@@ -72435,6 +72484,22 @@ function mcGiftWire(it){
   // typed, which is the whole reason for showing it here rather than a name
   words.addEventListener('input',drawPrev);
   words.addEventListener('change',drawPrev);
+  // same words on every sticker (gtSameWordsIds): the boxes saying what the
+  // clicked one said follow it as it is retyped - before drawPrev, so the
+  // preview shows every sticker changed, not one keystroke behind
+  let mcSame=null;
+  words.addEventListener('focusin',e=>{
+    mcSame=null;
+    const fk=String((e.target.dataset&&e.target.dataset.mcGtf)||'');
+    if(!fk.endsWith('|text')) return;
+    const d=mcGtDesign(mcGtPick), line=mcGtLine(it), old=e.target.value;
+    if(!d||line.eachWords===true||!gtLineSplits(line,d)||!old.trim()) return;
+    const boxes=[...words.querySelectorAll('textarea[data-mc-gtf$="|text"]')].filter(x=>x!==e.target&&x.value===old);
+    if(boxes.length) mcSame={box:e.target,boxes};
+  });
+  words.addEventListener('input',e=>{
+    if(mcSame&&e.target===mcSame.box) mcSame.boxes.forEach(x=>{ x.value=e.target.value; });
+  },true);
   document.getElementById('mcGtFinish').addEventListener('click',async e=>{
     const b=e.target.closest('[data-mc-fin]'); if(!b) return;
     const fin=b.dataset.mcFin;
@@ -72528,6 +72593,7 @@ function mcGiftWire(it){
       else delete out.bleed;
       // and its Break up tick, set on either and kept the same on both
       if(typeof live.split==='boolean') out.split=live.split;
+      if(live.eachWords===true) out.eachWords=true; else delete out.eachWords;
       if(qtyHere||wordsHere){
         live.qty=out.qty; live.vals=merged;
         shown={qty:out.qty,vals};       // said on the sheet now, so no longer a change
@@ -72966,6 +73032,7 @@ function mcGtAdoptOwnRows(home){
         // field by field, the back was left off and the line printed another
         bleed:gtLineBleedKept(row).bleed,back:typeof row.back==='string'?row.back:undefined,
         split:typeof row.split==='boolean'?row.split:undefined,
+        eachWords:row.eachWords===true?true:undefined,
         shape:row.shape||((it.sheet_item||{}).shape)||'',page:home.page,finish:home.finish};
       if(!home.ids.includes(it.id)) home.ids.push(it.id);
       return mcGtLine(it);
@@ -73152,6 +73219,7 @@ async function mcGtWriteBack(edited,home,asked){
       bleed:gtLineBleedKept(l).bleed,
       back:typeof l.back==='string'?l.back:undefined,
       split:typeof l.split==='boolean'?l.split:undefined,
+      eachWords:l.eachWords===true?true:undefined,
       // the extras are whatever the sheet now prints past the order; left as
       // they were, the line went on saying the old number of extras
       extra_qty:Math.max(0,(Number(l.qty)||0)-(Number(it.qty)||0)),
