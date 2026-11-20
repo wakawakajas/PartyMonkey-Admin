@@ -776,11 +776,15 @@ def _drive_path(unc):
     return unc
 
 
-CLAUDE_SAVE = _drive_path(SAVE)
+def _claude_save():
+    """Looked up before every run, not once at start: Sit Pretty started while the NAS was out of reach
+    (Proton VPN on, 20 Nov) kept the network path, which Claude Code refuses, so every run gave up until a restart."""
+    return _drive_path(SAVE)
 
-# the prompts name the save folder this PC actually uses
-CLIP_PROMPT, REFRESH_PROMPT, AUTO_PROMPT = (x.replace("N:\\Yong Chuan\\Dispute", CLAUDE_SAVE.replace("{", "{{").replace("}", "}}"))
-                                            for x in (CLIP_PROMPT, REFRESH_PROMPT, AUTO_PROMPT))
+
+def _with_save(prompt, save):
+    """The prompts name the save folder this PC actually uses."""
+    return prompt.replace("N:\\Yong Chuan\\Dispute", save)
 
 
 def auto_state():
@@ -822,8 +826,10 @@ def _run_claude_once(fname, model):
     if True:
         out_p = os.path.join(HERE, "tmp", "claude-run.log")
         with open(out_p, "w", encoding="utf8") as out:
-            cmd = [CLAUDE_EXE, "-p", (REFRESH_PROMPT if fname == "refresh" else CLIP_PROMPT if fname == CLIP_REQ else AUTO_PROMPT.replace("{fname}", fname)), "--chrome", "--permission-mode", "acceptEdits",
-                   "--add-dir", CLAUDE_SAVE]
+            save = _claude_save()
+            prompt = REFRESH_PROMPT if fname == "refresh" else CLIP_PROMPT if fname == CLIP_REQ else AUTO_PROMPT.replace("{fname}", fname)
+            cmd = [CLAUDE_EXE, "-p", _with_save(prompt, save), "--chrome", "--permission-mode", "acceptEdits",
+                   "--add-dir", save]
             if model:
                 cmd += ["--model", model]
             cmd += ["--allowedTools", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "mcp__claude-in-chrome"]
