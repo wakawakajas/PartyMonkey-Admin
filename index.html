@@ -43440,7 +43440,9 @@ const HELP=[
    h:'Contours on, click a tag: drag the round <b>↻</b> handle above it to turn it (hold Shift for right angles: 90°, 180°, 270°). <b>R</b> turns the picked tags a quarter, <b>Shift + R</b> back. On a packed sheet it stays where you put it and the rest nest round it.',find:'Contours'},
   {on:'sheet',t:'Tidy picked tags',k:'tidy align arrange neat',h:'Pick tags, then Rearrange → Selected → <b>Tidy</b>: only the picked tags move, into a neat grid in the free room nearest where they were, and stay picked. Nothing picked tidies the whole sheet.',find:'Tidy'},
   {on:'sheet',t:'Contours: move and resize cut lines',k:'contour cut line placeholder move resize drag box',
-   h:'Press <b>Contours</b> (top right of the sheet). Drag a cut line to move it, its corner to resize. Drag across empty paper to pick several (Shift adds).',sel:'#gtContourBtn'},
+   h:'Press <b>Contours</b> (top right of the sheet). Drag a cut line to move it, its corner to resize. Drag across empty paper to pick several (Shift adds). Shift + click picks one more or takes it out; Shift + drag moves in a straight line. Alt + drag drags off a copy.',sel:'#gtContourBtn'},
+  {on:'sheet',t:'Copy or straighten words on the sheet',k:'alt drag duplicate copy words text shift straight line move sheet',
+   h:'Click a tag, then drag its words to move them. <b>Shift + drag</b> moves them in a straight line. <b>Alt + drag</b> leaves the words where they are and drags off a copy (same words, font, size and colour) for that tag only; it shows on the line as an extra field you can retype or remove.'},
   {on:'sheet',t:'Pick all tags of one line or design',k:'double click select same line design all',
    h:'In Contours: <b>double-click</b> a tag picks that line\'s tags. <b>Ctrl + double-click</b> picks every line of that design. <b>Shift</b> adds to what is picked.',sel:'#gtContourBtn'},
   {on:'sheet',t:'Guides: split the sheet into sections',k:'guide ruler line split section divide',
@@ -51154,8 +51156,12 @@ function gtSheetDrag(c,side){
   // pushed about; dragging a tag's own words still moves the words. Which one
   // it is answers itself from what is under the pointer when it goes down.
   c._startPan=e=>startPan(e);
-  // Alt on a placeholder in Contours drags out a copy: the eyedropper leaves it be
-  c._altCopy=e=>{ if(!gtSlotEdit) return false; const q=at(e), s=q&&hitSlot(q); return !!(s&&!s.corner); };
+  // Alt on a placeholder in Contours drags out a copy, and so does Alt on words
+  // of the tag being worked on: the eyedropper leaves both be
+  c._altCopy=e=>{ const q=at(e); if(!q) return false;
+    if(gtSlotEdit){ const s=hitSlot(q); return !!(s&&!s.corner); }
+    if(gtLock) return false;
+    const h=hit(q); return !!(h&&h.f&&!h.corner&&h.line.id===gtSelLine); };
   c._ccHandle=e=>{ const q=at(e); if(!q) return false; const h=hit(q); if(h&&h.corner) return true;
     if(gtSlotEdit){ const s=hitSlot(q); return !!(s&&s.corner); } return false; };
   const startPan=e=>{
@@ -51174,14 +51180,28 @@ function gtSheetDrag(c,side){
     // a name of a list moves the words of every name on its line: the line's
     // own values are the ones written, not the stand-in's (gtNameLine)
     const own=h.line.nameOf?(gtOrder.find(l=>l.id===h.line.nameOf)||h.line):h.line;
-    drag={line:own,f:h.f,mode:h.corner?'resize':'move',
+    // Alt-drag (as in Illustrator): the words stay where they are and a copy
+    // of them is what moves - a box of this tag's own (line.extra), the same
+    // words, font, size and colour; let go without moving, no copy is kept
+    let f=h.f, copy=null;
+    if(e.altKey&&!h.corner&&!gtLock){
+      copy={...JSON.parse(JSON.stringify(f)),id:gtId('f')};
+      delete copy.fromSheet; delete copy.group;
+      copy.name=(f.name||'Text')+' copy';
+      const vals=own.vals||(own.vals={});
+      vals[copy.id]={...JSON.parse(JSON.stringify(vals[f.id]||{})),text:v.text};
+      (own.extra||(own.extra=[])).push(copy);
+      f=copy;
+    }
+    drag={line:own,f,mode:h.corner?'resize':'move',copy,
       px:p.mx,py:p.my,dx:v.dx,dy:v.dy,bw:h.b.w,bh:h.b.h};
     // the cut round these words keeps still while they are dragged - traced
     // at every step, the tag re-centred and the nest moved under the pointer -
     // and is traced again where they are let go (see gtWordsCut)
     gtWordsHold=h.line.id;
-    gtHeld={lineId:h.line.id,fieldId:h.f.id,name:h.f.name||''};
+    gtHeld={lineId:h.line.id,fieldId:f.id,name:f.name||''};
     try{ c.setPointerCapture(e.pointerId); }catch(err){}
+    if(copy) gtRenderOrder();
     gtDraw();
   };
   // Contours: a double-click picks every placeholder of that line on the sheet,
@@ -51257,10 +51277,17 @@ function gtSheetDrag(c,side){
         }
         gtDraw(); return;
       }
-      // Shift adds to the picked ones or takes it back out; a plain press on
-      // one already picked keeps the lot, so they can be dragged as one
-      if(e.shiftKey){ gtPickToggle(s.slot.id); gtSlotCardSync(); gtSlotScopeSync(); gtDraw(); return; }
-      if(!gtSelSet.has(s.slot.id)) gtPickOnly(s.slot.id);
+      // Shift tapped adds to the picked ones or takes it back out; Shift
+      // dragged moves them in a straight line (decided on the way, by whether
+      // the mouse goes anywhere). A plain press on one already picked keeps
+      // the lot, so they can be dragged as one
+      let tap=null;
+      if(e.shiftKey&&s.corner){ gtPickToggle(s.slot.id); gtSlotCardSync(); gtSlotScopeSync(); gtDraw(); return; }
+      if(e.shiftKey&&!e.altKey){
+        tap={id:s.slot.id,was:gtSelSet.has(s.slot.id),cx:e.clientX,cy:e.clientY};
+        gtSelSet.add(s.slot.id); gtSelSlot=s.slot.id;
+      }
+      else if(!gtSelSet.has(s.slot.id)) gtPickOnly(s.slot.id);
       else gtSelSlot=s.slot.id;
       // Alt-drag (as in Illustrator): the picked ones stay where they are and
       // copies of them are what moves; let go without moving, no copy is kept
@@ -51282,7 +51309,7 @@ function gtSheetDrag(c,side){
       const rgroup=s.corner&&document.getElementById('gtSizeTogether').checked
         ?gtSheet.slots.filter(x=>x!==s.slot&&gtSelSet.has(x.id)).map(x=>({s:x,w:x.w,h:x.h})):[];
       const keep=s.corner?[s.slot,...rgroup.map(g=>g.s)].map(q=>({slot:q,w:q.w,h:q.h,s:gtScaleOf(q)})):[];
-      sdrag={slot:s.slot,mode:s.corner?'resize':'move',group,rgroup,keep,copies,
+      sdrag={slot:s.slot,mode:s.corner?'resize':'move',group,rgroup,keep,copies,tap,
              px:p.mx,py:p.my,x:s.slot.x,y:s.slot.y,w:s.slot.w,h:s.slot.h};
       try{ c.setPointerCapture(e.pointerId); }catch(err){}
       gtDraw();
@@ -51364,6 +51391,11 @@ function gtSheetDrag(c,side){
       const p=at(e); if(!p) return;
       e.preventDefault();
       const s=sdrag.slot;
+      // a Shift press is a tap until the mouse has gone somewhere
+      if(sdrag.tap&&!sdrag.tap.moved){
+        if(Math.hypot(e.clientX-sdrag.tap.cx,e.clientY-sdrag.tap.cy)<4) return;
+        sdrag.tap.moved=true;
+      }
       if(sdrag.mode==='move'){
         let mx=p.mx-sdrag.px, my=p.my-sdrag.py;
         if(e.shiftKey){ if(Math.abs(mx)>=Math.abs(my)) my=0; else mx=0; }
@@ -51441,8 +51473,14 @@ function gtSheetDrag(c,side){
     }
     if(sdrag){
       const moved=[sdrag.slot,...(sdrag.group||[]).map(g=>g.s)], cp=sdrag.copies;
-      const still=sdrag.slot.x===sdrag.x&&sdrag.slot.y===sdrag.y;
+      const still=sdrag.slot.x===sdrag.x&&sdrag.slot.y===sdrag.y, tap=sdrag.tap;
       sdrag=null;
+      // Shift tapped, not dragged: it is picked, or taken back out
+      if(tap&&!tap.moved){
+        if(tap.was) gtPickToggle(tap.id);
+        gtSlotCardSync(); gtSlotScopeSync(); gtDraw();
+        return;
+      }
       if(cp&&still){
         cp.forEach(q=>{ const i=gtSheet.slots.indexOf(q); if(i>=0) gtSheet.slots.splice(i,1); });
         gtSelSet.clear(); cp.was.forEach(id=>gtSelSet.add(id));
@@ -51470,7 +51508,15 @@ function gtSheetDrag(c,side){
       return;
     }
     if(!drag) return;
-    drag=null;
+    const dr=drag; drag=null;
+    if(dr.copy){
+      const v=(dr.line.vals||{})[dr.copy.id]||{};
+      if((Number(v.dx)||0)===dr.dx&&(Number(v.dy)||0)===dr.dy){
+        dr.line.extra=(dr.line.extra||[]).filter(f=>f!==dr.copy);
+        delete dr.line.vals[dr.copy.id];
+        if(gtHeld&&gtHeld.fieldId===dr.copy.id) gtHeld=null;
+      }
+    }
     if(gtWordsHold){ gtWordsHold=null; gtNestCache=null; }
     gtRenderOrder(); gtDraw();
   };
