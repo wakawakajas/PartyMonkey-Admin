@@ -49327,6 +49327,9 @@ function gtVal(line,f){
 // PDF asks for it — the way a place card's words are. Typed on the sheet, a
 // name came out with stepped edges next to artwork that was sharp.
 let gtWordsCatch=null;
+// the Content-aware / AI bands round CMYK PDFs on a sheet being exported
+// (gtPutArt), made CMYK as their pages are (sheetRingConv)
+let gtRingsCatch=null;
 const GT_WORDS_DPI=1200;
 function gtDrawFields(ctx,d,line,ax,ay,aw,ah,sc,side){
   const want=side==='back'?'back':'front';
@@ -49826,6 +49829,27 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   const took=vec?vec.take({id:key,turn,...(own&&(ix||iy)?{ix,iy}:{})},r,g,gap,clip,!invert,own?gtSheet.bleedMode:null):false;
   if(pcR) pcR.placed=!!took;          // its page is under the render, not its pixels
   if(took===true) return;
+  // A CMYK PDF's Content-aware / AI band (pixels round its placed page) is
+  // written down, so the export makes it CMYK as the page is made - the PDF's
+  // own ink, held to the card's edge (sheetRingConv), as the Custom Print
+  // Template does. Left to the sheet's conversion, a K-only black card came
+  // out of Magic Create with a rich black band round it.
+  if(took==='ring'&&gtRingsCatch&&!invert&&(bm==='content'||bm==='ai')) try{
+    const pf=printArtPdf(img);
+    if(pf&&_pdfCmyk.get(pf)===true){
+      const m=ctx.getTransform();
+      const bx=(X,Y,Wd,Hd)=>{
+        const P=[[X,Y],[X+Wd,Y],[X,Y+Hd],[X+Wd,Y+Hd]].map(([u,v])=>[m.a*u*sc+m.c*v*sc+m.e,m.b*u*sc+m.d*v*sc+m.f]);
+        return [Math.min(...P.map(q=>q[0])),Math.min(...P.map(q=>q[1])),Math.max(...P.map(q=>q[0])),Math.max(...P.map(q=>q[1]))];
+      };
+      // the clip, and the half pixel the band is drawn past it on export
+      const o=bx(clip.x,clip.y,clip.w,clip.h).map((v,q)=>q<2?v-0.5:v+0.5);
+      const cx=(o[0]+o[2])/2, cy=(o[1]+o[3])/2;
+      // a turned or flipped page is not held to its picture edge by edge
+      const square=!turn&&m.a>0&&m.d>0&&!m.b&&!m.c;
+      gtRingsCatch.push({o,i:[cx,cy,cx,cy],a:bx(r.x,r.y,r.w,r.h),h:[],rot:square?0:90,f:pf,pic:printArtExportImg(img)});
+    }
+  }catch(e){}
   ctx.save();
   ctx.beginPath();
   ctx.rect(clip.x*sc,clip.y*sc,clip.w*sc,clip.h*sc);
@@ -57160,12 +57184,12 @@ async function gtBuildSideRun(side,pages,plan,cuts){
     const c=document.createElement('canvas');
     const place=[];
     const vec=forms.size?gtVecTaker(forms,place):null;
-    gtQrVecPass=true; const words=gtWordsCatch=[];
-    try{ gtRenderPage(c,i,px,true,null,vec,side); } finally{ gtQrVecPass=false; gtWordsCatch=null; }  // cut lines and holes are preview furniture
+    gtQrVecPass=true; const words=gtWordsCatch=[], rings=gtRingsCatch=[];
+    try{ gtRenderPage(c,i,px,true,null,vec,side); } finally{ gtQrVecPass=false; gtWordsCatch=null; gtRingsCatch=null; }  // cut lines and holes are preview furniture
     placed+=place.length;
     const ctx=c.getContext('2d');
     const out={imgData:ctx.getImageData(0,0,c.width,c.height),
-               wMm:S.paperW,hMm:S.paperH,place,clear:!!vec,
+               wMm:S.paperW,hMm:S.paperH,place,clear:!!vec,rings,
                ink:back?'':[gtDotsPdfOps(S.paperH),gtQrPdfOps(i,S.paperH)].filter(Boolean).join('\n'),
                // the words, then the base layer (the front's) multiplied over them
                over:words.concat((vec&&!back)?gtBaseOver(px/Math.max(S.paperW,S.paperH)):[])};
@@ -75088,12 +75112,12 @@ async function mcGiftBundleSide(lines,mode,side,guest){
       const c=document.createElement('canvas');
       const place=[];
       const vec=forms.size?gtVecTaker(forms,place):null;
-      gtQrVecPass=true; const words=gtWordsCatch=[];
-      try{ gtRenderPage(c,i,px,true,null,vec,back?'back':'front'); } finally{ gtQrVecPass=false; gtWordsCatch=null; }
+      gtQrVecPass=true; const words=gtWordsCatch=[], rings=gtRingsCatch=[];
+      try{ gtRenderPage(c,i,px,true,null,vec,back?'back':'front'); } finally{ gtQrVecPass=false; gtWordsCatch=null; gtRingsCatch=null; }
       const ctx=c.getContext('2d');
       const imgData=ctx.getImageData(0,0,c.width,c.height);
       // the base layer is the front's
-      return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH,place,clear:!!vec,
+      return {imgData,wMm:gtSheet.paperW,hMm:gtSheet.paperH,place,clear:!!vec,rings,
               ink:back?'':[gtDotsPdfOps(gtSheet.paperH),gtQrPdfOps(i,gtSheet.paperH)].filter(Boolean).join('\n'),
               over:words.concat((vec&&!back)?gtBaseOver(px/Math.max(gtSheet.paperW,gtSheet.paperH)):[])};
     },sources,'gt');
