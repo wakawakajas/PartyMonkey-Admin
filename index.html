@@ -27258,10 +27258,34 @@ const PICKUP_PHOTO_MAX_PX=1200;
 const PICKUP_PHOTO_MIN_PX=900;
 const PICKUP_PHOTO_QUALITIES=[0.85,0.75,0.65,0.55,0.45];
 const PICKUP_BUDGET_BYTES=200*1024;
-const photoUrlCache={};
-// A cached link is good for 24h; dropped at 12h so a tab left open overnight
-// signs a fresh one instead of re-asking storage with an expired token (400).
-setInterval(()=>{ for(const k in photoUrlCache) delete photoUrlCache[k]; },12*60*60*1000);
+// Signed photo links, kept on this device for 23h (a link is good for 24h), so
+// reopening Pigu reuses them: no re-signing, and the browser shows the photo
+// from its own cache instead of fetching it again under a new token. Every
+// sign and every fetch is a line of Supabase log ingestion (2026-11-23).
+// Photo names are fresh on every upload, so a kept link never shows an old
+// picture. Each link drops out 23h after it was signed, so a tab left open
+// overnight signs a fresh one instead of re-asking with an expired token (400).
+const PHOTO_URL_KEEP_MS=23*60*60*1000;
+const PHOTO_URL_STORE='pigu.photoUrls.v1';
+const photoUrlCache=(()=>{
+  const urls={}, at={};
+  try{
+    const saved=JSON.parse(localStorage.getItem(PHOTO_URL_STORE)||'{}'), now=Date.now();
+    for(const k in saved){ const e=saved[k]; if(e&&e.u&&now-e.t<PHOTO_URL_KEEP_MS){ urls[k]=e.u; at[k]=e.t; } }
+  }catch(e){}
+  let pending=0;
+  const save=()=>{ if(pending) return; pending=setTimeout(()=>{ pending=0;
+    try{ const out={}; for(const k in urls) out[k]={u:urls[k],t:at[k]};
+      localStorage.setItem(PHOTO_URL_STORE,JSON.stringify(out)); }catch(e){} },500); };
+  const own=k=>Object.prototype.hasOwnProperty.call(urls,k);
+  const stale=k=>{ if(own(k)&&Date.now()-at[k]>=PHOTO_URL_KEEP_MS){ delete urls[k]; delete at[k]; save(); } };
+  return new Proxy(urls,{
+    get(t,k){ if(typeof k==='string') stale(k); return own(k)?t[k]:undefined; },
+    has(t,k){ if(typeof k==='string') stale(k); return own(k); },
+    set(t,k,v){ t[k]=v; at[k]=Date.now(); save(); return true; },
+    deleteProperty(t,k){ delete t[k]; delete at[k]; save(); return true; },
+  });
+})();
 // innerHTML can't await, so thumbnails are painted first and their signed
 // URLs patched in afterwards; URLs are cached so re-renders don't re-sign.
 // The same lines are listed on the order and again on each box, so which
