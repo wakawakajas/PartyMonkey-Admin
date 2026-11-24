@@ -3220,3 +3220,150 @@ document.addEventListener("keydown", (event) => {
   check();
   setInterval(check, 30 * 60 * 1000);
 })();
+
+// -- Pick Up Labels ---------------------------------------------------
+// BigSeller's To Pick Up Shopee orders, as one PDF per logistics group.
+// The agent does the talking; this is the button and what it reports.
+
+(function bsLabels() {
+  const panel = document.getElementById("bsLabelsPanel");
+  if (!panel) return;
+  const goBtn = document.getElementById("bsLabelsBtn");
+  const checkBtn = document.getElementById("bsLabelsCheckBtn");
+  const folderBtn = document.getElementById("bsLabelsFolderBtn");
+  const chip = document.getElementById("bsLabelsChip");
+  const target = document.getElementById("bsLabelsTarget");
+  const note = document.getElementById("bsLabelsNote");
+  const resultList = document.getElementById("bsLabelsResult");
+  const setup = document.getElementById("bsLabelsSetup");
+  const setupNote = document.getElementById("bsLabelsSetupNote");
+  const cookieState = document.getElementById("bsLabelsCookieState");
+  const cookieInput = document.getElementById("bsLabelsCookie");
+  const saveCookieBtn = document.getElementById("bsLabelsSaveCookieBtn");
+  const outDirInput = document.getElementById("bsLabelsOutDir");
+  const csvInput = document.getElementById("bsLabelsCsv");
+  const saveBtn = document.getElementById("bsLabelsSaveBtn");
+
+  function rows(lines) {
+    resultList.innerHTML = "";
+    for (const line of lines) {
+      const li = document.createElement("li");
+      li.textContent = line;
+      resultList.appendChild(li);
+    }
+  }
+
+  // The agent's reply is either {detail} on an error or the report itself.
+  async function call(url, options) {
+    const res = await fetch(url, options);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `The agent answered ${res.status}.`);
+    return body;
+  }
+
+  function applyStatus(st) {
+    if (!st) return;
+    chip.textContent = st.running ? "working" : st.last_run_at ? "ready" : "idle";
+    target.textContent = st.next_name ? `${st.next_name} \u2192 ${st.out_dir || ""}` : "";
+    cookieState.textContent = st.has_cookie ? "\u2014 saved" : "\u2014 not set yet";
+    if (!st.has_cookie && setup) setup.open = true;
+    if (outDirInput && !outDirInput.value) outDirInput.value = st.out_dir || "";
+    goBtn.disabled = !!st.running;
+  }
+
+  async function refresh() {
+    try {
+      applyStatus(await call("/api/bigseller-labels/status"));
+    } catch (err) {
+      /* the agent is down; the connection chip already says so */
+    }
+  }
+
+  goBtn.addEventListener("click", async () => {
+    goBtn.disabled = true;
+    chip.textContent = "working";
+    showNote(note, "Asking BigSeller to build the labels\u2026", "");
+    rows([]);
+    try {
+      const { report, status } = await call("/api/bigseller-labels/download", { method: "POST" });
+      applyStatus(status);
+      if (!report.total) {
+        showNote(note, report.message || "Nothing to pick up.", "");
+      } else {
+        showNote(note,
+          `${report.total} orders in ${report.seconds}s \u2014 ${report.folder}`, "success");
+        rows((report.files || []).map(
+          (f) => `${f.name}  \u2014  ${f.orders} orders, ${f.pages} pages`));
+      }
+    } catch (err) {
+      showNote(note, err.message, "error");
+      if (/cookie|signed in/i.test(err.message) && setup) setup.open = true;
+    }
+    goBtn.disabled = false;
+    refresh();
+  });
+
+  checkBtn.addEventListener("click", async () => {
+    showNote(note, "Looking\u2026", "");
+    rows([]);
+    try {
+      const p = await call("/api/bigseller-labels/preview");
+      showNote(note, `${p.total} orders waiting \u2014 would be "${p.name}"`, "success");
+      const lines = [];
+      for (const g of p.groups) {
+        if (!g.count) continue;
+        lines.push(`${g.name} \u2014 ${g.count}`);
+        for (const c of g.carriers) lines.push(`    ${c.count}  ${c.name}`);
+      }
+      rows(lines);
+    } catch (err) {
+      showNote(note, err.message, "error");
+      if (/cookie|signed in/i.test(err.message) && setup) setup.open = true;
+    }
+  });
+
+  folderBtn.addEventListener("click", async () => {
+    try {
+      const r = await call("/api/bigseller-labels/open-folder", { method: "POST" });
+      showNote(note, r.folder, "success");
+    } catch (err) {
+      showNote(note, err.message, "error");
+    }
+  });
+
+  saveCookieBtn.addEventListener("click", async () => {
+    const cookie = cookieInput.value.trim();
+    if (cookie.indexOf("=") === -1 || cookie.length < 40) {
+      showNote(setupNote, "That doesn't look like a cookie header.", "error");
+      return;
+    }
+    try {
+      const { status } = await call("/api/bigseller-labels/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cookie }),
+      });
+      cookieInput.value = "";
+      applyStatus(status);
+      showNote(setupNote, "Saved. Press \u201cWhat's waiting?\u201d to check it.", "success");
+    } catch (err) {
+      showNote(setupNote, err.message, "error");
+    }
+  });
+
+  saveBtn.addEventListener("click", async () => {
+    try {
+      const { status } = await call("/api/bigseller-labels/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ out_dir: outDirInput.value.trim(), write_csv: csvInput.checked }),
+      });
+      applyStatus(status);
+      showNote(setupNote, "Saved.", "success");
+    } catch (err) {
+      showNote(setupNote, err.message, "error");
+    }
+  });
+
+  refresh();
+})();

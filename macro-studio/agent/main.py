@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import cdp, config, duoke, fiery, labels, library, macro_store, pickup_sync, run_reports, scheduler as scheduler_mod, settings, video
+from agent import bigseller_labels, cdp, config, duoke, fiery, labels, library, macro_store, pickup_sync, run_reports, scheduler as scheduler_mod, settings, video
 from agent.macro_store import MacroNotFoundError
 from agent.panic import PanicWatcher
 from agent.recorder import Recorder
@@ -1132,6 +1132,72 @@ def fiery_send_now() -> JSONResponse:
     except Exception as exc:  # a failed pass is an answer, not a 500
         return JSONResponse(status_code=200, content={
             "report": {"error": f"{type(exc).__name__}: {exc}"}, "status": fiery.status()})
+
+
+# ------------------------------------------------- BigSeller pick-up labels
+# One button: today's To Pick Up Shopee orders out of BigSeller as one PDF per
+# logistics group, named and filed the way the drive already is.
+
+
+class BsLabelsConfig(BaseModel):
+    cookie: Optional[str] = None
+    out_dir: Optional[str] = None
+    groups: Optional[list] = None
+    chunk_size: Optional[int] = None
+    workers: Optional[int] = None
+    write_csv: Optional[bool] = None
+
+
+@app.get("/api/bigseller-labels/status")
+def bs_labels_status() -> dict:
+    return bigseller_labels.status()
+
+
+@app.put("/api/bigseller-labels/config")
+def bs_labels_config(body: BsLabelsConfig) -> JSONResponse:
+    """Only the fields actually sent change, so saving the folder from one
+    panel cannot blank the cookie saved from another."""
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    bigseller_labels.save(patch)
+    return JSONResponse(content={
+        "saved": bigseller_labels.redacted(),
+        "status": bigseller_labels.status(),
+    })
+
+
+@app.get("/api/bigseller-labels/preview")
+def bs_labels_preview() -> JSONResponse:
+    """What is waiting, without downloading -- and it proves the cookie."""
+    try:
+        return JSONResponse(content=bigseller_labels.preview())
+    except bigseller_labels.NotLoggedIn as exc:
+        return JSONResponse(status_code=401, content={"error": "login", "detail": str(exc)})
+    except bigseller_labels.LabelError as exc:
+        return JSONResponse(status_code=400, content={"error": "bigseller", "detail": str(exc)})
+
+
+@app.post("/api/bigseller-labels/download")
+def bs_labels_download() -> JSONResponse:
+    try:
+        return JSONResponse(content={
+            "report": bigseller_labels.download_now(),
+            "status": bigseller_labels.status(),
+        })
+    except bigseller_labels.NotLoggedIn as exc:
+        return JSONResponse(status_code=401, content={"error": "login", "detail": str(exc)})
+    except bigseller_labels.LabelError as exc:
+        return JSONResponse(status_code=400, content={"error": "bigseller", "detail": str(exc)})
+    except Exception as exc:  # a failed run is an answer, not a 500
+        return JSONResponse(status_code=400, content={
+            "error": "bigseller", "detail": f"{type(exc).__name__}: {exc}"})
+
+
+@app.post("/api/bigseller-labels/open-folder")
+def bs_labels_open_folder() -> JSONResponse:
+    try:
+        return JSONResponse(content={"folder": bigseller_labels.open_folder()})
+    except bigseller_labels.LabelError as exc:
+        return JSONResponse(status_code=400, content={"error": "bigseller", "detail": str(exc)})
 
 
 @app.websocket("/ws")
