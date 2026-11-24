@@ -3244,11 +3244,17 @@ document.addEventListener("keydown", (event) => {
   const csvInput = document.getElementById("bsLabelsCsv");
   const saveBtn = document.getElementById("bsLabelsSaveBtn");
 
+  // A line is either a heading, or a courier under one when it has `sub` --
+  // indented here rather than with spaces, which HTML would swallow.
   function rows(lines) {
     resultList.innerHTML = "";
     for (const line of lines) {
       const li = document.createElement("li");
-      li.textContent = line;
+      li.textContent = typeof line === "string" ? line : line.text;
+      if (line.sub) {
+        li.style.paddingLeft = "26px";
+        li.style.opacity = "0.7";
+      }
       resultList.appendChild(li);
     }
   }
@@ -3313,7 +3319,7 @@ document.addEventListener("keydown", (event) => {
       for (const g of p.groups) {
         if (!g.count) continue;
         lines.push(`${g.name} \u2014 ${g.count}`);
-        for (const c of g.carriers) lines.push(`    ${c.count}  ${c.name}`);
+        for (const c of g.carriers) lines.push({ text: `${c.count}  ${c.name}`, sub: true });
       }
       rows(lines);
     } catch (err) {
