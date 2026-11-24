@@ -3371,5 +3371,20 @@ document.addEventListener("keydown", (event) => {
     }
   });
 
+  // Pigu's "Download pick up labels" button opens this page at #labels-go.
+  // The hash is dropped once it has fired, so a reload of the tab does not
+  // quietly build a second set of files.
+  function fromHash() {
+    const hash = location.hash;
+    if (hash !== "#labels" && hash !== "#labels-go") return;
+    history.replaceState(null, "", location.pathname);
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (hash === "#labels-go" && !goBtn.disabled) goBtn.click();
+  }
+  // Normally Pigu opens a fresh tab, but a hash dropped on the page it is
+  // already showing changes nothing on its own -- so listen for that too.
+  window.addEventListener("hashchange", fromHash);
+  fromHash();
+
   refresh();
 })();
