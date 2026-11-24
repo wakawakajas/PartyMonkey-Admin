@@ -4,14 +4,18 @@ Every morning and afternoon the pick-up orders have to be printed. BigSeller
 can do it, but only one logistics channel at a time -- ask it for a mixed
 batch and it answers "If your orders belong to multiple logistics, we
 recommend Auto High-Speed Printing", which needs its printing plugin. So the
-button here asks for one PDF per courier and joins them up afterwards:
+button here asks for one PDF per courier and joins them up afterwards, into
+the one file the drive has always had:
 
-    Y:\\11 November 2026\\24 November 2026 Morning - Next Day Delivery.pdf
-    Y:\\11 November 2026\\24 November 2026 Morning - SPX.pdf
+    Y:\\11 November 2026\\24 November 2026 Morning.pdf
+
+The couriers go in in group order -- Next Day Delivery first, then the rest --
+so the stack comes off the printer sorted by who collects it. Setting
+one_file false gives a PDF per group instead, "... - SPX.pdf".
 
 Morning before noon, Afternoon from noon. Press it twice in the same half of
-the day and both files get the same number -- "(1)", then "(2)" -- so nothing
-on the drive is ever written over.
+the day and the second gets a number -- "(1)", then "(2)" -- so nothing on
+the drive is ever written over.
 
 Three calls do the work, all of them BigSeller's own web API:
 
@@ -73,6 +77,9 @@ DEFAULTS: dict[str, Any] = {
     # chunks are what lets them build side by side.
     "chunk_size": 15,
     "workers": 8,
+    # One PDF for the whole pick up, the way the drive has always had it.
+    # False puts each group in its own file instead, "... - SPX.pdf".
+    "one_file": True,
     # Off, so the drive stays PDFs only.
     "write_csv": False,
 }
@@ -372,7 +379,11 @@ def _download() -> dict:
 
     base = slot_name()
     group_names = [g for g, c in grouped.items() if c]
-    dests = run_paths(out_dir, base, [f" - {g}" for g in group_names])
+    # The groups still set the order inside the stack -- Next Day Delivery
+    # first, then the rest -- even when they all go in one file.
+    one_file = bool(cfg.get("one_file", True))
+    suffixes = [""] if one_file else [f" - {g}" for g in group_names]
+    dests = run_paths(out_dir, base, suffixes)
 
     tmp_dir = Path(os.environ.get("TEMP", str(config.ROOT_DIR))) / f"bslabels_{os.getpid()}_{int(time.time())}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -402,21 +413,28 @@ def _download() -> dict:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(build, tasks))
 
+        ordered = [p for _t, p in sorted(results, key=lambda r: r[0][:2])]
         files = []
-        for gidx, gname in enumerate(group_names):
-            parts = [p for (g, _s, _c, _i), p in sorted(results, key=lambda r: r[0][:2]) if g == gidx]
-            dest = dests[gidx]
-            pages = merge_pdfs(parts, dest)
-            files.append({
-                "name": dest.name,
-                "path": str(dest),
-                "group": gname,
-                "orders": sum(len(v) for v in grouped[gname].values()),
-                "pages": pages,
-            })
+        if one_file:
+            pages = merge_pdfs(ordered, dests[0])
+            files.append({"name": dests[0].name, "path": str(dests[0]),
+                          "group": ", ".join(group_names), "orders": len(rows), "pages": pages})
+        else:
+            for gidx, gname in enumerate(group_names):
+                parts = [p for (g, _s, _c, _i), p in sorted(results, key=lambda r: r[0][:2]) if g == gidx]
+                dest = dests[gidx]
+                pages = merge_pdfs(parts, dest)
+                files.append({
+                    "name": dest.name,
+                    "path": str(dest),
+                    "group": gname,
+                    "orders": sum(len(v) for v in grouped[gname].values()),
+                    "pages": pages,
+                })
 
         if cfg.get("write_csv"):
-            csv_path = dests[0].with_name(f"{dests[0].stem.rsplit(' - ', 1)[0]}.csv")
+            stem = dests[0].stem if one_file else dests[0].stem.rsplit(" - ", 1)[0]
+            csv_path = dests[0].with_name(f"{stem}.csv")
             with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
                 w.writerow(["Group", "Carrier", "Shop", "Order No.", "Tracking No.", "Package No."])
