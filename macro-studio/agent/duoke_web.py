@@ -590,19 +590,7 @@ _PICKER = r"""
       if (window.__piguClear) window.__piguClear();
     });
   }
-  // Alt+1, Alt+2 ... puts that answer in the box, as a click would
-  if (!window.__piguKeys) {
-    window.__piguKeys = true;
-    document.addEventListener('keydown', e => {
-      if (!e.altKey || e.ctrlKey || e.shiftKey || !/^Digit[1-9]$/.test(e.code)) return;
-      const q = document.getElementById(ID);
-      if (!q || q.style.display === 'none') return;
-      const b = q.querySelectorAll('button[type=button]')[Number(e.code.slice(5)) - 1];
-      if (!b) return;
-      e.preventDefault(); e.stopPropagation();
-      b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-    }, true);
-  }
+  // No Alt+number keys: an answer is picked by clicking it (2026-11-24).
   // ROOM FOR THE PICKER: it sits over the bottom of the messages, so the
   // message list gets that much extra space at its end and the buyer's newest
   // message scrolls up above the picker instead of under it (2026-11-16).
@@ -709,7 +697,7 @@ _PICKER = r"""
   const head = document.createElement('div');
   head.style.cssText = 'display:flex;align-items:center;gap:8px;color:#888;font-size:13px';
   head.innerHTML = '<b style="color:#e4572e;font-size:14px">Pigu</b><span style="flex:1">' + opts.length +
-    (opts.length > 1 ? ' replies' : ' reply') + ' &middot; click or Alt+number, then you press Enter &middot; hover to read all</span>';
+    (opts.length > 1 ? ' replies' : ' reply') + ' &middot; click one, then you press Enter &middot; hover to read all</span>';
   const fold = document.createElement('button');
   const x = document.createElement('button');
   [fold, x].forEach(k => { k.style.cssText = 'border:0;background:none;font-size:18px;cursor:pointer;color:#888;padding:0 4px;line-height:1'; });
@@ -746,14 +734,14 @@ _PICKER = r"""
   opts.forEach((o, i) => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.title = o.text + (i < 9 ? '\n\n(Alt+' + (i + 1) + ')' : '');
+    b.title = o.text;
     b.style.cssText = 'display:flex;gap:8px;align-items:baseline;width:100%;text-align:left;border:1px solid #eee;' +
       'background:#fafafa;border-radius:8px;padding:4px 8px;margin:3px 0;cursor:pointer;font:inherit;color:inherit';
     b.onmouseenter = () => { b.style.background = '#fff4ef'; b.style.borderColor = '#f3b49c'; };
     b.onmouseleave = () => { b.style.background = '#fafafa'; b.style.borderColor = '#eee'; };
     const tag = document.createElement('span');
     tag.style.cssText = 'flex:none;font-size:13px;color:#e4572e;font-weight:600;white-space:nowrap';
-    tag.textContent = (i < 9 ? (i + 1) + ' \u00b7 ' : '') + o.label + ((o.photos || []).length ? ' \ud83d\udcf7' : '');
+    tag.textContent = o.label + ((o.photos || []).length ? ' \ud83d\udcf7' : '');
     const t = document.createElement('span');
     t.style.cssText = 'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     t.textContent = o.text.replace(/\s+/g, ' ');
