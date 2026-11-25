@@ -8689,6 +8689,7 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
     <!-- Custom Template orders on one layout and one paper, printed together -->
     <div class="click-row mc-merge-row" style="margin-top:16px;">
       <label class="click-tog"><input type="checkbox" id="mcMergeSameToggle"/>Merge same layout &amp; paper</label>
+      <label class="click-tog flat-export-tog" title="Every sheet goes out as one 300 dpi CMYK picture: PDFs are not placed and converted one by one, so big files are made faster and are smaller. Very small words in a PDF print a little softer (300 dpi). A CMYK PDF keeps its own ink numbers within a point or two, and black stays black ink only. One setting for every template and Magic Create, kept on this computer."><input type="checkbox"/>Flatten (faster, one picture)</label>
     </div>
     <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
       <button class="btn-primary" id="mcDownloadAllBtn" style="flex:1 1 200px;height:50px;">Download All</button>
@@ -8945,6 +8946,7 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
       <div class="click-row" style="margin-bottom:8px;">
         <label class="click-tog" hidden><input type="checkbox" id="gtVectorToggle" checked/>PDF artwork goes in whole</label>
         <label class="click-tog"><input type="checkbox" id="gtPltToggle" checked/>Save the cut file (.plt)</label>
+        <label class="click-tog flat-export-tog" title="Every sheet goes out as one 300 dpi CMYK picture: PDFs are not placed and converted one by one, so big files are made faster and are smaller. Very small words in a PDF print a little softer (300 dpi). A CMYK PDF keeps its own ink numbers within a point or two, and black stays black ink only. One setting for every template and Magic Create, kept on this computer."><input type="checkbox"/>Flatten (faster, one picture)</label>
       </div>
       <div class="gt-export-grid">
       <button class="btn-primary" id="gtExportBtn" style="width:100%;height:50px;font-size:14px;">Save PDF &amp; cut file</button>
@@ -10056,6 +10058,7 @@ body.lt:not(.dk) .fpk-it.on{background:#E6E1FD;}
              colours it was drawn in are the colours that are printed. -->
         <div class="click-row" style="margin-top:9px;">
           <label class="click-tog" hidden><input type="checkbox" id="wholeArtToggle" checked/>PDF artwork goes in whole</label>
+          <label class="click-tog flat-export-tog" title="Every sheet goes out as one 300 dpi CMYK picture: PDFs are not placed and converted one by one, so big files are made faster and are smaller. Very small words in a PDF print a little softer (300 dpi). A CMYK PDF keeps its own ink numbers within a point or two, and black stays black ink only. One setting for every template and Magic Create, kept on this computer."><input type="checkbox"/>Flatten (faster, one picture)</label>
         </div>
         <div id="printColourFront"></div>
         <div id="exportMsgFront"></div>
@@ -13945,6 +13948,24 @@ function renderSide(side,canvas,maxDim,opts){
         ctx.clip('evenodd');
       });
     }
+    // Flattened (flatExportOn), a CMYK PDF's card is pixels: written down as a
+    // ring over the whole card, so the export makes it CMYK as its placed page
+    // would be - the PDF's own ink, else GRACoL, with the look (sheetRingConv) -
+    // not matched to the paper like a picture (M90 Y70 came out M98 Y92)
+    if(pass==='art'&&opts.forExport&&!ringOnly&&!invert&&flatExportOn()) try{
+      const f=printArtPdf(img);
+      if(f&&_pdfCmyk.get(f)===true){
+        const m=ctx.getTransform(), P=(x,y)=>[m.a*x*sc+m.c*y*sc+m.e,m.b*x*sc+m.d*y*sc+m.f];
+        const box=(x,y,w,h)=>{ const a=P(x,y), b=P(x+w,y+h); return [Math.min(a[0],b[0]),Math.min(a[1],b[1]),Math.max(a[0],b[0]),Math.max(a[1],b[1])]; };
+        const o=box(clip.x,clip.y,clip.w,clip.h).map((v,q)=>q<2?v-1:v+1);
+        const c0=[(o[0]+o[2])/2,(o[1]+o[3])/2];
+        const to=artTrimOff(img,tf);
+        const ab=box(ph.xMm+ph.wMm/2-boxW/2-to.x*boxW,ph.yMm+ph.hMm/2-boxH/2-to.y*boxH,boxW,boxH);
+        const flip=m.a<0||m.d<0||m.b||m.c;
+        (opts._cmykRings||(opts._cmykRings=[])).push({o,i:[c0[0],c0[1],c0[0],c0[1]],a:ab,h:holes.map(q=>box(q.x,q.y,q.w,q.h)),
+          rot:flip?90:(rotDeg||0),f,pic:printArtExportImg(img),flat:true});
+      }
+    }catch(e){}
     ctx.translate(cx,cy);
     ctx.rotate(rotDeg*Math.PI/180);
     if(invert) ctx.filter='invert(1)';
@@ -34745,6 +34766,19 @@ async function sheetPacked(imgData,rings){
 async function sheetRingConv(imgData,rings){
   const {toGracol}=await lcmsLib();
   const kg=await printKOnly(null).catch(()=>null);
+  // a flattened card (flat): what was drawn from black ink alone (GRACoL's K
+  // ramp, as pdf.js 5 draws it) goes back to black ink alone - small black
+  // words otherwise came out in four inks (C76 M68 Y63 K83)
+  let kRamp=null;
+  if(rings.some(r=>r.flat)){ const {fromGracol}=await lcmsLib(); const c=new Uint8Array(256*4); for(let k=0;k<256;k++) c[k*4+3]=k; kRamp=fromGracol(c,256); }
+  const kMemo=new Map();
+  const kOf=(r,g,b)=>{
+    if(Math.abs(r-g)>6||Math.abs(g-b)>6||Math.abs(r-b)>6) return -1;
+    const key=(r<<16)|(g<<8)|b; if(kMemo.has(key)) return kMemo.get(key);
+    let best=-1, bd=4;
+    for(let k=0;k<256;k++){ const q=k*3, d=Math.max(Math.abs(kRamp[q]-r),Math.abs(kRamp[q+1]-g),Math.abs(kRamp[q+2]-b)); if(d<bd){ bd=d; best=k; } }
+    kMemo.set(key,best); return best;
+  };
   const P=await cmykLookParts(printMatchPaper(),printWarm());
   const luts=new Map();
   for(const r of rings) if(r.f&&!luts.has(r.f)) luts.set(r.f,await pdfOwnCmykLut(r.f,r.pic).catch(()=>null));
@@ -34773,6 +34807,7 @@ async function sheetRingConv(imgData,rings){
     for(let j=0;j<n;j++){
       const v=lut&&lut(a[j*3],a[j*3+1],a[j*3+2]);
       if(v){ base.set(v,j*4); continue; }
+      if(r.flat&&kRamp){ const k=kOf(a[j*3],a[j*3+1],a[j*3+2]); if(k>=0){ base[j*4+3]=k; continue; } }
       if(kg&&a[j*3]===a[j*3+1]&&a[j*3]===a[j*3+2]){ base[j*4+3]=kg[a[j*3]]; continue; }
       miss.push(j);
     }
@@ -36030,7 +36065,9 @@ async function printArtExportReady(){
     try{ fn(s).forEach(([,o])=>{ if(o&&o.img){ artSrc(o); a.push(o); } }); }catch(e){} })); return a; };
   arts();
   await Promise.race([Promise.allSettled([..._pdfScans]),by(20000)]);
-  if(!printExportPixels()) return;
+  // flattened, every PDF is drawn into the sheet from its export picture
+  const flat=flatExportOn();
+  if(!flat&&!printExportPixels()) return;
   const until=Date.now()+180000, seen=new Set();
   for(const o of arts()){
     const img=o.img, f=printArtPdf(img);
@@ -36041,13 +36078,13 @@ async function printArtExportReady(){
     const left=until-Date.now(); if(left<=0) break;
     // an RGB PDF's page is matched (pdfMatchColours), so its band is its own
     // numbers, matched with the sheet; unmatched, read as the Adobe RGB it is
-    if(!cm&&(PDF_AS_CMYK||printMatchPaper())) continue;
+    if(!flat&&!cm&&(PDF_AS_CMYK||printMatchPaper())) continue;
     // a picture that comes after the wait is not taken: the fill pass went on
     // without it, and one landing before the real pass printed a fill nobody waited for.
     // Tagged with the PDF it is of (_fillOf), so its filled bleed is made once
     // and kept, not made again - AI fill called again - for every export
     let late=false;
-    await Promise.race([(cm?pdf5Draw(img,f,'export'):pdfRgbAsAdobe(img)).then(c=>{ if(late||!c) return; c._fillOf=img; c._fillSig='x'; e.c=c; }).catch(()=>{}),by(left)]);
+    await Promise.race([(cm||flat?pdf5Draw(img,f,'export'):pdfRgbAsAdobe(img)).then(c=>{ if(late||!c) return; c._fillOf=img; c._fillSig='x'; e.c=c; }).catch(()=>{}),by(left)]);
     late=true;
   }
 }
@@ -39587,7 +39624,7 @@ function imgFinerThanSheet(img,side){
 }
 async function printVectorSources(side){
   const out=new Map();
-  if(!wholeArtOn()) return out;
+  if(!wholeArtOn()||flatExportOn()) return out;
   for(const [key,o] of sideArtObjs(side)){
     let bytes=await artPdfBytes(o), inverted=false;
     const swaps=o&&o.img?swapsForIds(new Set([artImgId(o.img)])):[];
@@ -39801,6 +39838,20 @@ document.getElementById('exportFrontBtn').addEventListener('click',()=>exportSid
 document.getElementById('exportBackBtn').addEventListener('click',()=>exportSide('back'));
 document.getElementById('printFrontBtn').addEventListener('click',()=>exportSide('front',null,true));
 document.getElementById('printBackBtn').addEventListener('click',()=>exportSide('back',null,true));
+// Flatten (25 Nov): every export - Custom Template, gift tags, Magic Create -
+// as one 300 dpi CMYK picture a sheet, no PDF placed (printVectorSources,
+// gtVectorSources): big files made faster and smaller. PDFs drawn from their
+// export picture (printArtExportReady), greys black ink only (gtBuildPdf).
+// One setting, kept on this computer; every tick box shows it.
+const FLAT_EXPORT_KEY='pigu.flatExport';
+function flatExportOn(){ try{ return localStorage.getItem(FLAT_EXPORT_KEY)==='1'; }catch(e){ return false; } }
+function flatExportShow(){ const on=flatExportOn(); document.querySelectorAll('.flat-export-tog input').forEach(i=>{ i.checked=on; }); }
+document.addEventListener('change',e=>{
+  const i=e.target; if(!i||!i.closest||!i.closest('.flat-export-tog')) return;
+  try{ localStorage.setItem(FLAT_EXPORT_KEY,i.checked?'1':'0'); }catch(err){}
+  flatExportShow();
+});
+flatExportShow();
 // the two switches are one setting, so whichever is turned the other follows
 document.getElementById('wholeArtToggle').checked=wholeArtOn();
 document.getElementById('wholeArtToggle').addEventListener('change',e=>{
@@ -43567,6 +43618,8 @@ const HELP=[
    h:'Top bar → <b>More ▾</b> → <b>Look at the cut file first</b>.',more:1,find:'Look at the cut file first'},
   {on:'sheet',t:'Save the cut file (.plt) or not',k:'plt cut file on off',
    h:'Top bar → <b>More ▾</b> → tick <b>Save the cut file (.plt)</b> to save it with the PDF.',more:1,find:'Save the cut file'},
+  {on:'sheet custom',t:'Flatten: faster, smaller print files',k:'flatten flat export fast slow big file size one picture raster magic create gift tag',
+   h:'Tick <b>Flatten (faster, one picture)</b> under the Custom Template download buttons, on the gift tag page or in Magic Create (one setting for all of them, kept on this computer). Every sheet then goes out as one 300 dpi CMYK picture instead of placing each PDF on its own, so big files are made faster and are smaller to send to the Fiery. Very small words in a PDF print a little softer (300 dpi instead of sharp lines). A CMYK PDF keeps its own ink numbers within a point or two, and black words stay black ink only. Untick it to go back to placing PDFs whole (sharpest). The test sheet is not flattened.',find:'Flatten (faster, one picture)'},
   {on:'sheet',t:'PDF artwork goes in whole',k:'pdf vector embed whole sharp',
    h:'Top bar → <b>More ▾</b> → <b>PDF artwork goes in whole</b>: a PDF design is put in as it is (sharp), not turned into a picture.',more:1,find:'PDF artwork goes in whole'},
   {on:'sheet',t:'Copy, paste or duplicate a line',k:'duplicate copy paste line ctrl d c v',
@@ -49885,7 +49938,9 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
   // own ink, held to the card's edge (sheetRingConv), as the Custom Print
   // Template does. Left to the sheet's conversion, a K-only black card came
   // out of Magic Create with a rich black band round it.
-  if(took==='ring'&&gtRingsCatch&&!invert&&(bm==='content'||bm==='ai')) try{
+  // and flattened (flatExportOn), a CMYK PDF's whole tag is pixels: the same,
+  // over the whole tag
+  if(gtRingsCatch&&!invert&&((took==='ring'&&(bm==='content'||bm==='ai'))||(!took&&flatExportOn()))) try{
     const pf=printArtPdf(img);
     if(pf&&_pdfCmyk.get(pf)===true){
       const m=ctx.getTransform();
@@ -49898,7 +49953,7 @@ function gtPutArt(ctx,img,key,art,x,y,w,h,b,sc,vec,invert,box,design){
       const cx=(o[0]+o[2])/2, cy=(o[1]+o[3])/2;
       // a turned or flipped page is not held to its picture edge by edge
       const square=!turn&&m.a>0&&m.d>0&&!m.b&&!m.c;
-      gtRingsCatch.push({o,i:[cx,cy,cx,cy],a:bx(r.x,r.y,r.w,r.h),h:[],rot:square?0:90,f:pf,pic:printArtExportImg(img)});
+      gtRingsCatch.push({o,i:[cx,cy,cx,cy],a:bx(r.x,r.y,r.w,r.h),h:[],rot:square?0:90,f:pf,pic:printArtExportImg(img),flat:!took});
     }
   }catch(e){}
   ctx.save();
@@ -56875,8 +56930,11 @@ function mtxMul(m,n){
 async function gtBuildPdf(count,render,sources,ctx){
   // every PDF's bleed pixels drawn as its page prints, let go once written
   const was=_printCtxNow; _printCtxNow=ctx||null;
+  // flattened (nothing placed), greys and black as black ink alone, as a
+  // placed PDF's are: small black words stay sharp, not four inks
+  const kOnly=flatExportOn()&&!(sources&&sources.size); if(kOnly) _sheetKOnly++;
   try{ await gtHydrateWait(); await printArtExportReady(); return await gtBuildPdfNow(count,render,sources); }
-  finally{ printArtExportDone(); _printCtxNow=was; }
+  finally{ if(kOnly) _sheetKOnly--; printArtExportDone(); _printCtxNow=was; }
 }
 async function gtBuildPdfNow(count,render,sources){
   await gtHydrateWait();              // every design's picture, drawn behind the page
@@ -57174,7 +57232,7 @@ function gtVecTaker(forms,place){
 // side 'back': the back pictures instead, keyed as gtBackOf names them.
 async function gtVectorSources(side){
   const out=new Map();
-  if(!wholeArtOn()) return out;
+  if(!wholeArtOn()||flatExportOn()) return out;
   for(const line of gtQueue()){
     const d=gtDesign(line.designId); if(!d) continue;
     const bk=side==='back'?gtBackOf(d,line):null;
