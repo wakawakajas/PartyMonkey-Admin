@@ -657,8 +657,10 @@ _PICKER = r"""
       if (q.height > 420) break;
       if (q.top < top) top = q.top;
     }
-    p.style.left = Math.round(r.left) + 'px';
-    p.style.width = Math.round(Math.min(r.width, 820)) + 'px';
+    // right-aligned with the reply box (the user wants it on the right)
+    const w = Math.min(r.width, 820);
+    p.style.left = Math.round(r.right - w) + 'px';
+    p.style.width = Math.round(w) + 'px';
     p.style.bottom = Math.round(window.innerHeight - Math.min(r.top, top) + 6) + 'px';
   };
   if (p && p.dataset.sig === sig) { if (p.dataset.closed !== conv) place(); return 'same'; }

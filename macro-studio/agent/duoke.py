@@ -2904,6 +2904,8 @@ def picker_options(text: str, draft: str, shop_id: str = "") -> list[dict]:
 def update_picker() -> None:
     """Keep the picker over DuoKe's reply box in step with the open chat."""
     if not load().get("reply_picker", True):
+        # switched off: take down any picker still on screen from before
+        duoke_web.show_picker("", [])
         return
     rows, conv = duoke_web.list_sessions()
     item = _picker.get(conv) if conv else None
