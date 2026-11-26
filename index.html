@@ -57053,6 +57053,31 @@ function mtxMul(m,n){
 }
 // ctx: the builder the file is for ('custom' / 'gt'), whose paper it is matched
 // to (printMatchPaper)
+// The parts of a page's picture that hold anything (alpha), as rectangles:
+// 64 px squares grouped where they touch, and boxes that then overlap put
+// together, so no pixel is in two of them (two soft edges laid over each
+// other would print darker). share: how much of the page they cover.
+function sheetPatches(img){
+  const w=img.width, h=img.height, d=img.data, T=64, tw=Math.ceil(w/T), th=Math.ceil(h/T);
+  const on=new Uint8Array(tw*th);
+  for(let y=0;y<h;y++){ const row=(y/T|0)*tw;
+    for(let x=0;x<w;x++) if(d[(y*w+x)*4+3]){ on[row+(x/T|0)]=1; x=Math.min(w,((x/T|0)+1)*T)-1; } }
+  const seen=new Uint8Array(tw*th); let boxes=[];
+  for(let k=0;k<on.length;k++){ if(!on[k]||seen[k]) continue;
+    let bx0=tw, by0=th, bx1=0, by1=0; const st=[k]; seen[k]=1;
+    while(st.length){ const c=st.pop(), cx=c%tw, cy=(c/tw)|0;
+      bx0=Math.min(bx0,cx); by0=Math.min(by0,cy); bx1=Math.max(bx1,cx+1); by1=Math.max(by1,cy+1);
+      for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){ const nx=cx+dx, ny=cy+dy;
+        if(nx<0||ny<0||nx>=tw||ny>=th) continue; const q=ny*tw+nx; if(on[q]&&!seen[q]){ seen[q]=1; st.push(q); } } }
+    boxes.push([bx0,by0,bx1,by1]); }
+  for(let merged=true;merged;){ merged=false;
+    for(let i=0;i<boxes.length&&!merged;i++) for(let j=i+1;j<boxes.length;j++){ const a=boxes[i], c=boxes[j];
+      if(a[0]<c[2]&&c[0]<a[2]&&a[1]<c[3]&&c[1]<a[3]){
+        boxes[i]=[Math.min(a[0],c[0]),Math.min(a[1],c[1]),Math.max(a[2],c[2]),Math.max(a[3],c[3])]; boxes.splice(j,1); merged=true; break; } } }
+  boxes=boxes.map(([a,c,e,g])=>[a*T,c*T,Math.min(w,e*T),Math.min(h,g*T)]);
+  const area=boxes.reduce((s,[a,c,e,g])=>s+(e-a)*(g-c),0);
+  return {boxes,share:area/(w*h)};
+}
 async function gtBuildPdf(count,render,sources,ctx){
   // every PDF's bleed pixels drawn as its page prints, let go once written
   const was=_printCtxNow; _printCtxNow=ctx||null;
@@ -57108,9 +57133,40 @@ async function gtBuildPdfNow(count,render,sources){
     const alpha=(clear||put.length)?rgbaToAlphaScanlines(imgData):null;
     // what the mask hides takes its neighbours' colour, so no black is blended in
     if(alpha) rgbaFillClear(imgData,4);
-    const sl=await sheetPacked(imgData,rings), deflated=sl.packed;
-    const packedA=alpha?await deflateBytes(alpha):null;
-    const imgNum=alloc(), maskNum=alpha?alloc():0, contentNum=alloc(), pageNum=alloc();
+    // A page whose cards are placed is mostly see-through: its own picture is
+    // the marks, the words over the sheet and any bleed band, 0.01% of it on an
+    // A6 sheet of eight. Sent whole, the Fiery opened a full 300 dpi CMYK sheet
+    // with a soft mask for every page (79 MB each, a 300-a-design run crawled).
+    // It goes as the patches that hold something instead; drawn (flattened, a
+    // sheet with no paper under it) it stays one picture.
+    let patches=alpha?sheetPatches(imgData):null;
+    if(patches&&patches.share>0.5) patches=null;
+    const sl=patches?null:await sheetPacked(imgData,rings), deflated=sl&&sl.packed;
+    const packedA=alpha&&!patches?await deflateBytes(alpha):null;
+    const imgNum=patches?0:alloc(), maskNum=alpha&&!patches?alloc():0, contentNum=alloc(), pageNum=alloc();
+    const pnames=[];
+    if(patches){
+      const pw=imgData.width, sx=mmToPt(wMm)/pw, sy=mmToPt(hMm)/imgData.height, Hp=mmToPt(hMm);
+      for(const [x0,y0,x1,y1] of patches.boxes){
+        const cw=x1-x0, ch=y1-y0, cd=new ImageData(cw,ch);
+        for(let y=0;y<ch;y++) cd.data.set(imgData.data.subarray(((y0+y)*pw+x0)*4,((y0+y)*pw+x1)*4),y*cw*4);
+        // the bands that reach this patch, moved to its corner
+        const mv=(q,n)=>q.map((v,k)=>k<n?v-(k%2?y0:x0):v);
+        const rs=(rings||[]).filter(r=>r.o[2]>x0&&r.o[0]<x1&&r.o[3]>y0&&r.o[1]<y1)
+          .map(r=>({...r,o:mv(r.o,4),i:mv(r.i,4),a:r.a?mv(r.a,4):r.a,h:(r.h||[]).map(q=>mv(q,4))}));
+        const am=rgbaToAlphaScanlines(cd); rgbaFillClear(cd,4);
+        const ps=await sheetPacked(cd,rs.length?rs:null), pm=await deflateBytes(am);
+        const num=alloc(), mnum=alloc(), nm='Ip'+pnames.length;
+        mark(num); push(enc.encode(`${num} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${cw} /Height ${ch} `
+          +sheetColourSpace(ps,iccNum)+`/BitsPerComponent 8 /Columns ${cw} >> /SMask ${mnum} 0 R /Length ${ps.packed.length} >>\nstream\n`));
+        push(ps.packed); push(enc.encode('\nendstream\nendobj\n'));
+        mark(mnum); push(enc.encode(`${mnum} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${cw} /Height ${ch} `
+          +`/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 1 `
+          +`/BitsPerComponent 8 /Columns ${cw} >> /Length ${pm.length} >>\nstream\n`));
+        push(pm); push(enc.encode('\nendstream\nendobj\n'));
+        pnames.push([nm,num,`q ${f(cw*sx)} 0 0 ${f(ch*sy)} ${f(x0*sx)} ${f(Hp-y1*sy)} cm /${nm} Do Q`]);
+      }
+    }
     // white paper under everything: no ink, so nothing below can show black
     // its own line: the first card placed went on straight after it ('Qq'),
     // which strict readers (Acrobat, the Fiery) refuse
@@ -57196,8 +57252,9 @@ async function gtBuildPdfNow(count,render,sources){
         }));
       }
     });
-    cs+=`
+    if(!patches) cs+=`
 q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
+    else pnames.forEach(([,,op])=>{ cs+='\n'+op; });
     // Layers over the page at a finer resolution than it — a place card's
     // words. Each is drawn, packed and let go one at a time, so a sheet of
     // them never holds more than one layer's pixels at once.
@@ -57228,7 +57285,7 @@ q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
     // drawing that goes in as vector, over everything (the cutter's QR code)
     if(ink) cs+='\n'+ink;
     const content=enc.encode(cs);
-    const xo=['/Im0 '+imgNum+' 0 R']
+    const xo=(patches?pnames.map(([nm,num])=>`/${nm} ${num} 0 R`):['/Im0 '+imgNum+' 0 R'])
       .concat([...names].map(([form,nm])=>`/${nm} ${form} 0 R`))
       .concat(layers.map(([nm,num])=>`/${nm} ${num} 0 R`)).join(' ');
     mark(pageNum); push(enc.encode(`${pageNum} 0 obj\n<< /Type /Page /Parent ${pages} 0 R `
@@ -57238,6 +57295,7 @@ q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
       +`/Contents ${contentNum} 0 R >>\nendobj\n`));
     mark(contentNum); push(enc.encode(`${contentNum} 0 obj\n<< /Length ${content.length} >>\nstream\n`));
     push(content); push(enc.encode('\nendstream\nendobj\n'));
+    if(!patches){
     mark(imgNum); push(enc.encode(`${imgNum} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${imgData.width} `
       +`/Height ${imgData.height} `+sheetColourSpace(sl,iccNum)+`/BitsPerComponent 8 /Columns ${imgData.width} >> `
       +(maskNum?`/SMask ${maskNum} 0 R `:'')
@@ -57249,6 +57307,7 @@ q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
         +`/DecodeParms << /Predictor 15 /Colors 1 /BitsPerComponent 8 /Columns ${imgData.width} >> `
         +`/Length ${packedA.length} >>\nstream\n`));
       push(packedA); push(enc.encode('\nendstream\nendobj\n'));
+    }
     }
     kids.push(pageNum);
   }
