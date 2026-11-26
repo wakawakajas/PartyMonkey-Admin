@@ -34820,6 +34820,9 @@ async function sheetRingConv(imgData,rings){
       const base=new Int16Array(n*4), miss=[];
       for(let j=0;j<n;j++){
         const R=cols[j]>>16, G=(cols[j]>>8)&255, B=cols[j]&255;
+        // paper white is no ink, whatever a picture under it was (a round sticker's
+        // square of pale pink round it, 26 Nov)
+        if(R===255&&G===255&&B===255) continue;
         const v=lut&&lut(R,G,B);
         if(v){ base.set(v,j*4); continue; }
         if(kRamp){ const k=kOf(R,G,B); if(k>=0){ base[j*4+3]=k; continue; } }
@@ -34852,6 +34855,7 @@ async function sheetRingConv(imgData,rings){
     // the designer's CMYK for each colour: the PDF's own, or GRACoL where it has none
     const base=new Int16Array(n*4), miss=[];
     for(let j=0;j<n;j++){
+      if(a[j*3]===255&&a[j*3+1]===255&&a[j*3+2]===255) continue;   // paper white: no ink
       const v=lut&&lut(a[j*3],a[j*3+1],a[j*3+2]);
       if(v){ base.set(v,j*4); continue; }
       if(r.flat&&kRamp){ const k=kOf(a[j*3],a[j*3+1],a[j*3+2]); if(k>=0){ base[j*4+3]=k; continue; } }
@@ -35013,6 +35017,7 @@ function pdfOwnCmykLut(f,pic){
           const x=Math.floor((i+0.5)*W2/G), y=Math.floor((j+0.5)*H2/G);
           const [sx,sy]=turnAt(k,best.W,best.H,x,y), o=(sy*best.W+sx)*4;
           const X=Math.min(pw-1,Math.floor((x+0.5)*pw/W2)), Y=Math.min(ph-1,Math.floor((y+0.5)*ph/H2)), q=(Y*pw+X)*4;
+          if(pd[q+3]<250) continue;
           const cell=((pd[q]>>3)<<10)|((pd[q+1]>>3)<<5)|(pd[q+2]>>3);
           n[cell]++; for(let t=0;t<4;t++){ s[cell*4+t]+=best.c[o+t]; q2[cell]+=best.c[o+t]*best.c[o+t]; }
         }
@@ -35031,12 +35036,15 @@ function pdfOwnCmykLut(f,pic){
           c2[d]=best.c[o]; c2[d+1]=best.c[o+1]; c2[d+2]=best.c[o+2]; c2[d+3]=best.c[o+3]; }
         best={W:W2,H:H2,c:c2};
       } }
-    const sum=new Uint32Array(32768*4), cnt=new Uint32Array(32768), sq=new Float64Array(32768);
+    const sum=new Uint32Array(32768*4), cnt=new Uint32Array(32768), sq=new Float64Array(32768), sumC=new Float64Array(32768*3);
     for(let y=0;y<best.H;y++){
       const Y=Math.min(ph-1,Math.floor((y+0.5)*ph/best.H));
       for(let x=0;x<best.W;x++){
         const X=Math.min(pw-1,Math.floor((x+0.5)*pw/best.W)), q=(Y*pw+X)*4, s=(y*best.W+x)*4;
+        // see-through on the page (outside a sticker's shape): the picture under it is not shown
+        if(pd[q+3]<250) continue;
         const cell=((pd[q]>>3)<<10)|((pd[q+1]>>3)<<5)|(pd[q+2]>>3);
+        sumC[cell*3]+=pd[q]; sumC[cell*3+1]+=pd[q+1]; sumC[cell*3+2]+=pd[q+2];
         cnt[cell]++; sum[cell*4]+=best.c[s]; sum[cell*4+1]+=best.c[s+1]; sum[cell*4+2]+=best.c[s+2]; sum[cell*4+3]+=best.c[s+3];
         sq[cell]+=best.c[s]*best.c[s]+best.c[s+1]*best.c[s+1]+best.c[s+2]*best.c[s+2]+best.c[s+3]*best.c[s+3];
       }
@@ -35061,8 +35069,10 @@ function pdfOwnCmykLut(f,pic){
       cells.forEach((cell,t)=>{ for(let i=0;i<4;i++) ink[t*4+i]=Math.round(sum[cell*4+i]/cnt[cell]); });
       const rgb=cells.length?fromGracol(ink,cells.length):null;
       cells.forEach((cell,t)=>{
-        const r=((cell>>10)<<3)+4, gg=(((cell>>5)&31)<<3)+4, bb=((cell&31)<<3)+4;
-        if(Math.max(Math.abs(rgb[t*3]-r),Math.abs(rgb[t*3+1]-gg),Math.abs(rgb[t*3+2]-bb))>40) cnt[cell]=0;
+        // against the colours actually paired there: right pairs land within
+        // 10 (26 Nov, eight Christmas cards); 40 let a pale pink under paper white through
+        const r=sumC[cell*3]/cnt[cell], gg=sumC[cell*3+1]/cnt[cell], bb=sumC[cell*3+2]/cnt[cell];
+        if(Math.max(Math.abs(rgb[t*3]-r),Math.abs(rgb[t*3+1]-gg),Math.abs(rgb[t*3+2]-bb))>12) cnt[cell]=0;
       }); }
     const memo=new Map();
     const look=(r,gg,b)=>{
