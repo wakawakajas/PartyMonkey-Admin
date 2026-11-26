@@ -2270,5 +2270,21 @@ def main():
     srv.serve_forever()
 
 
+def no_quick_edit():
+    """A click in the black window used to select text and freeze the server
+    (Windows pauses any program writing to a window with a selection).
+    Switch that select mode off for this window only. Local, no network."""
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-10)             # this window's input
+        m = ctypes.c_uint32()
+        if k.GetConsoleMode(h, ctypes.byref(m)):
+            k.SetConsoleMode(h, (m.value & ~0x40) | 0x80)   # QuickEdit off
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    no_quick_edit()
     main()
