@@ -34798,6 +34798,45 @@ async function sheetRingConv(imgData,rings){
     const lut=r.f?luts.get(r.f):null;
     // other cards' trims (whole), and the colour details' own letters (mask)
     const hs=(r.h||[]).map(b=>[Math.floor(b[0]),Math.floor(b[1]),Math.ceil(b[2]),Math.ceil(b[3]),b[4]||null]);
+    // Flattened, the ring is the whole card and nothing in it depends on where
+    // a pixel is, only on its colour: each colour is worked out once and the
+    // card kept as a rectangle of colour numbers. Kept pixel by pixel (three
+    // plain lists, then gone over again for every slice of the sheet) one A6
+    // sheet of eight cards held 1.1 GB and took seconds (26 Nov).
+    if(r.flat){
+      const RW=ox1-ox0, RH=oy1-oy0; if(RW<=0||RH<=0) continue;
+      const idx=new Int32Array(RW*RH).fill(-1), ids=new Map(), cols=[];
+      for(let y=oy0;y<oy1;y++){
+        const hy=hs.length?hs.filter(b=>y>=b[1]&&y<b[3]):null;
+        for(let x=ox0;x<ox1;x++){
+          const q=(y*w+x)*4; if(!data[q+3]) continue;      // see-through: the placed page shows there
+          if(hy&&hy.length&&hy.some(b=>x>=b[0]&&x<b[2]&&(!b[4]||b[4][(y-b[1])*(b[2]-b[0])+(x-b[0])]))) continue;   // another card's own
+          const key=(data[q]<<16)|(data[q+1]<<8)|data[q+2];
+          let id=ids.get(key); if(id===undefined){ id=cols.length; ids.set(key,id); cols.push(key); }
+          idx[(y-oy0)*RW+(x-ox0)]=id;
+        }
+      }
+      const n=cols.length; if(!n) continue;
+      const base=new Int16Array(n*4), miss=[];
+      for(let j=0;j<n;j++){
+        const R=cols[j]>>16, G=(cols[j]>>8)&255, B=cols[j]&255;
+        const v=lut&&lut(R,G,B);
+        if(v){ base.set(v,j*4); continue; }
+        if(kRamp){ const k=kOf(R,G,B); if(k>=0){ base[j*4+3]=k; continue; } }
+        if(kg&&R===G&&R===B){ base[j*4+3]=kg[R]; continue; }
+        miss.push(j);
+      }
+      if(miss.length){
+        const m=new Uint8Array(miss.length*3); miss.forEach((j,t)=>{ m[t*3]=cols[j]>>16; m[t*3+1]=(cols[j]>>8)&255; m[t*3+2]=cols[j]&255; });
+        const k=toGracol(m,miss.length); miss.forEach((j,t)=>{ for(let c=0;c<4;c++) base[j*4+c]=k[t*4+c]; });
+      }
+      const b8=new Uint8Array(n*4); for(let j=0;j<n*4;j++) b8[j]=Math.max(0,Math.min(255,base[j]));
+      let k=b8;
+      if(P.lookK) k=P.cmykLook(b8,n);
+      else if(P.w){ k=b8.slice(); for(let q=2;q<k.length;q+=4) k[q]=printWarmY(k[q],P.w); }
+      pre.push({flat:true,ox0,oy0,RW,RH,idx,k});
+      continue;
+    }
     const xs=[], ys=[], rgb=[];
     for(let y=oy0;y<oy1;y++){
       const inRow=y>=iy0&&y<iy1;
@@ -34893,7 +34932,17 @@ async function sheetRingConv(imgData,rings){
     pre.push({xs,ys,k});
   }
   return (out,y0,y1)=>{
-    for(const {xs,ys,k} of pre){
+    for(const e of pre){
+      if(e.flat){
+        const ya=Math.max(y0,e.oy0), yb=Math.min(y1,e.oy0+e.RH), {idx,k,RW}=e;
+        for(let y=ya;y<yb;y++){
+          const o=(y-y0)*row+1+e.ox0*4, ib=(y-e.oy0)*RW;
+          for(let x=0;x<RW;x++){ const id=idx[ib+x]; if(id<0) continue;
+            const p=o+x*4, s=id*4; out[p]=k[s]; out[p+1]=k[s+1]; out[p+2]=k[s+2]; out[p+3]=k[s+3]; }
+        }
+        continue;
+      }
+      const {xs,ys,k}=e;
       for(let j=0;j<xs.length;j++){
         const y=ys[j]; if(y<y0||y>=y1) continue;
         const p=(y-y0)*row+1+xs[j]*4;
@@ -34912,8 +34961,11 @@ const _pdfOwnLut=new Map();
 function pdfOwnCmykLut(f,pic){
   if(!f||!pic) return Promise.resolve(null);
   // least recently used goes first: a hit moves to the back
+  // one made flattened has no picture kept (below): made again for a placed export
+  if(_pdfOwnLut.has(f)&&_pdfOwnLut.get(f)._flat&&!flatExportOn()) _pdfOwnLut.delete(f);
   if(_pdfOwnLut.has(f)){ const p=_pdfOwnLut.get(f); _pdfOwnLut.delete(f); _pdfOwnLut.set(f,p); return p; }
-  { while(_pdfOwnLut.size>=4) _pdfOwnLut.delete(_pdfOwnLut.keys().next().value);
+  // a flattened sheet has one for every PDF on it
+  { const flat=flatExportOn(), cap=flat?16:4; while(_pdfOwnLut.size>=cap) _pdfOwnLut.delete(_pdfOwnLut.keys().next().value);
   const p=(async()=>{
     const bytes=new Uint8Array(await f.arrayBuffer());
     let best=null, failed=false;
@@ -35034,13 +35086,14 @@ function pdfOwnCmykLut(f,pic){
     const cap=3000;
     if(Math.max(best.W,best.H)>cap){ const k=cap/Math.max(best.W,best.H), W2=Math.max(1,Math.round(best.W*k)), H2=Math.max(1,Math.round(best.H*k));
       best={W:W2,H:H2,c:cmykShrink(best.c,best.W,best.H,W2,H2)}; }
-    look.img=best;
+    // flattened, the picture is never laid on (sheetRingConv): not held
+    look.img=flat?null:best;
     return look;
   })().catch(()=>{
     // a failed read is kept a minute (the rest of this export), then tried again
     setTimeout(()=>{ if(_pdfOwnLut.get(f)===p) _pdfOwnLut.delete(f); },60000);
     return null; });
-  _pdfOwnLut.set(f,p); return p; }
+  p._flat=flat; _pdfOwnLut.set(f,p); return p; }
 }
 // deflate of what fill() puts, a piece at a time, read as it is made
 async function deflateChunks(fill){
@@ -39907,6 +39960,10 @@ function flatExportOn(){ try{ return localStorage.getItem(FLAT_EXPORT_KEY)==='1'
 function flatExportShow(){ const on=flatExportOn(); document.querySelectorAll('.flat-export-tog input').forEach(i=>{ i.checked=on; }); }
 document.addEventListener('change',e=>{
   const i=e.target; if(!i||!i.closest||!i.closest('.flat-export-tog')) return;
+  // not while a file is being made: half of it was worked out one way (its
+  // PDFs placed or not, their pictures drawn or not) and the rest the other
+  let busy=false; try{ busy=cptExportBusy||gtExportBusy||mcBusy; }catch(err){}
+  if(busy){ flatExportShow(); return; }
   try{ localStorage.setItem(FLAT_EXPORT_KEY,i.checked?'1':'0'); }catch(err){}
   flatExportShow();
 });
