@@ -1884,6 +1884,30 @@ def save_photo(b):
     return {"file": os.path.basename(out), "label": photo_label(os.path.basename(out))}
 
 
+PHONE_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/heic": ".heic", "image/heif": ".heif", "image/webp": ".webp"}
+
+
+def save_phone_photo(order, name, ctype, data):
+    """A photo staff snapped on their phone, straight into the order's folder,
+    named after what they said it shows: OrderID_torn-box.jpg (_2, _3 if taken)."""
+    order = safe_id(order)
+    ext = PHONE_EXT.get(ctype.split(";")[0].strip().lower())
+    if not ext:
+        raise ValueError("That file is not a photo")
+    words = re.sub(r"[^A-Za-z0-9]+", "-", str(name or "")).strip("-").lower()[:60] or "phone-photo"
+    d = order_dir(order)
+    base = f"{order}_{words}"
+    out, n = os.path.join(d, base + ext), 2
+    while os.path.exists(out):
+        out, n = os.path.join(d, f"{base}_{n}{ext}"), n + 1
+    with open(out, "wb") as f:
+        f.write(data)
+    with open(os.path.join(d, "evidence-log.txt"), "a", encoding="utf8") as f:
+        f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  photo  {os.path.basename(out)}  phone\n")
+    log(f"Phone photo saved: {os.path.basename(out)}")
+    return {"file": os.path.basename(out)}
+
+
 def zoom_waybill(path, fx, fy, rotate=0):
     """Crop the saved frame to the parcel around the spot staff tapped on the waybill, enlarged and sharpened."""
     from PIL import Image, ImageFilter
@@ -2158,6 +2182,13 @@ class H(BaseHTTPRequestHandler):
         try:
             if not self.authed():
                 return self.send(401, {"error": "PIN needed"})
+            if u.path == "/api/phone-photo":   # raw picture, not JSON
+                q = dict(urllib.parse.parse_qsl(u.query))
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= 40_000_000:
+                    raise ValueError("The photo is empty or over 40 MB")
+                return self.send(200, save_phone_photo(q.get("order"), q.get("name"),
+                                                       self.headers.get("Content-Type", ""), self.rfile.read(n)))
             b = self.body()
             if u.path == "/api/unbox/start":
                 return self.send(200, UNBOX.start(b.get("order"), b.get("request", ""), b.get("note", ""), b.get("cam")))
